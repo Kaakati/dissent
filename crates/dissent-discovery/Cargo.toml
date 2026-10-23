@@ -1,0 +1,18 @@
+[package]
+name = "dissent-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dissent-identity.workspace = true
+postcard.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+pkarr.workspace = true
+url.workspace = true
+data-encoding.workspace = true
+ed25519-dalek.workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "dissent-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dissent-identity.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+postcard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+iroh.workspace = true
+iroh-gossip.workspace = true
+iroh-mainline-address-lookup.workspace = true
+futures-lite.workspace = true
+ed25519-dalek.workspace = true
+url = { workspace = true, features = ["serde"] }
+data-encoding.workspace = true
+blake3.workspace = true

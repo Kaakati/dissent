@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dissent-identity",
+    "crates/dissent-events",
+    "crates/dissent-net",
+    "crates/dissent-discovery",
+    "crates/dissent-core",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dissent-chat/dissent"
+
+[workspace.dependencies]
+dissent-identity = { path = "crates/dissent-identity" }
+dissent-events = { path = "crates/dissent-events" }
+dissent-net = { path = "crates/dissent-net" }
+dissent-discovery = { path = "crates/dissent-discovery" }
+dissent-core = { path = "crates/dissent-core" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ed25519-dalek = { version = "3", features = ["rand_core", "serde"] }
+rand = "0.10"
+blake3 = "1"
+bip39 = "3"
+hex = "0.4"
+data-encoding = "2"
+iroh = "1"
+iroh-gossip = "0.101"
+iroh-mainline-address-lookup = "0.6"
+pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
+url = { version = "2", features = ["serde"] }
+futures-lite = "2"
+negentropy = "0.5"
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

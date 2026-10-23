@@ -1,0 +1,279 @@
+//! One community's replayed state: its DAG, the signed events behind it, and its gossip wiring.
+//!
+//! Replay is incremental. A [`Replayer`] follows the DAG, so a new event costs one step at the
+//! end of the causal order instead of a full replay.
+
+use crate::error::{CoreError, Result};
+use crate::net::ReceiverTask;
+use dissent_events::{
+    CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer, Role,
+    SignedEvent,
+};
+use dissent_identity::{CommunityId, Genesis, RootId};
+use dissent_net::TopicSender;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// Outcome of ingesting a batch of verified events.
+pub(crate) struct Batch {
+    /// Events stored by this batch, including waiting children it released.
+    pub stored: Vec<SignedEvent>,
+    /// True when an event from this batch still waits for parents we do not have.
+    pub stalled: bool,
+}
+
+/// Events put into the DAG by one step. Replay has not seen them yet.
+struct Step {
+    /// Events stored by the step, in the order they entered.
+    items: Vec<SignedEvent>,
+    /// Ids the DAG reported as entered, for [`Replayer::on_insert`].
+    entered: Vec<EventId>,
+    stalled: bool,
+}
+
+pub(crate) struct Community {
+    pub genesis: Genesis,
+    /// Stored events in causal order.
+    dag: Dag,
+    replayer: Replayer,
+    /// Stored events that no stored event cites. These are the parents of new local events.
+    heads: BTreeSet<EventId>,
+    /// Highest HLC among stored events. Local events are stamped above it.
+    max_hlc: Option<Hlc>,
+    /// Every stored event with its cert. Feeds sync replies and the log.
+    signed: BTreeMap<EventId, SignedEvent>,
+    /// Events whose parents are missing. Held here so they can be persisted once released.
+    waiting: BTreeMap<EventId, SignedEvent>,
+    /// HLC of each user's latest accepted Join. Picks the freshest display name.
+    pub join_hlc: BTreeMap<RootId, Hlc>,
+    pub sender: Option<Arc<TopicSender>>,
+    pub task: Option<ReceiverTask>,
+}
+
+impl Community {
+    pub fn new(genesis: Genesis) -> Self {
+        let replayer = Replayer::new(genesis.owner);
+        Self {
+            genesis,
+            dag: Dag::new(),
+            replayer,
+            heads: BTreeSet::new(),
+            max_hlc: None,
+            signed: BTreeMap::new(),
+            waiting: BTreeMap::new(),
+            join_hlc: BTreeMap::new(),
+            sender: None,
+            task: None,
+        }
+    }
+
+    /// Rebuilds a community from events read off disk. The caller has verified each event.
+    pub fn load(genesis: Genesis, items: Vec<SignedEvent>) -> Self {
+        let mut c = Self::new(genesis);
+        let step = c.store(items);
+        c.replayer.apply_all(&c.dag);
+        c.after_change(&step.entered, &[]);
+        c
+    }
+
+    pub fn id(&self) -> CommunityId {
+        self.genesis.community
+    }
+
+    pub fn name(&self) -> &str {
+        &self.genesis.name
+    }
+
+    pub fn owner(&self) -> RootId {
+        self.genesis.owner
+    }
+
+    /// The replayed state of the community.
+    pub fn state(&self) -> &CommunityState {
+        self.replayer.state()
+    }
+
+    pub fn is_member(&self, user: &RootId) -> bool {
+        self.state().members.get(user).is_some_and(|m| !m.left)
+    }
+
+    pub fn is_rejected(&self, id: &EventId) -> bool {
+        self.state().rejected.iter().any(|(rejected, _)| rejected == id)
+    }
+
+    /// Hashes of the stored events no other stored event cites, sorted.
+    pub fn heads(&self) -> Vec<EventId> {
+        self.heads.iter().copied().collect()
+    }
+
+    /// HLC of the newest stored event.
+    pub fn max_hlc(&self) -> Option<Hlc> {
+        self.max_hlc
+    }
+
+    /// `(wall time, id)` for every stored event. The sync index is built from these.
+    pub fn index_items(&self) -> Vec<(u64, EventId)> {
+        self.signed
+            .values()
+            .map(|se| (se.event.body.hlc.wall_ms, se.event.id))
+            .collect()
+    }
+
+    /// The stored events with these ids, in causal order. Unknown ids are skipped.
+    pub fn signed_for(&self, ids: &[EventId]) -> Vec<SignedEvent> {
+        let mut out: Vec<SignedEvent> = ids
+            .iter()
+            .filter_map(|id| self.signed.get(id).cloned())
+            .collect();
+        out.sort_by_key(|se| (se.event.body.hlc, se.event.id));
+        out
+    }
+
+    /// `owner`, `admin`, `moderator`, or `member`.
+    pub fn role_of(&self, user: &RootId) -> &'static str {
+        if *user == self.owner() {
+            return "owner";
+        }
+        match self.state().roles.get(user) {
+            Some(roles) if roles.contains(&Role::Admin) => "admin",
+            Some(roles) if roles.contains(&Role::Moderator) => "moderator",
+            _ => "member",
+        }
+    }
+
+    pub fn handle_of(&self, user: &RootId) -> Option<String> {
+        self.state()
+            .handles
+            .iter()
+            .find(|(_, holder)| *holder == user)
+            .map(|(handle, _)| handle.clone())
+    }
+
+    /// Stores events that already passed `SignedEvent::verify`, then folds them into the state.
+    ///
+    /// An event whose parents are missing waits. It is stored when the parents arrive.
+    pub fn ingest(&mut self, items: Vec<SignedEvent>) -> Batch {
+        let rejected_before = self.rejected_ids();
+        let step = self.store(items);
+        if !step.entered.is_empty() {
+            self.replayer.on_insert(&self.dag, &step.entered);
+            self.after_change(&step.entered, &rejected_before);
+        }
+        Batch {
+            stored: step.items,
+            stalled: step.stalled,
+        }
+    }
+
+    /// Adds a locally authored event, but only if replay accepts it.
+    ///
+    /// The caller stamps the event above [`Self::max_hlc`]. The new event then sorts after every
+    /// applied event, which is the case where [`Replayer::would_reject`] is exact.
+    /// Returns every event the step stored, the new one and any waiting children it released.
+    pub fn author(&mut self, se: SignedEvent) -> Result<Vec<SignedEvent>> {
+        let id = se.event.id;
+        if self.max_hlc.is_some_and(|max| se.event.body.hlc <= max) {
+            return Err(CoreError::Invalid(
+                "a local event must sort after every stored event".into(),
+            ));
+        }
+        if let Some(why) = self.replayer.would_reject(&se.event) {
+            return Err(CoreError::Rejected(format!("{why:?}")));
+        }
+        let rejected_before = self.rejected_ids();
+        let step = self.store(vec![se]);
+        if !step.items.iter().any(|stored| stored.event.id == id) {
+            return Err(CoreError::Invalid("parents of the new event are missing".into()));
+        }
+        self.replayer.on_insert(&self.dag, &step.entered);
+        self.after_change(&step.entered, &rejected_before);
+        Ok(step.items)
+    }
+
+    /// Puts events into the DAG and the signed set. Replay is left to the caller.
+    fn store(&mut self, items: Vec<SignedEvent>) -> Step {
+        let mut step = Step {
+            items: Vec::new(),
+            entered: Vec::new(),
+            stalled: false,
+        };
+        let mut seen = Vec::new();
+        for se in items {
+            let id = se.event.id;
+            if self.signed.contains_key(&id) || self.waiting.contains_key(&id) {
+                continue;
+            }
+            seen.push(id);
+            match self.dag.insert(se.event.clone()) {
+                Ok(InsertOutcome::Inserted { entered }) => {
+                    for eid in entered {
+                        let item = if eid == id {
+                            Some(se.clone())
+                        } else {
+                            self.waiting.remove(&eid)
+                        };
+                        if let Some(item) = item {
+                            self.signed.insert(eid, item.clone());
+                            step.items.push(item);
+                        }
+                        step.entered.push(eid);
+                    }
+                }
+                Ok(InsertOutcome::Pending { .. }) => {
+                    self.waiting.insert(id, se);
+                }
+                Ok(InsertOutcome::Duplicate) | Err(_) => {}
+            }
+        }
+        step.stalled = seen.iter().any(|id| self.waiting.contains_key(id));
+        step
+    }
+
+    /// Bookkeeping after events entered the DAG: heads, the newest HLC, and join times.
+    fn after_change(&mut self, entered: &[EventId], rejected_before: &[EventId]) {
+        self.heads.extend(entered.iter().copied());
+        let mut joined = false;
+        for id in entered {
+            let Some(ev) = self.dag.get(id) else {
+                continue;
+            };
+            for parent in &ev.body.parents {
+                self.heads.remove(parent);
+            }
+            if self.max_hlc.is_none_or(|max| ev.body.hlc > max) {
+                self.max_hlc = Some(ev.body.hlc);
+            }
+            joined |= matches!(ev.body.payload, Payload::Join { .. });
+        }
+        if joined || self.rejected_ids() != rejected_before {
+            self.join_times_refresh();
+        }
+    }
+
+    fn join_times_refresh(&mut self) {
+        self.join_hlc = join_times(&self.dag, &self.state().rejected);
+    }
+
+    fn rejected_ids(&self) -> Vec<EventId> {
+        self.state().rejected.iter().map(|(id, _)| *id).collect()
+    }
+}
+
+/// HLC of the latest accepted Join per author.
+fn join_times(dag: &Dag, rejected: &[(EventId, Rejection)]) -> BTreeMap<RootId, Hlc> {
+    let bad: BTreeSet<EventId> = rejected.iter().map(|(id, _)| *id).collect();
+    let mut out: BTreeMap<RootId, Hlc> = BTreeMap::new();
+    for ev in dag.causal_order() {
+        if !matches!(ev.body.payload, Payload::Join { .. }) || bad.contains(&ev.id) {
+            continue;
+        }
+        let latest = out.entry(ev.body.author).or_insert(ev.body.hlc);
+        if ev.body.hlc > *latest {
+            *latest = ev.body.hlc;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;

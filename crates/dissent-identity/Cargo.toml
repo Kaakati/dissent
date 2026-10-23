@@ -1,0 +1,19 @@
+[package]
+name = "dissent-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+postcard.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+blake3.workspace = true
+bip39.workspace = true
+data-encoding.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

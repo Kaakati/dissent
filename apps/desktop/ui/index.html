@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dissent</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <nav id="rail" class="rail" aria-label="Servers"></nav>
+    <aside id="sidebar" class="sidebar" aria-label="Channels and conversations"></aside>
+    <main id="main" class="main"></main>
+    <aside id="members" class="members" aria-label="Members" hidden></aside>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <footer class="statusbar">
+    <span id="version"></span>
+    <span id="mock-note" class="warning" hidden>Mock backend (browser preview)</span>
+    <span id="net-status" class="net-status" hidden></span>
+  </footer>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
