@@ -115,7 +115,7 @@ pub async fn identity_import_phrase(
     let root = mnemonic::import(&phrase).map_err(err)?;
     let device = DeviceKey::generate();
     let cert = root.certify(device.id(), now_ms()?);
-    let identity = Identity { root: Some(root), device, cert };
+    let identity = Identity { root: Some(root), device, cert, device_name: String::new() };
     keystore::save(&identity, &state.identity_path()).map_err(err)?;
 
     restart_engine(&app, &state, identity).await?;

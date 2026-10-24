@@ -11,12 +11,14 @@
 //! Public IDs serialise as lowercase base32 (RFC 4648, no padding) and the
 //! first 8 chars (40 bits) form the `name·keysuffix` suffix.
 
+pub mod devices;
 pub mod keystore;
 pub mod mnemonic;
 pub mod recovery;
 pub mod safety;
 mod link;
 
+pub use devices::{DeviceRevocation, LinkGrant, LinkRequest};
 pub use recovery::{GuardianApproval, GuardianSet, KeyRotation, RotationProof, RotationRequest};
 pub use safety::{safety_fingerprint, safety_number};
 
@@ -258,6 +260,8 @@ pub struct Identity {
     pub root: Option<RootKey>,
     pub device: DeviceKey,
     pub cert: DeviceCert,
+    /// Local label for this device, shown in the device list. Empty if unset.
+    pub device_name: String,
 }
 
 impl Identity {
@@ -266,7 +270,7 @@ impl Identity {
         let root = RootKey::generate();
         let device = DeviceKey::generate();
         let cert = root.certify(device.id(), now_ms);
-        Self { root: Some(root), device, cert }
+        Self { root: Some(root), device, cert, device_name: String::new() }
     }
     pub fn root_id(&self) -> RootId {
         self.cert.root
