@@ -3,7 +3,7 @@
 #
 # Releases are automatic: every push to main that passes clippy and the test
 # suite becomes the next patch version (v0.1.0, v0.1.1, ...). Docs-only pushes
-# are skipped, and a newer push cancels an older one still building.
+# are skipped. A running build always finishes; a newer push waits behind it.
 #
 # Manual releases still work: push a tag (git tag v0.2.0 && git push origin v0.2.0)
 # or run the workflow with a tag. The version in the built app always comes
@@ -28,10 +28,11 @@ on:
 permissions:
   contents: write
 
-# One release build at a time on main; a newer push cancels an older one.
+# One release build at a time on main. A running build always finishes; a newer push waits behind
+# it (GitHub keeps only the newest waiting run, so pushes made while one builds release together).
 concurrency:
   group: release-${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
