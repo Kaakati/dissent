@@ -16,9 +16,11 @@ pub mod keystore;
 pub mod mnemonic;
 pub mod recovery;
 pub mod safety;
+pub mod vault;
 mod link;
 
 pub use devices::{DeviceRevocation, LinkGrant, LinkRequest};
+pub use vault::Vault;
 pub use recovery::{GuardianApproval, GuardianSet, KeyRotation, RotationProof, RotationRequest};
 pub use safety::{safety_fingerprint, safety_number};
 
@@ -57,6 +59,12 @@ pub enum IdentityError {
     Serde(String),
     #[error("recovery: {0}")]
     Recovery(String),
+    /// The OS credential store is missing or refused access. Callers may fall back to a passphrase.
+    #[error("OS keychain unavailable: {0}")]
+    Keychain(String),
+    /// Sealing or opening at-rest data failed, including a wrong key, aad or tampered bytes.
+    #[error("at-rest encryption: {0}")]
+    Crypto(String),
 }
 
 pub type Result<T> = std::result::Result<T, IdentityError>;

@@ -47,6 +47,7 @@ iroh = "1"
 rcgen = "0.14"
 noq-proto = { version = "1.4", default-features = false, features = ["rustls", "aws-lc-rs"] }
 iroh-gossip = "0.101"
+iroh-blobs = "0.103"
 iroh-mainline-address-lookup = "0.6"
 pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
 url = { version = "2", features = ["serde"] }
@@ -72,6 +73,7 @@ str0m = { version = "0.24", default-features = false, features = ["rust-crypto"]
 sframe = { version = "2", default-features = false, features = ["rust-crypto"] }
 argon2 = "0.6"
 chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
 keyring = "4"
 zeroize = "1"
 

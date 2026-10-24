@@ -99,7 +99,10 @@ if (!window.__TAURI__) {
 
   let mockNetwork = { use_public_relays: true, relays: [] };
   const listeners = [];
-  const emit = (payload) => listeners.forEach((cb) => cb({ payload }));
+  // Named events, like Tauri's. Engine events use the 'dissent://event' name.
+  const emitTo = (name, payload) => listeners.filter((l) => l.name === name).forEach((l) => l.cb({ payload }));
+  const emit = (payload) => emitTo('dissent://event', payload);
+  const UPDATE = { version: '0.2.0', current_version: '0.1.0', date: '2026-10-24', notes: '- Faster sync for large servers\n- Fixed relay settings on restart\n- Message search keeps focus while typing' };
   const roleOf = (c, user) => c.roles[user] ?? null;
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
@@ -137,6 +140,7 @@ if (!window.__TAURI__) {
     deleted: m.deleted,
   });
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
+  const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
   const need = (cond, reason) => {
     if (!cond) throw reason;
   };
@@ -172,7 +176,10 @@ if (!window.__TAURI__) {
       delete servers[communityId];
       return null;
     },
-    community_view: ({ communityId }) => view(servers[communityId]),
+    community_view: async ({ communityId }) => {
+      await pause();
+      return view(servers[communityId]);
+    },
     create_channel: ({ communityId, name }) => {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can create channels');
@@ -181,8 +188,10 @@ if (!window.__TAURI__) {
       c.msgs[ch.id] = [];
       return ch;
     },
-    channel_messages: ({ communityId, channelId, limit }) =>
-      (servers[communityId].msgs[channelId] ?? []).slice(-limit).map(messageItem),
+    channel_messages: async ({ communityId, channelId, limit }) => {
+      await pause();
+      return (servers[communityId].msgs[channelId] ?? []).slice(-limit).map(messageItem);
+    },
     send_message: ({ communityId, channelId, text }) => {
       const m = { id: id(`m${++seq}`), author: ME, text, ms: Date.now(), edited: false, deleted: false };
       servers[communityId].msgs[channelId].push(m);
@@ -219,6 +228,20 @@ if (!window.__TAURI__) {
     claim_handle: ({ communityId, handle }) => {
       handles[ME] = handle;
       return null;
+    },
+    check_update: () => (window.__mockNoUpdate ? null : { ...UPDATE }),
+    install_update: async () => {
+      for (let i = 1; i <= 10; i++) {
+        await new Promise((r) => setTimeout(r, 180));
+        emitTo('dissent://update-progress', { downloaded: Math.round((i / 10) * 9437184), total: 9437184 });
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      return null;
+    },
+    safety_number: ({ user }) => {
+      let h = 7;
+      for (const ch of ME + user) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      return Array.from({ length: 12 }, (_, i) => String((h * (i + 3) + i * 7919) % 100000).padStart(5, '0')).join(' ');
     },
     user_profile: ({ user }) => {
       const shared = sharedServers(user);
@@ -278,6 +301,11 @@ if (!window.__TAURI__) {
     emit({ kind: 'dm', peer });
   };
 
+  // The mock reports an update shortly after load, so the header icon is visible in previews.
+  setTimeout(() => {
+    if (!window.__mockNoUpdate) emitTo('dissent://update-available', { version: '0.2.0', current_version: '0.1.0', date: '2026-10-24', notes: '- Faster sync for large servers\n- Fixed relay settings on restart' });
+  }, 1500);
+
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args = {}) => {
@@ -287,9 +315,10 @@ if (!window.__TAURI__) {
       },
     },
     event: {
-      listen: async (_name, cb) => {
-        listeners.push(cb);
-        return () => listeners.splice(listeners.indexOf(cb), 1);
+      listen: async (name, cb) => {
+        const entry = { name, cb };
+        listeners.push(entry);
+        return () => listeners.splice(listeners.indexOf(entry), 1);
       },
     },
   };

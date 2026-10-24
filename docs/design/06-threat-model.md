@@ -49,11 +49,13 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 4. **Fixed: SFrame replay.** Each receiver keeps a 1024-frame sliding window per sender and
    epoch. The window is checked before decryption, and it advances only after a frame
    authenticates. Replays and frames older than the window are dropped.
-4b. **Open: impersonation inside a call.** Every call member holds the same SFrame group key, so
-   a member could send audio under another member's sender id (RFC 9605 §7.2). **Fix in
-   progress:** every 10 frames or 200 ms, each sender signs a digest of its frames with its device
-   key. Receivers play immediately and verify within 500 ms, then mute any sender caught forging.
-   Residual risk: up to about half a second of forged audio before detection.
+4b. **Fixed, with residual risk: impersonation inside a call.** Every call member holds the same
+   SFrame group key (RFC 9605 §7.2). Every 10 frames or 200 ms, each sender signs a digest of
+   its frames with its device key, which costs about 9.7 kbps per speaker. Receivers play at once
+   and verify against the sender's DeviceCert. A forger is flagged about 0.2 s after starting,
+   and its sender id's frames are then held until verified, so the real speaker keeps playing.
+   Residual risk: about 10 forged frames, roughly 200 ms, can play before detection. Group calls
+   (mesh and forwarder) are authenticated, but the 1:1 call API isn't yet.
 5. **Fixed: post-quantum key exchange.** Every connection prefers the hybrid X25519 + ML-KEM-768
    TLS key exchange, falling back to X25519 only for peers that don't support it. Traffic
    recorded today, including direct messages, resists later decryption by a quantum computer.

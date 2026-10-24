@@ -2,15 +2,16 @@
 // Both end with the user panel: my avatar, name, `you·suffix`, and the settings gear.
 import { state, subscribe, canManage } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar } from '../ui.js';
+import { el, avatar, skeletonRows } from '../ui.js';
+import { openSwitcher } from './switcher.js';
 import {
   confirmDialog,
   openAddContactDialog,
   openClaimHandleDialog,
   openCreateChannelDialog,
   openInviteDialog,
-  openSettings,
 } from './dialogs.js';
+import { openSettingsPage } from './settings.js';
 
 let menu = null;
 
@@ -22,12 +23,21 @@ export function initSidebar() {
 function render() {
   closeMenu();
   const column = document.getElementById('sidebar');
-  const serverOpen = state.route.kind === 'server' && state.community;
-  column.replaceChildren(
-    serverOpen ? serverTop(state.community) : homeTop(),
-    el('div', { class: 'sidebar-scroll' }, serverOpen ? serverList(state.community) : homeList()),
-    userPanel(),
-  );
+  const serverRoute = state.route.kind === 'server';
+  const serverOpen = serverRoute && state.community;
+  let top;
+  let body;
+  if (!serverRoute) {
+    top = homeTop();
+    body = homeList();
+  } else if (serverOpen) {
+    top = serverTop(state.community);
+    body = serverList(state.community);
+  } else {
+    top = el('div', { class: 'sidebar-top' }, el('span', { class: 'skel skel-line tall' }));
+    body = skeletonRows('channel', 5);
+  }
+  column.replaceChildren(top, el('div', { class: 'sidebar-scroll' }, body), userPanel());
 }
 
 // ---- top: find box (Home) or server header (server) ----
@@ -37,7 +47,8 @@ function homeTop() {
     el('button', {
       class: 'find-btn',
       'aria-label': 'Find or start a conversation',
-      onclick: () => openAddContactDialog(),
+      'aria-keyshortcuts': 'Control+K Meta+K',
+      onclick: () => openSwitcher(),
       text: 'Find or start a conversation',
     }));
 }
@@ -48,7 +59,7 @@ function serverTop(community) {
     'aria-haspopup': 'menu',
     'aria-label': `${community.name} menu`,
     onclick: (e) => toggleMenu(e.currentTarget.closest('.sidebar-top'), community),
-  }, el('span', { class: 'server-name', text: community.name }), el('span', { class: 'caret', icon: 'chevron-down' }));
+  }, el('span', { class: 'server-name', text: community.name, title: community.name }), el('span', { class: 'caret', icon: 'chevron-down' }));
   return el('div', { class: 'sidebar-top' }, menuBtn);
 }
 
@@ -64,7 +75,7 @@ function serverList(community) {
       'aria-current': active ? 'true' : null,
       icon: 'hash',
       onclick: () => actions.openChannel(ch.id),
-    }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name }));
+    }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name, title: `#${ch.name}` }));
   });
   return [
     el('div', { class: 'section-head' },
@@ -78,7 +89,7 @@ function serverList(community) {
           onclick: (e) => toggleMenu(e.currentTarget.closest('.sidebar').querySelector('.sidebar-top'), community),
         })
         : null),
-    ...(channels.length ? channels : [el('p', { class: 'muted', text: 'No channels.' })]),
+    ...(channels.length ? channels : [el('p', { class: 'sidebar-empty', text: 'No channels yet.' })]),
   ];
 }
 
@@ -91,6 +102,7 @@ function homeList() {
     return el('button', {
       class: `row-item convo${active ? ' active' : ''}${unread ? ' unread' : ''}`,
       'aria-current': active ? 'true' : null,
+      title: conv.display_name,
       onclick: () => actions.openDm(conv.peer, conv.display_name),
     },
     unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null,
@@ -109,7 +121,7 @@ function homeList() {
         icon: 'plus',
         onclick: () => openAddContactDialog(),
       })),
-    ...(convos.length ? convos : [el('p', { class: 'muted', text: 'No conversations yet.' })]),
+    ...(convos.length ? convos : [el('p', { class: 'sidebar-empty', text: 'No conversations yet. Add a contact to start one.' })]),
   ];
 }
 
@@ -162,8 +174,8 @@ function userPanel() {
   return el('div', { class: 'me' },
     avatar(me?.display_name || '?', me?.root_id),
     el('div', { class: 'me-text' },
-      el('div', { class: 'me-name', text: me?.display_name || 'Set a display name' }),
+      el('div', { class: 'me-name', text: me?.display_name || 'Set a display name', title: me?.display_name || '' }),
       el('div', { class: 'me-suffix', text: `you·${me?.suffix ?? ''}` })),
-    el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', icon: 'settings', onclick: () => openSettings() }),
+    el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', icon: 'settings', onclick: () => openSettingsPage() }),
   );
 }

@@ -140,11 +140,32 @@ export function openDialog({ title, content, onClose }) {
       el('button', { class: 'icon-btn', 'aria-label': 'Close', icon: 'x', onclick: close })),
     el('div', { class: 'dialog-body' }, content),
   );
+  const opener = document.activeElement;
   dialog.addEventListener('close', () => {
     dialog.remove();
     onClose?.();
+    if (opener?.isConnected) opener.focus();
   });
   document.body.append(dialog);
   dialog.showModal();
   return { dialog, close };
+}
+
+// Shimmer placeholders while data loads. kind: 'message' | 'channel' | 'member'.
+export function skeletonRows(kind, count = 6) {
+  return Array.from({ length: count }, (_, i) => {
+    if (kind === 'message') {
+      return el('div', { class: 'skel-msg', 'aria-hidden': 'true' },
+        el('span', { class: 'skel skel-circle' }),
+        el('div', { class: 'skel-lines' },
+          el('span', { class: 'skel skel-line' }),
+          el('span', { class: 'skel skel-line short' })));
+    }
+    if (kind === 'member') {
+      return el('div', { class: 'skel-row', 'aria-hidden': 'true' },
+        el('span', { class: 'skel skel-circle sm' }),
+        el('span', { class: 'skel skel-line' }));
+    }
+    return el('div', { class: 'skel-row', 'aria-hidden': 'true' }, el('span', { class: 'skel skel-line' }));
+  });
 }

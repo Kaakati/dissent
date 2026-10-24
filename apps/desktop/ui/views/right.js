@@ -2,6 +2,7 @@
 import { state, subscribe } from '../state.js';
 import { membersNodes } from './members.js';
 import { profilePanelNodes } from './dmpanel.js';
+import { skeletonRows } from '../ui.js';
 
 export function initRight() {
   subscribe('right', render);
@@ -16,6 +17,9 @@ function render() {
   if (state.route.kind === 'server' && state.community && state.ui.membersOpen) {
     mode = 'members';
     nodes = membersNodes(state.community);
+  } else if (state.route.kind === 'server' && state.ui.membersOpen) {
+    mode = 'members';
+    nodes = skeletonRows('member', 5);
   } else if (state.route.kind === 'home' && state.peer && state.ui.profileOpen) {
     mode = 'profile';
     nodes = profilePanelNodes();

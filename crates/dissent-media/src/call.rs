@@ -1,8 +1,13 @@
-//! A 1:1 media session: one str0m `Rtc` on one UDP socket, with SFrame applied to every frame.
+//! A 1:1 media session: one str0m `Rtc` over a [`PacketTransport`], with SFrame applied to every
+//! frame.
+//!
+//! A call can also be keyless. A keyless call is the forwarder's side of a link. It carries the
+//! same encrypted frames without holding a key, so it can forward them but never read them.
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -10,28 +15,29 @@ use str0m::format::Codec;
 use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
-use tokio::net::UdpSocket;
 
-use crate::e2ee::{SframeReceiver, SframeSender};
+use crate::auth::{frame_hash, is_digest, FrameSigner, LinkConfig, RxState, Step};
+use crate::e2ee::{
+    epoch_lsb, peek_counter, SframeReceiver, SframeSender, DEFAULT_LEVEL, EPOCH_GRACE,
+};
 use crate::error::{MediaError, Result};
 use crate::key::MediaKey;
 use crate::signal::Signal;
+use crate::transport::{PacketTransport, UdpTransport};
 
-/// Largest datagram we read. Above the MTU, so nothing a peer sends is truncated.
-const RECV_BUF: usize = 2048;
 /// How often str0m reports peer and media statistics.
 const STATS_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Counters and the latest measurements of a call.
 ///
-/// Packet counts cover every UDP datagram of the session, including ICE and RTCP.
+/// Packet counts cover every datagram of the session, including ICE and RTCP.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CallStats {
     /// Round-trip time in milliseconds, once str0m has measured it.
     pub rtt_ms: Option<f64>,
-    /// UDP datagrams this side sent.
+    /// Datagrams this side sent.
     pub packets_sent: u64,
-    /// UDP datagrams this side received.
+    /// Datagrams this side received.
     pub packets_received: u64,
     /// Packets the remote peer reports as lost, from its receiver reports.
     pub packets_lost: u64,
@@ -41,26 +47,41 @@ pub struct CallStats {
     pub frames_received: u64,
     /// Incoming frames that failed SFrame decryption and were dropped.
     pub frames_undecryptable: u64,
+    /// Incoming frames rejected as replays, or as older than the replay window.
+    pub frames_replayed: u64,
+    /// Frames that no digest verified in time, or that a digest never covered. A lost digest
+    /// causes this, so it is tolerated and mutes no one.
+    pub frames_unauthenticated: u64,
+    /// Times a sender's frame did not match its signed digest. Each one mutes that sender for
+    /// the rest of the epoch.
+    pub impersonation_detected: u64,
+}
+
+/// The keys of a call that has them.
+struct Keys {
+    tx: SframeSender,
+    rx: SframeReceiver,
 }
 
 /// One side of a 1:1 call.
 ///
-/// Create it with [`Call::start_offer`] or [`Call::accept`], move the signals between the peers
-/// with any transport, then call [`Call::apply`]. Drive the session with [`Call::next_frame`].
+/// Create it with [`Call::start_offer`] or [`Call::accept`] (UDP), or with [`Call::offer_over`] or
+/// [`Call::accept_over`] for any [`PacketTransport`]. Move the signals between the peers with any
+/// transport, then call [`Call::apply`]. Drive the session with [`Call::next_frame`].
 /// str0m does not run its own timers, so `next_frame` and `send_audio_frame` must keep being
 /// called while the call is alive.
-pub struct Call {
+pub struct Call<T: PacketTransport = UdpTransport> {
     rtc: Rtc,
-    socket: UdpSocket,
-    local_addr: SocketAddr,
-    tx: SframeSender,
-    rx: SframeReceiver,
+    transport: T,
+    keys: Option<Keys>,
+    signer: Option<FrameSigner>,
+    state: Arc<Mutex<RxState>>,
     pending_offer: Option<SdpPendingOffer>,
     audio_mid: Option<Mid>,
     started: Instant,
     timeout: Instant,
-    recv_buf: Vec<u8>,
     inbox: VecDeque<(u64, Vec<u8>)>,
+    raw_inbox: VecDeque<Vec<u8>>,
     stats: CallStats,
 }
 
@@ -70,12 +91,25 @@ const _: fn() = || {
     assert_send::<Call>();
 };
 
-fn new_rtc(start: Instant) -> Rtc {
-    Rtc::builder()
+/// Smallest MTU str0m accepts as a target.
+const MTU_MIN: usize = 576;
+/// Largest MTU str0m accepts as a target.
+const MTU_MAX: usize = 1500;
+
+fn new_rtc(start: Instant, max_datagram: Option<usize>) -> Result<Rtc> {
+    let mut config = Rtc::builder()
         .clear_codecs()
         .enable_opus(true, false)
-        .set_stats_interval(Some(STATS_INTERVAL))
-        .build(start)
+        .set_stats_interval(Some(STATS_INTERVAL));
+    if let Some(max) = max_datagram {
+        if !(MTU_MIN..=MTU_MAX).contains(&max) {
+            return Err(MediaError::BadState(
+                "transport datagram size is outside the MTU range",
+            ));
+        }
+        config = config.set_mtu(max..=max);
+    }
+    Ok(config.build(start))
 }
 
 fn add_host_candidate(rtc: &mut Rtc, local: SocketAddr) -> Result<()> {
@@ -84,9 +118,9 @@ fn add_host_candidate(rtc: &mut Rtc, local: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-impl Call {
-    /// Binds `bind` and creates the caller's offer. Send the returned [`Signal::Offer`] to the
-    /// peer, then apply its answer with [`Call::apply`].
+impl Call<UdpTransport> {
+    /// Binds `bind` over UDP and creates the caller's offer. Send the returned [`Signal::Offer`]
+    /// to the peer, then apply its answer with [`Call::apply`].
     ///
     /// `bind` should be `127.0.0.1:0` in tests. `sender_id` is this side's MLS member index.
     pub async fn start_offer(
@@ -94,10 +128,57 @@ impl Call {
         key: MediaKey,
         sender_id: u64,
     ) -> Result<(Self, Signal)> {
-        let socket = UdpSocket::bind(bind).await?;
-        let local_addr = socket.local_addr()?;
-        let mut rtc = new_rtc(Instant::now());
-        add_host_candidate(&mut rtc, local_addr)?;
+        Self::offer_over(UdpTransport::bind(bind).await?, key, sender_id).await
+    }
+
+    /// Binds `bind` over UDP and answers the caller's [`Signal::Offer`]. Send the returned
+    /// [`Signal::Answer`] back to the caller.
+    pub async fn accept(
+        bind: SocketAddr,
+        key: MediaKey,
+        sender_id: u64,
+        offer: Signal,
+    ) -> Result<(Self, Signal)> {
+        Self::accept_over(UdpTransport::bind(bind).await?, key, sender_id, offer).await
+    }
+}
+
+impl<T: PacketTransport> Call<T> {
+    /// Creates the caller's offer over `transport`, at key epoch 0. Its
+    /// [`PacketTransport::local_addr`] becomes the host candidate.
+    pub async fn offer_over(transport: T, key: MediaKey, sender_id: u64) -> Result<(Self, Signal)> {
+        Self::offer_at(transport, key, sender_id, 0, LinkConfig::plain()).await
+    }
+
+    /// Answers the caller's [`Signal::Offer`] over `transport`, at key epoch 0.
+    pub async fn accept_over(
+        transport: T,
+        key: MediaKey,
+        sender_id: u64,
+        offer: Signal,
+    ) -> Result<(Self, Signal)> {
+        Self::accept_at(transport, key, sender_id, 0, offer, LinkConfig::plain()).await
+    }
+
+    /// Like [`Call::offer_over`], with the frames keyed to `epoch` and the given link
+    /// configuration. A mesh and a participant pass their shared state through `link`.
+    pub(crate) async fn offer_at(
+        transport: T,
+        key: MediaKey,
+        sender_id: u64,
+        epoch: u64,
+        link: LinkConfig,
+    ) -> Result<(Self, Signal)> {
+        let keys = Some(Keys {
+            tx: SframeSender::new(&key, sender_id, epoch)?,
+            rx: SframeReceiver::new(key, epoch),
+        });
+        let signer = link
+            .auth
+            .as_ref()
+            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8));
+        let mut rtc = new_rtc(Instant::now(), transport.max_datagram_size())?;
+        add_host_candidate(&mut rtc, transport.local_addr())?;
 
         let mut changes = rtc.sdp_api();
         let mid = changes.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
@@ -105,18 +186,44 @@ impl Call {
             .apply()
             .ok_or(MediaError::BadState("nothing to offer"))?;
 
-        let mut call = Self::from_parts(rtc, socket, local_addr, key, sender_id)?;
+        let mut call = Self::from_parts(rtc, transport, keys, signer, link.state);
         call.pending_offer = Some(pending);
         call.audio_mid = Some(mid);
         Ok((call, Signal::Offer(offer.to_sdp_string())))
     }
 
-    /// Binds `bind` and answers the caller's [`Signal::Offer`]. Send the returned
-    /// [`Signal::Answer`] back to the caller.
-    pub async fn accept(
-        bind: SocketAddr,
+    /// Like [`Call::accept_over`], with the frames keyed to `epoch` and the given link
+    /// configuration.
+    pub(crate) async fn accept_at(
+        transport: T,
         key: MediaKey,
         sender_id: u64,
+        epoch: u64,
+        offer: Signal,
+        link: LinkConfig,
+    ) -> Result<(Self, Signal)> {
+        let keys = Some(Keys {
+            tx: SframeSender::new(&key, sender_id, epoch)?,
+            rx: SframeReceiver::new(key, epoch),
+        });
+        let signer = link
+            .auth
+            .as_ref()
+            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8));
+        Self::answer(transport, keys, signer, link.state, offer).await
+    }
+
+    /// Answers an offer with a keyless call. It forwards encrypted frames and cannot read them.
+    pub(crate) async fn accept_blind(transport: T, offer: Signal) -> Result<(Self, Signal)> {
+        let state = Arc::new(Mutex::new(RxState::new(None)));
+        Self::answer(transport, None, None, state, offer).await
+    }
+
+    async fn answer(
+        transport: T,
+        keys: Option<Keys>,
+        signer: Option<FrameSigner>,
+        state: Arc<Mutex<RxState>>,
         offer: Signal,
     ) -> Result<(Self, Signal)> {
         let Signal::Offer(sdp) = offer else {
@@ -125,39 +232,37 @@ impl Call {
         let offer =
             SdpOffer::from_sdp_string(&sdp).map_err(|e| MediaError::BadSignal(e.to_string()))?;
 
-        let socket = UdpSocket::bind(bind).await?;
-        let local_addr = socket.local_addr()?;
-        let mut rtc = new_rtc(Instant::now());
-        add_host_candidate(&mut rtc, local_addr)?;
+        let mut rtc = new_rtc(Instant::now(), transport.max_datagram_size())?;
+        add_host_candidate(&mut rtc, transport.local_addr())?;
         let answer = rtc.sdp_api().accept_offer(offer)?;
 
         // The audio track appears through an event once the offer is applied, see `on_event`.
-        let call = Self::from_parts(rtc, socket, local_addr, key, sender_id)?;
+        let call = Self::from_parts(rtc, transport, keys, signer, state);
         Ok((call, Signal::Answer(answer.to_sdp_string())))
     }
 
     fn from_parts(
         rtc: Rtc,
-        socket: UdpSocket,
-        local_addr: SocketAddr,
-        key: MediaKey,
-        sender_id: u64,
-    ) -> Result<Self> {
+        transport: T,
+        keys: Option<Keys>,
+        signer: Option<FrameSigner>,
+        state: Arc<Mutex<RxState>>,
+    ) -> Self {
         let now = Instant::now();
-        Ok(Self {
+        Self {
             rtc,
-            socket,
-            local_addr,
-            tx: SframeSender::new(&key, sender_id)?,
-            rx: SframeReceiver::new(key),
+            transport,
+            keys,
+            signer,
+            state,
             pending_offer: None,
             audio_mid: None,
             started: now,
             timeout: now,
-            recv_buf: vec![0; RECV_BUF],
             inbox: VecDeque::new(),
+            raw_inbox: VecDeque::new(),
             stats: CallStats::default(),
-        })
+        }
     }
 
     /// Applies the peer's answer or a remote candidate.
@@ -183,9 +288,14 @@ impl Call {
         }
     }
 
-    /// The address this side's socket is bound to.
+    /// The transport this call sends and receives on.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
+    /// The transport's local address, which is this side's host candidate.
     pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
+        self.transport.local_addr()
     }
 
     /// Whether ICE and DTLS have completed, so media can flow.
@@ -197,7 +307,7 @@ impl Call {
     /// for [`Call::next_frame`].
     pub async fn wait_connected(&mut self) -> Result<()> {
         loop {
-            self.drain()?;
+            self.drain().await?;
             if self.rtc.is_connected() {
                 return Ok(());
             }
@@ -211,19 +321,70 @@ impl Call {
     /// Encrypts one audio frame with SFrame and sends it as an Opus payload.
     ///
     /// Fails with [`MediaError::NotConnected`] before ICE and DTLS complete, because str0m drops
-    /// media written earlier.
+    /// media written earlier. Fails with [`MediaError::BadState`] on a keyless call.
     pub async fn send_audio_frame(&mut self, frame: &[u8]) -> Result<()> {
+        self.check_sendable()?;
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or(MediaError::BadState("a keyless call cannot encrypt"))?;
+        let encrypted = keys.tx.encrypt(frame, DEFAULT_LEVEL)?;
+        self.write_encrypted(encrypted).await
+    }
+
+    /// Sends a frame that the caller has already encrypted. A mesh encrypts once and sends the
+    /// result on every call, and a forwarder sends the frames it relays.
+    pub(crate) async fn send_encrypted(&mut self, encrypted: &[u8]) -> Result<()> {
+        self.check_sendable()?;
+        self.write_encrypted(encrypted.to_vec()).await
+    }
+
+    /// Accepts frames of `epoch` from now on. The previous epoch keeps decrypting for the grace
+    /// period, see [`EPOCH_GRACE`]. Digests of the new epoch are signed under its key id bits.
+    pub(crate) fn rotate_keys(&mut self, key: MediaKey, epoch: u64, now: Instant) -> Result<()> {
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or(MediaError::BadState("a keyless call cannot rotate keys"))?;
+        keys.rx.rotate(key, epoch, now, EPOCH_GRACE)?;
+        if let Some(signer) = self.signer.as_mut() {
+            signer.set_epoch(epoch_lsb(epoch) as u8);
+        }
+        Ok(())
+    }
+
+    fn check_sendable(&self) -> Result<()> {
         if !self.rtc.is_connected() {
             return Err(MediaError::NotConnected);
         }
+        if self.audio_mid.is_none() {
+            return Err(MediaError::NoAudioTrack);
+        }
+        Ok(())
+    }
+
+    /// Writes one encrypted frame, and any digest that its batch closes.
+    async fn write_encrypted(&mut self, encrypted: Vec<u8>) -> Result<()> {
+        let digests = match (self.signer.as_mut(), peek_counter(&encrypted)) {
+            (Some(signer), Some(counter)) => signer.record(counter, &encrypted, Instant::now()),
+            _ => Vec::new(),
+        };
+        self.stats.frames_sent += 1;
+        self.write_raw(encrypted).await?;
+        for digest in digests {
+            self.write_raw(digest).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes one payload on the audio track, without counting it as a frame.
+    async fn write_raw(&mut self, payload: Vec<u8>) -> Result<()> {
         let mid = self.audio_mid.ok_or(MediaError::NoAudioTrack)?;
         let pt = self.opus_pt().ok_or(MediaError::NoAudioTrack)?;
-        let encrypted = self.tx.encrypt(frame)?;
         let media_time = self.started.elapsed().into();
         let writer = self.rtc.writer(mid).ok_or(MediaError::NoAudioTrack)?;
-        writer.write(pt, Instant::now(), media_time, encrypted)?;
-        self.stats.frames_sent += 1;
-        self.drain()
+        writer.write(pt, Instant::now(), media_time, payload)?;
+        self.drain().await
     }
 
     /// Waits for the next decrypted frame and returns `(sender id, plaintext)`.
@@ -231,7 +392,7 @@ impl Call {
     /// Returns `Ok(None)` once the call has closed. Frames that fail decryption are counted in
     /// [`CallStats::frames_undecryptable`] and are not returned.
     ///
-    /// This method is cancel-safe. Dropping its future between awaits loses no frame.
+    /// This method is cancel-safe. Dropping its future between awaits loses no received frame.
     pub async fn next_frame(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
         loop {
             if let Some(frame) = self.inbox.pop_front() {
@@ -240,8 +401,24 @@ impl Call {
             if !self.rtc.is_alive() {
                 return Ok(None);
             }
-            self.drain()?;
+            self.drain().await?;
             if self.inbox.is_empty() {
+                self.pump_once().await?;
+            }
+        }
+    }
+
+    /// Waits for the next encrypted frame, exactly as it arrived, for a keyless call. Cancel-safe.
+    pub(crate) async fn next_raw(&mut self) -> Result<Option<Vec<u8>>> {
+        loop {
+            if let Some(frame) = self.raw_inbox.pop_front() {
+                return Ok(Some(frame));
+            }
+            if !self.rtc.is_alive() {
+                return Ok(None);
+            }
+            self.drain().await?;
+            if self.raw_inbox.is_empty() {
                 self.pump_once().await?;
             }
         }
@@ -261,7 +438,7 @@ impl Call {
 
     /// Transmits every queued datagram and handles every queued event. Stops at str0m's next
     /// timeout, which it records for [`Call::pump_once`].
-    fn drain(&mut self) -> Result<()> {
+    async fn drain(&mut self) -> Result<()> {
         loop {
             match self.rtc.poll_output()? {
                 Output::Timeout(at) => {
@@ -270,43 +447,35 @@ impl Call {
                 }
                 Output::Transmit(transmit) => {
                     self.stats.packets_sent += 1;
-                    match self
-                        .socket
-                        .try_send_to(&transmit.contents[..], transmit.destination)
-                    {
-                        Ok(_) => {}
-                        // UDP may drop a datagram, and the stack recovers from that.
-                        Err(e)
-                            if matches!(
-                                e.kind(),
-                                ErrorKind::WouldBlock | ErrorKind::ConnectionReset
-                            ) =>
-                        {
-                            tracing::debug!(error = %e, "dropped outgoing datagram");
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
+                    self.transport
+                        .send(transmit.destination, &transmit.contents)
+                        .await?;
                 }
                 Output::Event(event) => self.on_event(event),
             }
         }
     }
 
-    /// Waits for one of two things: a datagram from the socket, or str0m's timeout.
-    /// It then feeds the input to str0m and returns, so the caller drains again.
+    /// Waits for one of three things: a datagram from the transport, str0m's timeout, or the
+    /// close of the open digest batch. It then acts on that event and returns, so the caller
+    /// drains again.
     async fn pump_once(&mut self) -> Result<()> {
         let deadline = tokio::time::Instant::from_std(self.timeout);
+        let (has_batch, batch_due) = match self.signer.as_ref().and_then(FrameSigner::due) {
+            Some(due) => (true, tokio::time::Instant::from_std(due)),
+            None => (false, deadline),
+        };
         tokio::select! {
-            received = self.socket.recv_from(&mut self.recv_buf) => {
-                let (len, source) = match received {
+            received = self.transport.recv() => {
+                let (source, bytes) = match received {
                     Ok(v) => v,
                     // Windows reports an earlier ICMP port-unreachable as ConnectionReset here.
-                    Err(e) if e.kind() == ErrorKind::ConnectionReset => return Ok(()),
-                    Err(e) => return Err(e.into()),
+                    Err(MediaError::Io(e)) if e.kind() == ErrorKind::ConnectionReset => return Ok(()),
+                    Err(e) => return Err(e),
                 };
                 self.stats.packets_received += 1;
-                let contents = &self.recv_buf[..len];
-                match Receive::new(Protocol::Udp, source, self.local_addr, contents) {
+                let local = self.transport.local_addr();
+                match Receive::new(Protocol::Udp, source, local, &bytes) {
                     Ok(receive) => {
                         self.rtc.handle_input(Input::Receive(Instant::now(), receive))?;
                     }
@@ -316,6 +485,13 @@ impl Call {
             }
             _ = tokio::time::sleep_until(deadline) => {
                 self.rtc.handle_input(Input::Timeout(Instant::now()))?;
+                Ok(())
+            }
+            _ = tokio::time::sleep_until(batch_due), if has_batch => {
+                let digests = self.signer.as_mut().map(FrameSigner::flush).unwrap_or_default();
+                for digest in digests {
+                    self.write_raw(digest).await?;
+                }
                 Ok(())
             }
         }
@@ -341,16 +517,56 @@ impl Call {
         }
     }
 
-    fn on_media(&mut self, encrypted: &[u8]) {
-        match self.rx.decrypt(encrypted) {
-            Ok((sender, plaintext)) => {
-                self.stats.frames_received += 1;
-                self.inbox.push_back((sender, plaintext));
+    fn on_media(&mut self, wire: &[u8]) {
+        let now = Instant::now();
+        if self.keys.is_none() {
+            // A keyless call hands the encrypted frame on untouched, digests included.
+            self.stats.frames_received += 1;
+            self.raw_inbox.push_back(wire.to_vec());
+            return;
+        }
+        if is_digest(wire) {
+            let step = self
+                .state
+                .lock()
+                .expect("receiver state")
+                .on_digest(wire, now);
+            self.absorb(step);
+            return;
+        }
+        let Some(keys) = self.keys.as_mut() else {
+            return;
+        };
+        if let Some(ended) = keys.rx.expire_previous(now) {
+            self.state.lock().expect("receiver state").drop_epoch(ended);
+        }
+        match keys.rx.open(wire, now) {
+            Ok(opened) => {
+                let step = self.state.lock().expect("receiver state").on_frame(
+                    opened.sender,
+                    opened.lsb,
+                    opened.counter,
+                    frame_hash(wire),
+                    opened.plaintext,
+                    now,
+                );
+                self.absorb(step);
             }
             Err(e) => {
                 self.stats.frames_undecryptable += 1;
                 tracing::debug!(error = %e, "dropped undecryptable frame");
             }
+        }
+    }
+
+    /// Records what a receiver step did, and queues the frames it plays.
+    fn absorb(&mut self, step: Step) {
+        self.stats.frames_replayed += step.replayed;
+        self.stats.frames_unauthenticated += step.unauthenticated;
+        self.stats.impersonation_detected += step.impersonations;
+        self.stats.frames_received += step.deliver.len() as u64;
+        for frame in step.deliver {
+            self.inbox.push_back(frame);
         }
     }
 }

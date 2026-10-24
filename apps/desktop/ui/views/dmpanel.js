@@ -2,6 +2,7 @@
 import { state } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, setHue, copyText, toast, initials } from '../ui.js';
+import { openSafetyDialog } from './dialogs.js';
 
 export function profilePanelNodes() {
   const peer = state.peer;
@@ -34,7 +35,7 @@ export function profilePanelNodes() {
           class: 'server-row',
           title: `Open ${c.name}`,
           onclick: () => actions.openServer(c.id),
-        }, setHue(el('span', { class: 'mini-server', text: initials(c.name) }), c.id), el('span', { text: c.name }))))
+        }, setHue(el('span', { class: 'mini-server', text: initials(c.name) }), c.id), el('span', { text: c.name, title: c.name }))))
         : el('p', { class: 'muted', text: 'No mutual servers.' }),
       el('h4', { text: 'Handles' }),
       handles.length
@@ -42,7 +43,9 @@ export function profilePanelNodes() {
           el('span', { text: `@${h.handle}` }),
           el('span', { class: 'muted', text: h.community_name }))))
         : el('p', { class: 'muted', text: 'No handles claimed.' })),
-    el('div', { class: 'profile-actions' }, copyLink),
+    el('div', { class: 'profile-actions' },
+      copyLink,
+      el('button', { class: 'btn-secondary', icon: 'shield-check', text: 'Verify safety number', onclick: () => openSafetyDialog(peer) })),
   )];
 }
 

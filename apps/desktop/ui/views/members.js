@@ -14,7 +14,7 @@ export function membersNodes(community) {
   for (const [label, role] of GROUPS) {
     const people = community.members.filter((m) => m.role === role && !m.banned);
     if (people.length === 0) continue;
-    nodes.push(el('h3', { class: 'group-title', text: `${label.toUpperCase()} — ${people.length}` }));
+    nodes.push(el('h3', { class: 'group-title', text: `${label} — ${people.length}` }));
     for (const m of people) {
       nodes.push(el('button', {
         class: 'member',

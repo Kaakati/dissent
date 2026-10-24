@@ -16,6 +16,8 @@ function render() {
     const active = state.route.kind === 'server' && state.route.communityId === c.id;
     const btn = el('button', {
       class: 'rail-btn',
+      role: 'tab',
+      'aria-selected': active ? 'true' : 'false',
       'aria-label': c.name,
       'aria-current': active ? 'page' : null,
       'data-tip': c.name,
@@ -25,17 +27,22 @@ function render() {
     const unread = [...state.unread].some((k) => k.startsWith(`ch:${c.id}:`));
     return el('div', { class: `rail-item${active ? ' active' : ''}${unread ? ' unread' : ''}` }, btn);
   });
-  document.getElementById('rail').replaceChildren(
+  const rail = document.getElementById('rail');
+  rail.setAttribute('role', 'tablist');
+  rail.setAttribute('aria-orientation', 'vertical');
+  rail.setAttribute('aria-label', 'Servers and direct messages');
+  rail.replaceChildren(
     el('div', { class: `rail-item${onHome ? ' active' : ''}` },
       dmUnread > 0 ? el('span', { class: 'rail-badge', text: String(dmUnread), 'aria-label': `${dmUnread} unread conversations` }) : null,
       el('button', {
         class: 'rail-btn home',
+        role: 'tab',
+        'aria-selected': onHome ? 'true' : 'false',
         'aria-label': 'Direct messages',
         'aria-current': onHome ? 'page' : null,
         'data-tip': 'Direct Messages',
-        icon: 'dissent-mark',
         onclick: () => actions.openHome(),
-      })),
+      }, el('img', { class: 'home-logo', src: 'app-icon-96.png', alt: '' }))),
     el('hr', { class: 'rail-sep' }),
     ...servers,
     el('div', { class: 'rail-item' },

@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 dissent-core.workspace = true
 dissent-identity.workspace = true
+blake3.workspace = true
+data-encoding.workspace = true
+ring.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio = { workspace = true, features = ["signal"] }

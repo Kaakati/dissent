@@ -9,8 +9,10 @@ dissent-identity.workspace = true
 openmls.workspace = true
 openmls_rust_crypto.workspace = true
 openmls_basic_credential.workspace = true
+openmls_traits.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]

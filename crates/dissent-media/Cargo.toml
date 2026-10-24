@@ -12,6 +12,9 @@ thiserror.workspace = true
 serde.workspace = true
 postcard.workspace = true
 tracing.workspace = true
+dissent-net.workspace = true
+dissent-identity.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -1,7 +1,7 @@
 // Main pane: header, message list and composer. The same markup serves channels and DMs.
 import { state, subscribe, canModerate, inServer } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar, icon, linkify, dayKey, dayLabel, clockLabel, stampLabel, setHue, toast, copyText } from '../ui.js';
+import { el, avatar, icon, linkify, dayKey, dayLabel, clockLabel, stampLabel, setHue, toast, copyText, skeletonRows } from '../ui.js';
 import { confirmDialog, openInviteDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
 
@@ -12,8 +12,8 @@ const titleBox = el('div', { class: 'chat-title' });
 const tools = el('div', { class: 'header-tools' });
 const searchInput = el('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search messages', autocomplete: 'off' });
 searchInput.addEventListener('input', () => actions.setFilter(searchInput.value));
-const header = el('header', { class: 'chat-header' }, titleBox, tools, el('div', { class: 'search' }, searchInput, icon('search')));
-const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages' });
+const header = el('header', { class: 'chat-header' }, titleBox, tools, el('div', { class: 'update-host', id: 'update-host' }), el('div', { class: 'search' }, searchInput, icon('search')));
+const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages', 'aria-live': 'polite' });
 const composerHost = el('div', { class: 'composer-host' });
 
 let composerKey = null;
@@ -85,11 +85,17 @@ function peerName() {
   return known || state.peerName || `anon·${state.peer.slice(0, 8)}`;
 }
 
-function emptyText() {
+function emptyNode(iconName, title, text) {
+  return el('div', { class: 'empty' }, icon(iconName), el('p', { class: 'empty-title', text: title }), text ? el('p', { class: 'muted', text }) : null);
+}
+
+function emptyPane() {
   if (state.route.kind === 'server') {
-    return state.community ? 'Pick a channel to start reading.' : 'Loading server…';
+    return state.community
+      ? emptyNode('hash', 'Pick a channel', 'Choose a channel on the left to start reading.')
+      : emptyNode('hash', 'Loading server…', null);
   }
-  return 'Pick a conversation, or add a contact to start one.';
+  return emptyNode('message-circle', 'Your direct messages', 'Pick a conversation, or add a contact to start one.');
 }
 
 function render() {
@@ -97,7 +103,8 @@ function render() {
   if (!view) {
     titleBox.replaceChildren();
     tools.replaceChildren();
-    list.replaceChildren(el('p', { class: 'empty', text: emptyText() }));
+    list.setAttribute('aria-busy', state.route.kind === 'server' && !state.community ? 'true' : 'false');
+    list.replaceChildren(...(state.route.kind === 'server' && !state.community ? skeletonRows('message', 6) : [emptyPane()]));
     composerHost.replaceChildren();
     composerKey = null;
     listKey = null;
@@ -117,8 +124,10 @@ function render() {
   const shown = filtered(view.items);
   const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   let rows;
-  if (view.items.length === 0) rows = [el('p', { class: 'empty', text: 'No messages yet. Say hello.' })];
-  else if (shown.length === 0) rows = [el('p', { class: 'empty', text: `No messages match "${state.ui.filter}".` })];
+  list.setAttribute('aria-busy', state.loading.messages ? 'true' : 'false');
+  if (state.loading.messages && view.items.length === 0) rows = skeletonRows('message', 6);
+  else if (view.items.length === 0) rows = [emptyNode(view.dm ? 'message-circle' : 'hash', 'No messages yet', 'Say hello.')];
+  else if (shown.length === 0) rows = [emptyNode('search', 'No matches', `No messages match "${state.ui.filter}".`)];
   else rows = rowsFor(shown, view);
   const head = state.historyStart && !state.ui.filter ? [welcomeNode(view)] : [];
   list.replaceChildren(...head, ...rows);
@@ -134,14 +143,14 @@ function render() {
 
 function titleNodes(view) {
   if (view.dm) {
-    return [avatar(view.title, view.peer), el('h2', { text: view.title })];
+    return [avatar(view.title, view.peer, 'sm'), el('h2', { text: view.title, title: view.title })];
   }
-  return [icon('hash'), el('h2', { text: view.title })];
+  return [icon('hash'), el('h2', { text: view.title, title: `#${view.title}` })];
 }
 
 function iconButton(name, label, onclick, on = false) {
   return el('button', {
-    class: `icon-btn${on ? ' on' : ''}`,
+    class: `icon-btn lg${on ? ' on' : ''}`,
     'aria-label': label,
     title: label,
     'aria-pressed': on ? 'true' : 'false',
@@ -309,7 +318,7 @@ function composer(view) {
   });
   wrap.append(
     el('button', {
-      class: 'icon-btn',
+      class: 'icon-btn lg',
       'aria-label': 'More actions',
       'aria-haspopup': 'menu',
       title: 'More actions',
@@ -317,7 +326,7 @@ function composer(view) {
       onclick: (e) => togglePlusMenu(wrap, view, e.currentTarget),
     }),
     input,
-    el('button', { class: 'icon-btn send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
+    el('button', { class: 'icon-btn lg send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
   );
   return wrap;
 }

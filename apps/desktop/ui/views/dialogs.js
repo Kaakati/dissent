@@ -160,88 +160,6 @@ export function openCreateChannelDialog(communityId) {
   }));
 }
 
-export function openSettings() {
-  let close = () => {};
-  const me = state.me;
-
-  const nameInput = el('input', { value: me?.display_name ?? '', maxLength: 64, 'aria-label': 'Display name' });
-  const saveBtn = el('button', {
-    class: 'primary',
-    text: 'Save',
-    onclick: async () => {
-      const name = nameInput.value.trim();
-      if (!name) {
-        toast('Display name cannot be empty');
-        return;
-      }
-      await actions.setDisplayName(name);
-    },
-  });
-
-  const phraseBox = el('textarea', { readOnly: true, rows: 3, hidden: true, 'aria-label': 'Recovery phrase' });
-  const phraseWarning = el('p', {
-    class: 'warning',
-    hidden: true,
-    text: 'Anyone with these 24 words controls your identity. Keep them offline and never share them.',
-  });
-  const phraseLabel = el('span', { text: 'Show recovery phrase' });
-  const phraseBtn = el('button', { class: 'ghost', icon: 'key-round' }, phraseLabel);
-  phraseBtn.addEventListener('click', async () => {
-    if (!phraseBox.hidden) {
-      phraseBox.hidden = true;
-      phraseWarning.hidden = true;
-      phraseBox.value = '';
-      phraseLabel.textContent = 'Show recovery phrase';
-      return;
-    }
-    const phrase = await actions.loadRecoveryPhrase();
-    if (!phrase) return;
-    phraseBox.value = phrase;
-    phraseBox.hidden = false;
-    phraseWarning.hidden = false;
-    phraseLabel.textContent = 'Hide recovery phrase';
-  });
-
-  const importInput = el('textarea', { rows: 3, placeholder: '24 recovery words, separated by spaces', 'aria-label': 'Recovery phrase to import' });
-  const importBtn = el('button', {
-    class: 'danger-outline',
-    icon: 'key-round',
-    text: 'Import phrase',
-    onclick: async () => {
-      const phrase = importInput.value.trim();
-      if (!phrase) return;
-      const sure = await confirmDialog('Replace the identity on this device with the one from this phrase?', 'Import');
-      if (!sure) return;
-      if (await actions.restoreIdentity(phrase)) {
-        importInput.value = '';
-        close();
-      }
-    },
-  });
-
-  const versionLine = el('p', { class: 'muted', text: `Dissent ${state.version ? `v${state.version}` : ''}`.trim() });
-
-  ({ close } = openDialog({
-    title: 'Settings',
-    content: el('div', { class: 'settings' },
-      el('section', {},
-        el('h3', { text: 'Display name' }),
-        el('div', { class: 'row' }, nameInput, saveBtn)),
-      el('section', {},
-        el('h3', { text: 'Recovery phrase' }),
-        el('div', { class: 'row' }, phraseBtn),
-        phraseWarning,
-        phraseBox),
-      el('section', {},
-        el('h3', { text: 'Import recovery phrase' }),
-        el('p', { class: 'muted', text: 'Restoring replaces the identity stored on this device.' }),
-        importInput,
-        el('div', { class: 'row end' }, importBtn)),
-      networkSection(),
-      el('section', {}, versionLine)),
-  }));
-}
-
 export function openClaimHandleDialog(communityId) {
   let close = () => {};
   const input = el('input', { placeholder: 'your-handle', maxLength: 32, 'aria-label': 'Handle' });
@@ -273,90 +191,24 @@ function flashCopied(btn) {
   setTimeout(() => btn.replaceChildren(icon('copy'), 'Copy'), 1500);
 }
 
-// Relay settings. Public relays are the default. Custom relays apply only when public relays are off.
-function networkSection() {
-  let settings = { use_public_relays: true, relays: [] };
-  const toggle = el('input', { type: 'checkbox', 'aria-label': 'Use public n0 relays' });
-  const list = el('ul', { class: 'plain relay-list', 'aria-label': 'Custom relays' });
-  const input = el('input', { placeholder: 'https://relay.example.org', 'aria-label': 'Relay URL' });
-  const status = el('p', { class: 'muted', role: 'status' });
-  const hint = el('p', { class: 'warning', role: 'status' });
-  const saveBtn = el('button', { class: 'primary', text: 'Save network settings' });
-
-  // With public relays off and no custom relay, the engine would have no relay at all. Save is disabled instead.
-  const render = () => {
-    const empty = !settings.use_public_relays && settings.relays.length === 0;
-    hint.textContent = empty ? 'Add at least one relay, or turn public relays back on.' : '';
-    saveBtn.disabled = empty;
-    toggle.checked = settings.use_public_relays;
-    list.replaceChildren(...settings.relays.map((url, i) => el('li', { class: 'relay-item' },
-      el('span', { class: 'mono', text: url }),
-      el('button', {
-        class: 'icon-btn',
-        'aria-label': `Remove ${url}`,
-        title: 'Remove',
-        icon: 'x',
-        onclick: () => {
-          settings.relays = settings.relays.filter((_, j) => j !== i);
-          render();
-        },
-      }))));
-    list.hidden = settings.relays.length === 0;
-  };
-
-  toggle.addEventListener('change', () => {
-    settings.use_public_relays = toggle.checked;
-    render();
-  });
-  const addBtn = el('button', {
+// Safety number: the same 12 groups of five digits on both sides. Compare it in person or on a call.
+export async function openSafetyDialog(userId) {
+  const number = await actions.safetyNumber(userId);
+  if (!number) return;
+  const groups = number.split(' ');
+  const copyBtn = el('button', {
     class: 'ghost',
-    text: 'Add relay',
-    onclick: () => {
-      let url;
-      try {
-        url = new URL(input.value.trim());
-      } catch {
-        status.textContent = 'Enter a full URL, for example https://relay.example.org';
-        return;
-      }
-      if (url.protocol !== 'https:') {
-        status.textContent = 'A relay URL must use https.';
-        return;
-      }
-      if (settings.relays.length >= 8) {
-        status.textContent = 'Up to 8 custom relays.';
-        return;
-      }
-      if (!settings.relays.includes(url.toString())) settings.relays = [...settings.relays, url.toString()];
-      input.value = '';
-      status.textContent = '';
-      render();
+    icon: 'copy',
+    text: 'Copy',
+    onclick: async () => {
+      if (await copyText(number)) toast('Safety number copied', 'info');
     },
   });
-  saveBtn.addEventListener('click', async () => {
-    saveBtn.disabled = true;
-    const saved = await actions.setNetworkSettings(settings);
-    saveBtn.disabled = false;
-    if (saved) {
-      settings = saved;
-      render();
-    }
+  openDialog({
+    title: 'Verify safety number',
+    content: el('div', {},
+      el('p', { class: 'muted', text: 'Compare these numbers with the other person in person or on a call. If they match on both screens, your chat is verified.' }),
+      el('ol', { class: 'safety-grid', 'aria-label': 'Safety number' }, groups.map((g) => el('li', { text: g }))),
+      el('div', { class: 'row end' }, copyBtn)),
   });
-
-  actions.loadNetworkSettings().then((loaded) => {
-    if (loaded) {
-      settings = loaded;
-      render();
-    }
-  });
-  render();
-  return el('section', {},
-    el('h3', { text: 'Network' }),
-    el('label', { class: 'toggle-row' }, toggle, el('span', { text: 'Use public n0 relays' })),
-    el('p', { class: 'muted', text: 'With public relays on, your relays are added to number0’s. With it off, only your relays are used, and you need at least one. Each must be an https URL.' }),
-    list,
-    el('div', { class: 'row' }, input, addBtn),
-    status,
-    hint,
-    el('div', { class: 'row end' }, saveBtn));
 }

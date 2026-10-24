@@ -24,6 +24,9 @@ export const api = {
   moderate: (communityId, action, user) => call('moderate', { communityId, action, user }),
   claimHandle: (communityId, handle) => call('claim_handle', { communityId, handle }),
   userProfile: (user) => call('user_profile', { user }),
+  safetyNumber: (user) => call('safety_number', { user }),
+  checkUpdate: () => call('check_update'),
+  installUpdate: () => call('install_update'),
 
   listConversations: () => call('list_conversations'),
   dmMessages: (peer, limit) => call('dm_messages', { peer, limit }),
@@ -40,4 +43,9 @@ export const api = {
 // Calls handler with each EngineEvent payload, e.g. { kind: 'message', community_id, channel_id }.
 export function onEngineEvent(handler) {
   return window.__TAURI__.event.listen('dissent://event', (e) => handler(e.payload));
+}
+
+// Subscribes to any named Tauri event. Returns a promise of the unlisten function.
+export function listenTo(name, handler) {
+  return window.__TAURI__.event.listen(name, (e) => handler(e.payload));
 }

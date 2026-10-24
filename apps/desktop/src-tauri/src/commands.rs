@@ -11,7 +11,7 @@ use dissent_core::{
     ChannelId, ChannelInfo, CommunityId, CommunitySummary, CommunityView, ConversationSummary,
     Engine, EventId, Identity, MessageItem, MeView, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
-use dissent_identity::{keystore, mnemonic, DeviceKey};
+use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tracing::warn;
@@ -21,6 +21,8 @@ use crate::events::forward_events;
 /// Shared state. `engine` is `None` only while an identity import is restarting it.
 pub struct AppState {
     pub data_dir: PathBuf,
+    /// Encrypts identity.bin at rest. The key comes from the OS credential store.
+    pub vault: Vault,
     pub identity: Mutex<Identity>,
     pub engine: tokio::sync::RwLock<Option<Engine>>,
 }
@@ -116,7 +118,7 @@ pub async fn identity_import_phrase(
     let device = DeviceKey::generate();
     let cert = root.certify(device.id(), now_ms()?);
     let identity = Identity { root: Some(root), device, cert, device_name: String::new() };
-    keystore::save(&identity, &state.identity_path()).map_err(err)?;
+    keystore::save(&identity, &state.identity_path(), &state.vault).map_err(err)?;
 
     restart_engine(&app, &state, identity).await?;
     let me = engine(&state).await?.me();
@@ -341,4 +343,12 @@ pub async fn send_dm(state: State<'_, AppState>, peer: String, text: String) -> 
 #[tauri::command]
 pub async fn net_status(state: State<'_, AppState>) -> Result<NetStatusView, String> {
     Ok(engine(&state).await?.net_status().await)
+}
+
+/// Safety number for a pair of users: 12 groups of five digits, the same on both sides.
+#[tauri::command]
+pub async fn safety_number(state: State<'_, AppState>, user: String) -> Result<String, String> {
+    let them: RootId = parse("user id", &user)?;
+    let mine: RootId = parse("root id", &engine(&state).await?.me().root_id)?;
+    Ok(dissent_identity::safety_number(&mine, &them))
 }

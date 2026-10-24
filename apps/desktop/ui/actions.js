@@ -119,8 +119,14 @@ export const openChannel = guard(async (channelId) => {
   state.channelId = channelId;
   state.messages = [];
   state.newFromId = null;
+  state.loading.messages = true;
   notify('sidebar', 'main');
-  await loadMessages();
+  try {
+    await loadMessages();
+  } finally {
+    state.loading.messages = false;
+    notify('main');
+  }
   if (seenBefore !== null) state.newFromId = state.messages.find((m) => Number(m.ms) > seenBefore)?.id ?? null;
   markLatestRead(key, state.messages);
   notify('sidebar', 'rail', 'main');
@@ -136,7 +142,14 @@ export const openDm = guard(async (peer, displayName = '') => {
   state.dmMessages = [];
   state.peerProfile = null;
   notify('rail', 'sidebar', 'main', 'right');
-  await Promise.all([loadDm(), loadPeerProfile(peer)]);
+  state.loading.messages = true;
+  notify('main');
+  try {
+    await Promise.all([loadDm(), loadPeerProfile(peer)]);
+  } finally {
+    state.loading.messages = false;
+    notify('main');
+  }
   markLatestRead(`dm:${peer}`, state.dmMessages);
   notify('sidebar', 'rail');
 });
@@ -244,6 +257,7 @@ export const contactLink = guard(() => api.contactLink());
 // ---- profile and settings ----
 
 export const userProfile = guard((user) => api.userProfile(user));
+export const safetyNumber = guard((user) => api.safetyNumber(user));
 
 export const setDisplayName = guard(async (name) => {
   await api.setDisplayName(name);
@@ -381,3 +395,12 @@ export const setNetworkSettings = guard(async (settings) => {
   toast('Network settings saved. The engine restarted.', 'info');
   return saved;
 });
+
+// ---- updates ----
+
+// A newer release was found, by the background check or a manual one. Showing it brings the icon back.
+export function setUpdate(info) {
+  state.update = info;
+  state.updateDismissed = false;
+  notify('update');
+}

@@ -13,8 +13,11 @@ export const state = {
   peerProfile: null, // UserView of the open DM peer, for the profile panel
   dmMessages: [], // DmItem[] of the open DM
   historyStart: false, // true when the loaded history reaches the first message
+  loading: { messages: false }, // shows skeleton rows while a conversation loads
   unread: new Set(), // keys of channels and DMs with newer messages
   newFromId: null, // first message after the last-seen point, for the divider
+  update: null, // UpdateInfo of a newer release, when one was found
+  updateDismissed: false, // the user chose Later; the icon returns on the next check
   ui: {
     membersOpen: true, // server member list, right column
     profileOpen: true, // DM profile panel, right column

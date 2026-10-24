@@ -12,6 +12,7 @@ crates/dissent-discovery  pkarr community records on Mainline DHT, invite links
 crates/dissent-core       Engine: multi-community state, gossip, sync, DMs, persistence (no tauri)
 crates/dissent-mls        OpenMLS group encryption; core seals message text per community (see docs/design/05-encrypted-servers.md)
 crates/dissent-media      voice/video spike: str0m (sans-IO WebRTC) sessions with SFrame end-to-end media encryption
+crates/dissent-files      encrypted file sharing: encrypt-then-chunk, content-addressed transfer via iroh-blobs
 apps/seeder               headless always-on member: keeps community history available (uses dissent-core)
 apps/relay                open-source iroh relay server binary anyone can run
 apps/probe                connectivity probe: measures direct vs relayed paths, RTT and time-to-direct between two devices

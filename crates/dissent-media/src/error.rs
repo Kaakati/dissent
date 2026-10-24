@@ -35,6 +35,21 @@ pub enum MediaError {
     /// The underlying str0m instance has shut down.
     #[error("call is closed")]
     Closed,
+    /// A frame names a key epoch that is neither current nor still in its grace period.
+    #[error("frame is from a key epoch that is no longer accepted")]
+    EpochNotAccepted,
+    /// A frame was already received, or is older than the replay window.
+    #[error("frame is a replay or older than the replay window")]
+    Replayed,
+    /// A wire frame is too short to carry its audio-level byte and SFrame header.
+    #[error("frame is too short to be an SFrame frame")]
+    MalformedFrame,
+    /// The participant has no forwarder left to send through.
+    #[error("no forwarder is available to carry the call")]
+    NoSfu,
+    /// The iroh media link refused a datagram.
+    #[error("media link error: {0}")]
+    Link(#[from] dissent_net::NetError),
     /// A signal could not be encoded or decoded as bytes.
     #[error("signal encoding error: {0}")]
     Encoding(#[from] postcard::Error),

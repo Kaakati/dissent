@@ -68,3 +68,19 @@ A handle like `@example.com` lets people recognise you by a domain you own. It i
 **How checking works:** each person's app looks up the TXT record itself, using the system DNS and a public fallback. It accepts the handle only if the value matches your root key exactly. A handle is never trusted because a peer says it is verified. If a peer shows you a handle, your own app checks it again before you see the verified mark.
 
 **Limits:** the check proves who controls the domain, not who the person is. Look-alike domains that mix scripts are refused. Losing control of the domain, or the TXT record being removed, makes the handle stop verifying.
+
+## At-rest protection
+
+Your identity file is encrypted on disk. Its data key is kept by your operating system: Windows Credential Manager, the macOS Keychain, or the Secret Service on Linux. Where no such store exists, the key comes from a passphrase, stretched with Argon2id.
+
+**What it protects against:**
+
+- **A copied data folder.** Copying the app's data folder gives an attacker only ciphertext. The identity stays locked to your OS account.
+- **A lost or stolen backup.** A backup of that folder, or a disk image taken while you are logged out, can't be read without the key.
+
+**What it does not protect against:**
+
+- **Malware running as you.** Any program running under your account can ask the OS store for the same key.
+- **Someone at your unlocked computer.** The key is available while you are logged in.
+- **A weak passphrase.** Argon2id slows guessing, but a short passphrase can still be guessed.
+- **Leftover plaintext.** After upgrading an old plaintext file, the old bytes are overwritten with zeros. SSD wear-levelling and filesystem snapshots can keep old copies, so this is best effort.

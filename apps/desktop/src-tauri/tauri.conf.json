@@ -31,5 +31,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDExNDM4NjRDRDg2QUM4RDEKUldUUnlHcllUSVpERWM5MGx5TDRCNUl6ek9pZ004NXQwT0FPdHg3RjNUYURmQk5tT2pNSTVxRlYK",
+      "endpoints": [
+        "https://github.com/Kaakati/dissent/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

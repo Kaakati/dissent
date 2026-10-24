@@ -8,14 +8,22 @@ import { initSidebar } from './views/sidebar.js';
 import { initChat } from './views/chat.js';
 import { initRight } from './views/right.js';
 import { initStatus } from './views/status.js';
+import { initKeyboard } from './keyboard.js';
+import { initUpdater } from './views/updater.js';
+import { listenTo } from './api.js';
+import { applyAppearance } from './appearance.js';
 
 async function start() {
+  applyAppearance();
   if (!window.__TAURI__) await import('./mock.js');
   initRail();
   initSidebar();
   initChat();
   initRight();
   initStatus();
+  initKeyboard();
+  initUpdater();
+  listenTo('dissent://update-available', (info) => actions.setUpdate(info)).catch(() => {});
   if (window.__DISSENT_MOCK__) document.getElementById('mock-note').hidden = false;
 
   try {
