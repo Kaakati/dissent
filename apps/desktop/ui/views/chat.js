@@ -5,6 +5,8 @@ import { el, avatar, icon, linkify, dayKey, dayLabel, clockLabel, stampLabel, se
 import { confirmDialog, openInviteDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
 import { openEmojiPicker } from './emoji.js';
+import { attachmentNode, stagedChip, dropOverlay, isOverLimit, baseName, guessMime, MAX_FILE_LABEL } from './attachments.js';
+import { listenTo } from '../api.js';
 
 const GROUP_MS = 7 * 60 * 1000; // consecutive messages by one author within this gap share a header
 const FLASH_MS = 1200; // how long a jumped-to message stays highlighted
@@ -26,12 +28,71 @@ let plusMenu = null;
 let replyTo = null; // { id, authorName } while composing a reply
 let composerInput = null;
 let replyBar = null;
+let staged = []; // files waiting in the composer: { path, name, size, mime }
+let stagedRow = null;
+let sendButton = null;
+const overlay = dropOverlay();
 
 export function initChat() {
-  document.getElementById('main').replaceChildren(header, list, composerHost);
+  const main = document.getElementById('main');
+  main.replaceChildren(header, list, composerHost, overlay);
   list.addEventListener('keydown', onListKey);
+  initDrop(main);
   subscribe('main', render);
   render();
+}
+
+// ---- drag and drop ----
+
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+const canAttach = () => Boolean(current()?.files);
+
+function showDrop(on) {
+  const main = document.getElementById('main');
+  if (on) overlay.setTitle(`Drop to send to ${current()?.dm ? current().title : `#${current()?.title ?? ''}`}`);
+  main.classList.toggle('dropping', on);
+}
+
+// The backend owns drag and drop: it sends dissent://drag-over while files hover the window, dissent://drag-leave
+// when they leave or after a drop, and dissent://files-dropped with { path, name, size, mime } per file. The mock
+// translates the browser's drag events into the same three events, so this is the only code path.
+function initDrop(main) {
+  main.addEventListener('dragover', (e) => {
+    if (hasFiles(e)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = canAttach() ? 'copy' : 'none';
+    }
+  });
+  main.addEventListener('drop', (e) => {
+    if (hasFiles(e)) e.preventDefault(); // never let the window navigate to a dropped file
+  });
+  listenTo('dissent://drag-over', () => { if (canAttach()) showDrop(true); }).catch(() => {});
+  listenTo('dissent://drag-leave', () => showDrop(false)).catch(() => {});
+  listenTo('dissent://files-dropped', (files) => {
+    showDrop(false);
+    if (!canAttach() || !Array.isArray(files)) return;
+    stageFiles(files.filter((f) => f && typeof f.path === 'string').map((f) => ({
+      path: f.path, name: f.name ?? baseName(f.path), size: f.size ?? null, mime: f.mime ?? guessMime(f.name ?? f.path),
+    })));
+  }).catch(() => {});
+}
+
+function stageFiles(files) {
+  const known = new Set(staged.map((f) => f.path));
+  for (const f of files) if (f && f.path && !known.has(f.path)) staged.push(f);
+  renderStaged();
+  composerInput?.focus();
+}
+
+function renderStaged() {
+  if (!stagedRow) return;
+  stagedRow.hidden = staged.length === 0;
+  stagedRow.replaceChildren(...staged.map((f) => stagedChip(f, () => {
+    staged = staged.filter((x) => x !== f);
+    renderStaged();
+    composerInput?.focus();
+  })));
+  if (sendButton) sendButton.disabled = staged.some(isOverLimit);
 }
 
 // Keyboard in the message list: Up and Down move focus between messages, R replies to the focused one.
@@ -76,6 +137,7 @@ function current() {
       pending: false,
       replyTo: m.reply_to ?? null,
       reactions: Array.isArray(m.reactions) ? m.reactions : null,
+      attachments: Array.isArray(m.attachments) ? m.attachments : null,
     }));
     return {
       key: `ch:${state.community.id}:${channel.id}`,
@@ -84,35 +146,39 @@ function current() {
       hash: true,
       placeholder: `Message #${channel.name}`,
       items,
-      // Replies and reactions exist only when the backend sends a `reactions` array on messages.
+      // Replies and reactions exist only when the backend sends a `reactions` array on messages; files, an `attachments` array.
       social: items.some((m) => m.reactions !== null),
+      files: items.some((m) => m.attachments !== null),
     };
   }
   if (state.route.kind === 'home' && state.peer) {
     const name = peerName();
+    const items = state.dmMessages.map((m) => {
+      const own = m.from === me?.root_id;
+      return {
+        id: m.id,
+        author: m.from,
+        authorName: own ? me?.display_name : name,
+        text: m.text,
+        ms: m.ms,
+        edited: false,
+        deleted: false,
+        own,
+        pending: m.pending,
+        replyTo: null,
+        reactions: null,
+        attachments: Array.isArray(m.attachments) ? m.attachments : null,
+      };
+    });
     return {
       key: `dm:${state.peer}`,
       dm: true,
       peer: state.peer,
       title: name,
       placeholder: `Message ${name}`,
-      items: state.dmMessages.map((m) => {
-        const own = m.from === me?.root_id;
-        return {
-          id: m.id,
-          author: m.from,
-          authorName: own ? me?.display_name : name,
-          text: m.text,
-          ms: m.ms,
-          edited: false,
-          deleted: false,
-          own,
-          pending: m.pending,
-          replyTo: null,
-          reactions: null,
-        };
-      }),
+      items,
       social: false,
+      files: items.some((m) => m.attachments !== null),
     };
   }
   return null;
@@ -156,6 +222,7 @@ function render() {
   if (switched) {
     state.ui.filter = '';
     replyTo = null;
+    staged = [];
   }
   if (searchInput.value !== state.ui.filter) searchInput.value = state.ui.filter;
 
@@ -242,13 +309,17 @@ function messageRow(item, view, start) {
     ? el('div', { class: 'gutter' }, avatar(item.authorName, item.author, 'lg'))
     : el('div', { class: 'gutter' }, el('span', { class: 'gutter-time', text: clockLabel(item.ms) }));
   const reactions = view.social && item.reactions?.length && !item.deleted ? reactionsNode(item) : null;
+  const files = view.files && item.attachments?.length && !item.deleted
+    ? el('div', { class: 'attachments' }, item.attachments.map((a) => attachmentNode(a, { messageId: item.id })))
+    : null;
+  const bodyOrNull = item.deleted || item.text || !files ? body : null; // a file-only message has no empty text line
   const content = start
     ? el('div', { class: 'msg-content' },
       el('div', { class: 'msg-head' },
         authorButton(item),
         el('time', { title: stampLabel(item.ms), text: clockLabel(item.ms) })),
-      body, pending, reactions)
-    : el('div', { class: 'msg-content' }, body, pending, reactions);
+      bodyOrNull, files, pending, reactions)
+    : el('div', { class: 'msg-content' }, bodyOrNull, files, pending, reactions);
   return el('article', { class: classes, 'data-id': item.id, tabindex: '-1' },
     item.replyTo ? replyRef(item.replyTo) : null,
     gutter, content, view.dm || editing ? null : rowActions(item, view));
@@ -475,17 +546,29 @@ function composer(view) {
   composerInput = input;
   replyBar = el('div', { class: 'reply-bar', role: 'status', hidden: true });
   renderReplyBar();
+  stagedRow = el('div', { class: 'staged', role: 'list', 'aria-label': 'Files to send', hidden: true });
   const send = async () => {
     const text = input.value.trim();
-    if (!text) return;
+    const files = staged;
+    if (!text && files.length === 0) return;
+    if (files.some(isOverLimit)) {
+      toast(`Remove files over ${MAX_FILE_LABEL} before sending.`);
+      return;
+    }
     input.disabled = true;
     const reply = replyTo;
-    const ok = view.dm ? await actions.sendDm(text)
-      : reply ? await actions.sendReply(reply.id, text)
-        : await actions.sendMessage(text);
+    let ok;
+    if (files.length) ok = await actions.sendFiles(files.map((f) => f.path), text || null);
+    else if (view.dm) ok = await actions.sendDm(text);
+    else if (reply) ok = await actions.sendReply(reply.id, text);
+    else ok = await actions.sendMessage(text);
     input.disabled = false;
     if (ok) {
       input.value = '';
+      if (staged === files) {
+        staged = [];
+        renderStaged();
+      }
       if (replyTo === reply) cancelReply();
     }
     input.focus();
@@ -509,9 +592,17 @@ function composer(view) {
       onclick: (e) => togglePlusMenu(wrap, view, e.currentTarget),
     }),
     input,
-    el('button', { class: 'icon-btn lg send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
+    sendButton = el('button', { class: 'icon-btn lg send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
   );
-  return el('div', { class: 'composer-stack' }, replyBar, wrap);
+  renderStaged();
+  return el('div', { class: 'composer-stack' }, replyBar, stagedRow, wrap);
+}
+
+// The native file dialog, through the backend. Picked files are staged, not sent.
+async function uploadFile() {
+  const picked = await actions.pickFiles();
+  if (!Array.isArray(picked) || picked.length === 0) return;
+  stageFiles(picked.map((f) => ({ path: f.path, name: f.name ?? baseName(f.path), size: f.size ?? null, mime: f.mime ?? guessMime(f.name ?? f.path) })));
 }
 
 // Server: invite. DM: copy my contact link, so the other person can add me without a shared server.
@@ -530,7 +621,10 @@ function togglePlusMenu(wrap, view, anchor) {
       onPick();
     },
   });
+  // The composer outlives message loads, so feature flags are read from the live view, not the one it was built with.
+  const live = current() ?? view;
   plusMenu = el('div', { class: 'menu plus-menu', role: 'menu' },
+    live.files ? item('Upload a file', 'paperclip', uploadFile) : null,
     view.dm
       ? item('Copy contact link', 'link', async () => {
         const link = await actions.contactLink();

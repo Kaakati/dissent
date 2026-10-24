@@ -11,6 +11,7 @@ const ICONS = [
   'key-round', 'log-out', 'message-circle', 'message-square', 'pencil', 'plus', 'send-horizontal',
   'link', 'panel-right', 'search', 'settings', 'shield-minus', 'shield-plus', 'trash-2', 'undo-2', 'user-plus',
   'users', 'x', 'shield-check', 'user', 'palette', 'wifi', 'external-link', 'download', 'reply', 'smile-plus',
+  'paperclip', 'lock', 'file', 'file-text', 'file-archive', 'file-audio', 'file-video', 'file-code', 'image', 'folder-open', 'rotate-ccw',
 ];
 
 // Original marks drawn here, not from Lucide. Filled with currentColor.

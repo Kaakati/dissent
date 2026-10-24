@@ -24,6 +24,7 @@ async function start() {
   initKeyboard();
   initUpdater();
   listenTo('dissent://update-available', (info) => actions.setUpdate(info)).catch(() => {});
+  listenTo('dissent://attachment-progress', (p) => actions.handleAttachmentProgress(p)).catch(() => {});
   if (window.__DISSENT_MOCK__) document.getElementById('mock-note').hidden = false;
 
   try {

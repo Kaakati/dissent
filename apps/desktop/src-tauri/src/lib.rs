@@ -4,6 +4,7 @@ mod network;
 mod storage;
 mod tray;
 mod updates;
+mod attachments;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -50,15 +51,18 @@ fn data_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
 
 pub fn run() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mainline=error")))
         .init();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = data_dir(app)?;
             std::fs::create_dir_all(&data_dir)?;
+            attachments::allow_downloads(app, &data_dir)?;
             tracing::info!(dir = %data_dir.display(), "data dir");
 
             // chisle: the data key comes from the OS credential store. If none is available we refuse to start
@@ -92,6 +96,7 @@ pub fn run() {
             events::forward_events(app.handle().clone(), rx);
             tray::install(app)?;
             updates::start_background(app.handle().clone());
+            attachments::install(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -125,6 +130,9 @@ pub fn run() {
             commands::safety_number,
             updates::check_update,
             updates::install_update,
+            attachments::pick_files,
+            attachments::reveal_attachment,
+            attachments::open_attachment,
             commands::set_network_settings,
         ])
         .build(tauri::generate_context!())

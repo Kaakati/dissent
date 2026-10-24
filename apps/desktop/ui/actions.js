@@ -216,8 +216,19 @@ export const sendMessage = guard(async (text) => {
   if (!community || !state.channelId) return false;
   await api.sendMessage(community.id, state.channelId, text);
   await loadMessages();
+  markOwnSend();
   return true;
 });
+
+// After sending, the newest message is ours, so the seen marker moves past it and no "New messages" line
+// appears above it when the channel is reopened.
+function markOwnSend() {
+  if (state.route.kind === 'server' && state.community && state.channelId) {
+    markLatestRead(`ch:${state.community.id}:${state.channelId}`, state.messages);
+  } else if (state.route.kind === 'home' && state.peer) {
+    markLatestRead(`dm:${state.peer}`, state.dmMessages);
+  }
+}
 
 export const editMessage = guard(async (messageId, text) => {
   const community = state.community;
@@ -242,6 +253,7 @@ export const sendReply = guard(async (messageId, text) => {
   if (!community || !state.channelId) return false;
   await api.sendReply(community.id, state.channelId, messageId, text);
   await loadMessages();
+  markOwnSend();
   return true;
 });
 
@@ -255,6 +267,50 @@ export const toggleReaction = guard(async (messageId, emoji, mine) => {
   return true;
 });
 
+// ---- file attachments (only offered when the backend reports them, see views/chat.js) ----
+
+export const pickFiles = guard(() => api.pickFiles());
+
+// Sends the staged files with an optional caption to the open channel, or the open DM.
+export const sendFiles = guard(async (paths, text) => {
+  if (state.route.kind === 'home' && state.peer) {
+    await api.sendDmFiles(state.peer, paths, text ?? null);
+    await Promise.all([loadDm(), loadConversations()]);
+    markOwnSend();
+    return true;
+  }
+  const community = state.community;
+  if (!community || !state.channelId) return false;
+  await api.sendFiles(community.id, state.channelId, paths, text ?? null);
+  await loadMessages();
+  markOwnSend();
+  return true;
+});
+
+export const downloadAttachment = guard(async (messageId, attachmentId) => {
+  const communityId = state.route.kind === 'server' ? state.community?.id ?? null : null;
+  await api.downloadAttachment(communityId, messageId, attachmentId);
+  return true;
+});
+
+export const openAttachment = guard((localPath) => api.openAttachment(localPath));
+export const revealAttachment = guard((localPath) => api.revealAttachment(localPath));
+
+// Progress events update the attachment in place; the next message reload brings the final state.
+export function handleAttachmentProgress(p) {
+  if (!p) return;
+  for (const items of [state.messages, state.dmMessages]) {
+    const m = items.find((x) => x.id === p.message_id);
+    const a = m?.attachments?.find((x) => x.id === p.attachment_id);
+    if (a) {
+      a.state = 'downloading';
+      a.progress = Math.max(0, Math.min(1, Number(p.progress) || 0));
+      notify('main');
+      return;
+    }
+  }
+}
+
 // ---- direct messages ----
 
 export const sendDm = guard(async (text) => {
@@ -262,6 +318,7 @@ export const sendDm = guard(async (text) => {
   if (!peer) return false;
   await api.sendDm(peer, text);
   await Promise.all([loadDm(), loadConversations()]);
+  markOwnSend();
   return true;
 });
 

@@ -26,6 +26,15 @@ export const api = {
     call('send_reply', { communityId, channelId, messageId, text }),
   react: (communityId, channelId, messageId, emoji) => call('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId, channelId, messageId, emoji) => call('unreact', { communityId, channelId, messageId, emoji }),
+  // File attachments. The UI shows them only when message items carry an `attachments` array.
+  pickFiles: () => call('pick_files'),
+  sendFiles: (communityId, channelId, paths, text) => call('send_files', { communityId, channelId, paths, text }),
+  sendDmFiles: (peer, paths, text) => call('send_dm_files', { peer, paths, text }),
+  downloadAttachment: (communityId, messageId, attachmentId) =>
+    call('download_attachment', { communityId, messageId, attachmentId }),
+  // Both accept only a path inside the app's downloads directory.
+  openAttachment: (path) => call('open_attachment', { path }),
+  revealAttachment: (path) => call('reveal_attachment', { path }),
   moderate: (communityId, action, user) => call('moderate', { communityId, action, user }),
   claimHandle: (communityId, handle) => call('claim_handle', { communityId, handle }),
   userProfile: (user) => call('user_profile', { user }),
