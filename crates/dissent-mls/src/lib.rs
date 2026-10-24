@@ -24,7 +24,6 @@ use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as Tl
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-use openmls_traits::storage::StorageProvider as _;
 use serde::{Deserialize, Serialize};
 
 /// The single ciphersuite used by Dissent groups.
@@ -67,8 +66,6 @@ pub enum MlsError {
     Credential(&'static str),
     #[error("ciphersuite {found:#06x} is not the required {expected:#06x}")]
     WrongCiphersuite { expected: u16, found: u16 },
-    #[error("could not restore a welcome's key package: {0}")]
-    KeyPackageRestore(String),
     #[error("snapshot is not from this format or ciphersuite and cannot be restored")]
     IncompatibleSnapshot,
     #[error("message rejected: {0}")]
@@ -256,6 +253,21 @@ impl MlsClient {
         Ok(self.pool.drain(..take).collect())
     }
 
+    /// Removes every trace of `group` from this client: its memory and its stored MLS state. A
+    /// group that is not held does nothing and returns `Ok`, so this is safe to repeat.
+    pub fn drop_group(&mut self, group: &[u8; 32]) -> Result<()> {
+        let mut dropped = match self.groups.remove(group) {
+            Some(held) => held,
+            None => match MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group))
+                .map_err(om)?
+            {
+                Some(stored) => stored,
+                None => return Ok(()),
+            },
+        };
+        dropped.delete(self.provider.storage()).map_err(om)
+    }
+
     /// Whether this client holds state for `group`.
     pub fn has_group(&self, group: &[u8; 32]) -> bool {
         self.groups.contains_key(group)
@@ -325,37 +337,44 @@ impl MlsClient {
     }
 
     /// Describes the group a welcome would join, without joining or storing anything. Every member
-    /// credential must verify. The welcome's key package is restored to storage afterwards.
-    pub fn inspect_welcome(&self, welcome: &[u8]) -> Result<WelcomeInfo> {
-        let (staged, restore) = stage_welcome(&self.provider, welcome)?;
-        let info = welcome_info(&staged);
-        restore.finish()?;
+    /// credential must verify. Storage is rolled back afterwards, so the welcome's key package is
+    /// still there to join with.
+    pub fn inspect_welcome(&mut self, welcome: &[u8]) -> Result<WelcomeInfo> {
+        let before = storage_values(&self.provider)?;
+        let info = stage_welcome(&self.provider, welcome).and_then(|staged| welcome_info(&staged));
+        restore_values(&self.provider, before)?;
         info
     }
 
-    /// Joins the group named by a welcome if `policy` accepts its [`WelcomeInfo`]. A refused
-    /// welcome leaves no group behind, and its key package stays available for a later welcome.
+    /// Joins the group named by a welcome if `policy` accepts its [`WelcomeInfo`]. A refused welcome
+    /// leaves no group behind, and its key package stays available for a later welcome.
     pub fn join_from_welcome_with_policy(
         &mut self,
         welcome: &[u8],
         policy: impl FnOnce(&WelcomeInfo) -> bool,
     ) -> Result<[u8; 32]> {
-        let (staged, restore) = stage_welcome(&self.provider, welcome)?;
-        let info = match welcome_info(&staged) {
-            Ok(info) => info,
-            Err(e) => return refuse(restore, e),
-        };
+        let before = storage_values(&self.provider)?;
+        let result = self.join_staged(welcome, policy);
+        if result.is_err() {
+            restore_values(&self.provider, before)?;
+        }
+        result
+    }
+
+    fn join_staged(
+        &mut self,
+        welcome: &[u8],
+        policy: impl FnOnce(&WelcomeInfo) -> bool,
+    ) -> Result<[u8; 32]> {
+        let staged = stage_welcome(&self.provider, welcome)?;
+        let info = welcome_info(&staged)?;
         if self.groups.contains_key(&info.group) {
-            return refuse(restore, MlsError::GroupExists);
+            return Err(MlsError::GroupExists);
         }
         if !policy(&info) {
-            return refuse(restore, MlsError::Rejected("policy"));
+            return Err(MlsError::Rejected("policy"));
         }
-        let mls_group = match staged.into_group(&self.provider) {
-            Ok(group) => group,
-            Err(e) => return refuse(restore, om(e)),
-        };
-        restore.keep();
+        let mls_group = staged.into_group(&self.provider).map_err(om)?;
         self.groups.insert(info.group, mls_group);
         Ok(info.group)
     }
@@ -366,23 +385,104 @@ impl MlsClient {
     /// [`process_with_policy`](Self::process_with_policy).
     #[deprecated(note = "accepts any commit from a member; use process_with_policy")]
     pub fn process(&mut self, group: &[u8; 32], message: &[u8]) -> Result<Processed> {
-        self.process_with_policy(group, message, |_| true)
+        self.process_checked(group, parse_protocol(message)?, Expect::Any, |_| true)
     }
 
-    /// Processes an incoming MLS message for `group`. `policy` decides whether a commit may take
-    /// effect. It sees the [`CommitInfo`] that merging would produce, before the merge.
+    /// Processes a commit for `group`. `policy` decides whether it may take effect. It sees the
+    /// [`CommitInfo`] that merging would produce, before the merge.
     ///
-    /// If `policy` returns false, the staged commit is discarded and the group keeps its epoch.
-    /// Application messages and proposals are handled without consulting `policy`. A commit that
+    /// If `policy` returns false, the commit is discarded and the group keeps its epoch. Any error
+    /// leaves the group and storage as they were, so the same bytes can be processed again later
+    /// once the policy accepts them. A message that is not a commit is rejected. A commit that
     /// evicts this device drops the group.
+    ///
+    /// Only commits pay for the storage snapshot, because OpenMLS consumes a commit's decryption
+    /// secret while staging it.
+    pub fn process_commit_with_policy(
+        &mut self,
+        group: &[u8; 32],
+        commit: &[u8],
+        policy: impl FnOnce(&CommitInfo) -> bool,
+    ) -> Result<Processed> {
+        let protocol = parse_protocol(commit)?;
+        if protocol.content_type() != ContentType::Commit {
+            return Err(MlsError::Rejected("not a commit"));
+        }
+        self.process_checked(group, protocol, Expect::Commit, policy)
+    }
+
+    /// Decrypts an application message for `group` and returns its plaintext and sender. A message
+    /// that is not an application message is rejected.
+    ///
+    /// The envelope's content type is checked before anything is decrypted, so a message that is not
+    /// an application message is rejected with no state change. The content type is authenticated
+    /// as part of the AEAD additional data, so relabelling a message only makes it fail to decrypt.
+    /// No storage snapshot is taken, because a message that fails signature or decryption changes
+    /// nothing. A replay fails with `SecretReuseError`, or with `TooDistantInThePast` once it is
+    /// older than the tolerance window.
+    pub fn decrypt_application(
+        &mut self,
+        group: &[u8; 32],
+        message: &[u8],
+    ) -> Result<(Vec<u8>, DeviceId)> {
+        let protocol = parse_protocol(message)?;
+        if protocol.content_type() != ContentType::Application {
+            return Err(MlsError::Rejected("not an application message"));
+        }
+        let mls_group = self.groups.get_mut(group).ok_or(MlsError::UnknownGroup)?;
+        match process_in_group(
+            &self.provider,
+            mls_group,
+            protocol,
+            Expect::Application,
+            |_: &CommitInfo| true,
+        )?
+        .0
+        {
+            Processed::Application(plaintext, sender) => Ok((plaintext, sender)),
+            _ => Err(MlsError::Rejected("not an application message")),
+        }
+    }
+
+    /// Processes any message for `group`, with `policy` applied to commits.
+    ///
+    /// Deprecated: use [`process_commit_with_policy`](Self::process_commit_with_policy) for commits
+    /// and [`decrypt_application`](Self::decrypt_application) for application messages.
+    #[deprecated(
+        note = "use process_commit_with_policy for commits and decrypt_application for messages"
+    )]
     pub fn process_with_policy(
         &mut self,
         group: &[u8; 32],
         message: &[u8],
         policy: impl FnOnce(&CommitInfo) -> bool,
     ) -> Result<Processed> {
+        self.process_checked(group, parse_protocol(message)?, Expect::Any, policy)
+    }
+
+    /// Shared body of the commit and deprecated paths. Takes a storage snapshot, and rolls back and
+    /// reloads the group on any error.
+    fn process_checked(
+        &mut self,
+        group: &[u8; 32],
+        protocol: ProtocolMessage,
+        expect: Expect,
+        policy: impl FnOnce(&CommitInfo) -> bool,
+    ) -> Result<Processed> {
+        let before = storage_values(&self.provider)?;
         let mls_group = self.groups.get_mut(group).ok_or(MlsError::UnknownGroup)?;
-        let (processed, evicted) = process_in_group(&self.provider, mls_group, message, policy)?;
+        let outcome = process_in_group(&self.provider, mls_group, protocol, expect, policy);
+        let (processed, evicted) = match outcome {
+            Ok(done) => done,
+            Err(err) => {
+                restore_values(&self.provider, before)?;
+                let reloaded = MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group))
+                    .map_err(om)?
+                    .ok_or(MlsError::UnknownGroup)?;
+                self.groups.insert(*group, reloaded);
+                return Err(err);
+            }
+        };
         if evicted {
             if let Some(mut dropped) = self.groups.remove(group) {
                 dropped.delete(self.provider.storage()).map_err(om)?;
@@ -403,6 +503,20 @@ impl MlsClient {
     /// Current epoch of `group`.
     pub fn epoch(&self, group: &[u8; 32]) -> Result<u64> {
         Ok(self.group(group)?.epoch().as_u64())
+    }
+
+    /// Every current member of `group` with its MLS leaf index. Indices are unique within an
+    /// epoch, and a member keeps its index while it stays in the group.
+    pub fn indexed_members(&self, group: &[u8; 32]) -> Result<Vec<(u32, DeviceCert)>> {
+        self.group(group)?
+            .members()
+            .map(|member| {
+                Ok((
+                    member.index.u32(),
+                    verify_member(&member.credential, &member.signature_key)?,
+                ))
+            })
+            .collect()
     }
 
     /// Verified certificates of every current member of `group`.
@@ -440,18 +554,34 @@ fn sender_ratchet() -> SenderRatchetConfiguration {
     SenderRatchetConfiguration::new(RATCHET_TOLERANCE, RATCHET_FORWARD)
 }
 
+/// The kind of message a caller accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    Any,
+    Commit,
+    Application,
+}
+
+fn wrong_kind(expect: Expect) -> MlsError {
+    match expect {
+        Expect::Commit => MlsError::Rejected("not a commit"),
+        _ => MlsError::Rejected("not an application message"),
+    }
+}
+
 /// Processes one message against a group, without touching the group map.
 /// Returns the outcome and whether this device was evicted.
+///
+/// OpenMLS checks the signature and decrypts before it applies the sender ratchet change, so a
+/// message that fails those checks consumes nothing. Callers gate on the envelope's content type
+/// first, so a message of the wrong kind is rejected before it reaches this function.
 fn process_in_group(
     provider: &OpenMlsRustCrypto,
     mls_group: &mut MlsGroup,
-    message: &[u8],
+    protocol: ProtocolMessage,
+    expect: Expect,
     policy: impl FnOnce(&CommitInfo) -> bool,
 ) -> Result<(Processed, bool)> {
-    let mls_message = MlsMessageIn::tls_deserialize_exact(message).map_err(om)?;
-    let protocol = mls_message
-        .try_into_protocol_message()
-        .map_err(|_| MlsError::Rejected("not a group message"))?;
     let processed = mls_group.process_message(provider, protocol).map_err(om)?;
 
     let sender_leaf = match processed.sender() {
@@ -461,16 +591,25 @@ fn process_in_group(
 
     match processed.into_content() {
         ProcessedMessageContent::ApplicationMessage(app) => {
+            if expect == Expect::Commit {
+                return Err(wrong_kind(expect));
+            }
             let leaf =
                 sender_leaf.ok_or(MlsError::Rejected("application message from non-member"))?;
             let device = member_device(mls_group, leaf)?;
             Ok((Processed::Application(app.into_bytes(), device), false))
         }
         ProcessedMessageContent::ProposalMessage(proposal) => {
+            if expect != Expect::Any {
+                return Err(wrong_kind(expect));
+            }
             check_proposal(&proposal)?;
             Ok((Processed::Proposal, false))
         }
         ProcessedMessageContent::StagedCommitMessage(staged) => {
+            if expect == Expect::Application {
+                return Err(wrong_kind(expect));
+            }
             let committer = sender_leaf.ok_or(MlsError::Rejected("commit from non-member"))?;
             let info = commit_info(mls_group, committer, &staged)?;
             if !policy(&info) {
@@ -596,102 +735,49 @@ fn member_device(mls_group: &MlsGroup, leaf: LeafNodeIndex) -> Result<DeviceId> 
     current_cert(mls_group, leaf).map(|cert| cert.device)
 }
 
-/// A key package that a welcome consumed from storage. OpenMLS deletes it when it reads the
-/// welcome, so it is written back on drop unless `keep` is called.
-struct ConsumedKeyPackage<'a> {
-    provider: &'a OpenMlsRustCrypto,
-    saved: Option<(KeyPackageRef, KeyPackageBundle)>,
+/// Parses the envelope of an incoming MLS message. Nothing is decrypted or consumed here.
+fn parse_protocol(message: &[u8]) -> Result<ProtocolMessage> {
+    MlsMessageIn::tls_deserialize_exact(message)
+        .map_err(om)?
+        .try_into_protocol_message()
+        .map_err(|_| MlsError::Rejected("not a group message"))
 }
 
-impl ConsumedKeyPackage<'_> {
-    /// The welcome is accepted, so the key package stays spent.
-    fn keep(mut self) {
-        self.saved = None;
-    }
-
-    /// Writes the key package back now, and reports a storage failure to the caller.
-    fn finish(mut self) -> Result<()> {
-        match self.saved.take() {
-            Some((hash_ref, bundle)) => self
-                .provider
-                .storage()
-                .write_key_package(&hash_ref, &bundle)
-                .map_err(|e| MlsError::KeyPackageRestore(e.to_string())),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for ConsumedKeyPackage<'_> {
-    /// Fallback for a guard dropped without `keep` or `finish`, such as on an early error return.
-    /// A failure here cannot be returned, so it is logged at warn level. The key package then stays
-    /// spent.
-    fn drop(&mut self) {
-        if let Some((hash_ref, bundle)) = self.saved.take() {
-            if let Err(e) = self
-                .provider
-                .storage()
-                .write_key_package(&hash_ref, &bundle)
-            {
-                tracing::warn!(
-                    error = %e,
-                    "could not restore a welcome's key package; it stays spent"
-                );
-            }
-        }
-    }
-}
-
-/// Ends a refused welcome: restores its key package, then returns the refusal. A restore failure
-/// is returned in place of the refusal, since the caller must know the key package is spent.
-fn refuse<T>(restore: ConsumedKeyPackage<'_>, err: MlsError) -> Result<T> {
-    restore.finish()?;
-    Err(err)
-}
-
-/// Stages a welcome without joining. The key package it consumes is saved so the caller can
-/// restore it. Dropping the returned guard without `keep` restores it.
-fn stage_welcome<'a>(
-    provider: &'a OpenMlsRustCrypto,
-    bytes: &[u8],
-) -> Result<(StagedWelcome, ConsumedKeyPackage<'a>)> {
+/// Stages a welcome without joining. OpenMLS consumes the welcome's key package while staging, so
+/// every caller rolls storage back when it does not keep the result.
+fn stage_welcome(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<StagedWelcome> {
     let message = MlsMessageIn::tls_deserialize_exact(bytes).map_err(om)?;
     let welcome = match message.extract() {
         MlsMessageBodyIn::Welcome(welcome) => welcome,
         _ => return Err(MlsError::Rejected("message is not a welcome")),
     };
     check_ciphersuite(welcome.ciphersuite())?;
-    let saved = first_key_package(provider, &welcome)?;
-    let consumed = ConsumedKeyPackage { provider, saved };
     let config = MlsGroupJoinConfig::builder()
         .use_ratchet_tree_extension(true)
         .max_past_epochs(PAST_EPOCHS)
         .sender_ratchet_configuration(sender_ratchet())
         .build();
-    match StagedWelcome::new_from_welcome(provider, &config, welcome, None) {
-        Ok(staged) => Ok((staged, consumed)),
-        Err(e) => refuse(consumed, om(e)),
-    }
+    StagedWelcome::new_from_welcome(provider, &config, welcome, None).map_err(om)
 }
 
-/// Finds the key package OpenMLS will consume for `welcome`, in the same order it searches.
-/// Last-resort key packages are never consumed, so they give nothing to restore.
-fn first_key_package(
-    provider: &OpenMlsRustCrypto,
-    welcome: &Welcome,
-) -> Result<Option<(KeyPackageRef, KeyPackageBundle)>> {
-    for secret in welcome.secrets() {
-        let hash_ref = secret.new_member();
-        let found: Option<KeyPackageBundle> =
-            provider.storage().key_package(&hash_ref).map_err(om)?;
-        if let Some(bundle) = found {
-            if bundle.key_package().last_resort() {
-                return Ok(None);
-            }
-            return Ok(Some((hash_ref, bundle)));
-        }
-    }
-    Ok(None)
+/// A copy of every value in provider storage. Restoring it undoes all changes made since.
+fn storage_values(provider: &OpenMlsRustCrypto) -> Result<HashMap<Vec<u8>, Vec<u8>>> {
+    provider
+        .storage()
+        .values
+        .read()
+        .map(|values| values.clone())
+        .map_err(|_| MlsError::Rejected("storage lock poisoned"))
+}
+
+fn restore_values(provider: &OpenMlsRustCrypto, saved: HashMap<Vec<u8>, Vec<u8>>) -> Result<()> {
+    let mut values = provider
+        .storage()
+        .values
+        .write()
+        .map_err(|_| MlsError::Rejected("storage lock poisoned"))?;
+    *values = saved;
+    Ok(())
 }
 
 /// Describes a staged welcome: its group, verified members and epoch.

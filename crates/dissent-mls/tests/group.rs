@@ -62,7 +62,7 @@ fn three_member_group(group: &[u8; 32]) -> (Device, Device, Device) {
         .unwrap();
     assert_eq!(
         bob.client
-            .process_with_policy(group, &second.commit, allow_commit)
+            .process_commit_with_policy(group, &second.commit, allow_commit)
             .unwrap(),
         Processed::Commit
     );
@@ -93,7 +93,7 @@ fn group_with_pending_welcome(group: &[u8; 32]) -> (Device, Device, Device, Comm
         .add_members(group, &[carol_key_package])
         .unwrap();
     bob.client
-        .process_with_policy(group, &second.commit, allow_commit)
+        .process_commit_with_policy(group, &second.commit, allow_commit)
         .unwrap();
     (alice, bob, carol, second)
 }
@@ -128,7 +128,7 @@ fn three_members_exchange_messages_and_epoch_advances() {
     assert_eq!(alice.client.epoch(&group).unwrap(), 2);
     assert_eq!(
         bob.client
-            .process_with_policy(&group, &second.commit, allow_commit)
+            .process_commit_with_policy(&group, &second.commit, allow_commit)
             .unwrap(),
         Processed::Commit
     );
@@ -162,10 +162,8 @@ fn three_members_exchange_messages_and_epoch_advances() {
         let wire = sender_client.encrypt(&group, text.as_bytes()).unwrap();
         for other in others {
             assert_eq!(
-                other
-                    .process_with_policy(&group, &wire, allow_commit)
-                    .unwrap(),
-                Processed::Application(text.as_bytes().to_vec(), sender)
+                other.decrypt_application(&group, &wire).unwrap(),
+                (text.as_bytes().to_vec(), sender)
             );
         }
     }
@@ -181,7 +179,7 @@ fn removed_member_cannot_read_later_messages() {
     assert_eq!(alice.client.epoch(&group).unwrap(), 3);
     assert_eq!(
         bob.client
-            .process_with_policy(&group, &removal, allow_commit)
+            .process_commit_with_policy(&group, &removal, allow_commit)
             .unwrap(),
         Processed::Commit
     );
@@ -190,22 +188,17 @@ fn removed_member_cannot_read_later_messages() {
     assert_eq!(
         carol
             .client
-            .process_with_policy(&group, &removal, allow_commit)
+            .process_commit_with_policy(&group, &removal, allow_commit)
             .unwrap(),
         Processed::Commit
     );
 
     let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
     assert_eq!(
-        bob.client
-            .process_with_policy(&group, &wire, allow_commit)
-            .unwrap(),
-        Processed::Application(b"after the ban".to_vec(), alice.id)
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"after the ban".to_vec(), alice.id)
     );
-    assert!(carol
-        .client
-        .process_with_policy(&group, &wire, allow_commit)
-        .is_err());
+    assert!(carol.client.decrypt_application(&group, &wire).is_err());
     assert!(carol.client.encrypt(&group, b"still here").is_err());
 
     let roster: Vec<DeviceId> = alice
@@ -241,7 +234,7 @@ fn policy_refusing_commit_that_adds_outsider_leaves_state_unchanged() {
         .unwrap();
     let refused = bob
         .client
-        .process_with_policy(&group, &malicious.commit, |info| {
+        .process_commit_with_policy(&group, &malicious.commit, |info| {
             info.adds.iter().all(|cert| known.contains(&cert.root))
         });
     assert!(matches!(refused, Err(MlsError::Rejected(_))));
@@ -252,10 +245,7 @@ fn policy_refusing_commit_that_adds_outsider_leaves_state_unchanged() {
         .join_from_welcome_with_policy(&malicious.welcome, allow_welcome)
         .unwrap();
     let from_bob = bob.client.encrypt(&group, b"members only").unwrap();
-    assert!(eve
-        .client
-        .process_with_policy(&group, &from_bob, allow_commit)
-        .is_err());
+    assert!(eve.client.decrypt_application(&group, &from_bob).is_err());
 }
 
 #[test]
@@ -280,7 +270,7 @@ fn policy_accepting_commit_merges_it() {
         .unwrap();
     let merged = bob
         .client
-        .process_with_policy(&group, &second.commit, |info| {
+        .process_commit_with_policy(&group, &second.commit, |info| {
             info.adds.iter().all(|cert| known.contains(&cert.root))
         });
     assert_eq!(merged.unwrap(), Processed::Commit);
@@ -303,7 +293,7 @@ fn commit_info_reports_committer_adds_and_removes() {
         .unwrap();
     let mut seen = None;
     bob.client
-        .process_with_policy(&group, &added.commit, |info| {
+        .process_commit_with_policy(&group, &added.commit, |info| {
             seen = Some(info.clone());
             true
         })
@@ -320,7 +310,7 @@ fn commit_info_reports_committer_adds_and_removes() {
     let removal = alice.client.remove_members(&group, &[carol.id]).unwrap();
     let mut seen = None;
     bob.client
-        .process_with_policy(&group, &removal, |info| {
+        .process_commit_with_policy(&group, &removal, |info| {
             seen = Some(info.clone());
             true
         })
@@ -386,13 +376,8 @@ fn replayed_application_message_is_rejected() {
     let (mut alice, mut bob, _carol) = three_member_group(&group);
     let wire = alice.client.encrypt(&group, b"once").unwrap();
 
-    bob.client
-        .process_with_policy(&group, &wire, allow_commit)
-        .unwrap();
-    assert!(bob
-        .client
-        .process_with_policy(&group, &wire, allow_commit)
-        .is_err());
+    bob.client.decrypt_application(&group, &wire).unwrap();
+    assert!(bob.client.decrypt_application(&group, &wire).is_err());
 }
 
 /// Builds a KeyPackage with OpenMLS directly, bypassing Dissent's checks.
@@ -554,11 +539,11 @@ fn export_secret_agrees_within_an_epoch_and_changes_after_commit() {
         .add_members(&group, &[dave.client.key_package().unwrap()])
         .unwrap();
     bob.client
-        .process_with_policy(&group, &commit.commit, allow_commit)
+        .process_commit_with_policy(&group, &commit.commit, allow_commit)
         .unwrap();
     carol
         .client
-        .process_with_policy(&group, &commit.commit, allow_commit)
+        .process_commit_with_policy(&group, &commit.commit, allow_commit)
         .unwrap();
     dave.client
         .join_from_welcome_with_policy(&commit.welcome, allow_welcome)
@@ -844,7 +829,7 @@ fn commit_with_psk_proposal_is_refused_and_state_is_unchanged() {
     let refused = raw
         .bob
         .client
-        .process_with_policy(&raw.id, &commit, allow_commit);
+        .process_commit_with_policy(&raw.id, &commit, allow_commit);
     assert!(matches!(
         refused,
         Err(MlsError::OpenMls(ref msg)) if msg.contains("PSK could not be found")
@@ -877,7 +862,7 @@ fn commit_with_group_context_extension_is_refused_and_state_is_unchanged() {
     let refused = raw
         .bob
         .client
-        .process_with_policy(&raw.id, &commit, allow_commit);
+        .process_commit_with_policy(&raw.id, &commit, allow_commit);
     assert!(matches!(
         refused,
         Err(MlsError::Rejected(
@@ -932,7 +917,7 @@ fn external_commit_with_external_init_is_refused_and_state_is_unchanged() {
     let refused = raw
         .bob
         .client
-        .process_with_policy(&raw.id, &commit, allow_commit);
+        .process_commit_with_policy(&raw.id, &commit, allow_commit);
     assert!(matches!(
         refused,
         Err(MlsError::Rejected("commit from non-member"))
@@ -965,10 +950,245 @@ fn update_path_that_changes_device_is_refused_and_state_is_unchanged() {
     let refused = raw
         .bob
         .client
-        .process_with_policy(&raw.id, &commit, allow_commit);
+        .process_commit_with_policy(&raw.id, &commit, allow_commit);
     assert!(matches!(
         refused,
         Err(MlsError::Rejected("update path changes device"))
     ));
     assert_eq!(raw.bob.client.epoch(&raw.id).unwrap(), 1);
+}
+
+#[test]
+fn refused_commit_can_be_applied_once_the_policy_accepts_it() {
+    let group = community();
+    let (mut alice, mut bob, carol) = three_member_group(&group);
+    let removal = alice.client.remove_members(&group, &[carol.id]).unwrap();
+
+    let refused = bob
+        .client
+        .process_commit_with_policy(&group, &removal, |_| false);
+    assert!(matches!(refused, Err(MlsError::Rejected("policy"))));
+    assert_eq!(bob.client.epoch(&group).unwrap(), 2);
+
+    // The same commit, processed again after the policy changes its answer, still applies.
+    assert_eq!(
+        bob.client
+            .process_commit_with_policy(&group, &removal, allow_commit)
+            .unwrap(),
+        Processed::Commit
+    );
+    assert_eq!(bob.client.epoch(&group).unwrap(), 3);
+
+    let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"after the ban".to_vec(), alice.id)
+    );
+}
+
+#[test]
+fn refused_commit_removes_member_once_applied_and_locks_it_out() {
+    let group = community();
+    let (mut alice, mut bob, mut carol) = three_member_group(&group);
+    let removal = alice.client.remove_members(&group, &[carol.id]).unwrap();
+
+    // Bob's policy refuses the removal at first, as if the ban event had not arrived yet.
+    assert!(matches!(
+        bob.client
+            .process_commit_with_policy(&group, &removal, |_| false),
+        Err(MlsError::Rejected("policy"))
+    ));
+    // Once the ban is known, the same bytes apply, and Carol is out.
+    assert_eq!(
+        bob.client
+            .process_commit_with_policy(&group, &removal, allow_commit)
+            .unwrap(),
+        Processed::Commit
+    );
+    assert_eq!(
+        carol
+            .client
+            .process_commit_with_policy(&group, &removal, allow_commit)
+            .unwrap(),
+        Processed::Commit
+    );
+
+    let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"after the ban".to_vec(), alice.id)
+    );
+    assert!(carol.client.decrypt_application(&group, &wire).is_err());
+}
+
+#[test]
+fn corrupted_message_does_not_consume_its_secret() {
+    let group = community();
+    let (mut alice, mut bob, _carol) = three_member_group(&group);
+    let wire = alice.client.encrypt(&group, b"intact").unwrap();
+
+    // Flip a byte near the end, which is inside the AEAD tag, so decryption fails.
+    let mut corrupted = wire.clone();
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 0x01;
+    assert!(bob.client.decrypt_application(&group, &corrupted).is_err());
+
+    // The genuine message still decrypts, because its secret was not burned.
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"intact".to_vec(), alice.id)
+    );
+}
+
+#[test]
+fn refused_welcome_is_accepted_later_and_decrypts() {
+    let group = community();
+    let (mut alice, mut bob, mut carol, second) = group_with_pending_welcome(&group);
+
+    assert!(matches!(
+        carol
+            .client
+            .join_from_welcome_with_policy(&second.welcome, |_| false),
+        Err(MlsError::Rejected("policy"))
+    ));
+    assert_eq!(
+        carol
+            .client
+            .join_from_welcome_with_policy(&second.welcome, allow_welcome)
+            .unwrap(),
+        group
+    );
+    assert_eq!(carol.client.epoch(&group).unwrap(), 2);
+
+    let wire = alice
+        .client
+        .encrypt(&group, b"welcome to the group")
+        .unwrap();
+    assert_eq!(
+        carol.client.decrypt_application(&group, &wire).unwrap(),
+        (b"welcome to the group".to_vec(), alice.id)
+    );
+    let reply = carol.client.encrypt(&group, b"thanks").unwrap();
+    assert_eq!(
+        bob.client.decrypt_application(&group, &reply).unwrap(),
+        (b"thanks".to_vec(), carol.id)
+    );
+}
+
+#[test]
+fn corrupted_message_in_the_middle_does_not_consume_its_secret() {
+    let group = community();
+    let (mut alice, mut bob, _carol) = three_member_group(&group);
+    let wire = alice.client.encrypt(&group, b"intact").unwrap();
+
+    let mut corrupted = wire.clone();
+    let middle = corrupted.len() / 2;
+    corrupted[middle] ^= 0x80;
+    assert!(bob.client.decrypt_application(&group, &corrupted).is_err());
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"intact".to_vec(), alice.id)
+    );
+}
+
+#[test]
+fn garbage_bytes_do_not_desync_the_group() {
+    let group = community();
+    let (mut alice, mut bob, _carol) = three_member_group(&group);
+    assert!(bob.client.decrypt_application(&group, &[0xAB; 64]).is_err());
+    assert!(bob
+        .client
+        .process_commit_with_policy(&group, &[0xAB; 64], allow_commit)
+        .is_err());
+    let wire = alice.client.encrypt(&group, b"still in sync").unwrap();
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"still in sync".to_vec(), alice.id)
+    );
+}
+
+#[test]
+fn application_message_is_rejected_by_the_commit_path_and_state_is_kept() {
+    let group = community();
+    let (mut alice, mut bob, _carol) = three_member_group(&group);
+    let wire = alice.client.encrypt(&group, b"not a commit").unwrap();
+    assert!(matches!(
+        bob.client
+            .process_commit_with_policy(&group, &wire, allow_commit),
+        Err(MlsError::Rejected("not a commit"))
+    ));
+    assert_eq!(
+        bob.client.decrypt_application(&group, &wire).unwrap(),
+        (b"not a commit".to_vec(), alice.id)
+    );
+}
+
+#[test]
+fn commit_sent_as_application_is_rejected_before_decryption_and_still_applies() {
+    let group = community();
+    let (mut alice, mut bob, carol) = three_member_group(&group);
+    let removal = alice.client.remove_members(&group, &[carol.id]).unwrap();
+
+    // A malicious member re-sends the commit's bytes as a sealed application event.
+    assert!(matches!(
+        bob.client.decrypt_application(&group, &removal),
+        Err(MlsError::Rejected("not an application message"))
+    ));
+    // The gate ran before any decryption, so nothing was consumed and the real commit applies.
+    assert_eq!(
+        bob.client
+            .process_commit_with_policy(&group, &removal, allow_commit)
+            .unwrap(),
+        Processed::Commit
+    );
+    assert_eq!(bob.client.epoch(&group).unwrap(), 3);
+}
+
+#[test]
+fn forged_content_type_in_header_fails_authentication_and_consumes_nothing() {
+    let group = community();
+    let (mut alice, mut bob, carol) = three_member_group(&group);
+    let removal = alice.client.remove_members(&group, &[carol.id]).unwrap();
+
+    // Wire header: version (2 bytes), wire format (2), group id (1-byte length and 32 bytes), epoch
+    // (8), then the content type.
+    assert_eq!(
+        &removal[2..4],
+        &[0x00, 0x02],
+        "the commit is a PrivateMessage"
+    );
+    assert_eq!(removal[45], 3, "content type Commit sits at offset 45");
+    // Relabel the commit as an application message. The gate passes, but the content type is
+    // authenticated, so decryption fails and nothing is consumed.
+    let mut forged = removal.clone();
+    forged[45] = 1;
+    assert!(bob.client.decrypt_application(&group, &forged).is_err());
+    assert_eq!(
+        bob.client
+            .process_commit_with_policy(&group, &removal, allow_commit)
+            .unwrap(),
+        Processed::Commit
+    );
+    assert_eq!(bob.client.epoch(&group).unwrap(), 3);
+}
+
+#[test]
+fn drop_group_removes_state_and_is_idempotent() {
+    let group = community();
+    let mut alice = new_device();
+    alice.client.create_group(group).unwrap();
+    assert!(alice.client.has_group(&group));
+
+    alice.client.drop_group(&group).unwrap();
+    assert!(!alice.client.has_group(&group));
+    assert!(matches!(
+        alice.client.epoch(&group),
+        Err(MlsError::UnknownGroup)
+    ));
+    // Dropping again, or dropping a group never held, does nothing.
+    alice.client.drop_group(&group).unwrap();
+    alice.client.drop_group(&community()).unwrap();
+    // The stored state is gone too, so the same id can be created again.
+    alice.client.create_group(group).unwrap();
+    assert_eq!(alice.client.epoch(&group).unwrap(), 0);
 }

@@ -25,17 +25,19 @@ Replay never reads ciphertext, so every peer computes the same state regardless 
 
 ## Who commits
 
-MLS commits are not DAG events. They travel as `GossipMsg::Commit` on the community topic, and as the `MlsCommits` RPC for catch-up.
+MLS commits are not DAG events. Each applied commit is announced on the community topic as a `GossipMsg::Commit` carrying a `SignedCommit`. The announcement holds the epoch, a blake3 hash of the commit, and the committer's device signature. Receivers fetch the bytes with the `MlsCommit` RPC from the committer, or from the neighbour that relayed the announcement, and check the hash before applying. Gossip never carries the commit bytes, so a large post-quantum commit cannot exceed the gossip frame limit. Catch-up uses the `MlsCommits` RPC.
 
-- Rank: owner first, then admins by join time, then root id. Only owner and admins commit.
-- Preferred committer: the highest-ranked owner or admin that is online in the local view (self, or a gossip neighbour's device).
-- Only the preferred committer adds members (`MlsJoin` requests) and removes them (bans, leaves, departures).
-- Collision: a commit for an epoch already applied is ignored, so the first one applied wins. The lower-ranked committer's change is re-issued by the winner's reconcile. This is weaker than the full rule: committers merge at once, so a higher-ranked committer cannot override a commit already applied. Full tie-break needs deferred merge and is future work.
+- Any member may commit, but a commit takes effect only if the DAG allows it. Every peer checks this before merging, and refused commits are logged at warn level with the committer.
+- An add must bring in a device of a current, non-banned member.
+- A removal must take out a device of a banned or departed member, or one of the author's own devices.
+- The author must be a current member. A welcome must list only current members.
+- Rank sets only how long a device waits before acting: owner, then admins, then moderators, then members by join time. A device waits 3 s for each higher-ranked member that is online, up to 15 s, and then acts unless the change is already done.
+- Collision: a commit for an epoch already applied is ignored, so the first one applied wins. Two members that commit at once can fork the group. The delay makes this rare, but full resolution needs deferred merge and is future work.
 
 ## Joining
 
 1. The joiner gets the community's events, authors its `Join`, and pushes the `Join` to the invite peers (as before).
-2. It sends `MlsJoin { community, from }` to each invite peer. A peer that is not the preferred committer answers with an error, and the joiner tries the next peer.
+2. It sends `MlsJoin { community, from }` to each invite peer. A peer that is not a current member answers with an error, and the joiner tries the next peer. Otherwise the peer waits its turn, adds the joiner, and announces the commit.
 3. The committer checks the joiner's membership in the DAG, then fetches one key package from the joiner's device with `KeyPackages`.
 4. The committer adds the device (`add_members`), broadcasts the commit, appends it to `mls_commits.log`, and returns the welcome in the reply.
 5. The joiner joins from the welcome.
@@ -52,11 +54,18 @@ Sizes with this suite, measured in `dissent-mls` tests: a key package is about 2
 
 ## Bans and departures
 
-A ban, leave or departure removes every device of that member. The preferred committer runs this check when control events change and on each maintenance pass. The removal commit is delivered to everyone, including the removed device, which then drops the group. Messages sent after that epoch are locked for it.
+A ban, leave or departure removes every device of that member. Any member runs this check, after its turn to act when control events change and on each maintenance pass. The removal commit is delivered to everyone, including the removed device, which then drops the group. Messages sent after that epoch are locked for it.
 
 ## Persistence
 
-`openmls_sqlite_storage` is not in the local registry, so this uses OpenMLS's `MemoryStorage` and snapshots it. The storage's `values` map is written to `mls.bin` after each MLS mutation, including encryption, since sender ratchets advance on every message. Plaintext history lives in `content.log`, so losing MLS state keeps everything already decrypted. Snapshots hold key material in plain text. This matches the keystore, and it needs hardening before 1.0.
+`openmls_sqlite_storage` is not in the local registry, so this uses OpenMLS's `MemoryStorage` and snapshots it. The storage's `values` map is written to `mls.bin`. Snapshots hold key material in plain text. This matches the keystore, and it needs hardening before 1.0.
+
+Writes are split by kind of change:
+
+- Group changes (commits, joins, removals, key package pool refills) and our own sends are written at once and synced to disk. A lost commit would strand a device. A lost sender ratchet could make us reuse a key for the next message, which breaks AES-GCM for both messages, so sends cannot be debounced.
+- Decrypting a received message only marks the state dirty. The state is written at most once a second, or after 100 steps, and on maintenance and shutdown.
+
+A crash can lose the receive-side ratchet steps taken since the last write. The plaintext those steps produced is already in `content.log`, so decrypted history stays readable. The lost steps only mean that a later restart may decrypt the same ciphertexts again, which is harmless because the text is already stored.
 
 ## History for new members
 
