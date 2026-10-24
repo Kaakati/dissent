@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::auth::{Auth, LinkConfig, RxState};
 use crate::call::{Call, CallStats};
-use crate::e2ee::{epoch_lsb, SframeSender, DEFAULT_LEVEL};
+use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender, DEFAULT_LEVEL};
 use crate::error::{MediaError, Result};
 use crate::key::MediaKey;
 use crate::signal::Signal;
@@ -188,6 +188,12 @@ impl<T: PacketTransport> Mesh<T> {
         if !self.calls.values().all(Call::is_connected) {
             return Err(MediaError::NotConnected);
         }
+        let loss = self
+            .calls
+            .values()
+            .map(Call::loss_fraction)
+            .fold(0.0_f32, f32::max);
+        self.tx.set_red(redundancy_for(loss, self.tx.red()));
         let encrypted = self.tx.encrypt(frame, DEFAULT_LEVEL)?;
         let mut failed = Vec::new();
         for (peer, call) in self.calls.iter_mut() {

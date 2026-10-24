@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::auth::{Auth, LinkConfig, RxState};
 use crate::call::{Call, CallStats};
-use crate::e2ee::SframeSender;
+use crate::e2ee::{redundancy_for, SframeSender};
 use crate::election::{elect, ranked, Candidate, Election, Mode, PeerId};
 use crate::error::{MediaError, Result};
 use crate::key::MediaKey;
@@ -243,6 +243,11 @@ impl<T: PacketTransport> Participant<T> {
     /// A frame sent while that forwarder is still connecting is dropped, and the call reports
     /// success for it. Fails with [`MediaError::NoSfu`] when no forwarder is left.
     pub async fn send_audio_frame(&mut self, frame: &[u8], level: u8) -> Result<()> {
+        let loss = self
+            .active
+            .and_then(|active| self.links.get(&active))
+            .map_or(0.0, Call::loss_fraction);
+        self.tx.set_red(redundancy_for(loss, self.tx.red()));
         let wire = self.tx.encrypt(frame, level)?;
         loop {
             let active = self.active.ok_or(MediaError::NoSfu)?;

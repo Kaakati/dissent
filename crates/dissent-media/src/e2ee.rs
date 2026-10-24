@@ -19,6 +19,7 @@ use sframe::{
     CipherSuite,
 };
 
+use crate::auth::{frame_hash, HASH_LEN};
 use crate::error::{MediaError, Result};
 use crate::key::MediaKey;
 
@@ -142,10 +143,39 @@ impl ReplayWindow {
     }
 }
 
+/// The first byte of every frame's payload: no redundancy follows.
+const PLAIN_FLAG: u8 = 0;
+/// The first byte of a redundant payload: the previous frame follows, so a lost one can be
+/// recovered from the next.
+const RED_FLAG: u8 = 1;
+
+/// Redundancy turns on above this packet loss, and off again only below the lower mark, so it
+/// does not flap at the boundary.
+const RED_ON_LOSS: f32 = 0.10;
+const RED_OFF_LOSS: f32 = 0.05;
+
+/// Whether redundancy should be on for a link that loses `loss` of its packets.
+pub(crate) fn redundancy_for(loss: f32, currently_on: bool) -> bool {
+    if currently_on {
+        loss > RED_OFF_LOSS
+    } else {
+        loss > RED_ON_LOSS
+    }
+}
+
+/// The previous frame of a sender, kept so the next one can carry it.
+struct Prev {
+    counter: u64,
+    hash: [u8; HASH_LEN],
+    plain: Vec<u8>,
+}
+
 /// Encrypts the frames a local sender produces, under one epoch of the media key.
 pub(crate) struct SframeSender {
     key: EncryptionKey,
     counter: MonotonicCounter,
+    red: bool,
+    prev: Option<Prev>,
 }
 
 impl SframeSender {
@@ -159,15 +189,51 @@ impl SframeSender {
         Ok(Self {
             key,
             counter: MonotonicCounter::default(),
+            red: false,
+            prev: None,
         })
+    }
+
+    /// Turns redundancy on or off. With it on, each frame carries the one before it.
+    pub(crate) fn set_red(&mut self, on: bool) {
+        self.red = on;
+    }
+
+    /// Whether redundancy is on.
+    pub(crate) fn red(&self) -> bool {
+        self.red
     }
 
     /// Encrypts one plaintext frame. The output is the audio-level byte, then the SFrame header,
     /// then the ciphertext. The level byte is authenticated but not encrypted.
+    ///
+    /// The encrypted payload starts with a redundancy flag. With redundancy on, the flag is
+    /// followed by the previous frame's counter, hash and plaintext.
     pub(crate) fn encrypt(&mut self, plaintext: &[u8], level: u8) -> Result<Vec<u8>> {
-        let frame = MediaFrame::try_with_meta_data(&mut self.counter, plaintext, [level])?;
+        let mut payload = Vec::with_capacity(plaintext.len() + 32);
+        match self.prev.as_ref() {
+            Some(prev) if self.red => {
+                payload.push(RED_FLAG);
+                payload.extend_from_slice(&prev.counter.to_le_bytes());
+                payload.extend_from_slice(&prev.hash);
+                payload.extend_from_slice(&(prev.plain.len() as u16).to_le_bytes());
+                payload.extend_from_slice(&prev.plain);
+            }
+            _ => payload.push(PLAIN_FLAG),
+        }
+        payload.extend_from_slice(plaintext);
+
+        let frame = MediaFrame::try_with_meta_data(&mut self.counter, &payload, [level])?;
         let encrypted = frame.encrypt(&self.key)?;
-        Ok(encrypted.as_ref().to_vec())
+        let wire = encrypted.as_ref().to_vec();
+        if let Some(counter) = peek_counter(&wire) {
+            self.prev = Some(Prev {
+                counter,
+                hash: frame_hash(&wire),
+                plain: plaintext.to_vec(),
+            });
+        }
+        Ok(wire)
     }
 }
 
@@ -183,6 +249,54 @@ pub(crate) struct Opened {
     pub(crate) lsb: u64,
     pub(crate) counter: u64,
     pub(crate) plaintext: Vec<u8>,
+    /// The previous frame, carried for redundancy, if the sender included it.
+    pub(crate) recovered: Option<Recovered>,
+}
+
+/// A frame carried inside the next one, for recovery after loss.
+pub(crate) struct Recovered {
+    pub(crate) counter: u64,
+    pub(crate) hash: [u8; HASH_LEN],
+    pub(crate) plaintext: Vec<u8>,
+}
+
+/// Splits a decrypted payload into the redundant frame it carries, if any, and the body.
+fn unpack(payload: &[u8]) -> Result<(Option<Recovered>, &[u8])> {
+    let (flag, rest) = payload.split_first().ok_or(MediaError::MalformedFrame)?;
+    match *flag {
+        PLAIN_FLAG => Ok((None, rest)),
+        RED_FLAG => {
+            let fixed = 8 + HASH_LEN + 2;
+            if rest.len() < fixed {
+                return Err(MediaError::MalformedFrame);
+            }
+            let counter = u64::from_le_bytes(
+                rest[..8]
+                    .try_into()
+                    .map_err(|_| MediaError::MalformedFrame)?,
+            );
+            let mut hash = [0u8; HASH_LEN];
+            hash.copy_from_slice(&rest[8..8 + HASH_LEN]);
+            let len = u16::from_le_bytes(
+                rest[8 + HASH_LEN..fixed]
+                    .try_into()
+                    .map_err(|_| MediaError::MalformedFrame)?,
+            ) as usize;
+            let plain = rest
+                .get(fixed..fixed + len)
+                .ok_or(MediaError::MalformedFrame)?;
+            let body = &rest[fixed + len..];
+            Ok((
+                Some(Recovered {
+                    counter,
+                    hash,
+                    plaintext: plain.to_vec(),
+                }),
+                body,
+            ))
+        }
+        _ => Err(MediaError::MalformedFrame),
+    }
 }
 
 /// Decrypts incoming frames. It holds the current epoch's key, and the previous epoch's key for
@@ -248,11 +362,13 @@ impl SframeReceiver {
         let material = self.key_for(key_id.epoch_lsb(), now)?;
         let key = DecryptionKey::derive_from_mls(CIPHER_SUITE, material, key_id)?;
         let frame = view.decrypt(&key)?;
+        let (recovered, body) = unpack(frame.payload())?;
         Ok(Opened {
             sender: key_id.member_index(),
             lsb: key_id.epoch_lsb(),
             counter,
-            plaintext: frame.payload().to_vec(),
+            plaintext: body.to_vec(),
+            recovered,
         })
     }
 
@@ -466,5 +582,55 @@ mod tests {
         assert!(window.accepts(1000), "1000 is inside the window and unseen");
         window.accept(1000);
         assert!(!window.accepts(1000));
+    }
+}
+
+#[cfg(test)]
+mod red_tests {
+    use super::*;
+    use crate::auth::frame_hash;
+
+    fn key(byte: u8) -> MediaKey {
+        MediaKey::new([byte; 32])
+    }
+
+    #[test]
+    fn a_redundant_frame_carries_the_one_before_it() {
+        let mut tx = SframeSender::new(&key(3), 5, 0).unwrap();
+        let first = tx.encrypt(&[1u8; 40], DEFAULT_LEVEL).unwrap();
+        tx.set_red(true);
+        let second = tx.encrypt(&[2u8; 40], DEFAULT_LEVEL).unwrap();
+
+        let rx = SframeReceiver::new(key(3), 0);
+        let now = Instant::now();
+        let opened = rx.open(&second, now).unwrap();
+        assert_eq!(
+            opened.plaintext,
+            vec![2u8; 40],
+            "the body is the current frame"
+        );
+        let recovered = opened.recovered.expect("the previous frame rides along");
+        assert_eq!(recovered.counter, 0);
+        assert_eq!(recovered.hash, frame_hash(&first));
+        assert_eq!(recovered.plaintext, vec![1u8; 40]);
+    }
+
+    #[test]
+    fn a_plain_frame_recovers_nothing() {
+        let mut tx = SframeSender::new(&key(3), 5, 0).unwrap();
+        let wire = tx.encrypt(&[9u8; 40], DEFAULT_LEVEL).unwrap();
+        let opened = SframeReceiver::new(key(3), 0)
+            .open(&wire, Instant::now())
+            .unwrap();
+        assert!(opened.recovered.is_none());
+        assert_eq!(opened.plaintext, vec![9u8; 40]);
+    }
+
+    #[test]
+    fn redundancy_turns_on_above_ten_percent_and_off_below_five() {
+        assert!(!redundancy_for(0.09, false), "9% does not turn it on");
+        assert!(redundancy_for(0.11, false), "11% turns it on");
+        assert!(redundancy_for(0.07, true), "7% keeps it on");
+        assert!(!redundancy_for(0.04, true), "4% turns it off");
     }
 }

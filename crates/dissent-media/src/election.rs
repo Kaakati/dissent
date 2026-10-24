@@ -4,6 +4,7 @@
 //! same answer without a vote.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 /// A participant's id. It is also the MLS member index, so it is the same value everywhere.
 pub type PeerId = u64;
@@ -101,6 +102,33 @@ pub fn elect(candidates: &[Candidate], participants: usize, mode: Mode) -> Optio
         primary,
         backup: order.get(1).copied(),
     })
+}
+
+/// How central each peer is: the median RTT from every other participant to it.
+///
+/// `samples` holds measured pairs `(from, to, rtt_ms)`. A peer with no samples is not central
+/// at all, so it gets `u32::MAX`.
+pub fn centrality(samples: &[(PeerId, PeerId, u32)]) -> BTreeMap<PeerId, u32> {
+    let mut by_target: BTreeMap<PeerId, Vec<u32>> = BTreeMap::new();
+    for (_, to, rtt_ms) in samples {
+        by_target.entry(*to).or_default().push(*rtt_ms);
+    }
+    by_target
+        .into_iter()
+        .map(|(peer, mut rtts)| {
+            rtts.sort_unstable();
+            (peer, rtts[rtts.len() / 2])
+        })
+        .collect()
+}
+
+/// Sets each candidate's median RTT from the measurements. `elect` then breaks ties by
+/// centrality, so the most central candidate forwards.
+pub fn apply_centrality(candidates: &mut [Candidate], samples: &[(PeerId, PeerId, u32)]) {
+    let central = centrality(samples);
+    for candidate in candidates {
+        candidate.rtt_ms_median = central.get(&candidate.peer).copied().unwrap_or(u32::MAX);
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +279,45 @@ mod tests {
         assert!(elect(&[modest.clone()], 13, Mode::Video720p).is_some());
         assert!(elect(&[modest.clone()], 14, Mode::Video720p).is_none());
         assert!(elect(&[modest], 14, Mode::AudioTop3).is_some());
+    }
+
+    #[test]
+    fn centrality_is_the_median_rtt_from_the_other_participants() {
+        let samples = [(1, 2, 40), (3, 2, 10), (4, 2, 90), (1, 3, 200), (2, 3, 210)];
+        let central = centrality(&samples);
+        assert_eq!(central[&2], 40, "median of 40, 10, 90");
+        assert_eq!(
+            central[&3], 210,
+            "median of 200 and 210 is the upper of the two"
+        );
+    }
+
+    #[test]
+    fn the_most_central_candidate_forwards_when_everything_else_ties() {
+        let mut set = vec![cand(1), cand(2), cand(3)];
+        let samples = [
+            (7, 1, 90),
+            (8, 1, 95),
+            (7, 2, 15),
+            (8, 2, 20),
+            (7, 3, 60),
+            (8, 3, 70),
+        ];
+        apply_centrality(&mut set, &samples);
+        let e = elect(&set, 1, Mode::AudioTop3).unwrap();
+        assert_eq!(
+            e.primary, 2,
+            "the candidate with the lowest median RTT forwards"
+        );
+        assert_eq!(e.backup, Some(3));
+    }
+
+    #[test]
+    fn upload_still_beats_centrality() {
+        let mut set = vec![cand(1), cand(2)];
+        set[0].upload_kbps = 40_000;
+        set[1].upload_kbps = 20_000;
+        apply_centrality(&mut set, &[(7, 1, 300), (7, 2, 5)]);
+        assert_eq!(elect(&set, 1, Mode::AudioTop3).unwrap().primary, 1);
     }
 }

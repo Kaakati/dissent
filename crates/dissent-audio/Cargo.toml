@@ -1,0 +1,15 @@
+[package]
+name = "dissent-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+cpal.workspace = true
+nnnoiseless.workspace = true
+ringbuf.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+cc.workspace = true

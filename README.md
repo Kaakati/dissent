@@ -164,4 +164,4 @@ Ideas, bug reports and code are all welcome. Please open an issue to talk about 
 
 ## License
 
-Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. The interface icons come from [Lucide](https://lucide.dev) and are used under the ISC License.
+Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. The interface icons come from [Lucide](https://lucide.dev) and are used under the ISC License. Voice calls use the [Opus](https://opus-codec.org) codec, included under its BSD license in `crates/dissent-audio/vendor/libopus`.

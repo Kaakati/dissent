@@ -25,11 +25,11 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 
 ## Findings
 
-1. **Open: unauthorized MLS commits are accepted.** `apply_commit` merges any valid commit from
+1. **Fixed: unauthorized MLS commits are refused.** `apply_commit` merges any valid commit from
    any group member. A malicious or compromised member can add an outsider's device. Honest
    devices would then encrypt to it. **Fix:** before merging, check the commit against the event
    DAG:
-   - the committer must be the expected committer, an owner or admin per replay
+   - the author must be a current member, and the add, removal and welcome rules in `docs/design/05-encrypted-servers.md` must hold
    - every added device must belong to a current, non-banned member
    - removals must target only banned or departed members, or the committer's own stale devices
 
@@ -50,12 +50,14 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
    epoch. The window is checked before decryption, and it advances only after a frame
    authenticates. Replays and frames older than the window are dropped.
 4b. **Fixed, with residual risk: impersonation inside a call.** Every call member holds the same
-   SFrame group key (RFC 9605 §7.2). Every 10 frames or 200 ms, each sender signs a digest of
-   its frames with its device key, which costs about 9.7 kbps per speaker. Receivers play at once
-   and verify against the sender's DeviceCert. A forger is flagged about 0.2 s after starting,
-   and its sender id's frames are then held until verified, so the real speaker keeps playing.
-   Residual risk: about 10 forged frames, roughly 200 ms, can play before detection. Group calls
-   (mesh and forwarder) are authenticated, but the 1:1 call API isn't yet.
+   SFrame group key (RFC 9605 §7.2). Each sender signs a digest of its frames with its device key:
+   every 25 audio frames (about 500 ms) or 10 video frames, with 8-byte frame hashes, which costs
+   about 4.5 kbps per speaker. Receivers play at once and verify against the sender's DeviceCert.
+   A forger is flagged about 0.5 s after starting, and its sender id's frames are then held until
+   verified, so the real speaker keeps playing. Residual risk: up to 25 forged audio frames,
+   roughly 500 ms, can play before detection. Every tier is authenticated: 1:1, mesh, forwarder
+   and cascade. 4-byte hashes would save about 1.6 kbps but allow a 2^32 second-preimage search,
+   which a GPU can do in seconds, so they are rejected.
 5. **Fixed: post-quantum key exchange.** Every connection prefers the hybrid X25519 + ML-KEM-768
    TLS key exchange, falling back to X25519 only for peers that don't support it. Traffic
    recorded today, including direct messages, resists later decryption by a quantum computer.

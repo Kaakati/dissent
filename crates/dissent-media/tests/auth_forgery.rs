@@ -21,10 +21,26 @@ fn forged_frame() -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_forged_sender_id_is_flagged_and_muted_while_the_real_sender_plays() {
+async fn a_forged_sender_id_is_flagged_within_half_a_second_with_ten_frame_digests() {
+    forgery_scenario(10, Duration::from_millis(500)).await;
+}
+
+/// The default audio batch: 25 frames, about 500 ms, so detection waits for the batch to close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forged_sender_id_is_flagged_within_a_second_with_the_default_digests() {
+    forgery_scenario(25, Duration::from_secs(1)).await;
+}
+
+async fn forgery_scenario(digest_frames: usize, limit: Duration) {
     let media_key = MediaKey::new([9; 32]);
     let members = auth_set(&[VICTIM, RECEIVER, FORGER]);
     // The forger signs with its own device key, but claims the victim's sender id.
+    // Ten-frame digests keep the detection time short. The default 25-frame batch is covered by
+    // the unit tests and by the cost measurement.
+    let members: std::collections::BTreeMap<u64, Auth> = members
+        .into_iter()
+        .map(|(id, auth)| (id, auth.with_digest_frames(digest_frames)))
+        .collect();
     let forger_auth: Auth = members[&FORGER].clone();
 
     let mut victim: Mesh<MemoryTransport> =
@@ -109,13 +125,13 @@ async fn a_forged_sender_id_is_flagged_and_muted_while_the_real_sender_plays() {
     let _forger = forger_task.await.unwrap();
     drop(victim);
 
-    // Detection happens within 500 ms of the forged traffic starting.
+    // Detection happens within the limit of the forged traffic starting.
     let forged_start = start_rx.await.expect("the forger never started");
     let detected = detected_at.expect("the forgery was never flagged");
     let latency = detected.duration_since(forged_start);
     assert!(
-        latency <= Duration::from_millis(500),
-        "detected {latency:?} after the forged traffic started, which is more than 500 ms"
+        latency <= limit,
+        "detected {latency:?} after the forged traffic started, which is more than {limit:?}"
     );
 
     // The real sender keeps playing: every one of its frames arrives, intact.

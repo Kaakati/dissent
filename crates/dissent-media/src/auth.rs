@@ -31,12 +31,20 @@ pub(crate) const DIGEST_MARK: u8 = 0xFF;
 /// Domain separation for the digest signature.
 const DOMAIN: &[u8] = b"dissent/sframe-auth/v1";
 /// Bytes of each frame hash kept in a digest.
-pub(crate) const HASH_LEN: usize = 16;
-/// Frames per digest.
-pub(crate) const BATCH_FRAMES: usize = 10;
-/// Longest a batch may stay open before its digest is sent.
-pub(crate) const BATCH_MAX_AGE: Duration = Duration::from_millis(200);
-/// How long a frame may wait for its digest before it counts as unauthenticated.
+pub(crate) const HASH_LEN: usize = 8;
+/// Frames per digest for audio: 25 frames is 500 ms, which keeps the signature cost low.
+pub const AUDIO_DIGEST_FRAMES: usize = 25;
+/// Frames per digest for video, which must be checked sooner.
+pub const VIDEO_DIGEST_FRAMES: usize = 10;
+/// Audio frames are 20 ms apart.
+const FRAME_MS: u64 = 20;
+/// How long a batch of `frames` frames takes to fill. A batch also closes at this age.
+pub(crate) fn batch_span(frames: usize) -> Duration {
+    Duration::from_millis(FRAME_MS * frames as u64)
+}
+
+/// How long a frame may wait for its digest after its batch closes, before it counts as
+/// unauthenticated. The batch's own span is added on top, so a long batch is not penalised.
 pub(crate) const PENDING_DEADLINE: Duration = Duration::from_millis(500);
 /// How far past the last verified counter a frame may be before it is held.
 pub(crate) const AHEAD_SLACK: u64 = 50;
@@ -47,6 +55,7 @@ pub(crate) const AHEAD_SLACK: u64 = 50;
 pub struct Auth {
     pub(crate) device: DeviceKey,
     pub(crate) certs: Arc<HashMap<u64, DeviceCert>>,
+    pub(crate) digest_frames: usize,
 }
 
 impl Auth {
@@ -56,7 +65,25 @@ impl Auth {
         Self {
             device,
             certs: Arc::new(certs),
+            digest_frames: AUDIO_DIGEST_FRAMES,
         }
+    }
+
+    /// Sets how many frames each digest covers. The default is 25 for audio, about 500 ms.
+    /// Shorter batches verify sooner and cost more signatures.
+    pub fn with_digest_frames(mut self, frames: usize) -> Self {
+        self.digest_frames = frames.clamp(1, 255);
+        self
+    }
+
+    /// Digests for video: 10 frames, so a forgery is caught sooner than audio allows.
+    pub fn for_video(self) -> Self {
+        self.with_digest_frames(VIDEO_DIGEST_FRAMES)
+    }
+
+    /// How many frames each digest covers.
+    pub fn digest_frames(&self) -> usize {
+        self.digest_frames
     }
 }
 
@@ -89,7 +116,10 @@ impl LinkConfig {
     /// A fresh receiver state for a participant with the given authentication, to be shared by
     /// all of its links.
     pub(crate) fn shared_state(auth: &Auth) -> Arc<Mutex<RxState>> {
-        Arc::new(Mutex::new(RxState::new(Some(auth.certs.clone()))))
+        Arc::new(Mutex::new(RxState::with_deadline(
+            Some(auth.certs.clone()),
+            batch_span(auth.digest_frames) + PENDING_DEADLINE,
+        )))
     }
 }
 
@@ -200,14 +230,16 @@ pub(crate) struct FrameSigner {
     first: u64,
     last: Option<u64>,
     opened: Option<Instant>,
+    frames: usize,
 }
 
 impl FrameSigner {
-    pub(crate) fn new(device: DeviceKey, sender: u64, epoch: u8) -> Self {
+    pub(crate) fn new(device: DeviceKey, sender: u64, epoch: u8, frames: usize) -> Self {
         Self {
             device,
             sender,
             epoch,
+            frames,
             batch: Vec::new(),
             first: 0,
             last: None,
@@ -230,8 +262,8 @@ impl FrameSigner {
         self.last = Some(counter);
         let aged = self
             .opened
-            .is_some_and(|opened| now.duration_since(opened) >= BATCH_MAX_AGE);
-        if self.batch.len() >= BATCH_FRAMES || aged {
+            .is_some_and(|opened| now.duration_since(opened) >= batch_span(self.frames));
+        if self.batch.len() >= self.frames || aged {
             closed.extend(self.flush());
         }
         closed
@@ -239,7 +271,7 @@ impl FrameSigner {
 
     /// When the open batch must close, if one is open.
     pub(crate) fn due(&self) -> Option<Instant> {
-        self.opened.map(|opened| opened + BATCH_MAX_AGE)
+        self.opened.map(|opened| opened + batch_span(self.frames))
     }
 
     /// Closes the open batch and returns its digest, if it has frames.
@@ -277,6 +309,16 @@ struct Pending {
     arrived: Instant,
 }
 
+impl Step {
+    /// Adds another step's results to this one.
+    pub(crate) fn extend(&mut self, other: Step) {
+        self.deliver.extend(other.deliver);
+        self.replayed += other.replayed;
+        self.unauthenticated += other.unauthenticated;
+        self.impersonations += other.impersonations;
+    }
+}
+
 /// Receiver state for one (sender, epoch).
 #[derive(Default)]
 struct SenderRx {
@@ -288,11 +330,11 @@ struct SenderRx {
 
 impl SenderRx {
     /// Drops pending frames past their deadline, and returns how many were never verified.
-    fn expire(&mut self, now: Instant) -> u64 {
+    fn expire(&mut self, now: Instant, deadline: Duration) -> u64 {
         let mut expired = 0;
         self.pending.retain(|_, list| {
             list.retain(|p| {
-                let late = now.duration_since(p.arrived) > PENDING_DEADLINE;
+                let late = now.duration_since(p.arrived) > deadline;
                 if late {
                     expired += 1;
                 }
@@ -323,14 +365,23 @@ pub(crate) struct RxState {
     senders: BTreeMap<(u64, u64), SenderRx>,
     /// Epoch bits this link accepts, the current one and the previous one during its grace period.
     epochs: BTreeSet<u64>,
+    deadline: Duration,
 }
 
 impl RxState {
     pub(crate) fn new(certs: Option<Arc<HashMap<u64, DeviceCert>>>) -> Self {
+        Self::with_deadline(certs, PENDING_DEADLINE)
+    }
+
+    pub(crate) fn with_deadline(
+        certs: Option<Arc<HashMap<u64, DeviceCert>>>,
+        deadline: Duration,
+    ) -> Self {
         Self {
             certs,
             senders: BTreeMap::new(),
             epochs: BTreeSet::new(),
+            deadline,
         }
     }
 
@@ -345,9 +396,10 @@ impl RxState {
         now: Instant,
     ) -> Step {
         let authenticated = self.certs.is_some();
+        let deadline = self.deadline;
         let state = self.senders.entry((sender, lsb)).or_default();
         let mut step = Step {
-            unauthenticated: state.expire(now),
+            unauthenticated: state.expire(now, deadline),
             ..Step::default()
         };
 
@@ -387,9 +439,35 @@ impl RxState {
         step
     }
 
+    /// Handles a frame recovered from the redundancy of another frame. A copy the state already
+    /// holds is dropped quietly, and is not counted as a replay, because redundancy sends copies
+    /// on purpose.
+    pub(crate) fn on_redundant(
+        &mut self,
+        sender: u64,
+        lsb: u64,
+        counter: u64,
+        hash: [u8; HASH_LEN],
+        plaintext: Vec<u8>,
+        now: Instant,
+    ) -> Step {
+        let known = self.senders.get(&(sender, lsb)).is_some_and(|state| {
+            !state.window.accepts(counter)
+                || state
+                    .pending
+                    .get(&counter)
+                    .is_some_and(|list| list.iter().any(|p| p.hash == hash))
+        });
+        if known {
+            return Step::default();
+        }
+        self.on_frame(sender, lsb, counter, hash, plaintext, now)
+    }
+
     /// Handles a digest packet from a sender.
     pub(crate) fn on_digest(&mut self, wire: &[u8], now: Instant) -> Step {
         let mut step = Step::default();
+        let deadline = self.deadline;
         let Some(certs) = self.certs.clone() else {
             return step;
         };
@@ -408,7 +486,7 @@ impl RxState {
             .senders
             .entry((parsed.sender, parsed.epoch as u64))
             .or_default();
-        step.unauthenticated += state.expire(now);
+        step.unauthenticated += state.expire(now, deadline);
 
         if !verify_digest(&parsed, cert) {
             // A digest that does not verify is a forgery in the sender's name.
@@ -517,7 +595,7 @@ mod tests {
         fn new(device: DeviceKey) -> Self {
             Self {
                 tx: SframeSender::new(&media_key(), SENDER, 0).unwrap(),
-                signer: FrameSigner::new(device, SENDER, 0),
+                signer: FrameSigner::new(device, SENDER, 0, 10),
                 now: Instant::now(),
             }
         }
@@ -638,13 +716,13 @@ mod tests {
 
         // A slow sender closes the batch by age, before ten frames.
         let (device, _) = member();
-        let mut slow = FrameSigner::new(device, SENDER, 0);
+        let mut slow = FrameSigner::new(device, SENDER, 0, 10);
         let mut tx = SframeSender::new(&media_key(), SENDER, 0).unwrap();
         let start = Instant::now();
         let wire0 = tx.encrypt(&[0u8; 160], DEFAULT_LEVEL).unwrap();
         assert!(slow.record(0, &wire0, start).is_empty());
         let wire1 = tx.encrypt(&[1u8; 160], DEFAULT_LEVEL).unwrap();
-        let digests = slow.record(1, &wire1, start + BATCH_MAX_AGE);
+        let digests = slow.record(1, &wire1, start + batch_span(10));
         assert_eq!(digests.len(), 1, "a batch older than 200 ms closes");
     }
 
@@ -907,5 +985,45 @@ mod tests {
             "an unknown epoch's digest is ignored"
         );
         assert!(!receiver.muted(SENDER));
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+    use crate::e2ee::{SframeSender, DEFAULT_LEVEL};
+    use crate::key::MediaKey;
+    use dissent_identity::RootKey;
+
+    /// Measures what the authentication layer adds to a speaker's stream. Digest bytes are summed
+    /// over five seconds of audio, the exact packets a sender writes, and divided by the time.
+    #[test]
+    fn digest_overhead_per_speaker_at_the_default_batch() {
+        let root = RootKey::generate();
+        let device = DeviceKey::generate();
+        let _ = root.certify(device.id(), 0);
+        let media_key = MediaKey::new([4; 32]);
+        let mut tx = SframeSender::new(&media_key, 2, 0).unwrap();
+        let mut signer = FrameSigner::new(device, 2, 0, AUDIO_DIGEST_FRAMES);
+        let frames = 250u64; // five seconds at 20 ms
+        let start = Instant::now();
+        let mut digest_bytes = 0usize;
+        let mut frame_bytes = 0usize;
+        for index in 0..frames {
+            let wire = tx.encrypt(&[7u8; 160], DEFAULT_LEVEL).unwrap();
+            frame_bytes += wire.len();
+            let now = start + Duration::from_millis(20 * index);
+            let counter = crate::e2ee::peek_counter(&wire).unwrap();
+            for digest in signer.record(counter, &wire, now) {
+                digest_bytes += digest.len();
+            }
+        }
+        let seconds = (frames * 20) as f64 / 1000.0;
+        let kbps = digest_bytes as f64 * 8.0 / seconds / 1000.0;
+        let frame_kbps = frame_bytes as f64 * 8.0 / seconds / 1000.0;
+        println!(
+            "digest overhead: {kbps:.2} kbps per speaker at {AUDIO_DIGEST_FRAMES} frames per digest, {HASH_LEN}-byte hashes; audio payload {frame_kbps:.1} kbps"
+        );
+        assert!(kbps < 5.0, "digest overhead {kbps:.2} kbps is above 5 kbps");
     }
 }

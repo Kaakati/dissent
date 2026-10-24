@@ -14,6 +14,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 mod auth;
+mod bwe;
 mod call;
 mod cascade;
 mod e2ee;
@@ -28,10 +29,13 @@ mod signal;
 mod transport;
 
 pub use auth::Auth;
+pub use bwe::{pick_layer, BandwidthEstimator, MAX_KBPS, MIN_KBPS};
 pub use call::{Call, CallStats};
 pub use cascade::{assign_forwarders, load, plan, Cascade};
 pub use e2ee::MAX_SENDER_ID;
-pub use election::{capacity, elect, ranked, Candidate, Election, Mode, PeerId};
+pub use election::{
+    apply_centrality, capacity, centrality, elect, ranked, Candidate, Election, Mode, PeerId,
+};
 pub use error::{MediaError, Result};
 pub use key::MediaKey;
 pub use link::{LinkTransport, Side};

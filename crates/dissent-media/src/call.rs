@@ -17,8 +17,10 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::auth::{frame_hash, is_digest, Auth, FrameSigner, LinkConfig, RxState, Step};
+use crate::bwe::BandwidthEstimator;
 use crate::e2ee::{
-    epoch_lsb, peek_counter, SframeReceiver, SframeSender, DEFAULT_LEVEL, EPOCH_GRACE,
+    epoch_lsb, peek_counter, redundancy_for, SframeReceiver, SframeSender, DEFAULT_LEVEL,
+    EPOCH_GRACE,
 };
 use crate::error::{MediaError, Result};
 use crate::key::MediaKey;
@@ -84,6 +86,10 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     raw_inbox: VecDeque<Vec<u8>>,
     /// Whether media on this link is consumed. A standby link stays connected but does not listen.
     listening: bool,
+    bwe: BandwidthEstimator,
+    bitrate_cb: Option<Box<dyn FnMut(u32) + Send>>,
+    loss: f32,
+    red_override: Option<bool>,
     stats: CallStats,
 }
 
@@ -236,9 +242,14 @@ impl<T: PacketTransport> Call<T> {
     }
 
     fn signer_for(link: &LinkConfig, sender_id: u64, epoch: u64) -> Option<FrameSigner> {
-        link.auth
-            .as_ref()
-            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8))
+        link.auth.as_ref().map(|auth| {
+            FrameSigner::new(
+                auth.device.clone(),
+                sender_id,
+                epoch_lsb(epoch) as u8,
+                auth.digest_frames,
+            )
+        })
     }
 
     async fn offer_with(
@@ -311,6 +322,10 @@ impl<T: PacketTransport> Call<T> {
             inbox: VecDeque::new(),
             raw_inbox: VecDeque::new(),
             listening: true,
+            bwe: BandwidthEstimator::new(),
+            bitrate_cb: None,
+            loss: 0.0,
+            red_override: None,
             stats: CallStats::default(),
         }
     }
@@ -378,6 +393,10 @@ impl<T: PacketTransport> Call<T> {
             .keys
             .as_mut()
             .ok_or(MediaError::BadState("a keyless call cannot encrypt"))?;
+        let on = self
+            .red_override
+            .unwrap_or_else(|| redundancy_for(self.loss, keys.tx.red()));
+        keys.tx.set_red(on);
         let encrypted = keys.tx.encrypt(frame, DEFAULT_LEVEL)?;
         self.write_encrypted(encrypted).await
     }
@@ -479,6 +498,39 @@ impl<T: PacketTransport> Call<T> {
         }
     }
 
+    /// Registers the callback that receives the target audio bitrate, in kbps, each time it
+    /// changes. The audio pipeline uses it to set Opus's bitrate, which stays within 16 to 64.
+    pub fn on_target_bitrate(&mut self, callback: impl FnMut(u32) + Send + 'static) {
+        self.bitrate_cb = Some(Box::new(callback));
+    }
+
+    /// The current target audio bitrate in kbps, from the bandwidth estimate.
+    pub fn target_bitrate_kbps(&self) -> u32 {
+        self.bwe.target_kbps()
+    }
+
+    /// Forces audio redundancy on or off. `None` lets it follow the packet loss the peer reports,
+    /// which turns it on above 10% loss.
+    pub fn set_redundancy(&mut self, on: Option<bool>) {
+        self.red_override = on;
+    }
+
+    /// The loss the peer reports on this call's media, as a fraction from 0 to 1.
+    pub fn loss_fraction(&self) -> f32 {
+        self.loss
+    }
+
+    /// Feeds a round-trip sample to the estimator, and tells the callback when the target moves.
+    fn update_bitrate(&mut self, rtt_ms: f64) {
+        let before = self.bwe.target_kbps();
+        let target = self.bwe.update(rtt_ms, f64::from(self.loss));
+        if target != before {
+            if let Some(callback) = self.bitrate_cb.as_mut() {
+                callback(target);
+            }
+        }
+    }
+
     /// A snapshot of the call's counters.
     pub fn stats(&self) -> CallStats {
         self.stats
@@ -560,12 +612,17 @@ impl<T: PacketTransport> Call<T> {
             Event::MediaData(data) => self.on_media(&data.data),
             Event::PeerStats(stats) => {
                 if let Some(rtt) = stats.rtt {
-                    self.stats.rtt_ms = Some(rtt.as_secs_f64() * 1000.0);
+                    let rtt_ms = rtt.as_secs_f64() * 1000.0;
+                    self.stats.rtt_ms = Some(rtt_ms);
+                    self.update_bitrate(rtt_ms);
                 }
             }
             Event::MediaEgressStats(stats) => {
                 if let Some(remote) = stats.remote {
                     self.stats.packets_lost = remote.packets_lost;
+                }
+                if let Some(loss) = stats.loss {
+                    self.loss = loss;
                 }
             }
             _ => {}
@@ -607,14 +664,28 @@ impl<T: PacketTransport> Call<T> {
         }
         match keys.rx.open(wire, now) {
             Ok(opened) => {
-                let step = self.state.lock().expect("receiver state").on_frame(
-                    opened.sender,
-                    opened.lsb,
-                    opened.counter,
-                    frame_hash(wire),
-                    opened.plaintext,
-                    now,
-                );
+                let mut step = Step::default();
+                {
+                    let mut state = self.state.lock().expect("receiver state");
+                    if let Some(recovered) = opened.recovered {
+                        step.extend(state.on_redundant(
+                            opened.sender,
+                            opened.lsb,
+                            recovered.counter,
+                            recovered.hash,
+                            recovered.plaintext,
+                            now,
+                        ));
+                    }
+                    step.extend(state.on_frame(
+                        opened.sender,
+                        opened.lsb,
+                        opened.counter,
+                        frame_hash(wire),
+                        opened.plaintext,
+                        now,
+                    ));
+                }
                 self.absorb(step);
             }
             Err(e) => {

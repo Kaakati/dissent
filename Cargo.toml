@@ -9,6 +9,7 @@ members = [
     "crates/dissent-mls",
     "crates/dissent-media",
     "crates/dissent-files",
+    "crates/dissent-audio",
     "apps/seeder",
     "apps/relay",
     "apps/probe",

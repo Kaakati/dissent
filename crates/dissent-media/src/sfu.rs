@@ -78,6 +78,8 @@ pub struct Sfu<T: PacketTransport> {
     levels: BTreeMap<u64, (u8, Instant)>,
     /// Where the next poll starts, so no link is starved by a busy one.
     rotation: usize,
+    /// Each downlink's bitrate budget in kbps, as the estimator reports it.
+    budgets: BTreeMap<PeerId, u32>,
     observer: Option<Observer>,
     stats: SfuStats,
 }
@@ -92,6 +94,7 @@ impl<T: PacketTransport> Sfu<T> {
             active_up: None,
             levels: BTreeMap::new(),
             rotation: 0,
+            budgets: BTreeMap::new(),
             observer: None,
             stats: SfuStats::default(),
         }
@@ -143,6 +146,18 @@ impl<T: PacketTransport> Sfu<T> {
     /// The downlinks with a live link.
     pub fn downlinks(&self) -> Vec<PeerId> {
         self.links.keys().copied().collect()
+    }
+
+    /// Records what a listener's link can carry, in kbps.
+    pub fn set_listener_budget(&mut self, downlink: PeerId, kbps: u32) {
+        self.budgets.insert(downlink, kbps);
+    }
+
+    /// The layer to send one listener, out of `layers_kbps` (ascending). A listener with no
+    /// budget gets the top layer. Simulcast frames are not carried yet, so this only chooses.
+    pub fn listener_layer(&self, downlink: PeerId, layers_kbps: &[u32]) -> Option<usize> {
+        let budget = self.budgets.get(&downlink).copied().unwrap_or(u32::MAX);
+        crate::bwe::pick_layer(budget, layers_kbps)
     }
 
     /// The forwarder's counters.

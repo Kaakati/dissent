@@ -192,11 +192,32 @@ A digest whose signature does not verify is also treated as a forgery in the sen
 
 **Residual risk.** Forged audio can play for up to about 200 to 500 ms before it is flagged. The batch closes at ten frames, and the forgery is flagged when that batch's digest arrives. A forgery that reuses a counter the victim will send is flagged at that digest. A forgery more than 50 counters ahead of the last verified counter is held and never plays. It is counted as unauthenticated but not flagged, because a sender whose digests were lost looks the same for a while, and muting on that would punish honest senders. Frames that play before their digest also cannot be recalled after a flag.
 
-**Cost.** One digest is 243 bytes, and a speaker sends five a second. That is about 9.7 kbps, not the 2.5 kbps first estimated, because the estimate counted only the 64-byte signatures. Cutting the hash to 8 bytes would bring it to about 6.5 kbps. Batching more frames per digest would bring it lower, at the cost of more delay before a forgery is flagged.
+**Cost.** Audio digests cover 25 frames, about 500 ms, with 8-byte frame hashes. A speaker's digest traffic measures 4.5 kbps, from the packets the sender writes over five seconds. That is above the 3 kbps target. Most of it is the 64-byte signature and the 8-byte hashes; four-byte hashes would bring it to about 2.9 kbps, at the cost of a weaker per-frame check. Video digests cover 10 frames, which the estimate does not include.
+
+**Residual risk.** A forgery is flagged when its batch's digest arrives. With 25-frame batches that is about 500 ms after the forged traffic starts, and 25 forged frames can play before the flag. With 10-frame batches the flag comes after about 225 ms, with 10 forged frames played. The 25-frame case is measured in `auth_forgery.rs`.
 
 **Tests.** The unit tests in `auth.rs` cover honest traffic, batch closing, a replayed frame before and after verification, out-of-order frames, too-old frames, a mismatch that mutes and still plays the real frame, a muted sender that plays only verified frames, a far-ahead frame, a lost digest, the 500 ms deadline, a forged digest signature, and plain links. The integration tests cover an honest authenticated mesh, an honest forwarded call, and an authenticated 1:1 call (`Call::offer_authenticated`), both with zero unauthenticated frames and zero flags. The forgery test runs a member under another member's sender id and a device key of its own. It is flagged 228 ms after the forged traffic starts, all 50 real frames play, and 10 forged frames played in the window before the flag.
 
 **Limit of the cipher layer.** The cipher layer alone still lets any member send under another member's id. The `auth` layer is what detects it. A member with a device key can sign only its own digests, so it cannot forge another member's digest.
+
+## Bandwidth, bitrate and layers
+
+Each call runs a per-receiver estimator, `bwe.rs`. It takes the round-trip time that str0m reports, and the loss the peer reports, once per stats interval. It returns a target audio bitrate between 16 and 64 kbps.
+
+- **Delay.** Queuing delay is the RTT above the lowest RTT seen. Above 40 ms the target falls by 15%. Below 10 ms and not rising, it rises 1 kbps.
+- **Loss.** Above 10% the target falls by half the loss. Below 2% it rises 1 kbps.
+
+The target reaches the audio pipeline through `Call::on_target_bitrate`, which fires each time the target changes. A clean in-memory call moved from 32 kbps to 41 kbps over three seconds, with five changes.
+
+Forwarders choose a layer per listener with `pick_layer`, the highest layer under the listener's budget. Set the budget with `Sfu::set_listener_budget`. Simulcast frames are not carried yet, so the choice is ready but has nothing to switch between.
+
+**Centrality.** `centrality` measures each candidate's median RTT from the other participants. `apply_centrality` writes it into the candidate's RTT, which `elect` uses after upload and CPU. Among otherwise equal forwarders, the most central one forwards.
+
+## Audio redundancy
+
+Each frame's payload starts with a flag. When redundancy is on, the flag is followed by the previous frame's counter, its hash, and its plaintext, so a receiver can recover a frame lost in transit. The forwarder does not change: the key ID and level byte stay where they were, and the extra data is inside the encrypted payload.
+
+Redundancy turns on above 10% reported loss, and off again below 5%, so it does not flap. A test drops every fifth packet on a 1:1 call: without redundancy 238 of 250 frames arrived, and with it all 250 did. The cost is that each frame carries the previous one, so the payload roughly doubles.
 
 ## Limits of the spike
 
