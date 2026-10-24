@@ -9,7 +9,10 @@ use iroh::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::{NetError, Result, stream};
+use crate::{
+    error::{NetError, Result, stream},
+    tls::log_key_exchange,
+};
 
 pub(crate) const RPC_ALPN: &[u8] = b"dissent/rpc/0";
 /// Maximum frame payload, enforced in both directions.
@@ -34,6 +37,7 @@ impl fmt::Debug for RpcProtocol {
 impl ProtocolHandler for RpcProtocol {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let from = DeviceId(*connection.remote_id().as_bytes());
+        log_key_exchange(&connection, from, "accept");
         let (mut send, mut recv) = connection.accept_bi().await?;
         let req = read_frame(&mut recv, MAX_FRAME).await.map_err(AcceptError::from_err)?;
         let resp = self.0.handle(from, req).await;
@@ -57,6 +61,7 @@ pub(crate) async fn run_request(endpoint: &Endpoint, peer: DeviceId, req: Vec<u8
     let id = EndpointId::from_bytes(&peer.0).map_err(|e| NetError::BadPeer(e.to_string()))?;
     let exchange = async {
         let conn = endpoint.connect(id, RPC_ALPN).await?;
+        log_key_exchange(&conn, peer, "dial");
         let (mut send, mut recv) = conn.open_bi().await?;
         write_frame(&mut send, &req, MAX_FRAME).await?;
         send.finish().map_err(stream)?;

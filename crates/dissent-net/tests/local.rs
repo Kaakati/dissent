@@ -37,6 +37,8 @@ async fn ping_then_gossip_over_loopback() {
     let addr_a = a.addr().await;
     let report = b.ping(&addr_a).await.expect("ping a");
     assert_eq!(report.path, PathKind::Direct);
+    // Both ends prefer X25519MLKEM768, so loopback must negotiate the hybrid group.
+    assert_eq!(report.pq, Some(true));
 
     b.remember(&addr_a).expect("remember a");
     let topic = TopicId::for_channel(&CommunityKey::generate().id(), &[7; 32]);

@@ -25,6 +25,8 @@ pub enum NetError {
     FrameTooLarge { len: usize, max: usize },
     #[error("request timed out")]
     Timeout,
+    #[error("datagram failed: {0}")]
+    Datagram(String),
 }
 
 pub type Result<T> = std::result::Result<T, NetError>;

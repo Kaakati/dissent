@@ -18,7 +18,7 @@ else
   pkg="$1"; target="$2"; shift 2
   if [[ "$target" == "lib" ]]; then sel=(--lib); else sel=(--test "$target"); fi
   exe=$(cargo test -p "$pkg" "${sel[@]}" --no-run --message-format=json 2>/dev/null \
-    | grep -o '"executable":"[^"]*"' | tail -1 | sed 's/"executable":"//; s/"$//; s/\\\\/\//g')
+    | grep '"test":true' | grep -o '"executable":"[^"]*"' | tail -1 | sed 's/"executable":"//; s/"$//; s/\\\\/\//g')
 fi
 [[ "${1:-}" == "--" ]] && shift
 [[ -n "$exe" && -f "$exe" ]] || { echo "no executable: ${exe:-?}" >&2; exit 1; }
@@ -26,9 +26,18 @@ fi
 mkdir -p target/fw
 lock=target/fw/.lock
 got=
-for _ in $(seq 1200); do mkdir "$lock" 2>/dev/null && { got=1; break; }; sleep 1; done
-# A killed run can leave a stale lock: delete target/fw/.lock if nothing is running.
-[[ -n "$got" ]] || { echo "target/fw busy for 20 min (stale? rm -rf $lock)" >&2; exit 1; }
+for _ in $(seq 1200); do
+  if mkdir "$lock" 2>/dev/null; then got=1; break; fi
+  # Take over a lock left by a killed run: owner pid gone and no dissent-test.exe running.
+  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null \
+     && ! tasklist //FI "IMAGENAME eq dissent-test.exe" 2>/dev/null | grep -qi dissent-test.exe; then
+    rm -rf "$lock"; continue
+  fi
+  sleep 1
+done
+[[ -n "$got" ]] || { echo "target/fw busy for 20 min" >&2; exit 1; }
+echo $$ > "$lock/pid"
 trap 'rm -rf "$lock"' EXIT
 
 cp -f "$exe" target/fw/dissent-test.exe

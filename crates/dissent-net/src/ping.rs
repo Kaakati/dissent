@@ -1,12 +1,16 @@
 use std::time::Instant;
 
+use dissent_identity::DeviceId;
 use iroh::{
     Endpoint, EndpointAddr,
     endpoint::Connection,
     protocol::{AcceptError, ProtocolHandler},
 };
 
-use crate::error::{NetError, Result, stream};
+use crate::{
+    error::{NetError, Result, stream},
+    tls::{is_pq, key_exchange, log_key_exchange},
+};
 
 pub(crate) const PING_ALPN: &[u8] = b"dissent/ping/0";
 const PING: &[u8] = b"ping";
@@ -29,6 +33,9 @@ pub enum PathKind {
 pub struct PingReport {
     pub rtt_ms: u64,
     pub path: PathKind,
+    /// `Some(true)` if the handshake used hybrid X25519 + ML-KEM-768, `Some(false)` for a
+    /// classical group, `None` if the handshake data was unavailable.
+    pub pq: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -36,6 +43,7 @@ pub(crate) struct PingHandler;
 
 impl ProtocolHandler for PingHandler {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
+        log_key_exchange(&connection, DeviceId(*connection.remote_id().as_bytes()), "accept");
         let (mut send, mut recv) = connection.accept_bi().await?;
         let request = recv.read_to_end(PING.len()).await.map_err(AcceptError::from_err)?;
         if request == PING {
@@ -50,6 +58,7 @@ impl ProtocolHandler for PingHandler {
 
 pub(crate) async fn run_ping(endpoint: &Endpoint, addr: EndpointAddr) -> Result<PingReport> {
     let started = Instant::now();
+    let peer = DeviceId(*addr.id.as_bytes());
     let conn = endpoint.connect(addr, PING_ALPN).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
     send.write_all(PING).await.map_err(stream)?;
@@ -60,11 +69,13 @@ pub(crate) async fn run_ping(endpoint: &Endpoint, addr: EndpointAddr) -> Result<
         return Err(NetError::Protocol(format!("expected pong, got {} bytes", reply.len())));
     }
     let path = path_kind(&conn);
+    log_key_exchange(&conn, peer, "dial");
+    let pq = is_pq(key_exchange(&conn));
     conn.close(0u32.into(), b"ping done");
-    Ok(PingReport { rtt_ms, path })
+    Ok(PingReport { rtt_ms, path, pq })
 }
 
-fn path_kind(conn: &Connection) -> PathKind {
+pub(crate) fn path_kind(conn: &Connection) -> PathKind {
     let (mut direct, mut relayed) = (false, false);
     for path in conn.paths().iter() {
         if path.is_relay() {

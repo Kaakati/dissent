@@ -22,8 +22,9 @@
 //! Each event goes through `check` (read only) and then `commit`. The incremental
 //! [`crate::Replayer`] uses the same two steps, so both paths agree.
 
+use crate::emoji::normalize_emoji;
 use crate::names::{normalize_handle, skeleton};
-use crate::{ChannelId, Dag, Event, EventId, Hlc, Payload, Role};
+use crate::{ChannelId, Dag, Event, EventId, Hlc, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,10 +67,17 @@ pub struct MessageView {
     pub author: RootId,
     pub hlc: Hlc,
     pub text: String,
+    /// True when the text is sealed under MLS. `text` is then empty here; the plaintext lives in
+    /// each device's content view. Keeps state identical on every peer.
+    pub sealed: bool,
     /// Set by the first accepted Edit.
     pub edited: bool,
     /// Deleted messages keep their slot in the channel with empty text.
     pub deleted: bool,
+    /// The message this one replies to. The target may be deleted later.
+    pub reply_to: Option<EventId>,
+    /// Emoji to the canonical roots that reacted with it. Cleared on delete.
+    pub reactions: BTreeMap<String, BTreeSet<RootId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +212,21 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::Sealed { kind, .. } => match kind {
+                SealedKind::Message => {
+                    if !self.channels.contains_key(&chan) {
+                        return Err(Rejection::UnknownChannel);
+                    }
+                }
+                SealedKind::Reply { target } => {
+                    self.live_message(chan, target)?;
+                }
+                SealedKind::Edit { target } => {
+                    if self.live_message(chan, target)?.author != actor {
+                        return Err(Rejection::NotAuthorOfTarget);
+                    }
+                }
+            },
             Payload::Message { .. } => {
                 if !self.channels.contains_key(&chan) {
                     return Err(Rejection::UnknownChannel);
@@ -255,6 +278,13 @@ impl CommunityState {
                     }
                 }
             }
+            Payload::Reply { target, .. } => {
+                self.live_message(chan, target)?;
+            }
+            Payload::React { target, emoji } | Payload::Unreact { target, emoji } => {
+                normalize_emoji(emoji).map_err(|_| Rejection::Malformed)?;
+                self.live_message(chan, target)?;
+            }
             Payload::DeviceRevoke(rev) => {
                 require_control(chan)?;
                 rev.verify().map_err(|_| Rejection::Malformed)?;
@@ -296,19 +326,58 @@ impl CommunityState {
                 self.channels.insert(id, name.clone());
                 self.messages.entry(id).or_default();
             }
+            Payload::Sealed { kind, .. } => match kind {
+                SealedKind::Message => {
+                    self.messages.entry(chan).or_default().push(MessageView {
+                        id: ev.id,
+                        author: actor,
+                        hlc: ev.body.hlc,
+                        text: String::new(),
+                        sealed: true,
+                        edited: false,
+                        deleted: false,
+                        reply_to: None,
+                        reactions: BTreeMap::new(),
+                    });
+                }
+                SealedKind::Reply { target } => {
+                    self.messages.entry(chan).or_default().push(MessageView {
+                        id: ev.id,
+                        author: actor,
+                        hlc: ev.body.hlc,
+                        text: String::new(),
+                        sealed: true,
+                        edited: false,
+                        deleted: false,
+                        reply_to: Some(*target),
+                        reactions: BTreeMap::new(),
+                    });
+                }
+                SealedKind::Edit { target } => {
+                    if let Some(m) = self.live_message_mut(chan, target) {
+                        m.text.clear();
+                        m.sealed = true;
+                        m.edited = true;
+                    }
+                }
+            },
             Payload::Message { text } => {
                 self.messages.entry(chan).or_default().push(MessageView {
                     id: ev.id,
                     author: actor,
                     hlc: ev.body.hlc,
                     text: text.clone(),
+                    sealed: false,
                     edited: false,
                     deleted: false,
+                    reply_to: None,
+                    reactions: BTreeMap::new(),
                 });
             }
             Payload::Edit { target, text } => {
                 if let Some(m) = self.live_message_mut(chan, target) {
                     m.text = text.clone();
+                    m.sealed = false;
                     m.edited = true;
                 }
             }
@@ -316,6 +385,7 @@ impl CommunityState {
                 if let Some(m) = self.live_message_mut(chan, target) {
                     m.deleted = true;
                     m.text.clear();
+                    m.reactions.clear();
                 }
             }
             Payload::Join { display_name } => {
@@ -365,6 +435,40 @@ impl CommunityState {
                     self.handles.insert(key, actor);
                 }
             }
+            Payload::Reply { target, text } => {
+                self.messages.entry(chan).or_default().push(MessageView {
+                    id: ev.id,
+                    author: actor,
+                    hlc: ev.body.hlc,
+                    text: text.clone(),
+                    sealed: false,
+                    edited: false,
+                    deleted: false,
+                    reply_to: Some(*target),
+                    reactions: BTreeMap::new(),
+                });
+            }
+            Payload::React { target, emoji } => {
+                let Ok(emoji) = normalize_emoji(emoji) else {
+                    return;
+                };
+                if let Some(m) = self.live_message_mut(chan, target) {
+                    m.reactions.entry(emoji).or_default().insert(actor);
+                }
+            }
+            Payload::Unreact { target, emoji } => {
+                let Ok(emoji) = normalize_emoji(emoji) else {
+                    return;
+                };
+                if let Some(m) = self.live_message_mut(chan, target) {
+                    if let Some(set) = m.reactions.get_mut(&emoji) {
+                        set.remove(&actor);
+                        if set.is_empty() {
+                            m.reactions.remove(&emoji);
+                        }
+                    }
+                }
+            }
             Payload::DeviceRevoke(rev) => {
                 self.revoked_devices
                     .entry(rev.device)
@@ -401,6 +505,11 @@ impl CommunityState {
         for m in self.messages.values_mut().flatten() {
             if m.author == old {
                 m.author = new;
+            }
+            for reactors in m.reactions.values_mut() {
+                if reactors.remove(&old) {
+                    reactors.insert(new);
+                }
             }
         }
     }
@@ -1191,5 +1300,354 @@ mod revocation_tests {
         let rev_id = rev.id;
         let st = replay_all(&owner, &[g, rev]);
         assert!(st.rejected.contains(&(rev_id, Rejection::Malformed)));
+    }
+}
+
+#[cfg(test)]
+mod reply_reaction_tests {
+    use super::*;
+    use crate::testutil::{on_channel, User};
+    use crate::Hlc;
+    use dissent_identity::KeyRotation;
+
+    /// Append a causal child of the last event, on `chan`.
+    fn chain(evs: &mut Vec<Event>, u: &User, chan: ChannelId, payload: Payload) -> EventId {
+        let parents = evs.last().map(|e| vec![e.id]).unwrap_or_default();
+        let hlc = Hlc {
+            wall_ms: evs.len() as u64,
+            counter: 0,
+        };
+        let ev = on_channel(u, chan, parents, hlc, payload);
+        let id = ev.id;
+        evs.push(ev);
+        id
+    }
+
+    fn replay_all(owner: &User, evs: &[Event]) -> CommunityState {
+        let mut dag = Dag::new();
+        for ev in evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        replay(owner.id(), &dag)
+    }
+
+    #[test]
+    fn replies_point_at_live_messages_in_the_same_channel() {
+        let (owner, user) = (User::new(), User::new());
+        let mut evs = Vec::new();
+        let g = chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let other = chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::ChannelCreate { name: "h".into() },
+        );
+        let (general, side) = (ChannelId(g.0), ChannelId(other.0));
+        let m = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Message { text: "hi".into() },
+        );
+        let ok = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::Reply {
+                target: m,
+                text: "yo".into(),
+            },
+        );
+        let wrong_chan = chain(
+            &mut evs,
+            &user,
+            side,
+            Payload::Reply {
+                target: m,
+                text: "x".into(),
+            },
+        );
+        let on_control = chain(
+            &mut evs,
+            &user,
+            ChannelId::CONTROL,
+            Payload::Reply {
+                target: m,
+                text: "x".into(),
+            },
+        );
+        let dead = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Message {
+                text: "gone".into(),
+            },
+        );
+        chain(&mut evs, &owner, general, Payload::Delete { target: dead });
+        let late = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::Reply {
+                target: dead,
+                text: "late".into(),
+            },
+        );
+        // The reply stays when its target is deleted afterwards.
+        chain(&mut evs, &owner, general, Payload::Delete { target: m });
+
+        let st = replay_all(&owner, &evs);
+        assert!(st
+            .rejected
+            .contains(&(wrong_chan, Rejection::UnknownTarget)));
+        assert!(st
+            .rejected
+            .contains(&(on_control, Rejection::UnknownTarget)));
+        assert!(st.rejected.contains(&(late, Rejection::UnknownTarget)));
+        assert_eq!(st.rejected.len(), 3);
+        let msgs = &st.messages[&general];
+        let reply = msgs.iter().find(|x| x.id == ok).unwrap();
+        assert_eq!(reply.reply_to, Some(m));
+        assert_eq!(reply.text, "yo");
+        assert!(!reply.deleted);
+        let original = msgs.iter().find(|x| x.id == m).unwrap();
+        assert!(original.deleted && original.text.is_empty());
+    }
+
+    #[test]
+    fn reactions_are_idempotent_and_unreact_is_a_noop_without_reaction() {
+        let (owner, user, other) = (User::new(), User::new(), User::new());
+        let mut evs = Vec::new();
+        let g = chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let general = ChannelId(g.0);
+        let m = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Message { text: "hi".into() },
+        );
+        let like = || Payload::React {
+            target: m,
+            emoji: "👍".into(),
+        };
+        chain(&mut evs, &user, general, like());
+        chain(&mut evs, &user, general, like());
+        chain(
+            &mut evs,
+            &other,
+            general,
+            Payload::Unreact {
+                target: m,
+                emoji: "👍".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Unreact {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+        // Emoji set stays on the message, with one user per emoji.
+        let st = replay_all(&owner, &evs);
+        assert!(st.rejected.is_empty(), "{:?}", st.rejected);
+        let reacts = &st.messages[&general][0].reactions;
+        assert_eq!(reacts.len(), 1, "🎉 emptied and removed");
+        assert_eq!(reacts["👍"], BTreeSet::from([user.id()]));
+
+        // Only the reactor's own reaction is removed.
+        chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "👍".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::Unreact {
+                target: m,
+                emoji: "👍".into(),
+            },
+        );
+        let st = replay_all(&owner, &evs);
+        assert_eq!(
+            st.messages[&general][0].reactions["👍"],
+            BTreeSet::from([owner.id()])
+        );
+    }
+
+    #[test]
+    fn reaction_rules_bans_deletes_and_validation() {
+        let (owner, user) = (User::new(), User::new());
+        let mut evs = Vec::new();
+        let g = chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let general = ChannelId(g.0);
+        let m = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Message { text: "hi".into() },
+        );
+        let bad_text = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "a".into(),
+            },
+        );
+        let bad_space = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "👍 ".into(),
+            },
+        );
+        let bad_unreact = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::Unreact {
+                target: m,
+                emoji: "1".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::Ban { user: user.id() },
+        );
+        let banned = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::Unban { user: user.id() },
+        );
+        chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+        chain(&mut evs, &owner, general, Payload::Delete { target: m });
+        let on_dead = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+        let dead_unreact = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Unreact {
+                target: m,
+                emoji: "🎉".into(),
+            },
+        );
+
+        let st = replay_all(&owner, &evs);
+        assert!(st.rejected.contains(&(bad_text, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(bad_space, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(bad_unreact, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(banned, Rejection::Banned)));
+        assert!(st.rejected.contains(&(on_dead, Rejection::UnknownTarget)));
+        assert!(st
+            .rejected
+            .contains(&(dead_unreact, Rejection::UnknownTarget)));
+        assert_eq!(st.rejected.len(), 6);
+        let original = &st.messages[&general][0];
+        assert!(original.reactions.is_empty(), "deleting clears reactions");
+    }
+
+    #[test]
+    fn reactions_follow_a_rotation() {
+        let (owner, user, newer) = (User::new(), User::new(), User::new());
+        let mut evs = Vec::new();
+        let g = chain(
+            &mut evs,
+            &owner,
+            ChannelId::CONTROL,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let general = ChannelId(g.0);
+        let m = chain(
+            &mut evs,
+            &owner,
+            general,
+            Payload::Message { text: "hi".into() },
+        );
+        chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::React {
+                target: m,
+                emoji: "👍".into(),
+            },
+        );
+        chain(
+            &mut evs,
+            &newer,
+            ChannelId::CONTROL,
+            Payload::KeyRotation(KeyRotation::by_owner(&user.root, &newer.root, 1)),
+        );
+        let st = replay_all(&owner, &evs);
+        assert!(st.rejected.is_empty(), "{:?}", st.rejected);
+        assert_eq!(
+            st.messages[&general][0].reactions["👍"],
+            BTreeSet::from([newer.id()])
+        );
     }
 }

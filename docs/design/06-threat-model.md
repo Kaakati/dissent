@@ -46,16 +46,28 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 3. **Open: no key-change warning.** When a contact's root rotates via recovery, nothing tells the
    user to re-verify the safety number. **Fix:** an engine event and a UI notice on accepted
    rotations, and on new devices for people you've DMed.
-4. **Open: SFrame replay.** Replayed media frames aren't explicitly rejected. **Fix:** a per-sender
-   sliding replay window on the SFrame counter.
-5. **Hardening: post-quantum key exchange.** Direct messages rely on the QUIC handshake alone.
-   Prefer the hybrid X25519 + ML-KEM key exchange if iroh supports it, so recorded traffic can't
-   be decrypted later by a quantum computer.
+4. **Fixed: SFrame replay.** Each receiver keeps a 1024-frame sliding window per sender and
+   epoch. The window is checked before decryption, and it advances only after a frame
+   authenticates. Replays and frames older than the window are dropped.
+4b. **Open: impersonation inside a call.** Every call member holds the same SFrame group key, so
+   a member could send audio under another member's sender id (RFC 9605 §7.2). **Fix in
+   progress:** every 10 frames or 200 ms, each sender signs a digest of its frames with its device
+   key. Receivers play immediately and verify within 500 ms, then mute any sender caught forging.
+   Residual risk: up to about half a second of forged audio before detection.
+5. **Fixed: post-quantum key exchange.** Every connection prefers the hybrid X25519 + ML-KEM-768
+   TLS key exchange, falling back to X25519 only for peers that don't support it. Traffic
+   recorded today, including direct messages, resists later decryption by a quantum computer.
+   Server messages move to the hybrid MLS suite `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519`,
+   which uses AES-256-GCM. That is an IETF draft suite, and its wire format may change before the
+   RFC.
 6. **Accepted, documented:** a peer forwarder in a large call sees who is speaking and how
    loudly, through the audio-level byte. Message metadata (author, time, channel) is visible to
    members, as in any group chat.
-7. **Accepted for now:** the keystore, MLS state and decrypted content are plaintext on disk.
-   This is tracked separately: protect them with the OS keychain or a passphrase.
+7. **Partly fixed: data at rest.** The identity file is sealed with XChaCha20-Poly1305 under a
+   data key held in the OS credential store: Windows Credential Manager, macOS Keychain or Linux
+   Secret Service. Argon2id passphrase derivation is the fallback for headless machines. **Open:**
+   the MLS state and the decrypted content log are still plaintext, and core will adopt the same
+   `Vault`. Malware running as the user is out of scope.
 
 ## How the fixes are verified
 

@@ -10,6 +10,8 @@ members = [
     "crates/dissent-media",
     "apps/seeder",
     "apps/relay",
+    "apps/probe",
+    "apps/push-relay",
     "apps/desktop/src-tauri",
 ]
 
@@ -42,10 +44,14 @@ bip39 = "3"
 hex = "0.4"
 data-encoding = "2"
 iroh = "1"
+rcgen = "0.14"
+noq-proto = { version = "1.4", default-features = false, features = ["rustls", "aws-lc-rs"] }
 iroh-gossip = "0.101"
 iroh-mainline-address-lookup = "0.6"
 pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
 url = { version = "2", features = ["serde"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 futures-lite = "2"
 unicode-security = "0.1"
 unicode-normalization = "0.1"
@@ -55,11 +61,19 @@ negentropy = "0.5"
 clap = { version = "4", features = ["derive"] }
 iroh-relay = { version = "1.4.1", features = ["server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-openmls = "0.9"
-openmls_rust_crypto = "0.6"
-openmls_basic_credential = "0.6"
+axum = "0.8"
+reqwest = { version = "0.13", features = ["json"] }
+ring = "0.17"
+openmls = { version = "0.9", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_rust_crypto = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
 str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
 sframe = { version = "2", default-features = false, features = ["rust-crypto"] }
+argon2 = "0.6"
+chacha20poly1305 = "0.10"
+keyring = "4"
+zeroize = "1"
 
 [profile.dev.package.ed25519-dalek]
 opt-level = 3

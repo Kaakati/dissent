@@ -64,6 +64,14 @@ impl EventId {
     }
 }
 
+/// What a sealed payload is. Targets are in clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SealedKind {
+    Message,
+    Reply { target: EventId },
+    Edit { target: EventId },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Role {
     Admin,
@@ -111,6 +119,29 @@ pub enum Payload {
     KeyRotation(dissent_identity::KeyRotation),
     /// Revoke one device of the author's root. Takes effect for later events from that device.
     DeviceRevoke(dissent_identity::DeviceRevocation),
+    /// Message content sealed under the community's MLS group. The kind and any target stay in
+    /// clear, so permission checks need no key. Only the text is ciphertext.
+    Sealed {
+        /// MLS epoch the ciphertext was made in.
+        epoch: u64,
+        kind: SealedKind,
+        ciphertext: Vec<u8>,
+    },
+    /// Reply to a live message in the same channel.
+    Reply {
+        target: EventId,
+        text: String,
+    },
+    /// Add a reaction. `emoji` is validated by `crate::emoji::normalize_emoji`.
+    React {
+        target: EventId,
+        emoji: String,
+    },
+    /// Remove a reaction. A no-op if the author has not reacted with `emoji`.
+    Unreact {
+        target: EventId,
+        emoji: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

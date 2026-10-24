@@ -13,9 +13,12 @@ use url::Url;
 
 use crate::{
     addr::PeerAddr,
+    media::MEDIA_ALPN,
     error::{NetError, Result},
+    media::{MediaHandler, MediaLink, MediaProtocol, dial_media},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
     rpc::{RPC_ALPN, RpcHandler, RpcProtocol, run_request},
+    tls::pq_preferred_provider,
     topic::{TopicId, TopicReceiver, TopicSender},
 };
 
@@ -44,11 +47,20 @@ pub struct NodeConfig {
     /// Bind only to 127.0.0.1, so nothing listens on external interfaces. Used by tests and
     /// local multi-instance checks; avoids OS firewall prompts. Peers must be on this machine.
     pub loopback_only: bool,
+    /// Handler for inbound media links on the media ALPN. `None` refuses media.
+    pub media: Option<Arc<dyn MediaHandler>>,
 }
 
 impl Default for NodeConfig {
     fn default() -> Self {
-        Self { relay: RelayChoice::Default, bind_port: 0, rpc: None, dht_lookup: true, loopback_only: false }
+        Self {
+            relay: RelayChoice::Default,
+            bind_port: 0,
+            rpc: None,
+            dht_lookup: true,
+            loopback_only: false,
+            media: None,
+        }
     }
 }
 
@@ -59,6 +71,7 @@ impl fmt::Debug for NodeConfig {
             .field("bind_port", &self.bind_port)
             .field("rpc", &self.rpc.as_ref().map(|_| "RpcHandler"))
             .field("dht_lookup", &self.dht_lookup)
+            .field("media", &self.media.as_ref().map(|_| "MediaHandler"))
             .field("loopback_only", &self.loopback_only)
             .finish()
     }
@@ -80,6 +93,17 @@ struct Inner {
 
 impl Node {
     /// Starts the endpoint with the device key as its iroh secret key, so the node id equals `DeviceId`.
+    ///
+    /// Authentication: iroh uses raw public keys (RFC 7250) inside TLS 1.3. Each endpoint's
+    /// certificate is its Ed25519 key, and a dialer checks the server's key against the id it
+    /// dialled. QUIC is end to end between the two endpoints. A relay forwards QUIC packets it
+    /// cannot decrypt, so it cannot terminate TLS or read payloads.
+    ///
+    /// ALPNs accepted: `dissent/ping/0` and the gossip ALPN always, `dissent/rpc/0` when `rpc` is
+    /// set, and `dissent/media/0` when `media` is set.
+    ///
+    /// Key exchange prefers hybrid X25519 + ML-KEM-768 and falls back to classical X25519, P-256
+    /// or P-384 for peers that lack it.
     pub async fn spawn(device: &DeviceKey, cfg: NodeConfig) -> Result<Node> {
         let lookup = MemoryLookup::new();
         let use_dht = cfg.dht_lookup && !matches!(cfg.relay, RelayChoice::Disabled);
@@ -87,9 +111,16 @@ impl Node {
             RelayChoice::Default => Endpoint::builder(presets::N0),
             RelayChoice::Custom(_) | RelayChoice::Disabled => Endpoint::builder(presets::Minimal),
         };
+        let provider = pq_preferred_provider();
+        tracing::debug!(
+            suites = ?provider.cipher_suites.iter().map(|s| s.suite()).collect::<Vec<_>>(),
+            groups = ?provider.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>(),
+            "tls policy"
+        );
         let mut builder = preset
             .secret_key(SecretKey::from_bytes(&device.0.seed()))
-            .address_lookup(lookup.clone());
+            .address_lookup(lookup.clone())
+            .crypto_provider(provider);
         if use_dht {
             builder = builder.address_lookup(DhtAddressLookup::builder());
         }
@@ -117,6 +148,9 @@ impl Node {
             .accept(GOSSIP_ALPN, gossip.clone());
         if let Some(handler) = cfg.rpc {
             router = router.accept(RPC_ALPN, RpcProtocol(handler));
+        }
+        if let Some(handler) = cfg.media {
+            router = router.accept(MEDIA_ALPN, MediaProtocol(handler));
         }
         let router = router.spawn();
         Ok(Node {
@@ -153,6 +187,12 @@ impl Node {
     /// remembered or discoverable. Fails with `Timeout` after 15 s.
     pub async fn request(&self, peer: DeviceId, req: Vec<u8>) -> Result<Vec<u8>> {
         run_request(&self.inner.endpoint, peer, req).await
+    }
+
+    /// Dials `peer` and opens an unreliable datagram link for call media. The peer sees it via
+    /// `NodeConfig.media`.
+    pub async fn open_media(&self, peer: DeviceId) -> Result<MediaLink> {
+        dial_media(&self.inner.endpoint, peer).await
     }
 
     /// Joins a gossip topic, dialling `bootstrap` peers. Peers must be known via `remember` or dialable.

@@ -259,6 +259,79 @@ fn build() -> Builder {
         },
     );
 
+    // Reactions on one message. OWNER reacts and unreacts concurrently with a MOD reaction and
+    // a USER reaction. The rotation below moves USER's reaction to NEW.
+    let m = b.push(
+        ADMIN,
+        general,
+        vec![g],
+        60,
+        Payload::Message {
+            text: "react here".into(),
+        },
+    );
+    b.push(
+        OWNER,
+        general,
+        vec![m],
+        61,
+        Payload::React {
+            target: m,
+            emoji: "👍".into(),
+        },
+    );
+    b.push(
+        OWNER,
+        general,
+        vec![m],
+        62,
+        Payload::Unreact {
+            target: m,
+            emoji: "👍".into(),
+        },
+    );
+    b.push(
+        MOD,
+        general,
+        vec![m],
+        63,
+        Payload::React {
+            target: m,
+            emoji: "🎉".into(),
+        },
+    );
+    b.push(
+        USER,
+        general,
+        vec![m],
+        65,
+        Payload::React {
+            target: m,
+            emoji: "👍".into(),
+        },
+    );
+    // A reply concurrent with the delete of its target. The delete sorts first, so it is refused.
+    let m2 = b.push(
+        ADMIN,
+        general,
+        vec![g],
+        80,
+        Payload::Message {
+            text: "doomed".into(),
+        },
+    );
+    b.push(MOD, general, vec![m2], 81, Payload::Delete { target: m2 });
+    b.push(
+        ADMIN,
+        general,
+        vec![m2],
+        82,
+        Payload::Reply {
+            target: m2,
+            text: "reply".into(),
+        },
+    );
+
     // Device revocation. USER's main device posts early, then USER's extra device revokes it at
     // wall 900. A main-device message at 950 sorts after the revoke and is refused.
     let early = b.push(
@@ -503,7 +576,11 @@ fn replay_converges_across_200_shuffles() {
             .any(|(_, r)| *r == Rejection::HandleConfusable),
         "no HandleConfusable rejection exercised"
     );
-    for expected in [Rejection::RotatedAway, Rejection::DeviceRevoked] {
+    for expected in [
+        Rejection::RotatedAway,
+        Rejection::DeviceRevoked,
+        Rejection::UnknownTarget,
+    ] {
         assert!(
             reference.rejected.iter().any(|(_, r)| *r == expected),
             "no {expected:?} rejection exercised"

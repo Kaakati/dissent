@@ -12,6 +12,7 @@
 
 pub mod dag;
 pub mod dm;
+pub mod emoji;
 pub mod event;
 pub mod hlc;
 pub mod names;
@@ -23,7 +24,8 @@ pub mod wire;
 
 pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
-pub use event::{ChannelId, Event, EventBody, EventId, Payload, Role};
+pub use emoji::{normalize_emoji, EmojiError};
+pub use event::{ChannelId, Event, EventBody, EventId, Payload, Role, SealedKind};
 pub use hlc::{Hlc, HlcClock};
 pub use names::{confusable, normalize_handle, skeleton, NameError};
 pub use replayer::{ReplayStats, Replayer};
