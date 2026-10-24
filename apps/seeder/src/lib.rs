@@ -18,14 +18,33 @@
 //! and remember the passphrase. Losing the passphrase loses the seeder's identity. With neither a
 //! keychain nor a passphrase, the seeder exits with an error. It never writes the identity
 //! unencrypted.
+//!
+//! # Running as a background service
+//!
+//! `dissent-seeder service install --user -- --data-dir <abs dir> --join <invite>` records the
+//! run arguments and installs a per-user service. It runs at logon, on Windows as a hidden Task
+//! Scheduler task, on Linux as a `systemd --user` unit, and on macOS as a LaunchAgent. The
+//! credential store is per user, so a user service can use the keychain. `--system` installs a
+//! machine-wide service, which has no user keychain. It then needs `--passphrase-file`.
+//!
+//! `service start`, `service stop`, `service status` and `service uninstall` take the same
+//! `--user` or `--system` flag. `stop` and `status` also take `--data-dir`. `status` reads
+//! `status.json` from the data directory, which the running seeder rewrites every status interval.
+//! Logs rotate at 10 MB and are kept for 7 days in `<data-dir>/logs`.
+
+pub mod logs;
+pub mod service;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use dissent_core::{ChannelId, CommunityId, Engine, NodeConfig, RelayChoice};
 use dissent_identity::{IdentityError, Vault, keystore};
 use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 use tracing::{info, warn};
 
 /// Identity file, relative to `--data-dir`. Sealed under the vault.
@@ -34,12 +53,26 @@ pub const IDENTITY_FILE: &str = "identity.bin";
 pub const PROFILE_DIR: &str = "profile";
 /// Random salt for the passphrase vault, relative to `--data-dir`. The salt is not secret.
 pub const SALT_FILE: &str = "vault.salt";
+/// Status snapshot, relative to `--data-dir`. Rewritten at every status interval.
+pub const STATUS_FILE: &str = "status.json";
 /// Environment variable with the passphrase, read when no `--passphrase-file` is given.
 pub const PASSPHRASE_ENV: &str = "DISSENT_SEEDER_PASSPHRASE";
 /// Keychain service name used by `Vault::open`.
 const KEYCHAIN_APP: &str = "dissent-seeder";
 /// Shortest passphrase accepted. Argon2 does the hard work, but a short phrase is still guessable.
 const MIN_PASSPHRASE_CHARS: usize = 8;
+/// Log file stem, in the log directory.
+const LOG_STEM: &str = "dissent-seeder";
+
+/// How the service layer names this program.
+pub const SPEC: service::Spec = service::Spec {
+    name: "dissent-seeder",
+    title: "Dissent Seeder",
+    label: "org.dissent.seeder",
+    description: "Dissent seeder: keeps community history available",
+    path_flags: &["--data-dir", "--passphrase-file", "--log-dir"],
+    user_by_default: true,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,9 +81,18 @@ const MIN_PASSPHRASE_CHARS: usize = 8;
     about = "Headless Dissent member that keeps community history available"
 )]
 pub struct Cli {
-    /// Directory for the identity and engine data. Created if missing.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+    #[command(flatten)]
+    pub run: RunArgs,
+}
+
+/// Flags for running the seeder. These are the arguments a service records.
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct RunArgs {
+    /// Directory for the identity and engine data. Created if missing. Required to run.
     #[arg(long)]
-    pub data_dir: PathBuf,
+    pub data_dir: Option<PathBuf>,
     /// Display name shown to other members.
     #[arg(long, default_value = "seeder")]
     pub name: String,
@@ -67,6 +109,73 @@ pub struct Cli {
     /// keychain is unavailable, as on most headless Linux servers.
     #[arg(long, value_name = "PATH")]
     pub passphrase_file: Option<PathBuf>,
+    /// Write rolling log files here, as well as to the console.
+    #[arg(long, value_name = "DIR")]
+    pub log_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Install, start, stop, inspect or remove the seeder as a background service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCmd {
+    /// Record the run arguments and install the service. Pass them after `--`.
+    Install {
+        #[arg(long, conflicts_with = "system")]
+        user: bool,
+        #[arg(long)]
+        system: bool,
+        /// Linux system service only: run as this user instead of root.
+        #[arg(long, value_name = "USER")]
+        run_as: Option<String>,
+        /// Run arguments, for example `-- --data-dir <dir> --join <invite>`.
+        #[arg(last = true)]
+        run: Vec<String>,
+    },
+    /// Remove the service. Keeps the data directory.
+    Uninstall {
+        #[command(flatten)]
+        level: LevelArgs,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Start the installed service.
+    Start {
+        #[command(flatten)]
+        level: LevelArgs,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Stop the service. Gives it a few seconds to shut down cleanly.
+    Stop {
+        #[command(flatten)]
+        level: LevelArgs,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Show whether the service is installed and running, and what it reports.
+    Status {
+        #[command(flatten)]
+        level: LevelArgs,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Args, Clone, Copy, PartialEq, Eq)]
+pub struct LevelArgs {
+    /// Use the per-user service. This is the default for the seeder.
+    #[arg(long, conflicts_with = "system")]
+    pub user: bool,
+    /// Use the machine-wide service.
+    #[arg(long)]
+    pub system: bool,
 }
 
 /// Network settings for the seeder. `loopback` keeps every socket on this machine.
@@ -83,49 +192,150 @@ pub fn node_config(loopback: bool) -> NodeConfig {
     }
 }
 
-/// Starts the seeder and runs it until Ctrl-C.
-pub async fn run(cli: Cli) -> Result<()> {
-    std::fs::create_dir_all(&cli.data_dir)
-        .with_context(|| format!("create data dir {}", cli.data_dir.display()))?;
-    let passphrase = read_passphrase(cli.passphrase_file.as_deref())?;
-    let vault = open_vault(&cli.data_dir, passphrase.as_deref())?;
-    let identity = keystore::load_or_create(&cli.data_dir.join(IDENTITY_FILE), now_ms(), &vault)
+/// What `status.json` holds. Written by the running seeder, read by `service status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusFile {
+    pub pid: u32,
+    pub started_ms: u64,
+    pub updated_ms: u64,
+    pub peers: usize,
+    pub communities: Vec<CommunityLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunityLine {
+    pub name: String,
+    pub id: String,
+    pub members: usize,
+    pub messages: usize,
+}
+
+/// Runs the seeder until Ctrl-C, SIGTERM, or a stop request. Called by the console and by the
+/// Windows service dispatcher, which passes `stop` when the service is asked to stop.
+pub fn run_blocking(run: RunArgs, stop: Arc<Notify>) -> Result<()> {
+    init_tracing(run.log_dir.as_deref());
+    let data_dir = run.data_dir.clone().context("--data-dir is required to run the seeder")?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("start the async runtime")?
+        .block_on(run_seeder(run, data_dir, stop))
+}
+
+/// The entry point for the Windows service dispatcher. Parses the process arguments.
+pub fn run_from_args(args: Vec<String>, stop: Arc<Notify>) -> Result<()> {
+    let cli = Cli::try_parse_from(std::iter::once("dissent-seeder".to_string()).chain(args))
+        .context("parse the service's run arguments")?;
+    run_blocking(cli.run, stop)
+}
+
+/// Writes log lines to the console, and to rolling files when a log directory is given.
+pub fn init_tracing(log_dir: Option<&Path>) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let console = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let file = log_dir
+        .and_then(|dir| logs::RollingLog::open(dir, LOG_STEM).ok())
+        .map(|log| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || log.clone())
+        });
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(console)
+        .with(file.map(|l| l.boxed()))
+        .try_init();
+}
+
+async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Result<()> {
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    // A stop request left over from an earlier run is stale.
+    let _ = std::fs::remove_file(data_dir.join(service::STOP_FILE));
+    let passphrase = read_passphrase(run.passphrase_file.as_deref())?;
+    let vault = open_vault(&data_dir, passphrase.as_deref())?;
+    let identity = keystore::load_or_create(&data_dir.join(IDENTITY_FILE), now_ms(), &vault)
         .context("load or create identity")?;
-    let (engine, _events) = Engine::start(
-        identity,
-        cli.data_dir.join(PROFILE_DIR),
-        node_config(cli.loopback),
-    )
-    .await
-    .context("start engine")?;
+    let started_ms = now_ms();
+    let (engine, _events) = Engine::start(identity, data_dir.join(PROFILE_DIR), node_config(run.loopback))
+        .await
+        .context("start engine")?;
     engine
-        .set_display_name(cli.name.clone())
+        .set_display_name(run.name.clone())
         .await
         .context("set display name")?;
 
-    for invite in &cli.join {
+    for invite in &run.join {
         match engine.join_community(invite).await {
             Ok(summary) => info!(community = %summary.name, id = %summary.id, "joined community"),
             Err(e) => warn!(error = %e, "could not join community, continuing"),
         }
     }
 
-    let mut ticks = tokio::time::interval(Duration::from_secs(cli.status_every));
+    let mut ticks = tokio::time::interval(Duration::from_secs(run.status_every));
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("ctrl-c received, shutting down");
+            _ = shutdown_requested(stop.clone()) => {
+                info!("shutdown requested, stopping");
                 break;
             }
-            _ = ticks.tick() => log_status(&engine).await,
+            _ = poll.tick() => {
+                if data_dir.join(service::STOP_FILE).exists() {
+                    info!("stop request found, stopping");
+                    break;
+                }
+            }
+            _ = ticks.tick() => {
+                let status = collect_status(&engine, started_ms).await;
+                log_status(&status);
+                if let Err(e) = write_status(&data_dir, &status) {
+                    warn!(error = %e, "could not write status.json");
+                }
+            }
         }
     }
     engine.shutdown().await.context("shut down engine")?;
+    let _ = std::fs::remove_file(data_dir.join(service::STOP_FILE));
     Ok(())
 }
 
-/// Logs one line per community, then one for the network.
-pub async fn log_status(engine: &Engine) {
+/// Resolves when Ctrl-C, SIGTERM, or the service stop notification arrives.
+async fn shutdown_requested(stop: Arc<Notify>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = stop.notified() => {}
+                }
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+            _ = stop.notified() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = stop.notified() => {}
+        }
+    }
+}
+
+/// The current counts for every community, and the peer count.
+pub async fn collect_status(engine: &Engine, started_ms: u64) -> StatusFile {
+    let mut communities = Vec::new();
     for summary in engine.communities() {
         let Ok(id) = summary.id.parse::<CommunityId>() else {
             continue;
@@ -145,21 +355,144 @@ pub async fn log_status(engine: &Engine) {
                     .count()
             })
             .sum();
-        info!(
-            community = %summary.name,
-            id = %summary.id,
-            members = view.members.len(),
+        communities.push(CommunityLine {
+            name: summary.name,
+            id: summary.id,
+            members: view.members.len(),
             messages,
+        });
+    }
+    let net = engine.net_status().await;
+    StatusFile {
+        pid: std::process::id(),
+        started_ms,
+        updated_ms: now_ms(),
+        peers: net.peers,
+        communities,
+    }
+}
+
+/// Logs one line per community, then one for the network.
+pub fn log_status(status: &StatusFile) {
+    for c in &status.communities {
+        info!(
+            community = %c.name,
+            id = %c.id,
+            members = c.members,
+            messages = c.messages,
             "community status"
         );
     }
-    let net = engine.net_status().await;
-    info!(
-        peers = net.peers,
-        relay = ?net.relay,
-        dht = ?net.dht,
-        "network status"
-    );
+    info!(peers = status.peers, communities = status.communities.len(), "network status");
+}
+
+/// Writes `status.json` through a temporary file, so a reader never sees a half-written file.
+pub fn write_status(data_dir: &Path, status: &StatusFile) -> Result<()> {
+    let text = serde_json::to_string_pretty(status).context("encode status")?;
+    let tmp = data_dir.join(format!("{STATUS_FILE}.tmp"));
+    std::fs::write(&tmp, text).context("write status")?;
+    std::fs::rename(&tmp, data_dir.join(STATUS_FILE)).context("replace status.json")
+}
+
+/// Reads `status.json`. `None` when the seeder has not written one yet.
+pub fn read_status(data_dir: &Path) -> Result<Option<StatusFile>> {
+    let path = data_dir.join(STATUS_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).context("read status.json")?;
+    Ok(Some(serde_json::from_str(&text).context("parse status.json")?))
+}
+
+/// Runs a service subcommand and prints its result.
+pub fn service_command(action: ServiceCmd) -> Result<()> {
+    init_tracing(None);
+    match action {
+        ServiceCmd::Install { user, system, run, run_as } => {
+            let level = service::level_for(&SPEC, user, system)?;
+            let parsed = parse_recorded(&run)?;
+            let data_dir = parsed
+                .data_dir
+                .clone()
+                .context("the recorded arguments must include --data-dir")?;
+            if level == service::Level::System && parsed.passphrase_file.is_none() {
+                bail!(
+                    "a system service has no user keychain. Add --passphrase-file <path> to the run arguments"
+                );
+            }
+            let exe = std::env::current_exe().context("find this program")?;
+            let args = service::with_log_dir(&run, &data_dir);
+            let plan = service::Plan {
+                exe,
+                args,
+                work_dir: data_dir.clone(),
+                writable: vec![data_dir],
+                low_port: false,
+                run_as,
+            };
+            let out = service::install(&SPEC, level, &plan)?;
+            print!("{out}");
+            println!("recorded command: {}", service::command_line(&plan));
+            Ok(())
+        }
+        ServiceCmd::Uninstall { level, data_dir } => {
+            let level = level_of(&SPEC, level)?;
+            print!("{}", service::uninstall(&SPEC, level, data_dir.as_deref())?);
+            Ok(())
+        }
+        ServiceCmd::Start { level, data_dir } => {
+            let level = level_of(&SPEC, level)?;
+            print!("{}", service::start(&SPEC, level, data_dir.as_deref())?);
+            Ok(())
+        }
+        ServiceCmd::Stop { level, data_dir } => {
+            let level = level_of(&SPEC, level)?;
+            print!("{}", service::stop(&SPEC, level, data_dir.as_deref())?);
+            Ok(())
+        }
+        ServiceCmd::Status { level, data_dir } => {
+            let level = level_of(&SPEC, level)?;
+            let st = service::status(&SPEC, level)?;
+            println!("installed: {}", if st.installed { "yes" } else { "no" });
+            match st.running {
+                Some(r) => println!("running: {}", if r { "yes" } else { "no" }),
+                None => println!("running: unknown"),
+            }
+            if let Some(last) = &st.last_start {
+                println!("last start: {last}");
+            }
+            println!("service: {}", st.detail);
+            match data_dir {
+                Some(dir) => match read_status(&dir)? {
+                    Some(s) => {
+                        let age = now_ms().saturating_sub(s.updated_ms) / 1000;
+                        println!("communities: {} (status written {age} s ago, pid {})", s.communities.len(), s.pid);
+                        for c in &s.communities {
+                            println!("  {}: {} members, {} messages", c.name, c.members, c.messages);
+                        }
+                    }
+                    None => println!("communities: no status.json in {} yet", dir.display()),
+                },
+                None => println!("communities: pass --data-dir to read status.json"),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn level_of(spec: &service::Spec, args: LevelArgs) -> Result<service::Level> {
+    service::level_for(spec, args.user, args.system)
+}
+
+/// Parses the recorded run arguments the same way the service will, so a typo fails at install.
+fn parse_recorded(run: &[String]) -> Result<RunArgs> {
+    let cli = Cli::try_parse_from(std::iter::once("dissent-seeder".to_string()).chain(run.iter().cloned()))
+        .context("the run arguments do not parse")?;
+    if cli.command.is_some() {
+        bail!("pass run arguments after --, not a subcommand");
+    }
+    service::check_absolute_paths(run, SPEC.path_flags)?;
+    Ok(cli.run)
 }
 
 /// The passphrase from `path`, or else from the environment. `None` when neither is set.
@@ -241,10 +574,13 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("dissent-seeder").chain(args.iter().copied())).expect("valid")
+    }
+
     #[test]
     fn cli_parses_flags() {
-        let cli = Cli::try_parse_from([
-            "dissent-seeder",
+        let cli = parse(&[
             "--data-dir",
             "/var/lib/seeder",
             "--name",
@@ -256,61 +592,109 @@ mod tests {
             "--loopback",
             "--status-every",
             "15",
-        ])
-        .expect("valid arguments");
-        assert_eq!(cli.data_dir, PathBuf::from("/var/lib/seeder"));
-        assert_eq!(cli.name, "relay-seed");
-        assert_eq!(cli.join, ["dissent://invite/one", "dissent://invite/two"]);
-        assert!(cli.loopback);
-        assert_eq!(cli.status_every, 15);
+        ]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.run.data_dir, Some(PathBuf::from("/var/lib/seeder")));
+        assert_eq!(cli.run.name, "relay-seed");
+        assert_eq!(cli.run.join, ["dissent://invite/one", "dissent://invite/two"]);
+        assert!(cli.run.loopback);
+        assert_eq!(cli.run.status_every, 15);
     }
 
     #[test]
     fn cli_defaults() {
-        let cli = Cli::try_parse_from(["dissent-seeder", "--data-dir", "d"]).expect("valid");
-        assert_eq!(cli.name, "seeder");
-        assert!(cli.join.is_empty());
-        assert!(!cli.loopback);
-        assert_eq!(cli.status_every, 60);
+        let cli = parse(&["--data-dir", "d"]);
+        assert_eq!(cli.run.name, "seeder");
+        assert!(cli.run.join.is_empty());
+        assert!(!cli.run.loopback);
+        assert_eq!(cli.run.status_every, 60);
     }
 
     #[test]
-    fn cli_requires_data_dir_and_positive_interval() {
-        assert!(Cli::try_parse_from(["dissent-seeder"]).is_err());
+    fn data_dir_is_checked_when_running_not_when_parsing() {
+        // `service status` needs no data dir, so parsing alone must not require one.
+        assert!(Cli::try_parse_from(["dissent-seeder"]).is_ok());
         assert!(
-            Cli::try_parse_from(["dissent-seeder", "--data-dir", "d", "--status-every", "0"])
-                .is_err()
+            Cli::try_parse_from(["dissent-seeder", "--data-dir", "d", "--status-every", "0"]).is_err()
         );
     }
 
     #[test]
     fn cli_parses_passphrase_file() {
-        let cli = Cli::try_parse_from([
-            "dissent-seeder",
-            "--data-dir",
-            "d",
-            "--passphrase-file",
-            "/etc/dissent/seeder.pass",
-        ])
-        .expect("valid");
-        assert_eq!(
-            cli.passphrase_file,
-            Some(PathBuf::from("/etc/dissent/seeder.pass"))
-        );
-        assert!(Cli::try_parse_from(["dissent-seeder", "--data-dir", "d"])
-            .unwrap()
-            .passphrase_file
-            .is_none());
+        let cli = parse(&["--data-dir", "d", "--passphrase-file", "/etc/dissent/seeder.pass"]);
+        assert_eq!(cli.run.passphrase_file, Some(PathBuf::from("/etc/dissent/seeder.pass")));
+        assert!(parse(&["--data-dir", "d"]).run.passphrase_file.is_none());
     }
 
-    fn scratch_dir(name: &str) -> PathBuf {
-        let nanos = now_ms();
-        let dir = std::env::temp_dir().join(format!(
-            "dissent-seeder-unit-{name}-{}-{nanos}",
-            std::process::id()
-        ));
+    #[test]
+    fn cli_parses_service_install_with_recorded_arguments() {
+        let cli = parse(&[
+            "service",
+            "install",
+            "--user",
+            "--",
+            "--data-dir",
+            "/var/lib/seeder",
+            "--join",
+            "dissent://invite/one",
+            "--loopback",
+        ]);
+        let Some(Command::Service {
+            action: ServiceCmd::Install { user, system, run, .. },
+        }) = cli.command
+        else {
+            panic!("expected service install");
+        };
+        assert!(user && !system);
+        assert_eq!(
+            run,
+            ["--data-dir", "/var/lib/seeder", "--join", "dissent://invite/one", "--loopback"]
+        );
+    }
+
+    #[test]
+    fn cli_parses_service_status_with_level_and_data_dir() {
+        let cli = parse(&["service", "status", "--system", "--data-dir", "/var/lib/seeder"]);
+        let Some(Command::Service {
+            action: ServiceCmd::Status { level, data_dir },
+        }) = cli.command
+        else {
+            panic!("expected service status");
+        };
+        assert!(level.system && !level.user);
+        assert_eq!(data_dir, Some(PathBuf::from("/var/lib/seeder")));
+    }
+
+    #[test]
+    fn recorded_arguments_are_validated_at_install() {
+        let absolute = std::env::temp_dir().to_string_lossy().into_owned();
+        let ok = ["--data-dir".to_string(), absolute.clone()];
+        assert!(parse_recorded(&ok).is_ok());
+        let typo = ["--data-dri".to_string(), absolute];
+        assert!(parse_recorded(&typo).is_err());
+        let relative = ["--data-dir", "seeder"].map(String::from);
+        assert!(parse_recorded(&relative).is_err());
+    }
+
+    #[test]
+    fn status_file_round_trips() {
+        let dir = std::env::temp_dir().join(format!("dissent-seeder-status-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        let status = StatusFile {
+            pid: 42,
+            started_ms: 1,
+            updated_ms: 2,
+            peers: 3,
+            communities: vec![CommunityLine {
+                name: "Rustaceans".into(),
+                id: "abc".into(),
+                members: 4,
+                messages: 5,
+            }],
+        };
+        write_status(&dir, &status).unwrap();
+        assert_eq!(read_status(&dir).unwrap(), Some(status));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -385,5 +769,15 @@ mod tests {
         assert!(matches!(cfg.relay, RelayChoice::Disabled));
         assert!(cfg.loopback_only);
         assert!(!cfg.dht_lookup);
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dissent-seeder-unit-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

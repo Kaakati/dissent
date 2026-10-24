@@ -56,3 +56,21 @@ Add `--apns-sandbox` for the sandbox host. The request format is unit-tested, bu
 - The rate limit is per relay, so each relay limits its own traffic.
 - The per-address limit counts the proxy's address if you run behind one. Configure the proxy to pass the real address on, or the limit applies to everyone at once.
 - Registrations are not authenticated. Anyone who can reach the relay can register a device. The only check is that the endpoint is public.
+
+## Running it as a background service
+
+Give the run arguments after `--`, and they are saved exactly as written. Paths must be absolute, and `--data-dir` is required, because the registrations and logs live there.
+
+```sh
+sudo dissent-push-relay service install -- --data-dir /var/lib/dissent-push --snapshot /var/lib/dissent-push/registrations.json --bind 127.0.0.1:8787 --ups-allow-host push.example.org
+sudo dissent-push-relay service start
+dissent-push-relay service status
+sudo dissent-push-relay service stop
+sudo dissent-push-relay service uninstall
+```
+
+- **Linux:** a hardened systemd unit at `/etc/systemd/system/dissent-push-relay.service`. It runs with no privilege escalation, a read-only system, no home directory access, and writes only under its data directory. `--run-as <user>` runs it as an account other than root.
+- **Windows:** a Windows service, started by the Service Control Manager. Run the commands from an administrator prompt. It restarts after a failure.
+- **macOS:** a launchd daemon in `/Library/LaunchDaemons`.
+
+Add `--user` to install it for the logged-in user instead. Logs roll over at 10 MB and are kept for 7 days in `<data-dir>/logs`. `service status` reports whether the service is installed and running.

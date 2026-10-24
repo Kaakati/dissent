@@ -18,3 +18,6 @@ url.workspace = true
 dissent-identity.workspace = true
 dissent-net.workspace = true
 tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true

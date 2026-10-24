@@ -4,7 +4,7 @@ A relay helps two Dissent devices talk when neither can reach the other directly
 
 ## What you need
 
-- A small Linux server with a public IP address (a VPS is fine).
+- A small Linux server with a public IP address (a VPS is fine), or a Windows or macOS machine that stays on.
 - A DNS name pointing at it, such as `relay.example.org`. Create an `A` (and `AAAA` if you have IPv6) record first, because the TLS certificate needs it.
 - The binary. Build it with `cargo build --release -p dissent-relay` and copy `target/release/dissent-relay` to `/usr/local/bin/`.
 
@@ -19,13 +19,13 @@ Open these in the server firewall and in your provider's control panel.
 
 The relay does not use UDP, so you do not need to open any UDP ports.
 
-## Run it with Let's Encrypt
+## Run it in the foreground
 
 ```sh
-dissent-relay --hostname relay.example.org --acme-email you@example.org --acme-cache /var/lib/dissent-relay/acme
+dissent-relay --data-dir /var/lib/dissent-relay --hostname relay.example.org --acme-email you@example.org
 ```
 
-On the first start it gets a certificate and caches it under the cache directory. It then prints the URL to use:
+On the first start it gets a certificate and caches it under `<data-dir>/acme`. It then prints the URL to use:
 
 ```text
 Relay listening. Put this URL in a Dissent client: https://relay.example.org
@@ -36,45 +36,57 @@ To test without hitting Let's Encrypt rate limits, add `--acme-staging`. Staging
 ## Run it with your own certificate
 
 ```sh
-dissent-relay --hostname relay.example.org --cert /etc/dissent-relay/fullchain.pem --key /etc/dissent-relay/privkey.pem
+dissent-relay --data-dir /var/lib/dissent-relay --hostname relay.example.org --cert /etc/dissent-relay/fullchain.pem --key /etc/dissent-relay/privkey.pem
 ```
 
 The certificate and key must be PEM files. The relay reloads them once a day, so a renewal tool can replace them in place.
 
-## Systemd unit
+## Install it as a background service
 
-Save this as `/etc/systemd/system/dissent-relay.service`:
+The relay installs as a machine-wide service by default. Give the same run arguments as above, after `--`. The arguments are saved exactly as you write them. Paths must be absolute.
+
+```sh
+sudo dissent-relay service install -- --data-dir /var/lib/dissent-relay --hostname relay.example.org --acme-email you@example.org
+sudo dissent-relay service start
+dissent-relay service status
+sudo dissent-relay service stop
+sudo dissent-relay service uninstall
+```
+
+- **Linux:** a systemd unit at `/etc/systemd/system/dissent-relay.service`. It is hardened: no privilege escalation, a read-only system, no access to home directories, a private `/tmp`, and writes only under its data directory. It binds port 443 without root, through a single capability, when you use a port below 1024. Add `--run-as <user>` to `install` to run it as an account that is not root. Create that account first, with no login shell. Then give that account ownership of the data directory.
+- **Windows:** a Windows service, started by the Service Control Manager. Run the commands from an administrator prompt. The service restarts after a failure. Stopping it shuts the relay down cleanly.
+- **macOS:** a launchd daemon in `/Library/LaunchDaemons`, run with `sudo`.
+
+The service writes rolling log files to `<data-dir>/logs`. They roll over at 10 MB and are kept for 7 days.
+
+The unit that `install` writes on Linux looks like this:
 
 ```ini
 [Unit]
-Description=Dissent relay
+Description=Dissent relay: carries encrypted traffic between devices that cannot connect directly
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/dissent-relay --hostname relay.example.org --acme-email you@example.org --acme-cache /var/lib/dissent-relay/acme
-User=dissent-relay
-Group=dissent-relay
-StateDirectory=dissent-relay
+ExecStart=/usr/local/bin/dissent-relay --data-dir /var/lib/dissent-relay --hostname relay.example.org --acme-email you@example.org
 WorkingDirectory=/var/lib/dissent-relay
-# Lets a non-root user bind port 443.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
 Restart=on-failure
 RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/dissent-relay
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Then create the user and start the service:
-
-```sh
-sudo useradd --system --home /var/lib/dissent-relay --shell /usr/sbin/nologin dissent-relay
-sudo systemctl daemon-reload
-sudo systemctl enable --now dissent-relay
-sudo journalctl -u dissent-relay -f
-```
+The `AmbientCapabilities` line appears only when the relay binds a port below 1024.
 
 ## Pointing a Dissent client at your relay
 
@@ -100,7 +112,9 @@ Clients then use `http://127.0.0.1:3340`.
 | `--hostname` | none | Public DNS name. Required with `--acme-email`. Used in the printed URL. |
 | `--acme-email` | none | Let's Encrypt account email. Needs `--hostname`. |
 | `--acme-staging` | off | Use Let's Encrypt staging. |
-| `--acme-cache` | `acme-cache` | Directory for the ACME account and certificates. |
+| `--acme-cache` | `<data-dir>/acme` | Directory for the ACME account and certificates. |
 | `--cert` / `--key` | none | PEM certificate chain and private key. Use together. |
+| `--data-dir` | none | State directory: ACME cache and logs. Required to install a service. |
+| `--log-dir` | none | Also write rolling log files here. |
 
-Set `RUST_LOG=debug` for more logging.
+Service subcommands: `service install [--user|--system] [--run-as <user>] -- <run arguments>`, `service uninstall`, `service start`, `service stop`, and `service status`. Set `RUST_LOG=debug` for more logging.

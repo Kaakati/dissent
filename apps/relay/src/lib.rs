@@ -4,6 +4,10 @@
 //! This crate only configures the server. The protocol lives in `iroh-relay`, pinned to the same
 //! version as the `iroh` endpoint the apps use, so both sides speak one protocol.
 
+pub mod logs;
+pub mod run;
+pub mod service;
+
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::PathBuf;

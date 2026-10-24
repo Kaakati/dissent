@@ -22,3 +22,6 @@ url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
