@@ -1,39 +1,95 @@
 # Builds Dissent for Windows, macOS and Linux and publishes a GitHub release
-# with notes generated from the commits since the previous tag.
+# with notes generated from the commits since the previous release.
 #
-# To release: bump `version` in the root Cargo.toml, commit, then
-#   git tag v0.2.0 && git push origin v0.2.0
-# The tag must match the Cargo version (checked below).
+# Releases are automatic: every push to main that passes clippy and the test
+# suite becomes the next patch version (v0.1.0, v0.1.1, ...). Docs-only pushes
+# are skipped, and a newer push cancels an older one still building.
+#
+# Manual releases still work: push a tag (git tag v0.2.0 && git push origin v0.2.0)
+# or run the workflow with a tag. The version in the built app always comes
+# from the tag, set into Cargo.toml at build time.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".github/FUNDING.yml"
+      - "LICENSE-*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build, e.g. v0.2.0"
+        description: "Tag to (re)build, e.g. v0.2.0 (created at the current commit if missing)"
         required: true
 
 permissions:
   contents: write
 
+# One release build at a time on main; a newer push cancels an older one.
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
-  cancel-in-progress: false
+  group: release-${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Decide version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+      auto: ${{ steps.v.outputs.auto }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"; auto=false
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"; auto=false
+          else
+            # Next patch after the highest vX.Y.Z tag; the first release is the Cargo version.
+            last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+            if [ -z "$last" ]; then
+              tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            else
+              IFS=. read -r major minor patch <<<"${last#v}"
+              tag="v${major}.${minor}.$((patch + 1))"
+            fi
+            # This commit is already released (e.g. a re-run): reuse its tag.
+            existing=$(git tag --points-at "$sha" --list 'v*' | head -1)
+            [ -n "$existing" ] && tag="$existing"
+            auto=true
+          fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$tag' is not vMAJOR.MINOR.PATCH"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "auto=$auto" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from $sha (automatic: $auto)" >> "$GITHUB_STEP_SUMMARY"
+
   test:
     name: Test
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.sha }}
       - name: Linux dependencies
         run: |
           sudo apt-get update
@@ -42,51 +98,53 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Tag matches Cargo version
-        run: |
-          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "v$cargo_version" != "$TAG" ]; then
-            echo "::error::Tag $TAG does not match Cargo version v$cargo_version"
-            exit 1
-          fi
+      - name: Set version
+        run: sed -i '0,/^version = ".*"/s//version = "${{ needs.version.outputs.version }}"/' Cargo.toml
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (networked tests stay ignored)
         run: cargo test --workspace
 
   changelog:
-    name: Changelog and draft release
-    needs: test
+    name: Tag, changelog and draft release
+    needs: [version, test]
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.id }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      SHA: ${{ needs.version.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.sha }}
           fetch-depth: 0
-      - name: Release notes for this tag
+      # Automatic releases don't create the tag here: publishing the release creates it at
+      # $SHA. A run cancelled by a newer push then leaves only a draft, which the next run
+      # reuses for the same version, so version numbers never skip.
+      - name: Release notes for this version
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --latest --strip header
+          args: ${{ needs.version.outputs.auto == 'true' && format('--unreleased --tag {0} --strip header', needs.version.outputs.tag) || '--latest --strip header' }}
         env:
           OUTPUT: RELEASE_NOTES.md
       - name: Full changelog
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
+          args: ${{ needs.version.outputs.auto == 'true' && format('--tag {0}', needs.version.outputs.tag) || '' }}
         env:
           OUTPUT: CHANGELOG.md
-      - name: Create draft release
+      - name: Create or reuse the draft release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --draft=true --notes-file RELEASE_NOTES.md
+            gh release edit "$TAG" --draft=true --target "$SHA" --notes-file RELEASE_NOTES.md
           else
-            gh release create "$TAG" --draft --title "Dissent $TAG" --notes-file RELEASE_NOTES.md --verify-tag
+            gh release create "$TAG" --draft --target "$SHA" --title "Dissent $TAG" --notes-file RELEASE_NOTES.md
           fi
           gh release upload "$TAG" CHANGELOG.md --clobber
           id=$(gh api "repos/${{ github.repository }}/releases" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
@@ -94,7 +152,7 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.name }})
-    needs: changelog
+    needs: [version, changelog]
     strategy:
       fail-fast: false
       matrix:
@@ -117,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.sha }}
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -129,6 +187,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.name }}
+      - name: Set version
+        shell: bash
+        run: |
+          v='${{ needs.version.outputs.version }}'
+          perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$v\"/m" Cargo.toml
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       # Bundling is off for local development; enable it only for releases. Signed
@@ -163,7 +226,7 @@ jobs:
 
   tools:
     name: Tools (${{ matrix.name }})
-    needs: changelog
+    needs: [version, changelog]
     strategy:
       fail-fast: false
       matrix:
@@ -178,14 +241,26 @@ jobs:
             os: ubuntu-22.04
             ext: ""
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.sha }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: tools-${{ matrix.name }}
+      - name: Set version
+        shell: bash
+        run: |
+          v='${{ needs.version.outputs.version }}'
+          perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$v\"/m" Cargo.toml
       - name: Build seeder, relay, probe and push relay
         run: cargo build --release -p dissent-seeder -p dissent-relay -p dissent-probe -p dissent-push-relay
       - name: Package
@@ -197,6 +272,7 @@ jobs:
             cp "target/release/$bin${{ matrix.ext }}" "$dir/"
           done
           cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          cp apps/seeder/README.md "$dir/SEEDER.md"
           cp apps/relay/README.md "$dir/RELAY.md"
           cp apps/probe/README.md "$dir/PROBE.md"
           cp apps/push-relay/README.md "$dir/PUSH-RELAY.md"
@@ -215,10 +291,10 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [desktop, tools]
+    needs: [version, desktop, tools]
     runs-on: ubuntu-latest
     steps:
       - name: Undraft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false --latest
+        run: gh release edit "${{ needs.version.outputs.tag }}" --repo "${{ github.repository }}" --draft=false --latest

@@ -67,5 +67,5 @@ Time is `u64` milliseconds since Unix epoch everywhere.
 
 ## Releases
 
-- Bump `version` in the root `Cargo.toml`, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. `.github/workflows/release.yml` tests, builds installers (Windows, macOS arm64/x64, Linux) and tool archives, and publishes a release whose notes come from `cliff.toml` (git-cliff, grouped by the commit subject's first verb: Add, Fix, Harden, Remove, ...). Keep commit subjects imperative and descriptive.
+- Every push to `main` (except docs-only) that passes clippy and tests is released automatically as the next patch version; a newer push cancels an older build. For a specific version push a tag `vX.Y.Z`. `.github/workflows/release.yml` tests, builds installers (Windows, macOS arm64/x64, Linux) and tool archives, and publishes a release whose notes come from `cliff.toml` (git-cliff, grouped by the commit subject's first verb: Add, Fix, Harden, Remove, ...). Keep commit subjects imperative and descriptive.
 - In-app updates use `tauri-plugin-updater` and the release's signed `latest.json`. The signing key lives outside the repo (`~/.tauri/dissent-updater.key`); CI reads it from the `TAURI_SIGNING_PRIVATE_KEY` secret. Never commit or print the private key.
