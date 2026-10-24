@@ -520,15 +520,24 @@ mod platform {
         }
     }
 
-    fn task_status(spec: &Spec) -> Result<Option<String>> {
-        let out = Command::new("schtasks")
-            .args(["/Query", "/TN", spec.title, "/V", "/FO", "LIST"])
+    /// The task's state and last run, from PowerShell. Its state is an enum name, which does not
+    /// change with the Windows display language. `None` when the task does not exist.
+    fn task_info(spec: &Spec) -> Result<Option<TaskInfo>> {
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'; $t = Get-ScheduledTask -TaskName '{}'; \
+             $i = $t | Get-ScheduledTaskInfo; \
+             Write-Output ('State=' + [string]$t.State); \
+             if ($i.LastRunTime.Year -ge 2000) {{ Write-Output ('LastRunTime=' + $i.LastRunTime.ToString('o')) }}",
+            spec.title
+        );
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
-            .context("run schtasks")?;
+            .context("run powershell")?;
         if !out.status.success() {
             return Ok(None);
         }
-        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+        Ok(Some(parse_task_info(&String::from_utf8_lossy(&out.stdout))))
     }
 
     pub fn install(spec: &Spec, level: Level, plan: &Plan) -> Result<String> {
@@ -587,9 +596,7 @@ mod platform {
                     .context("write the stop request")?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
-                    let running = task_status(spec)?
-                        .and_then(|l| field(&l, "Status"))
-                        .is_some_and(|s| s == "Running");
+                    let running = task_info(spec)?.is_some_and(|t| t.state == "Running");
                     if !running {
                         return Ok("stopped\n".into());
                     }
@@ -607,16 +614,16 @@ mod platform {
 
     pub fn status(spec: &Spec, level: Level) -> Result<Status> {
         match level {
-            Level::User => match task_status(spec)? {
+            Level::User => match task_info(spec)? {
                 None => Ok(Status {
                     installed: false,
                     detail: format!("scheduled task \"{}\" not found", spec.title),
                     ..Status::default()
                 }),
-                Some(listing) => Ok(Status {
+                Some(info) => Ok(Status {
                     installed: true,
-                    running: field(&listing, "Status").map(|s| s == "Running"),
-                    last_start: field(&listing, "Last Run Time"),
+                    running: Some(info.state == "Running"),
+                    last_start: info.last_run,
                     detail: format!("scheduled task \"{}\" (user {})", spec.title, current_user()),
                 }),
             },
@@ -737,13 +744,30 @@ mod platform {
 /// The file a user-level task polls for. Writing it asks the program to shut down.
 pub const STOP_FILE: &str = "stop.request";
 
-/// The value of one `Name: value` line of `schtasks /Query /V /FO LIST` output.
+/// A scheduled task's state, from the `State=` and `LastRunTime=` lines the PowerShell query prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInfo {
+    /// Enum name such as `Ready`, `Running` or `Disabled`.
+    pub state: String,
+    pub last_run: Option<String>,
+}
+
+/// Parses the `key=value` lines of the task query. Unknown lines are ignored.
 #[cfg(any(windows, test))]
-fn field(listing: &str, name: &str) -> Option<String> {
-    listing
-        .lines()
-        .find_map(|l| l.strip_prefix(name).and_then(|rest| rest.strip_prefix(':')))
-        .map(|v| v.trim().to_string())
+pub fn parse_task_info(output: &str) -> TaskInfo {
+    let mut info = TaskInfo {
+        state: String::new(),
+        last_run: None,
+    };
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("State=") {
+            info.state = v.to_string();
+        } else if let Some(v) = line.strip_prefix("LastRunTime=") {
+            info.last_run = Some(v.to_string());
+        }
+    }
+    info
 }
 
 /// Windows only. Runs the program as a Windows service when the Service Control Manager started
@@ -1007,9 +1031,12 @@ mod tests {
     }
 
     #[test]
-    fn schtasks_field_parser_reads_status_line() {
-        let listing = "Folder: \\\nTaskName: Dissent Seeder\nStatus: Running\nLast Run Time: 10/24/2026 9:00:00 AM\n";
-        assert_eq!(field(listing, "Status").as_deref(), Some("Running"));
-        assert_eq!(field(listing, "Last Run Time").as_deref(), Some("10/24/2026 9:00:00 AM"));
+    fn task_query_parser_reads_state_and_last_run() {
+        let info = parse_task_info("State=Running\nLastRunTime=2026-10-24T12:50:26.0000000+03:00\n");
+        assert_eq!(info.state, "Running");
+        assert_eq!(info.last_run.as_deref(), Some("2026-10-24T12:50:26.0000000+03:00"));
+        let never = parse_task_info("State=Ready\n");
+        assert_eq!(never.state, "Ready");
+        assert!(never.last_run.is_none());
     }
 }

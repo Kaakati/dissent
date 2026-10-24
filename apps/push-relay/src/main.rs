@@ -1,6 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use dissent_push_relay::run::{Cli, Command, SPEC, run_blocking, run_from_args, service_command};
+use dissent_push_relay::run::{Cli, Command, run_blocking, service_command};
+#[cfg(windows)]
+use dissent_push_relay::run::{SPEC, run_from_args};
+#[cfg(windows)]
 use dissent_push_relay::service;
 use std::sync::Arc;
 use tokio::sync::Notify;

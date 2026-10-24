@@ -256,8 +256,8 @@ impl Node {
     }
 
     pub async fn shutdown(self) -> Result<()> {
-        self.inner.gossip.shutdown().await.map_err(|e| NetError::Shutdown(e.to_string()))?;
-        // The router also closes the endpoint.
+        // The router shuts each protocol handler down, gossip included, and then closes the endpoint.
+        // Gossip must not be shut down twice, since the second call warns that its actor is gone.
         self.inner.router.shutdown().await.map_err(|e| NetError::Shutdown(e.to_string()))
     }
 }

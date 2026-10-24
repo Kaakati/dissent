@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use dissent_seeder::{Cli, Command, SPEC, run_blocking, run_from_args, service, service_command};
+use dissent_seeder::{Cli, Command, run_blocking, service_command};
+#[cfg(windows)]
+use dissent_seeder::{SPEC, run_from_args, service};
 use std::sync::Arc;
 use tokio::sync::Notify;
 

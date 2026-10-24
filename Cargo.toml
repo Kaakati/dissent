@@ -100,3 +100,6 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[profile.dev.package.dissent-audio]
+opt-level = 2
