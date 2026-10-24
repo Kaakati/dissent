@@ -1019,3 +1019,199 @@ async fn meet_each_other(a: &Peer, b: &Peer) {
         .await
         .expect("b asks a");
 }
+
+/// The live call a DM with `peer` shows on `engine`, if any.
+fn live_dm_with(engine: &dissent_core::Engine, peer: dissent_core::RootId) -> Option<dissent_core::LiveCallView> {
+    engine
+        .conversations()
+        .into_iter()
+        .find(|c| c.kind == "dm" && c.peer == peer.to_string())
+        .and_then(|c| c.live_call)
+}
+
+/// The live call a group shows on `engine`, if any.
+fn live_group(engine: &dissent_core::Engine, conv: dissent_core::ConvId) -> Option<dissent_core::LiveCallView> {
+    engine
+        .conversations()
+        .into_iter()
+        .find(|c| c.id == conv.to_string())
+        .and_then(|c| c.live_call)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_group_call_shows_as_live_to_a_member_outside_it_who_joins_and_hears_it() {
+    let _serial = common::heavy_test_lock().await;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let carol = peer("carol").await;
+    let dave = peer("dave").await;
+    for other in [&bob, &carol, &dave] {
+        meet_each_other(&alice, other).await;
+    }
+    for (x, y) in [(&bob, &carol), (&bob, &dave), (&carol, &dave)] {
+        meet_each_other(x, y).await;
+    }
+    let created = alice
+        .engine
+        .create_group(
+            "club".into(),
+            vec![bob.identity.root_id(), carol.identity.root_id(), dave.identity.root_id()],
+        )
+        .await
+        .expect("alice creates the group");
+    let conv: dissent_core::ConvId = created.id.parse().expect("id parses");
+    for p in [&bob, &carol, &dave] {
+        eventually("a member has the group", || group_id_named(p, "club")).await;
+    }
+
+    let mut bob_events = bob.engine.subscribe();
+    let mut carol_events = carol.engine.subscribe();
+    let mut dave_events = dave.engine.subscribe();
+    alice
+        .engine
+        .join_group_call(conv)
+        .await
+        .expect("alice starts the group call");
+    let bob_call = next_incoming(&mut bob_events).await;
+    let carol_call = next_incoming(&mut carol_events).await;
+    let dave_call = next_incoming(&mut dave_events).await;
+    bob.engine.accept_call(bob_call).await.expect("bob accepts");
+    carol.engine.accept_call(carol_call).await.expect("carol accepts");
+    dave.engine.decline_call(dave_call).await.expect("dave stays out");
+
+    // Dave is a member outside the call. His list shows it live: three people in it, not him.
+    let live = eventually_within(Duration::from_secs(90), "dave sees the live call", || {
+        live_group(&dave.engine, conv).filter(|l| l.participants.len() == 3)
+    })
+    .await;
+    assert_eq!(live.total, 4, "everyone in the group, dave included");
+    assert!(live.not_in.is_empty(), "every member is in the call");
+    assert_eq!(live.route.kind, "direct");
+    assert_eq!(live.scope, None, "a group call has no dm scope");
+    let in_call: Vec<String> = live.participants.iter().map(|p| p.root_id.clone()).collect();
+    for p in [&alice, &bob, &carol] {
+        assert!(in_call.contains(&p.identity.root_id().to_string()), "the call lists everyone in it");
+    }
+    assert!(!in_call.contains(&dave.identity.root_id().to_string()), "dave is not in it yet");
+
+    // Dave joins through the lobby and hears the call.
+    dave.engine.join_group_call(conv).await.expect("dave joins the live call");
+    eventually_within(Duration::from_secs(90), "dave hears the call", || {
+        dave.engine
+            .call_state()
+            .filter(|v| v.participants.len() == 3 && v.frames_received > 0)
+    })
+    .await;
+
+    finish(vec![alice, bob, carol, dave]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_dm_call_stays_live_after_one_side_steps_away_and_rejoins() {
+    let _serial = common::heavy_test_lock().await;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    make_contacts(&alice, &bob).await;
+
+    let mut bob_events = bob.engine.subscribe();
+    alice
+        .engine
+        .call_dm(bob.identity.root_id())
+        .await
+        .expect("call starts");
+    accept_incoming(&bob.engine, &mut bob_events).await;
+    eventually_within(Duration::from_secs(90), "alice is in the call with bob", || {
+        alice
+            .engine
+            .call_state()
+            .filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+    })
+    .await;
+    eventually_within(Duration::from_secs(90), "bob is in the call with alice", || {
+        bob.engine
+            .call_state()
+            .filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+    })
+    .await;
+
+    // Alice steps away. Bob stays, so the call stays live for alice, and it is no longer live for bob.
+    alice.engine.leave_call().await.expect("alice steps away");
+    let live = eventually_within(Duration::from_secs(30), "alice sees the call still live", || {
+        live_dm_with(&alice.engine, bob.identity.root_id()).filter(|l| l.participants.len() == 1)
+    })
+    .await;
+    assert_eq!(live.scope, Some("dm"));
+    assert_eq!(live.total, 2);
+    assert!(live.not_in.is_empty());
+    assert_eq!(live.participants[0].root_id, bob.identity.root_id().to_string());
+    eventually_within(Duration::from_secs(30), "bob sees alice has left", || {
+        live_dm_with(&bob.engine, alice.identity.root_id()).is_none().then_some(())
+    })
+    .await;
+
+    // Alice rejoins through the live call and hears bob again.
+    alice
+        .engine
+        .call_dm(bob.identity.root_id())
+        .await
+        .expect("alice rejoins the live call");
+    eventually_within(Duration::from_secs(90), "alice hears bob again", || {
+        alice
+            .engine
+            .call_state()
+            .filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+    })
+    .await;
+    eventually_within(Duration::from_secs(90), "bob hears alice again", || {
+        bob.engine
+            .call_state()
+            .filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+    })
+    .await;
+
+    finish(vec![alice, bob]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_outsider_sees_no_live_call() {
+    let _serial = common::heavy_test_lock().await;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let carol = peer("carol").await;
+    let dave = peer("dave").await;
+    let outsider = peer("outsider").await;
+    for other in [&bob, &carol, &dave] {
+        meet_each_other(&alice, other).await;
+    }
+    let created = alice
+        .engine
+        .create_group(
+            "club".into(),
+            vec![bob.identity.root_id(), carol.identity.root_id(), dave.identity.root_id()],
+        )
+        .await
+        .expect("alice creates the group");
+    let conv: dissent_core::ConvId = created.id.parse().expect("id parses");
+    eventually("bob has the group", || group_id_named(&bob, "club")).await;
+
+    let mut bob_events = bob.engine.subscribe();
+    alice
+        .engine
+        .join_group_call(conv)
+        .await
+        .expect("alice starts the group call");
+    accept_incoming(&bob.engine, &mut bob_events).await;
+    // Bob's list shows the call, so the call's roster has reached a member.
+    eventually_within(Duration::from_secs(90), "bob sees the live call", || {
+        live_group(&bob.engine, conv).filter(|l| l.participants.len() == 1)
+    })
+    .await;
+
+    // The outsider has no copy of the group, so no conversation of theirs shows a live call.
+    assert!(live_group(&outsider.engine, conv).is_none());
+    assert!(outsider.engine.conversations().iter().all(|c| c.live_call.is_none()));
+    finish(vec![alice, bob, carol, dave, outsider]).await;
+}

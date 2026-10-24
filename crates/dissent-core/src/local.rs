@@ -29,6 +29,7 @@ pub const CAPABILITIES: &[&str] = &[
     "onboarding",
     "close_dm",
     "ignore",
+    "status",
 ];
 
 /// Which text a user note stores.

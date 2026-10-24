@@ -158,6 +158,11 @@ impl Engine {
                     debug!(error = %e, "rejected gossiped address");
                 }
             }
+            Ok(GossipMsg::Presence(sp)) => {
+                if let Err(e) = self.accept_presence(Some(community), *sp) {
+                    debug!(community = %community, error = %e, "rejected presence beacon");
+                }
+            }
             Err(e) => debug!(error = %e, "undecodable gossip message"),
         }
     }
@@ -171,7 +176,6 @@ impl Engine {
         if let Err(e) = self.check_request(&env, conn_from) {
             return Response::Error(e.to_string());
         }
-        self.write().last_seen.insert(conn_from, now_ms());
         match env.req {
             Request::Genesis { community } => {
                 let genesis = self
@@ -234,6 +238,10 @@ impl Engine {
             Request::TakeKeyPackage { root } => self.take_key_package(root),
             Request::Call(msg) => Response::Call(self.handle_call(conn_from, *msg).await),
             Request::Guardians(set) => self.accept_guardians(*set),
+            Request::Presence(sp) => match self.accept_presence(None, *sp) {
+                Ok(()) => Response::Ack,
+                Err(e) => Response::Error(format!("invalid presence: {e}")),
+            },
         }
     }
 
@@ -507,6 +515,7 @@ pub(crate) async fn receive_loop(
             if let Some(inner) = weak.upgrade() {
                 let engine = Engine { inner };
                 engine.broadcast_own_addr(community).await;
+                engine.broadcast_presence(community).await;
                 // Gossip sent just before a neighbour joined does not reach it. Sync with it now.
                 for device in fresh {
                     let task = engine.clone();

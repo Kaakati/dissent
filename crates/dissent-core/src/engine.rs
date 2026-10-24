@@ -176,11 +176,14 @@ impl Engine {
         }
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
         Ok((engine, rx))
     }
 
     /// Stops background tasks and the network node. Stored data stays on disk.
     pub async fn shutdown(self) -> Result<()> {
+        // Peers drop us now, rather than when our last beacon runs out.
+        let _ = tokio::time::timeout(crate::presence::OFFLINE_WAIT, self.send_offline()).await;
         self.flush_mls(true);
         {
             let mut guard = self.write();

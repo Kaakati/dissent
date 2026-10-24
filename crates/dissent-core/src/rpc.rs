@@ -66,6 +66,8 @@ pub(crate) enum Request {
     Call(Box<crate::calls::CallMsg>),
     /// The root's guardian list, sent to another device of the same root.
     Guardians(Box<dissent_identity::GuardianSet>),
+    /// A presence beacon, sent directly to a contact's device. Community beacons go on the topic.
+    Presence(Box<crate::presence::SignedPresence>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

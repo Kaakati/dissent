@@ -455,6 +455,30 @@ export const setIgnored = guard(async (rootId, ignore) => {
   return true;
 });
 
+// Your own status (the profile popover). The engine sends dissent://status-changed for every change, including timed ones ending.
+const normalizeStatus = (s) => ({ status: s?.status ?? 'online', until_ms: s?.until_ms ?? null });
+
+export async function loadStatus() {
+  if (!has('status')) return;
+  try {
+    state.status = normalizeStatus(await api.getStatus());
+    notify('status');
+  } catch (err) {
+    toast(err);
+  }
+}
+
+export function applyStatus(payload) {
+  state.status = normalizeStatus(payload);
+  notify('status');
+}
+
+export const setStatus = guard(async (status, untilMs = null) => {
+  await api.setStatus(status, untilMs);
+  applyStatus({ status, until_ms: untilMs });
+  return true;
+});
+
 export const closeDm = guard(async (key) => {
   await api.closeConversation(key);
   await loadConversations();

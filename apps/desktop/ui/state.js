@@ -1,6 +1,7 @@
 // Single source of UI state. Actions mutate `state` and call notify() with the parts that changed.
 export const state = {
   me: null,
+  status: { status: 'online', until_ms: null }, // your own status: 'online' | 'idle' | 'dnd' | 'invisible', until_ms when timed
   version: '',
   communities: [], // CommunitySummary[]
   conversations: [], // ConversationSummary[] (kind 'dm' or, with the groups feature, 'group')

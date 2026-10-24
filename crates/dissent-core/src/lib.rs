@@ -25,6 +25,7 @@ mod error;
 mod groups;
 mod inbox;
 mod invites;
+mod presence;
 mod previews;
 mod messages;
 mod net;
@@ -44,7 +45,10 @@ pub use dissent_events::{ChannelId, EventId};
 pub use dissent_identity::{CommunityId, DeviceId, Identity, RootId};
 pub use dissent_net::{NodeConfig, RelayChoice};
 pub use contacts::{ContactEntry, ContactRequestView, ContactsView, DmPolicy, MAX_NOTE_CHARS};
-pub use calls::{CallQuality, CallRoute, CallScope, CallView, ParticipantView, PathView, Topology};
+pub use calls::{
+    CallQuality, CallRoute, CallScope, CallView, LiveCallView, LiveMember, LiveParticipant, LiveRoute,
+    ParticipantView, PathView, Topology,
+};
 pub use attachments::{AttachmentView, StoreStats, TransferSettings, TransferView};
 pub use engine::Engine;
 pub use dissent_audio::SenderConfig;
@@ -53,6 +57,7 @@ pub use groups::{ConvId, MAX_GROUP_MEMBERS, MAX_GROUP_NAME_CHARS, MIN_GROUP_MEMB
 pub use inbox::{InboxStats, MAX_INBOXES};
 pub use invites::{JoinRequestView, GROUP_INVITE_TTL_MS};
 pub use previews::Embed;
+pub use presence::{Presence, Status};
 pub use identity_flows::{start_device_link, DeviceView, GuardianEntry, GuardianView, PendingDevice};
 pub use error::{CoreError, Result};
 pub use views::*;

@@ -19,6 +19,20 @@ import { has } from './features.js';
 import { showOnboarding } from './views/onboarding.js';
 import { openSettingsPage } from './views/settings.js';
 
+// Input counts as activity for auto-idle. The engine ignores repeats, so the UI reports at most once every 30 seconds.
+const ACTIVITY_EVERY_MS = 30_000;
+function watchActivity() {
+  if (!has('status')) return;
+  let last = 0;
+  const report = () => {
+    const now = Date.now();
+    if (now - last < ACTIVITY_EVERY_MS) return;
+    last = now;
+    api.recordActivity().catch(() => {});
+  };
+  for (const type of ['pointerdown', 'keydown', 'wheel']) window.addEventListener(type, report, { capture: true, passive: true });
+}
+
 async function start() {
   applyAppearance();
   if (!window.__TAURI__) await import('./mock.js');
@@ -35,12 +49,15 @@ async function start() {
   listenTo('dissent://attachment-progress', (p) => actions.handleAttachmentProgress(p)).catch(() => {});
   listenTo('dissent://transfers', (p) => actions.handleTransfersEvent(p)).catch(() => {});
   listenTo('dissent://call-state', (c) => actions.handleCallEvent(c)).catch(() => {});
+  listenTo('dissent://status-changed', (s) => actions.applyStatus(s)).catch(() => {});
   listenTo('dissent://call-ringing', (p) => { if (has('calls')) showIncomingCall(p); }).catch(() => {});
   if (window.__DISSENT_MOCK__) document.getElementById('mock-note').hidden = false;
 
   try {
     await onEngineEvent(actions.handleEngineEvent);
     await actions.boot();
+    await actions.loadStatus();
+    watchActivity();
     if (has('onboarding') && state.me?.first_run) showOnboarding();
     if (window.__DISSENT_MOCK__) await openMockView(new URLSearchParams(location.search));
   } catch (err) {

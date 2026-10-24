@@ -2,7 +2,7 @@
 // kept inside the viewport. Only one card is open at a time. Escape and an outside click close it.
 import { state, canModerate, myRole } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar, setHue } from '../ui.js';
+import { el, avatar, setHue, presenceOf } from '../ui.js';
 import { openSafetyDialog } from './dialogs.js';
 
 const CARD_W = 300;
@@ -95,7 +95,7 @@ export function cardContent(view, userId) {
   return [
     banner,
     el('div', { class: 'card-body' },
-      avatar(view.display_name, userId, 'card-avatar'),
+      avatar(view.display_name, userId, 'card-avatar', presenceOf(view) ?? presenceOf(member)),
       el('div', { class: 'card-name', text: view.display_name, title: view.display_name }),
       el('div', { class: 'card-suffix mono', text: `${view.display_name}·${view.suffix}` }),
       member?.handle ? el('div', { class: 'card-handle', text: `@${member.handle} in ${state.community.name}` }) : null,

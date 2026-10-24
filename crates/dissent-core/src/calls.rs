@@ -10,7 +10,7 @@
 //! The call rekeys when the group epoch changes.
 
 use crate::engine::{now_ms, Engine, Inner};
-use crate::groups::ConvId;
+use crate::groups::{dm_conv_id, ConvId};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, Request, Response};
 use crate::views::EngineEvent;
@@ -120,7 +120,49 @@ pub(crate) enum CallMsg {
     AnsweredElsewhere { room: RoomId },
     /// The sender has left the room and drops its link to us.
     Leave { room: RoomId },
+    /// The sender's account of the DM or group call it is in. Sent to the people who could join
+    /// it, so they can show it as live. An empty roster means the sender has left.
+    Presence(Box<PresenceMsg>),
 }
+
+/// A device's roster for the DM or group call it is in.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PresenceMsg {
+    pub room: RoomId,
+    pub scope: Scope,
+    /// When the call started on the sender's device, in milliseconds.
+    pub started_ms: u64,
+    /// Everyone in the call on the sender's device, the sender included.
+    pub members: Vec<PresenceMember>,
+}
+
+/// One person in a call, as a device sees them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PresenceMember {
+    pub root: RootId,
+    pub muted: bool,
+}
+
+/// A call another device said it is in. Kept per device, since a device is in one call at a time.
+#[derive(Clone, Debug)]
+pub(crate) struct Heard {
+    pub room: RoomId,
+    pub scope: Scope,
+    pub started_ms: u64,
+    /// The person whose device sent this.
+    pub from: RootId,
+    pub members: Vec<PresenceMember>,
+    /// When this device last heard the roster, in milliseconds.
+    pub seen_ms: u64,
+}
+
+/// The most people a presence message may list. Groups are capped well below this.
+const MAX_PRESENCE_MEMBERS: usize = 64;
+/// How often a device in a DM or group call re-sends its roster.
+const PRESENCE_EVERY: Duration = Duration::from_secs(30);
+/// A roster not re-sent within this long is dropped, so a device that died mid-call leaves no
+/// call behind.
+const PRESENCE_TTL_MS: u64 = 90_000;
 
 /// Answers to a [`CallMsg`].
 #[derive(Debug, Serialize, Deserialize)]
@@ -484,6 +526,8 @@ pub(crate) struct Room {
     sending: AtomicBool,
     /// Media links this room has established. Counts links, not presence entries.
     links: AtomicUsize,
+    /// True once this room has a presence clock, so that it has only one.
+    clocked: AtomicBool,
 }
 
 /// How long an incoming or outgoing direct call rings before it counts as missed.
@@ -515,6 +559,8 @@ pub(crate) struct CallHub {
     arrived: Notify,
     ringing: Mutex<Option<Ringing>>,
     ring_timeout: Mutex<Duration>,
+    /// DM and group calls other devices said they are in, by device.
+    heard: Mutex<BTreeMap<DeviceId, Heard>>,
     /// Whether new calls use the voice pipeline instead of synthetic frames.
     voice: AtomicBool,
     /// Capture settings for the voice pipeline. Defaults include noise suppression and AGC.
@@ -532,6 +578,7 @@ impl Default for CallHub {
             arrived: Notify::new(),
             ringing: Mutex::new(None),
             ring_timeout: Mutex::new(RING_TIMEOUT),
+            heard: Mutex::new(BTreeMap::new()),
             voice: AtomicBool::new(false),
             sender_config: Mutex::new(SenderConfig::default()),
         }
@@ -781,6 +828,7 @@ impl Room {
             forwarder_since: Mutex::new(None),
             sending: AtomicBool::new(true),
             links: AtomicUsize::new(0),
+            clocked: AtomicBool::new(false),
         }
     }
 
@@ -1349,6 +1397,7 @@ impl Engine {
                 "that person cannot be called right now".into(),
             ));
         }
+        self.share_call(&room);
         self.end_if_unanswered(room.id);
         self.emit(EngineEvent::CallUpdated);
         Ok(())
@@ -1519,6 +1568,7 @@ impl Engine {
                         peer.muted = muted;
                     }
                     self.emit(EngineEvent::CallUpdated);
+                    self.announce_call(&current, self.roster_of(&current));
                 }
                 CallReply::Ack
             }
@@ -1574,10 +1624,137 @@ impl Engine {
                     lock(&current.peers).remove(&sid);
                     lock(&current.live).remove(&sid);
                     self.emit(EngineEvent::CallUpdated);
+                    self.announce_call(&current, self.roster_of(&current));
                 }
                 CallReply::Ack
             }
+            CallMsg::Presence(msg) => self.on_presence(from, *msg),
         }
+    }
+
+    /// Records what a device says about its DM or group call. Only a contact, or a member of the
+    /// group, may say so. An empty roster means that device has left its call.
+    fn on_presence(&self, from: DeviceId, msg: PresenceMsg) -> CallReply {
+        let Some(root) = self.read().directory.root_of(&from) else {
+            return CallReply::Refused("unknown device".into());
+        };
+        if matches!(msg.scope, Scope::Channel { .. }) {
+            return CallReply::Refused("not a direct or group call".into());
+        }
+        if let Err(why) = self.may_join(&msg.scope, root) {
+            return CallReply::Refused(why);
+        }
+        if msg.members.len() > MAX_PRESENCE_MEMBERS {
+            return CallReply::Refused("roster too long".into());
+        }
+        {
+            let mut heard = lock(&self.inner.calls.heard);
+            if msg.members.is_empty() {
+                heard.remove(&from);
+            } else {
+                heard.insert(
+                    from,
+                    Heard {
+                        room: msg.room,
+                        scope: msg.scope,
+                        started_ms: msg.started_ms,
+                        from: root,
+                        members: msg.members,
+                        seen_ms: now_ms(),
+                    },
+                );
+            }
+        }
+        self.emit_conversation(msg.scope, Some(root));
+        CallReply::Ack
+    }
+
+    /// Announces a call that has just connected, and keeps its roster re-sent while it lasts.
+    fn share_call(&self, room: &Arc<Room>) {
+        self.announce_call(room, self.roster_of(room));
+        self.start_presence_clock(room);
+    }
+
+    /// Re-sends the roster every `PRESENCE_EVERY` while the room is the current call. Only one
+    /// clock runs per room. It holds the room weakly, so it does not keep the room alive.
+    fn start_presence_clock(&self, room: &Arc<Room>) {
+        if room.clocked.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let engine = self.clone();
+        let room = Arc::downgrade(room);
+        self.spawn_task(async move {
+            loop {
+                tokio::time::sleep(PRESENCE_EVERY).await;
+                let Some(room) = room.upgrade() else { break };
+                let current = lock(&engine.inner.calls.current).clone();
+                if !current.is_some_and(|c| Arc::ptr_eq(&c, &room)) {
+                    break;
+                }
+                engine.announce_call(&room, engine.roster_of(&room));
+            }
+        });
+    }
+
+    /// Tells the people who could join a DM or group call what its roster is now: every group
+    /// member's device, or the peer's devices for a DM. Also tells this device's own conversation
+    /// list that the call changed.
+    fn announce_call(&self, room: &Arc<Room>, members: Vec<PresenceMember>) {
+        let devices = match room.scope {
+            Scope::Group { conv } => self.group_devices(conv).unwrap_or_default(),
+            Scope::Dm => room
+                .peer
+                .map(|peer| self.read().directory.devices_of(&peer))
+                .unwrap_or_default(),
+            Scope::Channel { .. } => return,
+        };
+        for device in devices {
+            let msg = PresenceMsg {
+                room: room.id,
+                scope: room.scope,
+                started_ms: room.started_ms,
+                members: members.clone(),
+            };
+            let engine = self.clone();
+            self.spawn_task(async move {
+                if let Err(e) = engine.call_rpc(device, CallMsg::Presence(Box::new(msg))).await {
+                    debug!(device = %device, error = %e, "call presence not sent");
+                }
+            });
+        }
+        self.emit_conversation(room.scope, room.peer);
+    }
+
+    /// This device's roster for a room: itself, and each person whose device has joined.
+    fn roster_of(&self, room: &Room) -> Vec<PresenceMember> {
+        let me = self.inner.identity.device_id();
+        let w = self.read();
+        let peers = lock(&room.peers);
+        let mut members = vec![PresenceMember {
+            root: self.inner.me,
+            muted: room.is_muted(),
+        }];
+        for device in lock(&room.live).values().filter(|d| **d != me) {
+            let Some(root) = w.directory.root_of(device) else {
+                continue;
+            };
+            if members.iter().any(|m| m.root == root) {
+                continue;
+            }
+            let muted = peers.values().any(|p| p.device == *device && p.muted);
+            members.push(PresenceMember { root, muted });
+        }
+        members
+    }
+
+    /// Emits that a DM or group conversation changed, so the conversation list reads it again.
+    fn emit_conversation(&self, scope: Scope, peer: Option<RootId>) {
+        let id = match (scope, peer) {
+            (Scope::Group { conv }, _) => conv.to_string(),
+            (Scope::Dm, Some(peer)) => dm_conv_id(&self.inner.me, &peer).to_string(),
+            _ => return,
+        };
+        self.emit(EngineEvent::ConversationChanged { id });
     }
 
     /// A direct call was answered by `winner`. The other devices of the contact stop ringing.
@@ -1658,6 +1835,16 @@ impl Engine {
                 if taken {
                     return CallReply::Refused("answered on another device".into());
                 }
+                // A direct call whose other side has stepped away stays open for a rejoin. A
+                // rejoin brings a fresh media key, so the room is rebuilt around that key.
+                if let (Scope::Dm, Some(_)) = (room.scope, key) {
+                    if lock(&room.peers).is_empty() {
+                        return match self.open_dm_room(id, &cert, key) {
+                            Ok(fresh) => self.answer_join(&fresh, from, cert.root),
+                            Err(e) => CallReply::Refused(e.to_string()),
+                        };
+                    }
+                }
                 return self.answer_join(&room, from, cert.root);
             }
             Some(_) => return CallReply::Refused("busy in another call".into()),
@@ -1676,6 +1863,7 @@ impl Engine {
         if let Some(sid) = room.sid_of(&from) {
             lock(&room.live).insert(sid, from);
         }
+        self.share_call(room);
         if room.forwarding.is_some() {
             if let Some(sid) = room.sid_of(&from) {
                 room.add_peer(sid, from, root, true);
@@ -1766,6 +1954,7 @@ impl Engine {
             let room = self.open_group_room(Scope::Group { conv }, group_room_id(&conv)).await?;
             let devices = self.group_devices(conv)?;
             self.join_devices_ring(&room, &devices, None, false).await;
+            self.share_call(&room);
             self.emit(EngineEvent::CallUpdated);
             return Ok(());
         }
@@ -1781,6 +1970,7 @@ impl Engine {
             });
             return Err(CoreError::Rejected("answered on another device".into()));
         }
+        self.share_call(&room);
         self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
@@ -1933,6 +2123,7 @@ impl Engine {
                 debug!(device = %device, error = %e, "mute not sent");
             }
         }
+        self.announce_call(&room, self.roster_of(&room));
         self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
@@ -2005,6 +2196,8 @@ impl Engine {
             mesh.remove_peer(sid);
         }
         drop(mesh);
+        // An empty roster tells the others this device has left the call.
+        self.announce_call(&room, Vec::new());
         self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
@@ -3042,6 +3235,7 @@ impl Engine {
             // Nobody is in it, so this call starts now: ring the other members.
             self.join_devices_ring(&room, &devices, None, true).await;
         }
+        self.share_call(&room);
         self.end_if_unanswered(room.id);
         self.emit(EngineEvent::CallUpdated);
         Ok(())
@@ -3088,5 +3282,139 @@ impl Engine {
             }
         });
         CallReply::Ringing
+    }
+}
+
+/// A DM or group call another device said is live, shaped as the conversation list reads it.
+/// `participants` and `not_in` leave out this device's own person.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LiveCallView {
+    pub started_ms: u64,
+    /// The display name of the person whose device started the call.
+    pub started_by: String,
+    /// Everyone in the conversation, this device's person included.
+    pub total: usize,
+    pub route: LiveRoute,
+    pub participants: Vec<LiveParticipant>,
+    /// Members of the group who are not in the call. Empty for a direct call.
+    pub not_in: Vec<LiveMember>,
+    /// `dm` for a direct call. Absent for a group call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<&'static str>,
+}
+
+/// How the call's media is routed. A mesh call is `direct`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LiveRoute {
+    pub kind: &'static str,
+}
+
+/// A person in a live call. Speaking is only known on the device in the call, so it is false here.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LiveParticipant {
+    pub root_id: String,
+    pub display_name: String,
+    pub muted: bool,
+    pub speaking: bool,
+}
+
+/// A group member who is not in the live call.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LiveMember {
+    pub root_id: String,
+    pub display_name: String,
+}
+
+impl Engine {
+    /// The live call of a group, if another member's device said one is running.
+    pub fn live_call_of_group(&self, conv: ConvId) -> Option<LiveCallView> {
+        let (members, left) = {
+            let w = self.read();
+            let meta = w.conv_book.convs.get(&conv)?;
+            (meta.members.clone(), meta.left)
+        };
+        if left {
+            return None;
+        }
+        self.live_view(|h| h.scope == (Scope::Group { conv }), Some(&members), false)
+    }
+
+    /// Rosters heard recently enough to trust. A device that stops re-sending drops out.
+    fn fresh_heard(&self) -> Vec<Heard> {
+        let now = now_ms();
+        lock(&self.inner.calls.heard)
+            .values()
+            .filter(|h| now.saturating_sub(h.seen_ms) < PRESENCE_TTL_MS)
+            .cloned()
+            .collect()
+    }
+
+    /// The peers whose devices said a direct call with us is live.
+    pub(crate) fn live_dm_peers(&self) -> Vec<RootId> {
+        let mut peers: Vec<RootId> = self
+            .fresh_heard()
+            .into_iter()
+            .filter(|h| h.scope == Scope::Dm)
+            .map(|h| h.from)
+            .collect();
+        peers.sort();
+        peers.dedup();
+        peers
+    }
+
+    /// The live direct call with `peer`, if the peer's device said one is running.
+    pub fn live_call_of_dm(&self, peer: RootId) -> Option<LiveCallView> {
+        self.live_view(|h| h.scope == Scope::Dm && h.from == peer, None, true)
+    }
+
+    /// Builds the view of the earliest call that `want` matches. Several devices may report the
+    /// same room, so their rosters are merged. `group` is the group's members, or `None` for a DM.
+    fn live_view(
+        &self,
+        want: impl Fn(&Heard) -> bool,
+        group: Option<&[RootId]>,
+        dm: bool,
+    ) -> Option<LiveCallView> {
+        let mut calls: Vec<Heard> = self.fresh_heard().into_iter().filter(|h| want(h)).collect();
+        calls.sort_by_key(|h| h.started_ms);
+        let first = calls.first()?.clone();
+        let mut roster: Vec<PresenceMember> = Vec::new();
+        for call in calls.iter().filter(|h| h.room == first.room) {
+            for member in &call.members {
+                if !roster.iter().any(|m| m.root == member.root) {
+                    roster.push(*member);
+                }
+            }
+        }
+        let me = self.inner.me;
+        let w = self.read();
+        let participants = roster
+            .iter()
+            .filter(|m| m.root != me)
+            .map(|m| LiveParticipant {
+                root_id: m.root.to_string(),
+                display_name: w.display_name(&m.root),
+                muted: m.muted,
+                speaking: false,
+            })
+            .collect();
+        let not_in = group
+            .unwrap_or(&[])
+            .iter()
+            .filter(|r| **r != me && !roster.iter().any(|m| m.root == **r))
+            .map(|r| LiveMember {
+                root_id: r.to_string(),
+                display_name: w.display_name(r),
+            })
+            .collect();
+        Some(LiveCallView {
+            started_ms: first.started_ms,
+            started_by: w.display_name(&first.from),
+            total: group.map_or(2, <[RootId]>::len),
+            route: LiveRoute { kind: "direct" },
+            participants,
+            not_in,
+            scope: dm.then_some("dm"),
+        })
     }
 }

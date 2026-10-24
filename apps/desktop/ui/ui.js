@@ -57,16 +57,29 @@ export function initials(name) {
 }
 
 // size: '' (32px), 'xs' (16), 'sm' (24), 'lg' (40), 'xl' (80), 'card-avatar' (88). Colour follows the seed.
-// online: true or false adds a presence dot; undefined (no presence data) adds nothing.
-export function avatar(name, seed, size = '', online) {
+// presence: a status ('online' | 'idle' | 'dnd' | 'offline') adds a presence dot; so does a boolean (true online, false
+// offline). undefined (no presence data) adds nothing.
+export function avatar(name, seed, size = '', presence) {
   const node = el('span', { class: `avatar ${size}`.trim(), text: initials(name) });
   node.style.setProperty('--hue', String(hueOf(seed || name)));
-  if (online === true || online === false) node.append(presenceDot(online));
+  if (typeof presence === 'boolean' || PRESENCE.includes(presence)) node.append(presenceDot(presence));
   return node;
 }
 
-export function presenceDot(online) {
-  return el('span', { class: `presence${online ? ' online' : ''}`, role: 'img', 'aria-label': online ? 'online' : 'offline' });
+// The four presence states. Each has its own glyph shape (style.css), so colour is never the only cue.
+export const PRESENCE = ['online', 'idle', 'dnd', 'offline'];
+export const PRESENCE_LABEL = { online: 'Online', idle: 'Idle', dnd: 'Do Not Disturb', offline: 'Offline' };
+
+// The presence of a view: its `status` string, else `online` as online or offline. undefined when the view has neither.
+export function presenceOf(view) {
+  if (PRESENCE.includes(view?.status)) return view.status;
+  if (typeof view?.online === 'boolean') return view.online ? 'online' : 'offline';
+  return undefined;
+}
+
+export function presenceDot(presence) {
+  const status = presence === true ? 'online' : presence === false ? 'offline' : presence;
+  return el('span', { class: `presence ${status}`, role: 'img', 'aria-label': PRESENCE_LABEL[status] });
 }
 
 // Two small avatars, one over the other, for a group conversation.

@@ -19,6 +19,8 @@ pub(crate) enum GossipMsg {
     /// An MLS commit was applied. The bytes are fetched over RPC, so a large commit never meets
     /// the gossip frame limit.
     Commit(Box<SignedCommit>),
+    /// A presence beacon from a member. See `presence.rs`.
+    Presence(Box<crate::presence::SignedPresence>),
 }
 
 /// Announces the MLS commit that entered `epoch`. Signed by the committer's device key, so a

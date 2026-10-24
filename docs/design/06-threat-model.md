@@ -23,6 +23,7 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 | Media confidentiality | Call frames are SFrame-encrypted (RFC 9605) with keys from the MLS exporter. Forwarders hold no key. |
 | Direct messages | Sent only device to device over the authenticated QUIC connection, never stored by third parties. Signed by the sender and bound to the recipient. |
 | Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 16 per device. |
+| Presence privacy | Online status comes only from signed beacons, sent every 30 s to community members and direct contacts, never from traffic. Invisible sends none, but a peer may still show the last beacon for up to 60 s after you go invisible. Status is per device, not per account. |
 
 ## Findings
 

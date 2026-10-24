@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::presence::Presence;
 use dissent_discovery::ContactCard;
 use dissent_identity::{DeviceId, DeviceKey, RootId, Signature};
 use dissent_net::PeerAddr;
@@ -351,6 +352,8 @@ impl Engine {
         }
         self.emit(EngineEvent::ContactsChanged);
         self.retry_contact_outbox().await;
+        // The new contact can see our status now, so it need not wait for the next beacon.
+        self.send_presence().await;
         Ok(self.read().user_view(&user))
     }
 
@@ -621,7 +624,9 @@ pub struct ContactEntry {
     pub root_id: String,
     pub display_name: String,
     pub suffix: String,
-    /// Not tracked yet. Always false.
+    /// What others see of this person. See `status`.
+    pub status: crate::presence::Presence,
+    /// True unless `status` is offline. Kept for older clients.
     pub online: bool,
     /// Names of the servers we share with them.
     pub shared_servers: Vec<String>,
@@ -640,35 +645,22 @@ impl Engine {
     /// The contacts page, as the desktop lists it.
     pub fn list_contacts(&self) -> ContactsView {
         let w = self.read();
-        let neighbours: BTreeSet<DeviceId> = self
-            .inner
-            .neighbours
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .flatten()
-            .copied()
-            .collect();
         let now = now_ms();
-        let online = |root: &RootId| {
-            w.directory.devices_of(root).iter().any(|d| {
-                neighbours.contains(d)
-                    || w.last_seen
-                        .get(d)
-                        .is_some_and(|t| now.saturating_sub(*t) < PRESENCE_WINDOW_MS)
-            })
-        };
-        let entry = |root: RootId| ContactEntry {
+        let entry = |root: RootId| {
+            let status = w.presence_of(&root, now);
+            ContactEntry {
             root_id: root.to_string(),
             display_name: w.display_name(&root),
             suffix: root.suffix(),
-            online: online(&root),
+            status,
+            online: status != Presence::Offline,
             shared_servers: w
                 .communities
                 .values()
                 .filter(|c| c.is_member(&root) && c.is_member(&w.me))
                 .map(|c| c.name().to_string())
                 .collect(),
+            }
         };
         ContactsView {
             incoming: w
@@ -759,8 +751,6 @@ impl Engine {
 /// How long a sender waits between explicit refusals. Within this window, a refused sender gets
 /// the same silent acknowledgement a blocked one does.
 pub(crate) const REFUSAL_WINDOW_MS: u64 = 10 * 60 * 1000;
-/// A device counts as online if it sent us a request this recently, or is a gossip neighbour.
-pub(crate) const PRESENCE_WINDOW_MS: u64 = 60 * 1000;
 
 /// The reply to a message the recipient's policy refuses. At most one explicit refusal per sender
 /// per window. After that, the sender gets a silent acknowledgement, the same as a blocked sender,

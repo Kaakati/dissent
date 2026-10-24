@@ -1,5 +1,7 @@
-// A right-click menu at a point. Items: { label, icon, sub, danger, disabled, onPick, submenu: [...] } or 'sep'.
-// Keyboard: Up and Down move, Right opens a submenu, Left closes it, Enter picks, Escape closes everything.
+// A right-click menu at a point. Items: { label, icon, leading, sub, danger, disabled, onPick, submenu: [...] }, 'sep',
+// or { header } for a non-item block (a node that the arrow keys skip).
+// Keyboard: Up and Down move (closing any open submenu), Right opens a submenu, Left closes it, Enter picks, Escape
+// closes everything. A submenu opens on hover, click, Enter or Right, not on focus alone.
 import { el, icon } from '../ui.js';
 
 let open = null; // { root, opener }
@@ -26,13 +28,13 @@ function onKey(e) {
   const i = items.indexOf(active);
   switch (e.key) {
     case 'Escape': e.preventDefault(); closeContextMenu(); return;
-    case 'ArrowDown': e.preventDefault(); items[(i + 1) % items.length]?.focus(); return;
-    case 'ArrowUp': e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); return;
-    case 'Home': e.preventDefault(); items[0]?.focus(); return;
-    case 'End': e.preventDefault(); items[items.length - 1]?.focus(); return;
+    case 'ArrowDown': e.preventDefault(); moveTo(menu, items[(i + 1) % items.length]); return;
+    case 'ArrowUp': e.preventDefault(); moveTo(menu, items[(i - 1 + items.length) % items.length]); return;
+    case 'Home': e.preventDefault(); moveTo(menu, items[0]); return;
+    case 'End': e.preventDefault(); moveTo(menu, items[items.length - 1]); return;
     case 'ArrowRight': {
       const sub = active?.querySelector?.(':scope > .submenu');
-      if (sub) { e.preventDefault(); sub.querySelector('.menu-item')?.focus(); }
+      if (sub) { e.preventDefault(); sub.hidden = false; placeSub(active, sub); sub.querySelector('.menu-item')?.focus(); }
       return;
     }
     case 'ArrowLeft': {
@@ -44,11 +46,18 @@ function onKey(e) {
   }
 }
 
+// Focuses a row of this menu and shuts the submenus of its sibling rows.
+function moveTo(menu, item) {
+  for (const sub of menu.querySelectorAll(':scope > .menu-item > .submenu')) sub.hidden = true;
+  item?.focus();
+}
+
 function build(items, isSub = false) {
   const menu = el('div', { class: `menu context${isSub ? ' submenu' : ''}`, role: 'menu' });
   for (const item of items) {
     if (item === 'sep') { menu.append(el('div', { class: 'menu-sep', role: 'separator' })); continue; }
     if (!item) continue;
+    if (item.header) { menu.append(el('div', { class: 'menu-head', role: 'none' }, item.header)); continue; }
     const node = el('button', {
       class: `menu-item${item.danger ? ' danger' : ''}${item.submenu ? ' has-sub' : ''}`,
       role: 'menuitem',
@@ -56,7 +65,7 @@ function build(items, isSub = false) {
       'aria-haspopup': item.submenu ? 'menu' : null,
       tabindex: '-1',
     },
-    item.icon ? icon(item.icon) : null,
+    item.leading ?? (item.icon ? icon(item.icon) : null),
     el('span', { class: 'menu-text' }, el('span', { text: item.label }), item.sub ? el('span', { class: 'menu-sub', text: item.sub }) : null),
     item.submenu ? el('span', { class: 'icon chev' }, icon('chevron-right')) : null);
     if (item.submenu) {
@@ -65,7 +74,6 @@ function build(items, isSub = false) {
       node.append(sub);
       const show = () => { sub.hidden = false; placeSub(node, sub); };
       node.addEventListener('pointerenter', show);
-      node.addEventListener('focus', show);
       node.addEventListener('pointerleave', () => { sub.hidden = true; });
       node.addEventListener('click', (e) => { if (e.target === node || e.target.closest('.menu-item') === node) { e.stopPropagation(); show(); } });
     } else {
@@ -89,14 +97,16 @@ function placeSub(parent, sub) {
 }
 
 // Opens the menu with its top-left corner at (x, y), moved back inside the window when it would overflow.
-export function openContextMenu(x, y, items) {
+// placeAbove puts the bottom-left corner at (x, y) instead, for menus that open from a control at the window's foot.
+export function openContextMenu(x, y, items, { placeAbove = false } = {}) {
   closeContextMenu();
   const root = build(items);
   root.setAttribute('aria-label', 'Context menu');
   document.body.append(root);
   const r = root.getBoundingClientRect();
   root.style.left = `${Math.round(Math.max(8, Math.min(x, window.innerWidth - r.width - 8)))}px`;
-  root.style.top = `${Math.round(Math.max(8, Math.min(y, window.innerHeight - r.height - 8)))}px`;
+  const top = placeAbove ? y - r.height : y;
+  root.style.top = `${Math.round(Math.max(8, Math.min(top, window.innerHeight - r.height - 8)))}px`;
   open = { root, opener: document.activeElement };
   document.addEventListener('pointerdown', onOutside, true);
   document.addEventListener('keydown', onKey, true);

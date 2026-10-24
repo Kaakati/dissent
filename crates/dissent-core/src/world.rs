@@ -59,8 +59,12 @@ pub(crate) struct World {
     pub attach: crate::attachments::AttachBook,
     /// Inbox service state: envelopes and key packages held for our root.
     pub inbox: crate::inbox::InboxBook,
-    /// When each device last sent us a request. Presence is judged from this, with no pings.
-    pub last_seen: BTreeMap<DeviceId, u64>,
+    /// This device's own status, from `status.bin`.
+    pub own: crate::presence::OwnStatus,
+    /// Set by the desktop after a quiet stretch. Turns an online status into idle, and is never stored.
+    pub auto_idle: bool,
+    /// The newest presence beacon held for each person. See `presence.rs`.
+    pub presence: BTreeMap<RootId, crate::presence::Heard>,
     pub directory: Directory,
     pub addresses: AddressBook,
     /// Our dialable address. Set once the endpoint is up.
@@ -102,6 +106,7 @@ impl World {
         let access = crate::access::load(&paths, communities.keys().copied())?;
         let identity_changes: Vec<IdentityChange> =
             crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
+        let own = crate::presence::load_own(&paths);
         Ok(World {
             me: identity.root_id(),
             device: identity.device_id(),
@@ -118,7 +123,9 @@ impl World {
             conv_msgs,
             inbox,
             attach,
-            last_seen: BTreeMap::new(),
+            own,
+            auto_idle: false,
+            presence: BTreeMap::new(),
             directory,
             addresses: AddressBook::from_list(addrs),
             my_addr: None,
@@ -225,6 +232,7 @@ impl World {
                 name: name.clone(),
             })
             .collect();
+        let now = crate::engine::now_ms();
         let members = c
             .state()
             .members
@@ -237,6 +245,7 @@ impl World {
                 handle: c.handle_of(root),
                 role: c.role_of(root).to_string(),
                 banned: c.state().banned.contains(root),
+                status: self.presence_of(root, now),
             })
             .collect();
         CommunityView {
@@ -263,6 +272,7 @@ impl World {
             note: fields.note,
             nickname: fields.nickname,
             ignored: fields.ignored,
+            status: self.presence_of(user, crate::engine::now_ms()),
             handles: shared
                 .iter()
                 .map(|c| HandleView {

@@ -22,6 +22,7 @@ export const FEATURES = [
   'topics', // a channel topic line in the chat header (Part 6.13)
   'close_dm', // "Close DM" in the conversation menu (close_conversation)
   'ignore', // "Ignore" and "Unignore" in the DM menu; ignored users' messages collapse
+  'status', // your status (online, idle, Do Not Disturb, invisible) from the profile popover on the user bar
 ];
 
 const supported = new Set();

@@ -9,6 +9,7 @@ mod voice;
 mod transfers_cmds;
 mod part6;
 mod contacts_cmds;
+mod status_cmds;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -104,6 +105,8 @@ pub fn run() {
                 engine: tokio::sync::RwLock::new(Some(engine)),
             });
             events::forward_events(app.handle().clone(), rx);
+            app.manage(status_cmds::LastInput::new());
+            status_cmds::start_idle_watch(app.handle().clone());
             tray::install(app)?;
             updates::start_background(app.handle().clone());
             attachments::install(app);
@@ -183,6 +186,9 @@ pub fn run() {
             commands::dm_messages,
             commands::send_dm,
             commands::net_status,
+            status_cmds::set_status,
+            status_cmds::get_status,
+            status_cmds::record_activity,
             commands::get_network_settings,
             commands::safety_number,
             updates::check_update,
@@ -208,6 +214,8 @@ pub fn run() {
             part6::send_call_message,
             part6::accept_call,
             part6::decline_call,
+            part6::join_group_call,
+            part6::join_dm_call,
             part6::complete_first_run,
             part6::read_markers,
             part6::close_conversation,

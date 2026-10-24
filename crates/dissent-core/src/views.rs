@@ -48,6 +48,8 @@ pub struct MemberInfo {
     pub handle: Option<String>,
     pub role: String,
     pub banned: bool,
+    /// What others see of this member: their status, or offline.
+    pub status: crate::presence::Presence,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -116,6 +118,8 @@ pub struct UserView {
     pub nickname: Option<String>,
     /// True if this device ignores the person. Their messages still arrive, collapsed, and never notify.
     pub ignored: bool,
+    /// What others see of this person: their status, or offline.
+    pub status: crate::presence::Presence,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -154,6 +158,10 @@ pub struct ConversationSummary {
     pub display_name: String,
     pub last_text: String,
     pub last_ms: u64,
+    /// The other party's status in a 1:1 DM. `None` for a group.
+    pub status: Option<crate::presence::Presence>,
+    /// The call in this conversation that another member's device says is live. `None` when none is.
+    pub live_call: Option<crate::calls::LiveCallView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -218,6 +226,13 @@ pub enum EngineEvent {
     CallMissed { call_id: String, from: String },
     /// Another device of the same person answered this call, so this one stopped ringing.
     CallAnsweredElsewhere { call_id: String },
+    /// Our status changed, by a set, an expiry, or auto-idle. `until_ms` is the end of a timed status.
+    StatusChanged {
+        status: crate::presence::Status,
+        until_ms: Option<u64>,
+    },
+    /// What we show for `user` changed because a status beacon arrived. A person going quiet emits nothing.
+    PresenceChanged { user: String },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.

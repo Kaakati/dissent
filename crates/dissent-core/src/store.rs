@@ -117,6 +117,10 @@ impl Paths {
     pub fn local_state(&self) -> PathBuf {
         self.root.join("local.bin")
     }
+    /// This device's own status. Its own file, so `local.bin` keeps its layout.
+    pub fn own_status(&self) -> PathBuf {
+        self.root.join("status.bin")
+    }
 }
 
 fn encoding(e: postcard::Error) -> CoreError {

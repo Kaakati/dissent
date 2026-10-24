@@ -182,10 +182,18 @@ p + p, .muted + .muted { margin-top: var(--s-1); }
 .avatar.xl { width: var(--avatar-xl); height: var(--avatar-xl); font-size: 28px; }
 .avatar.card-avatar { width: var(--avatar-card); height: var(--avatar-card); font-size: 28px; }
 /* Presence dot: 10 px with a 3 px ring in the surface colour, set per container through --ring. */
-.presence { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--offline); box-shadow: 0 0 0 3px var(--ring, var(--sidebar)); }
-.presence.online { background: var(--success); }
+.presence { position: absolute; right: -2px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--ring, var(--sidebar)); overflow: hidden; }
+/* The four states differ in shape as well as colour: filled dot, moon, minus disc and hollow ring. */
+.presence.idle { background: var(--warn); }
+.presence.idle::after { content: ""; position: absolute; top: -30%; right: -40%; width: 90%; height: 90%; border-radius: 50%; background: var(--ring, var(--sidebar)); }
+.presence.dnd { background: var(--danger); }
+.presence.dnd::after { content: ""; position: absolute; left: 22%; right: 22%; top: 50%; height: 20%; margin-top: -10%; border-radius: 1px; background: #fff; }
+.presence.offline { background: var(--ring, var(--sidebar)); box-shadow: inset 0 0 0 2px var(--offline), 0 0 0 3px var(--ring, var(--sidebar)); }
 .avatar.card-avatar .presence { right: 2px; bottom: 2px; width: 16px; height: 16px; box-shadow: 0 0 0 4px var(--ring, var(--panel)); }
+.avatar.card-avatar .presence.offline { box-shadow: inset 0 0 0 2px var(--offline), 0 0 0 4px var(--ring, var(--panel)); }
 .avatar.lg .presence { width: 12px; height: 12px; }
+.avatar.xl .presence { right: 0; bottom: 0; width: 18px; height: 18px; box-shadow: 0 0 0 4px var(--ring, var(--sidebar)); }
+.avatar.xl .presence.offline { box-shadow: inset 0 0 0 2px var(--offline), 0 0 0 4px var(--ring, var(--sidebar)); }
 .mini-server {
   width: var(--avatar-sm); height: var(--avatar-sm); border-radius: var(--r-3); flex: none;
   display: inline-grid; place-items: center; color: #fff; font-size: 9px; font-weight: 600; line-height: 1;
@@ -563,7 +571,18 @@ p + p, .muted + .muted { margin-top: var(--s-1); }
 .menu-item.has-sub::after { content: ""; }
 .menu-item > .icon.chev { margin-left: auto; }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--border-menu); flex: none; }
-.menu.context { position: fixed; top: auto; left: auto; right: auto; width: 264px; }
+.menu.context { position: fixed; top: auto; left: auto; right: auto; width: 264px; --ring: var(--ink); }
+.menu-head { padding: var(--s-2); }
+.status-card { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
+.status-card .avatar { flex: none; }
+.status-id { display: flex; flex-direction: column; min-width: 0; }
+.status-id .name { color: var(--text-strong); font: 600 var(--fs-body) / 20px var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-id .tag { color: var(--muted); font: var(--fs-meta) / var(--lh-meta) var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The status glyph in a menu row: the same shapes as the presence dot, sized to the row, and cut out in the row's colour. */
+.status-glyph.presence { position: relative; right: auto; bottom: auto; flex: none; width: 12px; height: 12px; box-shadow: none; --ring: var(--ink); }
+.status-glyph.presence.offline { background: transparent; box-shadow: inset 0 0 0 2px var(--offline); }
+.menu-item:hover .status-glyph.presence, .menu-item:focus-visible .status-glyph.presence { --ring: var(--accent); }
+.menu-item:hover .status-glyph.presence.offline, .menu-item:focus-visible .status-glyph.presence.offline { box-shadow: inset 0 0 0 2px #fff; }
 .menu.submenu { position: absolute; left: calc(100% + 10px); top: -6px; width: 220px; right: auto; }
 .menu-item .mini-server { width: 20px; height: 20px; border-radius: 6px; font-size: 8px; }
 .popover { position: fixed; z-index: 20; width: 280px; background: var(--ink); border-radius: var(--r-2); padding: var(--s-4); box-shadow: var(--shadow-2); }
@@ -1181,9 +1200,9 @@ html[data-density="compact"] .skel-lines { padding-top: 0; gap: var(--s-1); }
 .onboard-steps li.current .dot { background: var(--accent); }
 .onboard-steps .dot.ring { background: none; box-shadow: inset 0 0 0 2px var(--faint); color: var(--muted); }
 .onboard-body { background: var(--chat); padding: 60px 0; display: flex; justify-content: center; overflow-y: auto; }
-.onboard-body > * { width: 760px; }
+.onboard-body > * { width: 960px; max-width: 100%; }
 .onboard-body { flex-direction: column; align-items: center; gap: var(--s-6); }
-.onboard-id { width: 760px; display: flex; align-items: center; gap: var(--s-4); padding: var(--s-4) var(--s-5); background: var(--user-bar); border: 1px solid var(--border); border-radius: var(--r-row); }
+.onboard-id { width: 960px; max-width: 100%; display: flex; align-items: center; gap: var(--s-4); padding: var(--s-4) var(--s-5); background: var(--user-bar); border: 1px solid var(--border); border-radius: var(--r-row); }
 .onboard-id .text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .onboard-id .name { color: var(--text-strong); font: 600 18px / 24px var(--font); }
 .onboard-id .tag { color: var(--muted); font: var(--fs-ui) / var(--lh-ui) var(--mono); }

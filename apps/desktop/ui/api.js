@@ -123,6 +123,11 @@ export const api = {
   readMarkers: () => call('read_markers'),
   approveDevice: (link) => call('approve_device', { link }),
   finishDeviceLink: (grant) => call('finish_device_link', { grant }),
+  // your own status; untilMs is epoch milliseconds, or null for no end
+  getStatus: () => call('get_status'),
+  setStatus: (status, untilMs) => call('set_status', { status, untilMs }),
+  // Any user input, for auto-idle. The UI calls it at most once every 30 seconds.
+  recordActivity: () => call('record_activity'),
 };
 
 // Calls handler with each EngineEvent payload, e.g. { kind: 'message', community_id, channel_id }.

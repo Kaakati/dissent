@@ -339,6 +339,7 @@ export function openFileSendDialog(files) {
           'Members download from you and from each other at the same time, and from the seeder when you’re offline.',
         ],
         via: 'Members share the load',
+        members: state.community.members.filter((m) => !m.banned).length,
         end: 'Members',
         send: 'Share to #' + channel.name,
       });
@@ -388,13 +389,16 @@ export function openFileSendDialog(files) {
         paint();
       },
     }, el('span', { class: 'target-mark', text: t.initials }), el('span', { class: 'target-text' }, el('span', { class: 'target-title', text: t.title }), el('span', { class: 'target-sub', text: t.sub })))));
+    // The channel end counts its members, and names the seeder when the seeder keeps a copy.
+    const end = current.members === undefined ? current.end : `${current.members} members${seedBox.checked ? ' + seeder' : ''}`;
     travel.replaceChildren(
       el('span', { class: 'travel-label', text: 'How it travels' }),
-      el('div', { class: 'travel-line' }, el('span', { class: 'end-node', text: 'You' }), el('span', { class: 'line' }), el('span', { class: 'via', text: current.via }), el('span', { class: 'line' }), el('span', { class: 'end-node', text: current.end })),
+      el('div', { class: 'travel-line' }, el('span', { class: 'end-node', text: 'You' }), el('span', { class: 'line' }), el('span', { class: 'via', text: current.via }), el('span', { class: 'line' }), el('span', { class: 'end-node', text: end })),
       el('ol', { class: 'steps' }, current.steps.map((s, i) => el('li', {}, el('span', { class: 'n', text: String(i + 1) }), el('span', { text: s })))));
     sendBtn.textContent = current.send;
     seedRow.hidden = current.target.kind !== 'channel';
   };
+  seedBox.addEventListener('change', paint);
   paint();
   const fileRow = el('div', { class: 'file-card' },
     el('span', { class: 'file-tile', text: files.length === 1 ? (fileExt(files[0].name) || 'FILE').toUpperCase() : String(files.length) }),

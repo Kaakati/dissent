@@ -739,6 +739,7 @@ function composer(view) {
       onclick: (e) => togglePlusMenu(wrap, view, e.currentTarget),
     }),
     input,
+    el('span', { class: 'limit-hint', text: `Files up to ${MAX_FILE_LABEL}` }),
     sendButton = el('button', { class: 'icon-btn lg send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
   );
   renderStaged();

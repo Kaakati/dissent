@@ -2,7 +2,7 @@
 //! `groups.rs`). Plaintext DMs written before sealing stay readable, and are merged into the same
 //! view under the same conversation id.
 
-use crate::engine::Engine;
+use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::groups::{dm_conv_id, ConvId, ConvKind, ConvMeta};
 use crate::views::{ConvMember, ConversationSummary, DmItem};
@@ -46,6 +46,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         }
         None => (meta.name.clone(), meta.name.clone(), String::new()),
     };
+    let status = peer.map(|p| w.presence_of(&p, now_ms()));
     ConversationSummary {
         id: meta.id.to_string(),
         kind: meta.kind.as_str().to_string(),
@@ -63,12 +64,14 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         display_name,
         last_text: crate::attachments::text_of(&last_text),
         last_ms,
+        status,
+        live_call: None,
     }
 }
 
 /// One summary per conversation, newest first. Plaintext DMs from peers with no sealed
-/// conversation yet get a 1:1 summary too.
-pub(crate) fn conversations(w: &World) -> Vec<ConversationSummary> {
+/// conversation yet get a 1:1 summary too, and so does a peer whose DM call is live.
+pub(crate) fn conversations(w: &World, live_peers: &[RootId]) -> Vec<ConversationSummary> {
     let mut out: Vec<ConversationSummary> = w
         .conv_book
         .convs
@@ -76,7 +79,8 @@ pub(crate) fn conversations(w: &World) -> Vec<ConversationSummary> {
         .filter(|m| !m.left)
         .map(|m| summary(w, m))
         .collect();
-    for peer in w.dms.keys() {
+    let fresh = live_peers.iter().filter(|p| !w.dms.contains_key(p));
+    for peer in w.dms.keys().chain(fresh) {
         let conv = dm_conv_id(&w.me, peer);
         if w.conv_book.convs.contains_key(&conv) {
             continue;
@@ -121,7 +125,16 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
 impl Engine {
     /// One summary per conversation: 1:1 DMs and group DMs, newest first.
     pub fn conversations(&self) -> Vec<ConversationSummary> {
-        conversations(&self.read())
+        let live_peers = self.live_dm_peers();
+        let mut list = conversations(&self.read(), &live_peers);
+        for c in &mut list {
+            c.live_call = if c.kind == "dm" {
+                c.peer.parse().ok().and_then(|peer| self.live_call_of_dm(peer))
+            } else {
+                c.id.parse().ok().and_then(|conv| self.live_call_of_group(conv))
+            };
+        }
+        list
     }
 
     /// The newest `limit` messages with `peer`, sealed and plaintext, oldest first.

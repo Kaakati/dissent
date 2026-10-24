@@ -3,7 +3,7 @@ import { state, subscribe } from '../state.js';
 import { membersNodes } from './members.js';
 import { profilePanelNodes } from './dmpanel.js';
 import * as actions from '../actions.js';
-import { skeletonRows, avatar, el, copyText, toast } from '../ui.js';
+import { skeletonRows, avatar, el, copyText, toast, presenceOf } from '../ui.js';
 import { confirmDialog } from './dialogs.js';
 import { has } from '../features.js';
 import { pageBuilders } from './pages.js';
@@ -64,7 +64,7 @@ function card(title, body) {
 function groupMembersCard(group) {
   const members = group.members ?? [];
   const rows = members.map((m) => el('div', { class: 'member two-line', title: `${m.display_name}·${m.suffix}` },
-    avatar(m.display_name, m.root_id, '', m.online),
+    avatar(m.display_name, m.root_id, '', presenceOf(m)),
     el('span', { class: 'member-text' },
       el('span', { class: 'member-name' },
         el('span', { text: m.display_name }),

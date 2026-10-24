@@ -8,10 +8,11 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use dissent_core::{
-    CallView, ChannelId, CommunityId, DeviceView, Engine, EventId, GuardianView, Identity,
+    CallView, ChannelId, CommunityId, ConvId, DeviceView, Engine, EventId, GuardianView, Identity,
     MessageItem, NoteKind, PendingDevice, RootId,
 };
 use dissent_identity::{keystore, DeviceId};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{restart_engine, AppState};
@@ -259,6 +260,82 @@ pub async fn finish_device_link(
 #[tauri::command]
 pub async fn accept_call(state: State<'_, AppState>, call_id: String) -> Result<(), String> {
     engine(&state).await?.accept_call(call_id).await.map_err(err)
+}
+
+/// Joins a group call that is already live. The call is linked to every member in it.
+#[tauri::command]
+pub async fn join_group_call(
+    state: State<'_, AppState>,
+    group_id: String,
+) -> Result<Option<CallView>, String> {
+    let conv: ConvId = parse("group id", &group_id)?;
+    let engine = engine(&state).await?;
+    engine.join_group_call(conv).await.map_err(err)?;
+    Ok(engine.call_state())
+}
+
+/// Joins the direct call with a contact, or calls them when none is live. A live call is joined
+/// the same way: the device that stayed in it answers with a fresh key.
+#[tauri::command]
+pub async fn join_dm_call(state: State<'_, AppState>, peer: String) -> Result<Option<CallView>, String> {
+    let peer: RootId = parse("peer", &peer)?;
+    let engine = engine(&state).await?;
+    engine.call_dm(peer).await.map_err(err)?;
+    Ok(engine.call_state())
+}
+
+/// The payload of `dissent://call-ringing`, from the engine's `IncomingCall` event. The names,
+/// the verification chip and who is already in the call come from the engine's own views.
+pub(crate) fn ringing_payload(engine: &Engine, call_id: &str, from: &str, conv: Option<&str>) -> Value {
+    // Verified means the safety number was compared, and the key has not changed since.
+    let (caller_name, verified) = RootId::from_str(from)
+        .map(|root| {
+            let user = engine.user_profile(root);
+            let verified = user.verified_ms.is_some() && user.key_changed_ms.is_none();
+            (user.display_name, verified)
+        })
+        .unwrap_or_default();
+    let caller = json!({ "root_id": from, "display_name": caller_name });
+    match conv {
+        Some(group_id) => {
+            let summary = engine.conversations().into_iter().find(|c| c.id == group_id);
+            let name = summary.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            let total = summary.as_ref().map_or(0, |c| c.members.len());
+            let mut members_in: Vec<Value> = summary
+                .and_then(|c| c.live_call)
+                .map(|live| live.participants)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| json!({ "root_id": p.root_id, "display_name": p.display_name }))
+                .collect();
+            // The caller is in the call it started, even before its roster has reached this device.
+            if !members_in.iter().any(|m| m["root_id"].as_str() == Some(from)) {
+                members_in.insert(0, caller.clone());
+            }
+            json!({
+                "call_id": call_id,
+                "scope": "group",
+                "group_id": group_id,
+                "name": name,
+                "caller": caller,
+                "verified": verified,
+                "in_call": members_in.len(),
+                "total": total,
+                "members_in": members_in,
+            })
+        }
+        None => json!({
+            "call_id": call_id,
+            "scope": "dm",
+            "peer": from,
+            "name": caller_name,
+            "caller": caller,
+            "verified": verified,
+            "in_call": 1,
+            "total": 2,
+            "members_in": [],
+        }),
+    }
 }
 
 /// Declines a ringing direct call. The caller is told, and nothing connects.

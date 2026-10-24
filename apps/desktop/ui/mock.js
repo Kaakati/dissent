@@ -18,6 +18,8 @@ if (!window.__TAURI__) {
   const people = { [ME]: 'Sami', [GRACE]: 'Maya', [LINUS]: 'Jonas', [KEN]: 'Omar', [RADIA]: 'Leila', [RANA]: 'Rana' };
   const handles = { [ME]: 'sami', [GRACE]: 'maya', [LINUS]: 'jonas', [KEN]: 'omar', [RADIA]: 'leila', [RANA]: 'rana' };
   const suffix = (root) => root.slice(0, 8);
+  // Presence for the member lists and DM rows: the mock sets a few, and leaves the rest without a dot.
+  const MEMBER_STATUS = { [GRACE]: 'online', [LINUS]: 'idle', [KEN]: 'dnd', [RADIA]: 'offline' };
 
   // Messages are written as [minutes ago, author, text]. Gaps longer than 7 minutes start a new group.
   // Reactions are kept as { emoji, users } and replies as the original's id; messageItem shapes them for the UI.
@@ -187,6 +189,8 @@ if (!window.__TAURI__) {
   };
 
   let mockNetwork = { use_public_relays: true, relays: [] };
+  let mockStatus = { status: 'online', until_ms: null };
+  let mockStatusTimer = null;
   const listeners = [];
   // ?view=dm&peer=maya&plain: the DM board's thread. Maya's messages, one queued message from me (offline delivery,
   // Part 6.8), a verified safety number and no key change. Other mock states are unchanged.
@@ -229,6 +233,7 @@ if (!window.__TAURI__) {
       handle: handles[r] ?? null,
       role: c.roles[r],
       banned: c.banned.has(r),
+      status: MEMBER_STATUS[r],
     })),
   });
   // The reply reference: a snippet of the original, or text null when it is deleted or sealed for this device.
@@ -542,7 +547,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status'];
   const ignoredSet = new Set();
   const NADIA = id('nadia-c5v8m1wk');
   const YUSUF = id('yusuf-r3j6t0pb');
@@ -631,9 +636,25 @@ if (!window.__TAURI__) {
 
   Object.assign(handlers, {
     capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES]),
+    // Your status. set_status emits dissent://status-changed the way the engine will; a timed status reverts to online.
+    get_status: () => mockStatus,
+    // Auto-idle input report: the mock has no idle timer, so it does nothing.
+    record_activity: () => null,
+    set_status: ({ status, untilMs }) => {
+      clearTimeout(mockStatusTimer);
+      mockStatus = { status, until_ms: untilMs ?? null };
+      if (untilMs) {
+        mockStatusTimer = setTimeout(() => {
+          mockStatus = { status: 'online', until_ms: null };
+          emitTo('dissent://status-changed', mockStatus);
+        }, Math.max(0, untilMs - Date.now()));
+      }
+      emitTo('dissent://status-changed', mockStatus);
+      return null;
+    },
     list_conversations: () => {
       const rows = [
-        ...conversations().map((c) => ({ kind: 'dm', ...c, last_text: c.peer === NADIA ? 'Running a seeder for Book club' : '', online: c.peer !== LINUS })),
+        ...conversations().map((c) => ({ kind: 'dm', ...c, last_text: c.peer === NADIA ? 'Running a seeder for Book club' : '', online: c.peer !== LINUS, status: MEMBER_STATUS[c.peer] })),
         ...Object.values(groups).map(groupRow),
       ];
       const rank = (r) => { const i = BOARD_ORDER.indexOf(r.kind === 'group' ? `group:${r.id}` : r.peer); return i < 0 ? 99 : i; };

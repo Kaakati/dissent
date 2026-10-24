@@ -2,7 +2,7 @@
 // direct messages. The user panel (#me) floats over the rail and the sidebar and is rendered here too.
 import { state, subscribe, canManage } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar, stackAvatar, skeletonRows, icon, copyText, toast, plural, presenceDot } from '../ui.js';
+import { el, avatar, stackAvatar, skeletonRows, icon, copyText, toast, plural, presenceDot, presenceOf } from '../ui.js';
 import { has } from '../features.js';
 import { openSwitcher } from './switcher.js';
 import {
@@ -19,12 +19,14 @@ import {
 import { openSettingsPage } from './settings.js';
 import { openProfile } from './profile.js';
 import { openContextMenu } from './contextmenu.js';
+import { openStatusMenu, selfPresence, statusLabel } from './statusmenu.js';
 
 let menu = null;
 
 export function initSidebar() {
   subscribe('sidebar', render);
   subscribe('me', renderMe);
+  subscribe('status', renderMe);
   subscribe('sidebar', renderMe);
   render();
   renderMe();
@@ -190,7 +192,7 @@ function conversationRow(conv) {
     oncontextmenu: (e) => { e.preventDefault(); openConversationMenu(e.clientX, e.clientY, conv); },
   },
   unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null,
-  group ? groupAvatar(conv) : avatar(name, conv.peer, '', typeof conv.online === 'boolean' ? conv.online : undefined),
+  group ? groupAvatar(conv) : avatar(name, conv.peer, '', presenceOf(conv)),
   el('span', { class: 'convo-text' },
     el('span', { class: 'name', text: name }),
     sub ? el('span', { class: `convo-last${live ? ' call-live' : ''}`, text: sub }) : null),
@@ -200,7 +202,8 @@ function conversationRow(conv) {
 
 function groupAvatar(conv) {
   const node = stackAvatar(conv.members ?? []);
-  if (typeof conv.online === 'boolean') node.append(presenceDot(conv.online));
+  const presence = presenceOf(conv);
+  if (presence) node.append(presenceDot(presence));
   return node;
 }
 
@@ -332,14 +335,16 @@ function renderMe() {
   const me = state.me;
   const call = state.call;
   const name = me?.display_name || 'Set a display name';
-  const status = call ? 'In a call' : 'Online';
+  const status = call ? 'In a call' : statusLabel(state.status.status);
+  // The name and avatar open the profile popover with the status picker; without the status feature they open Settings.
   const self = el('button', {
     class: 'me-self',
-    'aria-label': `${name}, ${status}. Open settings`,
+    'aria-label': `${name}, ${status}. Profile and status`,
+    'aria-haspopup': has('status') ? 'menu' : null,
     title: me ? `${me.display_name}·${me.suffix}` : '',
-    onclick: () => openSettingsPage('identity'),
+    onclick: (e) => (has('status') ? openStatusMenu(e.currentTarget) : openSettingsPage('identity')),
   },
-  avatar(me?.display_name || '?', me?.root_id, '', true),
+  avatar(me?.display_name || '?', me?.root_id, '', selfPresence()),
   el('span', { class: 'me-text' },
     el('span', { class: 'me-name', text: name }),
     el('span', { class: 'me-status', text: status })));
@@ -362,5 +367,8 @@ function renderMe() {
         el('div', { class: 'where', text: call.where ?? [call.channel_name, call.community_name].filter(Boolean).join(' / ') })),
       el('button', { class: 'icon-btn', 'aria-label': 'Leave call', title: 'Leave call', icon: 'phone-off', onclick: () => actions.leaveCall() }))
     : null;
+  // A re-render drops focus with the old button, so the user bar keeps it when it had it.
+  const hadFocus = host.contains(document.activeElement);
   host.replaceChildren(...[voice, el('div', { class: 'me-row' }, self, ...tools)].filter(Boolean));
+  if (hadFocus) host.querySelector('.me-self')?.focus();
 }
