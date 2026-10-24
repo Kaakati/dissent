@@ -634,8 +634,35 @@ if (!window.__TAURI__) {
 
   servers.c4 = { id: 'c4', hue: 350, name: 'Kinnly', owner: LINUS, channels: [{ id: 'ch9', name: 'general' }], roles: { [LINUS]: 'owner', [ME]: 'member' }, banned: new Set(), msgs: { ch9: [] } };
 
+  // Typing: nobody types for real in the preview. The mock shows `typers` people from the roster, which cycles
+  // 1, 2, 3, 5 and none every few seconds, until `window.__mockTypers(n)` sets the count by hand.
+  const TYPERS = ['Maya', 'Jonas', 'Leila', 'Omar', 'Rana'];
+  const TYPING_CYCLE = [1, 2, 3, 5, 0];
+  let typers = 0;
+  let typingManual = false;
+  let typingStep = 0;
+  const typingWatched = new Map(); // target key -> target, for each conversation the page has asked about
+  const typingNames = () => TYPERS.slice(0, typers);
+  const watchTyping = (target) => { typingWatched.set(JSON.stringify(target), target); return typingNames(); };
+  const announceTyping = () => typingWatched.forEach((target) => emitTo('dissent://typing-changed', { target, names: typingNames() }));
+  const setTypers = (n) => { typers = n; announceTyping(); };
+  window.__mockTypers = (n) => { typingManual = true; setTypers(n); };
+  setInterval(() => {
+    if (typingManual) return;
+    typingStep = (typingStep + 1) % TYPING_CYCLE.length;
+    setTypers(TYPING_CYCLE[typingStep]);
+  }, 4000);
+
+  Object.assign(handlers, {
+    typing: ({ target }) => { watchTyping(target); return null; },
+    stop_typing: () => null,
+    typing_in: ({ target }) => watchTyping(target),
+  });
+
   Object.assign(handlers, {
     capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES]),
+    // Desktop notifications: the native plugin shows them in the app. The browser preview only logs them.
+    'plugin:notification|notify': ({ options }) => { console.info('[mock] desktop notification', options); return null; },
     // Your status. set_status emits dissent://status-changed the way the engine will; a timed status reverts to online.
     get_status: () => mockStatus,
     // Auto-idle input report: the mock has no idle timer, so it does nothing.
@@ -698,7 +725,14 @@ if (!window.__TAURI__) {
     peer_contact_link: ({ rootId }) => `dissent://contact/${suffix(rootId)}`,
     set_note: () => null,
     start_call: ({ peer }) => {
-      calls.current = callView('dm', { peer, route: { kind: 'direct', title: `Direct call with ${people[peer]}`, detail: 'Peer to peer, end-to-end encrypted' } });
+      // The call rings until the callee answers. The mock answers after four seconds, so ringing and the join sound both show.
+      const started = callView('dm', { peer, participants: [], route: { kind: 'direct', title: `Calling ${people[peer]}`, detail: 'Ringing. Peer to peer, end-to-end encrypted' } });
+      calls.current = started;
+      setTimeout(() => {
+        if (calls.current !== started) return;
+        started.participants = [{ root_id: peer, display_name: people[peer], muted: false, speaking: false }];
+        emitTo('dissent://call-state', { ...started });
+      }, 4000);
       return { ...calls.current };
     },
     join_call: () => {
@@ -797,6 +831,22 @@ if (!window.__TAURI__) {
   window.__mockDm = (peer, text) => {
     (dms[peer] ??= []).push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false });
     emit({ kind: 'dm', peer });
+  };
+
+  // Sound previews. Each helper makes the event the engine would send, so the join, leave, missed and group sounds play.
+  // Participants are replaced as a new array, the way the engine's serialised state arrives.
+  window.__mockCallPeople = (change = 'join') => {
+    if (!calls.current) return;
+    const others = calls.current.participants.filter((p) => p.root_id !== RADIA);
+    calls.current.participants = change === 'join'
+      ? [...others, { root_id: RADIA, display_name: people[RADIA], muted: false, speaking: false }]
+      : others;
+    emitTo('dissent://call-state', { ...calls.current });
+  };
+  window.__mockCallMissed = () => emit({ kind: 'call_missed', call_id: 'call-maya', from: GRACE });
+  window.__mockGroupPost = (groupId, from, text) => {
+    groups[groupId].items.push({ id: id(`g${++seq}`), from, text, ms: Date.now(), pending: false });
+    emit({ kind: 'group', group_id: groupId });
   };
 
   // Drag and drop: the desktop backend sends dissent://drag-over, dissent://drag-leave and dissent://files-dropped.

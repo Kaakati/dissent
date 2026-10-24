@@ -233,6 +233,8 @@ pub enum EngineEvent {
     },
     /// What we show for `user` changed because a status beacon arrived. A person going quiet emits nothing.
     PresenceChanged { user: String },
+    /// Who is typing in `target` changed: someone started, stopped, sent, or timed out.
+    TypingChanged { target: crate::typing::TypingTarget },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.

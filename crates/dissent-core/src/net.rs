@@ -8,10 +8,11 @@ use crate::identity_watch;
 use crate::messages::event_for;
 use crate::rpc::{Request, Response, decode};
 use crate::store::append_records;
+use crate::typing::TypingTarget;
 use crate::views::EngineEvent;
 use crate::wire::{GossipMsg, decode_gossip};
 use crate::world::World;
-use dissent_events::{Payload, SignedDm, SignedEvent};
+use dissent_events::{Payload, SealedKind, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicReceiver};
 use std::collections::BTreeSet;
@@ -93,6 +94,16 @@ impl Engine {
             if c.is_rejected(&se.event.id) {
                 continue;
             }
+            if matches!(
+                se.event.body.payload,
+                Payload::Message { .. } | Payload::Sealed { kind: SealedKind::Message, .. }
+            ) {
+                let target = TypingTarget::Channel {
+                    community,
+                    channel: se.event.body.channel,
+                };
+                self.clear_typer(target, se.event.body.author);
+            }
             if let Payload::SetRelays { relays } = &se.event.body.payload {
                 relay_sets.push(relays.clone());
             }
@@ -161,6 +172,11 @@ impl Engine {
             Ok(GossipMsg::Presence(sp)) => {
                 if let Err(e) = self.accept_presence(Some(community), *sp) {
                     debug!(community = %community, error = %e, "rejected presence beacon");
+                }
+            }
+            Ok(GossipMsg::Typing(st)) => {
+                if let Err(e) = self.accept_typing(Some(community), *st) {
+                    debug!(community = %community, error = %e, "rejected typing signal");
                 }
             }
             Err(e) => debug!(error = %e, "undecodable gossip message"),
@@ -242,6 +258,10 @@ impl Engine {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid presence: {e}")),
             },
+            Request::Typing(st) => match self.accept_typing(None, *st) {
+                Ok(()) => Response::Ack,
+                Err(e) => Response::Error(format!("invalid typing: {e}")),
+            },
         }
     }
 
@@ -311,6 +331,7 @@ impl Engine {
                 true
             }
         };
+        self.clear_typer(TypingTarget::Dm(peer), peer);
         if let Some(ev) = device_notice {
             self.emit(ev);
         }

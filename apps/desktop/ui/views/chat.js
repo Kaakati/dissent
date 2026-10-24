@@ -11,6 +11,7 @@ import { listenTo } from '../api.js';
 import { pageBuilders } from './pages.js';
 import { callPane } from './call.js';
 import { lobbyNodes, lobbyHeader } from './lobby.js';
+import { typingRow, showTyping, typed, stopTyping } from '../typing.js';
 
 // The conversation whose join lobby the user dismissed with Not now. Cleared when they open another conversation.
 let lobbyDismissed = null;
@@ -43,7 +44,7 @@ const overlay = dropOverlay();
 
 export function initChat() {
   const main = document.getElementById('main');
-  main.replaceChildren(header, list, composerHost, overlay);
+  main.replaceChildren(header, list, typingRow, composerHost, overlay);
   list.addEventListener('keydown', onListKey);
   initDrop(main);
   subscribe('main', render);
@@ -152,6 +153,7 @@ function current() {
     return {
       topic: has('topics') ? (channel.topic ?? null) : null,
       key: `ch:${state.community.id}:${channel.id}`,
+      typing: { kind: 'channel', communityId: state.community.id, channelId: channel.id },
       dm: false,
       title: channel.name,
       hash: true,
@@ -186,6 +188,7 @@ function current() {
     });
     return {
       key: state.group ? `group:${state.peer}` : `dm:${state.peer}`,
+      typing: state.group ? { kind: 'group', groupId: state.peer } : { kind: 'dm', peer: state.peer },
       dm: true,
       group: Boolean(state.group),
       peer: state.peer,
@@ -223,6 +226,7 @@ function render() {
     return;
   }
   const view = current();
+  showTyping(view?.typing ?? null);
   if (!view) {
     titleBox.replaceChildren();
     tools.replaceChildren();
@@ -316,6 +320,7 @@ function render() {
 
 // Contacts and Transfers take the whole pane; their aside lives in the right column (views/right.js).
 function renderPage() {
+  showTyping(null);
   const built = pageBuilders[state.ui.page]();
   titleBox.replaceChildren(icon(built.titleIcon), el('h2', { text: built.title }));
   tools.replaceChildren(...(built.headerExtra ?? []));
@@ -698,6 +703,7 @@ function composer(view) {
     const text = input.value.trim();
     const files = staged;
     if (!text && files.length === 0) return;
+    stopTyping(view.typing);
     if (files.some(isOverLimit)) {
       toast(`Remove files over ${MAX_FILE_LABEL} before sending.`);
       return;
@@ -720,6 +726,7 @@ function composer(view) {
     }
     input.focus();
   };
+  input.addEventListener('input', () => typed(view.typing, input.value));
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();

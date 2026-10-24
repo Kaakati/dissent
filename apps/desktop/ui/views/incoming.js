@@ -4,6 +4,7 @@
 import { api } from '../api.js';
 import * as actions from '../actions.js';
 import { el, icon, avatar, toast } from '../ui.js';
+import { startRingtone, stopRingtone } from '../sounds.js';
 
 const QUICK_REPLIES = ['Joining in 5 minutes', 'Can’t make it, catch me up', 'Text me instead'];
 
@@ -16,6 +17,7 @@ export function showIncomingCall(p) {
   let settled = false; // the first answer, decline or reply wins
 
   const dialog = el('dialog', { class: 'dialog incoming', role: 'alertdialog', 'aria-labelledby': titleId, 'aria-describedby': 'incoming-sub' });
+  dialog.dataset.callId = p.call_id;
 
   const decline = async () => {
     if (settled) return;
@@ -89,10 +91,21 @@ export function showIncomingCall(p) {
   dialog.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target === dialog) { e.preventDefault(); answer(); }
   });
-  dialog.addEventListener('close', () => dialog.remove());
+  // Answer, decline, reply, Esc, or the call ending elsewhere: the dialog closes and the ringing stops with it.
+  dialog.addEventListener('close', () => {
+    stopRingtone();
+    dialog.remove();
+  });
 
   document.body.append(dialog);
   dialog.showModal();
+  startRingtone();
   acceptBtn.focus();
   return dialog;
+}
+
+// Closes the ringing dialog for a call that rang out or was answered on another device.
+export function dismissIncomingCall(callId) {
+  const dialog = document.querySelector('dialog.incoming');
+  if (dialog?.dataset.callId === callId) dialog.close();
 }

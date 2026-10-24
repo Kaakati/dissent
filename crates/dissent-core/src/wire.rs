@@ -21,6 +21,8 @@ pub(crate) enum GossipMsg {
     Commit(Box<SignedCommit>),
     /// A presence beacon from a member. See `presence.rs`.
     Presence(Box<crate::presence::SignedPresence>),
+    /// A typing signal from a member. See `typing.rs`.
+    Typing(Box<crate::typing::SignedTyping>),
 }
 
 /// Announces the MLS commit that entered `epoch`. Signed by the committer's device key, so a

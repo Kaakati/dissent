@@ -4,6 +4,8 @@ import { state, notify } from './state.js';
 import { toast } from './ui.js';
 import { seenMs, markSeen } from './unread.js';
 import { has } from './features.js';
+import { callChanged, beginOutgoingRing, playNotification } from './sounds.js';
+import { showOsNotification } from './osnotify.js';
 
 const MSG_LIMIT = 200;
 
@@ -561,37 +563,47 @@ export function handleTransfersEvent(payload) {
 
 // ---- calls (calls feature) ----
 
+// Every change to the call on this device goes through here, so join and leave sounds follow the participant list.
+function setCall(next) {
+  const prev = state.call;
+  state.call = next ?? null;
+  callChanged(prev, state.call);
+}
+
 export async function loadCallState() {
   if (!has('calls')) return;
   try {
-    state.call = await api.callState();
+    setCall(await api.callState());
   } catch {
-    state.call = null;
+    setCall(null);
   }
   notify('me', 'sidebar', 'main', 'right');
 }
 
 export function handleCallEvent(call) {
   if (!has('calls')) return;
-  state.call = call ?? null;
+  setCall(call);
   notify('me', 'sidebar', 'main', 'right', 'title');
 }
 
 export const joinCall = guard(async (communityId, channelId) => {
-  state.call = await api.joinCall(communityId, channelId);
+  setCall(await api.joinCall(communityId, channelId));
   notify('me', 'sidebar', 'main', 'right');
   return true;
 });
 
 export const startCall = guard(async (peer) => {
-  state.call = await api.startCall(peer);
+  const next = await api.startCall(peer);
+  // Until the callee answers, the call has no other participants, and it rings.
+  if (next && !next.participants?.length) beginOutgoingRing();
+  setCall(next);
   notify('me', 'sidebar', 'main', 'right');
   return true;
 });
 
 export const leaveCall = guard(async () => {
   await api.leaveCall();
-  state.call = null;
+  setCall(null);
   notify('me', 'sidebar', 'main', 'right');
   return true;
 });
@@ -599,7 +611,7 @@ export const leaveCall = guard(async () => {
 // Ringing: answer or decline a direct call. Answering with the mic muted mutes it once the call connects.
 export const acceptCall = guard(async (callId, { muted = false } = {}) => {
   await api.acceptCall(callId);
-  state.call = await api.callState();
+  setCall(await api.callState());
   if (muted && state.call && !state.call.muted) {
     await api.setMuted(true);
     state.call.muted = true;
@@ -615,14 +627,14 @@ export const declineCall = guard(async (callId) => {
 
 // Joining a call that is already live (the lobby). Mic state comes from the lobby.
 export const joinGroupCall = guard(async (groupId, { muted = false } = {}) => {
-  state.call = await api.joinGroupCall(groupId);
+  setCall(await api.joinGroupCall(groupId));
   if (muted && state.call && !state.call.muted) { await api.setMuted(true); state.call.muted = true; }
   notify('me', 'sidebar', 'main', 'right');
   return true;
 });
 
 export const joinDmCall = guard(async (peer, { muted = false } = {}) => {
-  state.call = await api.joinDmCall(peer);
+  setCall(await api.joinDmCall(peer));
   if (muted && state.call && !state.call.muted) { await api.setMuted(true); state.call.muted = true; }
   notify('me', 'sidebar', 'main', 'right');
   return true;
@@ -719,6 +731,144 @@ export async function loadVersion() {
   notify('sidebar');
 }
 
+// ---- notification sounds (see sounds.js) ----
+
+// The conversation on screen, as an unread key. Null when none is open.
+function openKey() {
+  if (state.route.kind === 'server') return state.community && state.channelId ? `ch:${state.community.id}:${state.channelId}` : null;
+  if (!state.peer) return null;
+  return state.group ? `group:${state.peer}` : `dm:${state.peer}`;
+}
+
+// A new message in the conversation the user is reading, in a focused window, needs no sound.
+const reading = (key) => openKey() === key && !state.ui.page && document.hasFocus();
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// True when the text @-mentions one of the names, as a whole word and ignoring case.
+function mentions(text, names) {
+  return names.some((name) => name && new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_])`, 'iu').test(text));
+}
+
+// ---- mute: per conversation, kept on this device ----
+
+const MUTE_KEY = 'dissent.muted.v1';
+
+// { [conversation key]: untilMs, or null until it is unmuted }. Storage can be unavailable: mutes then last this session.
+let mutes = (() => {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(MUTE_KEY) ?? '{}');
+    return saved && typeof saved === 'object' ? saved : {};
+  } catch {
+    return {};
+  }
+})();
+
+function saveMutes() {
+  try {
+    window.localStorage.setItem(MUTE_KEY, JSON.stringify(mutes));
+  } catch {
+    // Unavailable: the mute lasts for this session only.
+  }
+}
+
+// A timed mute that has run out is removed here, the next time the conversation is checked.
+export function isMuted(key) {
+  if (!(key in mutes)) return false;
+  const until = mutes[key];
+  if (until === null || until > Date.now()) return true;
+  mutes = { ...mutes };
+  delete mutes[key];
+  saveMutes();
+  return false;
+}
+
+// Mutes a conversation until untilMs, or until it is unmuted when untilMs is null. A muted conversation makes no sound and no desktop notification.
+export function muteConversation(key, untilMs = null) {
+  mutes = { ...mutes, [key]: untilMs };
+  saveMutes();
+  notify('sidebar');
+  return true;
+}
+
+export function unmuteConversation(key) {
+  mutes = { ...mutes };
+  delete mutes[key];
+  saveMutes();
+  notify('sidebar');
+  return true;
+}
+
+// One decision for the notification sound and the desktop notification: does this new message deserve an alert?
+// Muted, own, ignored, closed and channel messages without an @mention never do, and neither does Do Not Disturb.
+// `msg.mentions` is set for channel messages only.
+function shouldAlert(msg) {
+  const me = state.me;
+  if (isMuted(msg.key)) return false;
+  if (!me || msg.from === me.root_id || state.ignored.has(msg.from)) return false;
+  if (state.status?.status === 'dnd') return false;
+  if (msg.kind === 'channel') return msg.mentions;
+  return state.conversations.some((c) => convKey(c) === msg.key); // a closed conversation is no longer listed
+}
+
+// The sound waits for the conversation to be on screen in a focused window. The desktop notification waits for
+// the window to be minimized or unfocused (showOsNotification checks that).
+function alertFor(msg) {
+  if (!shouldAlert(msg)) return undefined;
+  if (!reading(msg.key)) playNotification();
+  return showOsNotification(msg);
+}
+
+// The engine event carries no text, so the newest message is read. Only a message that @-mentions the user alerts.
+async function alertForChannelMessage(ev) {
+  const [latest] = await api.channelMessages(ev.community_id, ev.channel_id, 1);
+  const me = state.me;
+  if (!latest || !me || !latest.text?.includes('@')) return undefined;
+  const community = state.community?.id === ev.community_id ? state.community : await api.communityView(ev.community_id);
+  const handle = community.members?.find((m) => m.root_id === me.root_id)?.handle;
+  const channel = community.channels?.find((c) => c.id === ev.channel_id);
+  return alertFor({
+    kind: 'channel',
+    key: `ch:${ev.community_id}:${ev.channel_id}`,
+    from: latest.author,
+    sender: latest.author_name,
+    where: channel ? `#${channel.name}` : '',
+    text: latest.text,
+    mentions: mentions(latest.text, [me.display_name, handle]),
+  });
+}
+
+// Any DM message from the peer alerts. Call after the conversation list is reloaded, so a closed DM is not listed.
+async function alertForDm(peer) {
+  const [latest] = await api.dmMessages(peer, 1);
+  const conv = state.conversations.find((c) => c.kind !== 'group' && c.peer === peer);
+  if (!latest || !conv) return undefined;
+  return alertFor({ kind: 'dm', key: `dm:${peer}`, from: latest.from, sender: conv.display_name, where: '', text: latest.text });
+}
+
+// Any group message alerts. Membership lines in a group are not messages.
+async function alertForGroup(groupId) {
+  const [latest] = await api.groupMessages(groupId, 1);
+  const conv = state.conversations.find((c) => c.kind === 'group' && c.id === groupId);
+  if (!latest || !conv || latest.system) return undefined;
+  const sender = conv.members?.find((m) => m.root_id === latest.from)?.display_name ?? 'Someone';
+  return alertFor({ kind: 'group', key: `group:${groupId}`, from: latest.from, sender, where: conv.name, text: latest.text });
+}
+
+// A desktop notification was clicked. The backend has restored the window; this opens the conversation it was for.
+export async function openNotifiedConversation(key) {
+  if (typeof key !== 'string') return;
+  const [kind, a, b] = key.split(':');
+  if (kind === 'ch') return openServer(a, b);
+  await loadConversations();
+  if (kind === 'group') {
+    const conv = state.conversations.find((c) => c.kind === 'group' && c.id === a);
+    return conv ? openGroup(conv) : undefined;
+  }
+  const conv = state.conversations.find((c) => c.kind !== 'group' && c.peer === a);
+  return conv ? openDm(a, conv.display_name) : undefined;
+}
+
 // ---- engine events: refresh only what the event touched ----
 
 export const handleEngineEvent = guard(async (ev) => {
@@ -733,6 +883,7 @@ export const handleEngineEvent = guard(async (ev) => {
       return undefined;
     case 'message': {
       const key = `ch:${ev.community_id}:${ev.channel_id}`;
+      alertForChannelMessage(ev).catch(() => {});
       if (state.route.kind === 'server' && state.community?.id === ev.community_id && state.channelId === ev.channel_id) {
         await loadMessages();
         markLatestRead(key, state.messages);
@@ -743,6 +894,7 @@ export const handleEngineEvent = guard(async (ev) => {
     }
     case 'dm': {
       await loadConversations();
+      alertForDm(ev.peer).catch(() => {});
       if (state.route.kind === 'home' && state.peer === ev.peer) {
         await loadDm();
         markLatestRead(`dm:${ev.peer}`, state.dmMessages);
@@ -753,6 +905,7 @@ export const handleEngineEvent = guard(async (ev) => {
     }
     case 'group': {
       await loadConversations();
+      alertForGroup(ev.group_id).catch(() => {});
       if (state.route.kind === 'home' && state.group?.id === ev.group_id) {
         await loadDm();
         markLatestRead(`group:${ev.group_id}`, state.dmMessages);

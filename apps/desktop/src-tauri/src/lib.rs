@@ -10,6 +10,7 @@ mod transfers_cmds;
 mod part6;
 mod contacts_cmds;
 mod status_cmds;
+mod typing_cmds;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -64,6 +65,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = data_dir(app)?;
             std::fs::create_dir_all(&data_dir)?;
@@ -105,6 +107,7 @@ pub fn run() {
                 engine: tokio::sync::RwLock::new(Some(engine)),
             });
             events::forward_events(app.handle().clone(), rx);
+            events::forward_notification_clicks(app.handle());
             app.manage(status_cmds::LastInput::new());
             status_cmds::start_idle_watch(app.handle().clone());
             tray::install(app)?;
@@ -188,6 +191,9 @@ pub fn run() {
             commands::net_status,
             status_cmds::set_status,
             status_cmds::get_status,
+            typing_cmds::typing,
+            typing_cmds::stop_typing,
+            typing_cmds::typing_in,
             status_cmds::record_activity,
             commands::get_network_settings,
             commands::safety_number,

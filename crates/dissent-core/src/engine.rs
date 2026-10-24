@@ -74,6 +74,8 @@ pub(crate) struct Inner {
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
     /// The voice call on this device, and the media links waiting for it.
     pub calls: crate::calls::CallHub,
+    /// Who is typing where. In memory only, so a restart clears it.
+    pub typing: Mutex<crate::typing::Typing>,
     /// Encrypted file storage for attachments. Mounted on the node, so it shares its lifetime.
     pub files: std::sync::Arc<dissent_files::Files>,
 }
@@ -136,6 +138,7 @@ impl Engine {
             sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
             calls: Default::default(),
+            typing: Default::default(),
             files,
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
@@ -177,6 +180,7 @@ impl Engine {
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::typing::typing_loop(Arc::downgrade(&engine.inner)));
         Ok((engine, rx))
     }
 

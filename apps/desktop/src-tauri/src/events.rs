@@ -3,12 +3,15 @@
 use dissent_core::EngineEvent;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::commands::AppState;
 use tokio::sync::broadcast;
 use tracing::warn;
 
 pub const EVENT: &str = "dissent://event";
+/// A desktop notification of this app was clicked. Payload: `{ conv }`, the conversation key it was shown for.
+pub const NOTIFICATION_CLICK_EVENT: &str = "dissent://notification-click";
 /// Our own status changed. Payload: `{ status, until_ms }`, as `get_status` returns it.
 pub const STATUS_EVENT: &str = "dissent://status-changed";
 /// A call is ringing on this device. Payload: the dialog's shape, see `part6::ringing_payload`.
@@ -43,6 +46,30 @@ async fn emit_ringing(app: &AppHandle, call_id: &str, from: &str, conv: Option<&
     }
 }
 
+/// Restores and focuses the main window when a notification is clicked, then tells the UI which conversation it
+/// was for. The plugin reports a click only while the notification is on screen (Windows), so this may not fire
+/// once it has moved to the Action Center.
+pub fn forward_notification_clicks(app: &AppHandle) {
+    let handle = app.clone();
+    let registered = app.notification().on_action(move |action| {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        let conv = action
+            .notification()
+            .and_then(|n| n.extra().get("conv").cloned())
+            .unwrap_or(Value::Null);
+        if let Err(e) = handle.emit(NOTIFICATION_CLICK_EVENT, json!({ "conv": conv })) {
+            warn!(error = %e, "could not emit notification click");
+        }
+    });
+    if let Err(e) = registered {
+        warn!(error = %e, "could not listen for notification clicks");
+    }
+}
+
 /// Runs until the engine drops its sender. A lagging receiver asks the UI to refresh the community list.
 pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) {
     tauri::async_runtime::spawn(async move {
@@ -53,6 +80,9 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                     if let Err(e) = app.emit(STATUS_EVENT, payload) {
                         warn!(error = %e, "could not emit status change");
                     }
+                }
+                Ok(EngineEvent::TypingChanged { target }) => {
+                    crate::typing_cmds::emit_typing(&app, &target).await;
                 }
                 Ok(event) => {
                     if let EngineEvent::IncomingCall { call_id, from, conv, .. } = &event {

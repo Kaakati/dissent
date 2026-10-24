@@ -7,6 +7,7 @@ import { el, icon, copyText, toast } from '../ui.js';
 import { confirmDialog } from './dialogs.js';
 import { cardContent } from './profile.js';
 import { getAppearance, setAppearance } from '../appearance.js';
+import { getSoundSettings, setSoundSettings } from '../sounds.js';
 import { openUpdateDialog } from './updater.js';
 import { has } from '../features.js';
 import { recoveryNodes, devicesNodes } from './guardians.js';
@@ -18,6 +19,7 @@ const NAV = [
   { key: 'devices', label: 'Devices', icon: 'server', feature: 'devices' },
   { key: 'profile', label: 'Contacts & privacy', icon: 'shield-check' },
   { key: 'appearance', label: 'Appearance', icon: 'palette' },
+  { key: 'sounds', label: 'Notifications & sounds', icon: 'volume-2' },
   { key: 'network', label: 'Network', icon: 'wifi' },
   { key: 'updates', label: 'Updates', icon: 'download' },
 ];
@@ -112,7 +114,7 @@ function show(which) {
   renderNav();
   const asyncSection = { recovery: () => recoveryNodes({ onCancel: closeSettingsPage }), devices: devicesNodes }[section];
   const host = el('div', { class: 'settings-async' }, asyncSection ? el('p', { class: 'muted', text: 'Loading…' }) : null);
-  const body = asyncSection ? host : { account, profile, network, appearance, updates }[section]();
+  const body = asyncSection ? host : { account, profile, network, appearance, sounds, updates }[section]();
   page.querySelector('.settings-content').replaceChildren(
     el('header', { class: 'settings-head' }, el('h1', { text: TITLES[section] })),
     el('div', { class: asyncSection ? 'settings-body settings-body-async' : 'settings-body' }, body),
@@ -357,6 +359,61 @@ function appearance() {
       radio('scale', 90, '90%', current.scale === 90, (v) => setAppearance({ scale: v })),
       radio('scale', 100, '100%', current.scale === 100, (v) => setAppearance({ scale: v })),
       radio('scale', 110, '110%', current.scale === 110, (v) => setAppearance({ scale: v }))));
+}
+
+// ---- Sounds: message notifications, call and voice sounds, the ringtone and the volume (sounds.js) ----
+
+function sounds() {
+  const s = getSoundSettings();
+  const kinds = []; // the per-kind toggles and the volume, which are disabled while Play sounds is off
+  const kindToggle = (key, label) => {
+    const input = el('input', { type: 'checkbox', checked: s[key], onchange: (e) => setSoundSettings({ [key]: e.target.checked }) });
+    kinds.push(input);
+    return el('label', { class: 'toggle-row' }, input, el('span', { text: label }));
+  };
+  const level = el('output', { class: 'mono', text: `${s.volume}%` });
+  const volume = el('input', {
+    type: 'range',
+    min: '0',
+    max: '100',
+    step: '5',
+    value: String(s.volume),
+    'aria-label': 'Sound volume',
+    oninput: (e) => { level.textContent = `${e.target.value}%`; },
+    onchange: (e) => setSoundSettings({ volume: Number(e.target.value) }),
+  });
+  kinds.push(volume);
+  const master = el('input', {
+    type: 'checkbox',
+    checked: s.enabled,
+    onchange: (e) => {
+      setSoundSettings({ enabled: e.target.checked });
+      for (const input of kinds) input.disabled = !e.target.checked;
+    },
+  });
+  for (const input of kinds) input.disabled = !s.enabled;
+  // Desktop notifications are not sounds, so these stay available while Play sounds is off.
+  const contentRadio = (value, label) => el('label', { class: 'radio-row' },
+    el('input', { type: 'radio', name: 'notification-content', value, checked: s.content === value, onchange: () => setSoundSettings({ content: value }) }),
+    el('span', { text: label }));
+  return el('div', { class: 'settings-card' },
+    el('section', { class: 'settings-block' },
+      el('h2', { text: 'Sounds' }),
+      el('label', { class: 'toggle-row' }, master, el('span', { text: 'Play sounds' })),
+      el('p', { class: 'muted', text: 'Do Not Disturb silences message and call sounds. Incoming calls still ring.' })),
+    el('section', { class: 'settings-block' },
+      el('h2', { text: 'What plays' }),
+      kindToggle('messages', 'Message notifications'),
+      kindToggle('calls', 'Call and voice sounds'),
+      kindToggle('ringtone', 'Ringtone')),
+    el('fieldset', { class: 'settings-block' },
+      el('legend', { text: 'Show in notifications' }),
+      contentRadio('both', 'Sender and message'),
+      contentRadio('sender', 'Sender only'),
+      contentRadio('none', 'Nothing (just “New message”)')),
+    el('section', { class: 'settings-block' },
+      el('h2', { text: 'Volume' }),
+      el('label', { class: 'volume-row' }, el('span', { text: 'Level' }), volume, level)));
 }
 
 // ---- Updates (version, the update check, and licences) ----

@@ -1316,6 +1316,7 @@ impl Engine {
         if self.read().contact_book.blocked.contains(&signed.cert.root) {
             return Ok(());
         }
+        self.clear_typer(crate::typing::conv_target(&self.inner.me, conv, signed.cert.root), signed.cert.root);
         if meta.kind == ConvKind::Dm && !crate::contacts::dm_allowed(&self.read(), &signed.cert.root) {
             return Err(CoreError::PolicyRefused {
                 from: signed.cert.root,

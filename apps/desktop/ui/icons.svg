@@ -345,4 +345,10 @@
   <symbol id="i-dissent-mark" viewBox="192.5 189 870 870" fill="currentColor">
     <path fill="currentColor" d="M235 230Q235 202 268 202H680C850 202 980 330 1012 490L780 588V535C778 450 710 374 632 374H450V750L238 850Q235 851 235 845Z M1017 547L780 638V665C778 760 710 828 630 828H410C385 828 362 838 350 858L244 1028Q238 1046 257 1046L340 1003Q345 1000 352 1000H705C900 1000 1020 860 1020 680Z" />
   </symbol>
+  <symbol id="i-bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5" />
+    <path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7" />
+    <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    <path d="m2 2 20 20" />
+  </symbol>
 </svg>

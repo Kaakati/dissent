@@ -107,7 +107,7 @@ jobs:
       # Loopback-only suites that are #[ignore]d locally so Windows Firewall doesn't prompt
       # for every rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt.
       - name: Loopback networked tests
-        run: cargo test -p dissent-core --test calls --test part6 --test identity_flows -- --ignored
+        run: cargo test -p dissent-core --test calls --test part6 --test identity_flows --test typing -- --ignored
 
   changelog:
     name: Tag, changelog and draft release

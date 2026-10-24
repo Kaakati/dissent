@@ -196,7 +196,8 @@ function conversationRow(conv) {
   el('span', { class: 'convo-text' },
     el('span', { class: 'name', text: name }),
     sub ? el('span', { class: `convo-last${live ? ' call-live' : ''}`, text: sub }) : null),
-  conv.pinned ? el('span', { class: 'icon pinned', title: 'Pinned' }, icon('pin')) : null);
+  conv.pinned ? el('span', { class: 'icon pinned', title: 'Pinned' }, icon('pin')) : null,
+  actions.isMuted(key) ? el('span', { class: 'icon muted-mark', title: 'Muted', 'aria-label': 'Muted' }, icon('bell-off')) : null);
   return row;
 }
 
@@ -275,11 +276,14 @@ export function openConversationMenu(x, y, conv) {
     );
   }
   if (has('mute')) {
-    items.push('sep', {
+    items.push('sep', actions.isMuted(key) ? {
+      label: `Unmute ${group ? name : `@${name}`}`,
+      onPick: () => actions.unmuteConversation(key),
+    } : {
       label: `Mute ${group ? name : `@${name}`}`,
       submenu: [15, 60, 480, 0].map((mins) => ({
         label: mins === 0 ? 'Until I turn it back on' : mins >= 60 ? plural(mins / 60, 'hour') : `${mins} minutes`,
-        onPick: () => actions.muteConversation?.(key, mins),
+        onPick: () => actions.muteConversation(key, mins === 0 ? null : Date.now() + mins * 60_000),
       })),
     });
   }

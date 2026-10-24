@@ -19,6 +19,10 @@ export const api = {
   channelMessages: (communityId, channelId, limit) =>
     call('channel_messages', { communityId, channelId, limit }),
   sendMessage: (communityId, channelId, text) => call('send_message', { communityId, channelId, text }),
+  // Typing indicators. `target` is { kind: 'channel', communityId, channelId }, { kind: 'dm', peer } or { kind: 'group', groupId }.
+  typing: (target) => call('typing', { target }),
+  stopTyping: (target) => call('stop_typing', { target }),
+  typingIn: (target) => call('typing_in', { target }),
   editMessage: (communityId, channelId, messageId, text) =>
     call('edit_message', { communityId, channelId, messageId, text }),
   deleteMessage: (communityId, channelId, messageId) =>

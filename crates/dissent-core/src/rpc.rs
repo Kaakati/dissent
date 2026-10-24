@@ -68,6 +68,8 @@ pub(crate) enum Request {
     Guardians(Box<dissent_identity::GuardianSet>),
     /// A presence beacon, sent directly to a contact's device. Community beacons go on the topic.
     Presence(Box<crate::presence::SignedPresence>),
+    /// A typing signal, sent directly to a DM or group member's device. Channels use the topic.
+    Typing(Box<crate::typing::SignedTyping>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

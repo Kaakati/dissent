@@ -5,11 +5,12 @@ import { initTitlebar } from './views/titlebar.js';
 import * as actions from './actions.js';
 import { state } from './state.js';
 import { toast } from './ui.js';
+import { applyTyping } from './typing.js';
 import { initRail } from './views/rail.js';
 import { initSidebar } from './views/sidebar.js';
 import { initChat } from './views/chat.js';
 import { initRight } from './views/right.js';
-import { showIncomingCall } from './views/incoming.js';
+import { showIncomingCall, dismissIncomingCall } from './views/incoming.js';
 import { initStatus } from './views/status.js';
 import { initKeyboard } from './keyboard.js';
 import { initUpdater } from './views/updater.js';
@@ -50,11 +51,17 @@ async function start() {
   listenTo('dissent://transfers', (p) => actions.handleTransfersEvent(p)).catch(() => {});
   listenTo('dissent://call-state', (c) => actions.handleCallEvent(c)).catch(() => {});
   listenTo('dissent://status-changed', (s) => actions.applyStatus(s)).catch(() => {});
+  listenTo('dissent://typing-changed', (p) => applyTyping(p)).catch(() => {});
   listenTo('dissent://call-ringing', (p) => { if (has('calls')) showIncomingCall(p); }).catch(() => {});
+  listenTo('dissent://notification-click', (p) => actions.openNotifiedConversation(p?.conv)).catch(() => {});
   if (window.__DISSENT_MOCK__) document.getElementById('mock-note').hidden = false;
 
   try {
     await onEngineEvent(actions.handleEngineEvent);
+    // A call that rang out, or was answered on another device, is no longer ringing here.
+    onEngineEvent((ev) => {
+      if (ev?.kind === 'call_missed' || ev?.kind === 'call_answered_elsewhere') dismissIncomingCall(ev.call_id);
+    }).catch(() => {});
     await actions.boot();
     await actions.loadStatus();
     watchActivity();
