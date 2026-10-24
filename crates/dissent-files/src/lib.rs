@@ -15,7 +15,10 @@ pub use error::{FilesError, Result};
 pub use file_ref::FileRef;
 pub use iroh_blobs::BlobsProtocol;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
-pub use store::{Files, Input, Timeouts, DEFAULT_GC_INTERVAL, MAX_FILE_SIZE};
+pub use store::{
+    Files, Input, MirrorPolicy, Timeouts, DEFAULT_GC_INTERVAL, DEFAULT_PARTIAL_TTL, DISK_MARGIN,
+    MAX_BYTES_INPUT, MAX_FILE_SIZE,
+};
 
 /// ALPN the blob protocol runs on: `/iroh-bytes/4`. Mount [`Files::protocol_handler`] under it.
 pub const ALPN: &[u8] = iroh_blobs::ALPN;

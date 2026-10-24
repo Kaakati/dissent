@@ -4,17 +4,24 @@
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use std::time::{Duration, Instant};
 
 use dissent_files::{
-    cipher_len, sanitize_name, FileRef, Files, FilesError, Input, Timeouts, ALPN, MAX_FILE_SIZE,
+    cipher_len, sanitize_name, FileRef, Files, FilesError, Input, MirrorPolicy, Timeouts, ALPN,
+    DISK_MARGIN, MAX_BYTES_INPUT, MAX_FILE_SIZE,
 };
 use iroh::endpoint::Connection;
 use iroh::protocol::Router;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::EndpointAddr;
 use iroh::{endpoint::presets, Endpoint, RelayMode};
+use iroh_blobs::provider::events::{
+    EventMask, EventSender, ProviderMessage, RequestMode, RequestUpdate,
+};
+use iroh_blobs::{BlobsProtocol, Hash, HashAndFormat};
 
 const MIB: usize = 1024 * 1024;
 
@@ -406,6 +413,7 @@ async fn seeder_serves_ciphertext_it_cannot_read() {
             &[alice.addr()],
             fref.hash,
             fref.cipher_size,
+            MirrorPolicy::default(),
             |done, _| seen = done,
         )
         .await
@@ -591,10 +599,13 @@ fn timeout_budget_scales_and_caps() {
     assert_eq!(t.overall(1), Duration::from_secs(70));
     assert_eq!(t.overall(5 * MIB as u64), Duration::from_secs(60 + 50));
     assert_eq!(t.overall(5 * MIB as u64 + 1), Duration::from_secs(60 + 60));
+    // The overall cap is 24 hours, and a 10 GB file reaches it.
+    assert_eq!(t.max, Duration::from_secs(24 * 60 * 60));
     assert_eq!(
         t.overall(MAX_FILE_SIZE * 1000),
-        Duration::from_secs(20 * 60)
+        Duration::from_secs(24 * 60 * 60)
     );
+    assert_eq!(t.overall(MAX_FILE_SIZE), Duration::from_secs(24 * 60 * 60));
 }
 
 #[tokio::test]
@@ -792,38 +803,339 @@ async fn gc_removes_unpinned_and_keeps_pinned() {
     );
 }
 
+/// Counts the partial-download holds that exist for `hash`.
+async fn holds(files: &Files, hash: [u8; 32]) -> usize {
+    use futures_lite::StreamExt;
+    let needle = Hash::from_bytes(hash).to_hex();
+    let mut tags = files
+        .store()
+        .tags()
+        .list_prefix("dissent/files/partial/")
+        .await
+        .unwrap();
+    let mut count = 0;
+    while let Some(tag) = tags.next().await {
+        let tag = tag.unwrap();
+        if String::from_utf8_lossy(tag.name.as_ref()).contains(&needle) {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[tokio::test]
-async fn gc_collects_partial_download_from_a_failed_fetch() {
+async fn failed_fetch_holds_its_partial_until_expiry() {
+    let dir = TestDir::new();
+    let files = Files::open(dir.path().join("data"))
+        .await
+        .unwrap()
+        .with_partial_ttl(Duration::from_millis(300))
+        .with_timeouts(timeouts(
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+        ));
+    let endpoint = loopback_endpoint().await;
+    let alice = Peer::new().await;
+    let (silent_ep, _router) = silent_provider().await;
+    let fref = silent_file(&alice).await;
+    let downloads = dir.path().join("downloads");
+    assert!(files
+        .fetch(&endpoint, &[silent_ep.addr()], &fref, &downloads, |_, _| {})
+        .await
+        .is_err());
+    assert_eq!(
+        holds(&files, fref.hash).await,
+        1,
+        "failed fetch keeps a hold"
+    );
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    files.prune_partials().await.unwrap();
+    assert_eq!(
+        holds(&files, fref.hash).await,
+        0,
+        "expired hold is released"
+    );
+}
+
+/// A provider serving one `Files` store on a fresh loopback endpoint. `sent` counts the payload
+/// bytes the provider has finished sending, read from iroh-blobs' transfer events.
+struct Provider {
+    endpoint: Endpoint,
+    /// Never read. It is held so the router, and the store under it, stay alive.
+    #[allow(dead_code)]
+    router: Router,
+    sent: Arc<AtomicU64>,
+}
+
+async fn serve(files: &Files) -> Provider {
+    let endpoint = loopback_endpoint().await;
+    let sent = Arc::new(AtomicU64::new(0));
+    let mask = EventMask {
+        get: RequestMode::NotifyLog,
+        ..EventMask::DEFAULT
+    };
+    let (events, mut messages) = EventSender::channel(64, mask);
+    let counter = Arc::clone(&sent);
+    tokio::spawn(async move {
+        while let Some(message) = messages.recv().await {
+            if let ProviderMessage::GetRequestReceivedNotify(request) = message {
+                let mut updates = request.rx;
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    while let Ok(Some(update)) = updates.recv().await {
+                        if let RequestUpdate::Completed(done) = update {
+                            counter.fetch_add(done.stats.payload_bytes_sent, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        }
+    });
+    let router = Router::builder(endpoint.clone())
+        .accept(ALPN, BlobsProtocol::new(files.store(), Some(events)))
+        .spawn();
+    Provider {
+        endpoint,
+        router,
+        sent,
+    }
+}
+
+#[tokio::test]
+async fn interrupted_fetch_resumes_from_its_partial_ciphertext() {
+    // Garbage collection runs often here, so the partial hold is what keeps the bytes alive.
     let bob = Peer::build(
         None,
         Some(Duration::from_millis(100)),
         Some(timeouts(
             Duration::from_secs(5),
-            Duration::from_secs(1),
-            Duration::from_secs(60),
+            Duration::from_secs(5),
+            Duration::from_secs(120),
         )),
     )
     .await;
     let alice = Peer::new().await;
-    let (silent_ep, _router) = silent_provider().await;
-    let fref = silent_file(&alice).await;
-    assert!(bob
+    let plain = sample(50 * MIB);
+    let src = alice.dir.path().join("archive.bin");
+    fs::write(&src, &plain).unwrap();
+    let fref = alice
+        .files
+        .add(Input::Path {
+            path: src,
+            mime: "application/octet-stream".into(),
+        })
+        .await
+        .unwrap();
+    let hf = HashAndFormat::raw(Hash::from_bytes(fref.hash));
+    let cipher = fref.cipher_size;
+
+    // First attempt: carol serves a full copy, and her endpoint closes once half the ciphertext
+    // has arrived. Closing an endpoint also shuts down its router and the store under it, so carol
+    // is a throwaway provider. Alice, who keeps her store, serves the second attempt.
+    let carol = Peer::new().await;
+    carol
+        .files
+        .mirror(
+            &carol.endpoint,
+            &[alice.addr()],
+            fref.hash,
+            cipher,
+            MirrorPolicy::default(),
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+    let (half_tx, half_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut half_tx = Some(half_tx);
+    let carol_addr = [carol.addr()];
+    let downloads = bob.downloads();
+    let attempt = bob.files.fetch(
+        &bob.endpoint,
+        &carol_addr,
+        &fref,
+        &downloads,
+        move |done, total| {
+            if done >= total / 2 {
+                if let Some(tx) = half_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        },
+    );
+    let carol_endpoint = carol.endpoint.clone();
+    let drop_provider = async {
+        let _ = half_rx.await;
+        carol_endpoint.close().await;
+    };
+    let (outcome, ()) = tokio::join!(attempt, drop_provider);
+    assert!(outcome.is_err(), "first attempt must fail: {outcome:?}");
+    let held = bob
+        .files
+        .store()
+        .remote()
+        .local(hf)
+        .await
+        .unwrap()
+        .local_bytes();
+    assert!(held > 0 && held < cipher, "held {held} of {cipher} bytes");
+    assert!(!bob.downloads().exists() || fs::read_dir(bob.downloads()).unwrap().next().is_none());
+
+    // Second attempt: a new provider. Only the missing ranges should cross the wire.
+    let second = serve(&alice.files).await;
+    let out = bob
         .files
         .fetch(
             &bob.endpoint,
-            &[silent_ep.addr()],
+            &[second.endpoint.addr()],
             &fref,
             &bob.downloads(),
-            |_, _| {}
+            |_, _| {},
         )
         .await
-        .is_err());
-    assert!(wait_until_gone(&bob.files, fref.hash).await);
+        .unwrap();
+    assert_eq!(fs::read(&out).unwrap(), plain);
+    // The provider records a transfer after the last byte leaves, so give that event a moment.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent = second.sent.load(Ordering::SeqCst);
+    assert!(
+        sent < cipher,
+        "second attempt sent {sent} of {cipher} bytes"
+    );
+    assert!(
+        sent <= cipher - held + MIB as u64,
+        "resume re-sent held bytes: sent {sent}, held {held}, total {cipher}"
+    );
+}
+
+#[tokio::test]
+async fn disk_checks_refuse_before_any_work() {
+    let dir = TestDir::new();
+    let tight = Files::open(dir.path().join("data"))
+        .await
+        .unwrap()
+        .with_free_space(|_: &Path| Ok(1024));
+    let err = tight
+        .add(Input::Bytes {
+            name: "a.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: sample(MIB),
+        })
+        .await
+        .unwrap_err();
+    match err {
+        FilesError::DiskFull { needed, available } => {
+            assert_eq!(needed, cipher_len(MIB as u64) + DISK_MARGIN);
+            assert_eq!(available, 1024);
+        }
+        other => panic!("expected DiskFull, got {other:?}"),
+    }
+
+    // Fetch needs the ciphertext and the plaintext. This probe has room for the first only.
+    let alice = Peer::new().await;
+    let fref = alice
+        .files
+        .add(Input::Bytes {
+            name: "b.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: sample(3 * MIB),
+        })
+        .await
+        .unwrap();
+    let needed = fref.cipher_size + fref.size + DISK_MARGIN;
+    let bob_dir = TestDir::new();
+    let short = Files::open(bob_dir.path().join("data"))
+        .await
+        .unwrap()
+        .with_free_space(move |_: &Path| Ok(needed - 1));
+    let endpoint = loopback_endpoint().await;
+    let downloads = bob_dir.path().join("downloads");
+    let err = short
+        .fetch(&endpoint, &[alice.addr()], &fref, &downloads, |_, _| {})
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesError::DiskFull { needed: n, available } if n == needed && available == needed - 1),
+        "{err:?}"
+    );
+    assert!(
+        !downloads.exists(),
+        "nothing is written before the check passes"
+    );
+}
+
+#[tokio::test]
+async fn mirror_policy_refuses_before_moving_bytes() {
+    let alice = Peer::new().await;
+    let seeder = Peer::new().await;
+    let fref = alice
+        .files
+        .add(Input::Bytes {
+            name: "c.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: sample(3 * MIB),
+        })
+        .await
+        .unwrap();
+
+    let per_file = MirrorPolicy {
+        max_file_size: MIB as u64,
+        max_total: 50 * 1024 * MIB as u64,
+    };
+    let err = seeder
+        .files
+        .mirror(
+            &seeder.endpoint,
+            &[alice.addr()],
+            fref.hash,
+            fref.cipher_size,
+            per_file,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesError::PolicyRefused(_)), "{err:?}");
+
+    let total = MirrorPolicy {
+        max_file_size: 2 * 1024 * MIB as u64,
+        max_total: MIB as u64,
+    };
+    let err = seeder
+        .files
+        .mirror(
+            &seeder.endpoint,
+            &[alice.addr()],
+            fref.hash,
+            fref.cipher_size,
+            total,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesError::PolicyRefused(_)), "{err:?}");
+    assert!(!seeder.files.store().blobs().has(fref.hash).await.unwrap());
+}
+
+#[tokio::test]
+async fn bytes_input_is_capped_and_points_at_path() {
+    let alice = Peer::new().await;
+    let err = alice
+        .files
+        .add(Input::Bytes {
+            name: "big.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: vec![0u8; MAX_BYTES_INPUT as usize + 1],
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesError::BytesTooLarge { .. }), "{err:?}");
+    assert!(err.to_string().contains("Input::Path"), "{err}");
 }
 
 #[test]
 fn size_limit_is_clamped_to_the_hard_cap() {
-    assert_eq!(MAX_FILE_SIZE, 100 * 1024 * 1024);
+    assert_eq!(MAX_FILE_SIZE, 10 * 1024 * 1024 * 1024);
     let dir = TestDir::new();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -844,20 +1156,25 @@ fn size_limit_is_clamped_to_the_hard_cap() {
 #[test]
 fn over_cap_error_message() {
     let err = FilesError::TooLarge { size: 1, limit: 1 };
-    assert_eq!(err.to_string(), "Files can be up to 100 MB.");
+    assert_eq!(err.to_string(), "Files can be up to 10 GB.");
 }
 
 #[tokio::test]
 async fn add_refuses_over_cap_and_fetch_refuses_over_cap_reference() {
     let alice = Peer::new().await;
     let bob = Peer::new().await;
-    // Over the cap on add.
+    // Over the cap on add. A sparse file of the right length is refused from its metadata alone,
+    // so the test never reads 10 GB.
+    let sparse = alice.dir.path().join("huge.bin");
+    fs::File::create(&sparse)
+        .unwrap()
+        .set_len(MAX_FILE_SIZE + 1)
+        .unwrap();
     let err = alice
         .files
-        .add(Input::Bytes {
-            name: "huge.bin".into(),
+        .add(Input::Path {
+            path: sparse,
             mime: "application/octet-stream".into(),
-            data: vec![0u8; MAX_FILE_SIZE as usize + 1],
         })
         .await
         .unwrap_err();
@@ -880,7 +1197,7 @@ async fn add_refuses_over_cap_and_fetch_refuses_over_cap_reference() {
         .await
         .unwrap_err();
     assert!(matches!(err, FilesError::TooLarge { .. }), "{err:?}");
-    assert_eq!(err.to_string(), "Files can be up to 100 MB.");
+    assert_eq!(err.to_string(), "Files can be up to 10 GB.");
 
     // A reference whose ciphertext size is inflated past the cap is also refused.
     let mut inflated = fref.clone();

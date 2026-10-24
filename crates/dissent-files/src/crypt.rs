@@ -73,6 +73,15 @@ pub(crate) struct Sealed {
     pub cipher_len: u64,
 }
 
+/// Plaintext length for a ciphertext of `cipher_len` bytes, or `None` when no plaintext of that
+/// length exists. This is the inverse of [`cipher_len`].
+pub(crate) fn plain_len_for_cipher(ciphertext_len: u64) -> Option<u64> {
+    let frame = (CHUNK_SIZE + TAG_LEN) as u64;
+    let chunks = ciphertext_len.div_ceil(frame).max(1);
+    let plain = ciphertext_len.checked_sub(chunks * TAG_LEN as u64)?;
+    (cipher_len(plain) == ciphertext_len).then_some(plain)
+}
+
 /// Encrypts `input` into `output`, failing if the plaintext is over `limit`.
 pub(crate) fn encrypt_stream<R, W>(input: &mut R, output: &mut W, limit: u64) -> Result<Sealed>
 where
