@@ -24,6 +24,7 @@
 
 use crate::emoji::normalize_emoji;
 use crate::names::{normalize_handle, skeleton};
+use crate::control::{open_event, OpenError, SealKey};
 use crate::{ChannelId, Dag, Event, EventId, Hlc, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,20 @@ pub enum Rejection {
     AlreadyRotated,
     /// The author's device was revoked before this event.
     DeviceRevoked,
+    /// A sealed control event whose generation this replay holds no key for. A device that
+    /// fetches the missing key replays it again.
+    Locked,
+    /// A sealed control event that does not open under the key of its generation.
+    Forged,
+}
+
+impl From<OpenError> for Rejection {
+    fn from(why: OpenError) -> Self {
+        match why {
+            OpenError::NoKey => Rejection::Locked,
+            OpenError::Forged => Rejection::Forged,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,23 +139,33 @@ enum Rank {
     Owner,
 }
 
-/// Replay the DAG's causal order against a fresh state owned by `owner`.
-/// This is the reference implementation. [`crate::Replayer`] must match it.
+/// Replay the DAG's causal order against a fresh state owned by `owner`, with no keys. Sealed
+/// control events are rejected as [`Rejection::Locked`]. This is the reference implementation.
+/// [`crate::Replayer`] must match it.
 pub fn replay(owner: RootId, dag: &Dag) -> CommunityState {
+    replay_with(owner, dag, &[])
+}
+
+/// Replay the DAG's causal order, opening sealed control events with the keys in `ring`.
+pub fn replay_with(owner: RootId, dag: &Dag, ring: &[SealKey]) -> CommunityState {
     let mut st = CommunityState::new(owner);
     for ev in dag.causal_order() {
-        apply_event(&mut st, ev);
+        apply_event(&mut st, ev, ring);
     }
     st
 }
 
 /// Apply one event at its causal position, recording a rejection if it has one.
-pub(crate) fn apply_event(st: &mut CommunityState, ev: &Event) {
+pub(crate) fn apply_event(st: &mut CommunityState, ev: &Event, ring: &[SealKey]) {
     st.device_roots
         .entry(ev.body.device)
         .or_insert(ev.body.author);
-    match st.check(ev) {
-        Ok(()) => st.commit(ev),
+    let plain = match open_event(ev, ring) {
+        Ok(plain) => plain,
+        Err(why) => return st.rejected.push((ev.id, why.into())),
+    };
+    match st.check(&plain) {
+        Ok(()) => st.commit(&plain),
         Err(why) => st.rejected.push((ev.id, why)),
     }
 }
@@ -233,6 +258,8 @@ impl CommunityState {
         }
         let chan = ev.body.channel;
         match &ev.body.payload {
+            // Opened by `apply_event` before it gets here. A sealed payload left is not a control event.
+            Payload::SealedControl { .. } => return Err(Rejection::Forged),
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 require_control(chan)?;
                 if rank < Rank::Admin {
@@ -393,6 +420,7 @@ impl CommunityState {
         let actor = ev.body.author;
         let chan = ev.body.channel;
         match &ev.body.payload {
+            Payload::SealedControl { .. } => {}
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());

@@ -2,25 +2,103 @@
 //! No lock is held across a network await.
 
 use crate::access::InEnvelope;
+use crate::community::Community;
 use crate::engine::{Engine, Inner, MAX_CLOCK_SKEW_MS, RETRY_EVERY, not_found, now_ms};
 use crate::error::Result;
+use crate::groups::ConvBook;
 use crate::identity_watch;
+use crate::identity_watch::IdentityChange;
 use crate::messages::event_for;
 use crate::rpc::{Request, Response, decode};
-use crate::store::append_records;
+use crate::store::{append_records, Paths};
 use crate::typing::TypingTarget;
 use crate::views::EngineEvent;
 use crate::wire::{GossipMsg, decode_gossip};
 use crate::world::World;
-use dissent_events::{Payload, SealedKind, SignedDm, SignedEvent};
+use dissent_events::{open_event, Payload, SealKey, SealedKind, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicReceiver};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{PoisonError, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
+
+/// What accepted events ask of the engine. Collected under the lock, performed after it.
+#[derive(Default)]
+pub(crate) struct ControlEffects {
+    emitted: Vec<EngineEvent>,
+    relay_sets: Vec<Vec<String>>,
+}
+
+/// Collects what the accepted `events` ask of the engine: a notice for each, the relays a
+/// `SetRelays` names, and an identity notice for a `KeyRotation` that concerns someone we know.
+/// The caller passes only events that replay accepted and that have not been handled yet.
+#[allow(clippy::too_many_arguments)]
+fn control_effects(
+    community: CommunityId,
+    c: &Community,
+    paths: &Paths,
+    dms: &BTreeMap<RootId, Vec<SignedDm>>,
+    conv_book: &ConvBook,
+    identity_changes: &mut Vec<IdentityChange>,
+    now: u64,
+    events: &[SignedEvent],
+) -> ControlEffects {
+    let mut fx = ControlEffects::default();
+    for se in events {
+        let Ok(ev) = open_event(&se.event, c.ring()) else {
+            continue;
+        };
+        if let Payload::SetRelays { relays } = &ev.body.payload {
+            fx.relay_sets.push(relays.clone());
+        }
+        if let Payload::KeyRotation(rot) = &ev.body.payload {
+            let (old, new) = (rot.request.old_root, rot.request.new_root);
+            if c.is_member(&new)
+                || c.is_member(&old)
+                || identity_watch::messaged(dms, conv_book, &new)
+                || identity_watch::messaged(dms, conv_book, &old)
+            {
+                let key = format!("rot:{:?}", se.event.id);
+                let path = paths.identity_changes();
+                let reason = identity_watch::ROTATED;
+                if let Some(notice) =
+                    identity_watch::record(identity_changes, &path, new, key, reason, now)
+                {
+                    fx.emitted.push(notice);
+                }
+            }
+        }
+        let notice = event_for(&community, &se.event);
+        if !fx.emitted.contains(&notice) {
+            fx.emitted.push(notice);
+        }
+    }
+    fx
+}
+
+impl World {
+    /// Installs `ring` on `community`. Returns the effects of every event it unlocked, each one
+    /// exactly once, for the caller to perform after releasing the lock.
+    pub(crate) fn install_ring(&mut self, community: CommunityId, ring: Vec<SealKey>) -> ControlEffects {
+        let World {
+            paths,
+            communities,
+            dms,
+            conv_book,
+            identity_changes,
+            ..
+        } = self;
+        let Some(c) = communities.get_mut(&community) else {
+            return ControlEffects::default();
+        };
+        c.set_ring(ring);
+        let unlocked = c.take_unhandled(&[]);
+        control_effects(community, c, paths, dms, conv_book, identity_changes, now_ms(), &unlocked)
+    }
+}
 
 /// The receive loop of one community's topic, and the means to stop it.
 pub(crate) struct ReceiverTask {
@@ -50,7 +128,6 @@ impl Engine {
             ..
         } = &mut *guard;
         let mut emitted: Vec<EngineEvent> = Vec::new();
-        let mut relay_sets: Vec<Vec<String>> = Vec::new();
         let mut valid = Vec::with_capacity(items.len());
         for se in items {
             let hlc = se.event.body.hlc;
@@ -90,10 +167,8 @@ impl Engine {
         if let Err(e) = append_records(&paths.events_log(&community), &batch.stored) {
             warn!(community = %community, error = %e, "could not persist events");
         }
-        for se in &batch.stored {
-            if c.is_rejected(&se.event.id) {
-                continue;
-            }
+        let fresh = c.take_unhandled(&batch.stored);
+        for se in &fresh {
             if matches!(
                 se.event.body.payload,
                 Payload::Message { .. } | Payload::Sealed { kind: SealedKind::Message, .. }
@@ -104,42 +179,35 @@ impl Engine {
                 };
                 self.clear_typer(target, se.event.body.author);
             }
-            if let Payload::SetRelays { relays } = &se.event.body.payload {
-                relay_sets.push(relays.clone());
-            }
-            if let Payload::KeyRotation(rot) = &se.event.body.payload {
-                let (old, new) = (rot.request.old_root, rot.request.new_root);
-                if c.is_member(&new)
-                    || c.is_member(&old)
-                    || identity_watch::messaged(dms, conv_book, &new)
-                    || identity_watch::messaged(dms, conv_book, &old)
-                {
-                    let key = format!("rot:{:?}", se.event.id);
-                    let path = paths.identity_changes();
-                    let reason = identity_watch::ROTATED;
-                    if let Some(ev) =
-                        identity_watch::record(identity_changes, &path, new, key, reason, now)
-                    {
-                        emitted.push(ev);
-                    }
-                }
-            }
-            let ev = event_for(&community, &se.event);
-            if !emitted.contains(&ev) {
-                emitted.push(ev);
-            }
         }
+        let mut fx = control_effects(
+            community,
+            c,
+            paths,
+            dms,
+            conv_book,
+            identity_changes,
+            now,
+            &fresh,
+        );
+        fx.emitted.splice(0..0, emitted);
         drop(guard);
         self.retry_deferred_commits(community);
-        for relays in relay_sets {
+        self.perform_effects(fx);
+        self.unseal_pending(community);
+        Ok(batch.stalled)
+    }
+
+    /// Performs what accepted events asked for, after the lock is released. A `SetRelays` adopts
+    /// its relays, and every notice is emitted.
+    pub(crate) fn perform_effects(&self, fx: ControlEffects) {
+        for relays in fx.relay_sets {
             let engine = self.clone();
             self.spawn_task(async move { engine.adopt_relays(&relays).await });
         }
-        self.unseal_pending(community);
-        for ev in emitted {
+        for ev in fx.emitted {
             self.emit(ev);
         }
-        Ok(batch.stalled)
     }
 
     /// Handles one gossip message. The sender is the neighbour that relayed it, not the author.
@@ -233,6 +301,7 @@ impl Engine {
                 Response::MlsCommits(self.commits_after(community, after))
             }
             Request::Secret { community } => self.serve_secret(conn_from, community),
+            Request::SecretHistory { community } => self.serve_secret_history(conn_from, community),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }

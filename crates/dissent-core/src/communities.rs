@@ -43,8 +43,10 @@ impl Engine {
             let secret = crate::access::random_secret();
             let keys = crate::access::Keys::from_invite(0, secret);
             crate::access::save(&paths, &id, &keys)?;
+            let mut community = Community::new(genesis);
+            community.set_ring(keys.history.clone());
             guard.access.insert(id, keys);
-            guard.communities.insert(id, Community::new(genesis));
+            guard.communities.insert(id, community);
         }
         self.inner
             .founded
@@ -229,9 +231,11 @@ impl Engine {
         {
             let mut guard = self.write();
             write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
-            guard
-                .communities
-                .insert(id, Community::new(invite.genesis.clone()));
+            let mut community = Community::new(invite.genesis.clone());
+            if let Some(keys) = guard.access.get(&id) {
+                community.set_ring(keys.history.clone());
+            }
+            guard.communities.insert(id, community);
         }
         self.ingest(id, fetched.events)?;
         self.learn_member_addrs(id, fetched.addrs);
@@ -280,6 +284,10 @@ impl Engine {
                         debug!(community = %id, peer = %peer, error = %e, "join not pushed to invite peer");
                     }
                 }
+                // The peers now know our Join, so they serve the older secrets to us. Their join
+                // events are sealed too, which is why we ask them rather than the members we cannot
+                // see yet.
+                self.fetch_history_from(id, served).await;
             }
             Err(e) => warn!(community = %id, error = %e, "could not announce join"),
         }

@@ -70,6 +70,9 @@ pub(crate) enum Request {
     Presence(Box<crate::presence::SignedPresence>),
     /// A typing signal, sent directly to a DM or group member's device. Channels use the topic.
     Typing(Box<crate::typing::SignedTyping>),
+    /// Every community secret the responder holds, with its generation, for an active member that
+    /// joined after a rotation. Appended, so the encoding of earlier variants is unchanged.
+    SecretHistory { community: CommunityId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,6 +104,8 @@ pub(crate) enum Response {
     /// Policy refused the request. The reason is for the sender to show.
     Refused(String),
     Error(String),
+    /// The `(generation, secret)` pairs the responder holds. See `Request::SecretHistory`.
+    SecretHistory(Vec<(u64, [u8; 32])>),
 }
 
 impl Request {
@@ -116,7 +121,8 @@ impl Request {
 
             | Request::MlsCommits { community, .. }
             | Request::MlsCommit { community, .. }
-            | Request::Secret { community } => Some(*community),
+            | Request::Secret { community }
+            | Request::SecretHistory { community } => Some(*community),
             _ => None,
         }
     }

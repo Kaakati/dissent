@@ -6,8 +6,8 @@
 use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use dissent_events::{
-    CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer, Role,
-    SignedEvent,
+    open_event, CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer,
+    Role, SealKey, SignedEvent,
 };
 use dissent_identity::{CommunityId, Genesis, RootId};
 use dissent_net::TopicSender;
@@ -44,6 +44,11 @@ pub(crate) struct Community {
     signed: BTreeMap<EventId, SignedEvent>,
     /// Events whose parents are missing. Held here so they can be persisted once released.
     waiting: BTreeMap<EventId, SignedEvent>,
+    /// Accepted events whose side effects have already been handed out, so each runs once.
+    handled: BTreeSet<EventId>,
+    /// Set when the keys change. Any accepted event may then have unlocked, so the next
+    /// [`Community::take_unhandled`] considers every stored event.
+    ring_dirty: bool,
     /// HLC of each user's latest accepted Join. Picks the freshest display name.
     pub join_hlc: BTreeMap<RootId, Hlc>,
     /// Decrypted text by content key: a message or reply id, or the target of an edit. The newest
@@ -64,6 +69,8 @@ impl Community {
             max_hlc: None,
             signed: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            handled: BTreeSet::new(),
+            ring_dirty: false,
             join_hlc: BTreeMap::new(),
             content: BTreeMap::new(),
             sender: None,
@@ -96,6 +103,35 @@ impl Community {
     /// The replayed state of the community.
     pub fn state(&self) -> &CommunityState {
         self.replayer.state()
+    }
+
+    /// The keys this community's sealed control events open with.
+    pub fn ring(&self) -> &[SealKey] {
+        self.replayer.ring()
+    }
+
+    /// Installs the keys that open sealed control events, and rebuilds the replay if they changed.
+    pub fn set_ring(&mut self, ring: Vec<SealKey>) {
+        self.replayer.set_ring(&self.dag, ring);
+        self.join_times_refresh();
+        self.ring_dirty = true;
+    }
+
+    /// Accepted events whose side effects have not run yet, in causal order, and marks them as
+    /// handled. `stored` are the events the last step stored. After a key change every stored
+    /// event is considered, since any of them may have unlocked.
+    pub fn take_unhandled(&mut self, stored: &[SignedEvent]) -> Vec<SignedEvent> {
+        let rejected: BTreeSet<EventId> = self.rejected_ids().into_iter().collect();
+        let candidates: Vec<EventId> = if std::mem::take(&mut self.ring_dirty) {
+            self.dag.causal_order().iter().map(|ev| ev.id).collect()
+        } else {
+            stored.iter().map(|se| se.event.id).collect()
+        };
+        let fresh: Vec<EventId> = candidates
+            .into_iter()
+            .filter(|id| !rejected.contains(id) && self.handled.insert(*id))
+            .collect();
+        self.signed_for(&fresh)
     }
 
     pub fn is_member(&self, user: &RootId) -> bool {
@@ -221,6 +257,8 @@ impl Community {
         }
         self.replayer.on_insert(&self.dag, &step.entered);
         self.after_change(&step.entered, &rejected_before);
+        // Local events are handled by the caller that authored them, not by the inbound path.
+        self.handled.extend(step.items.iter().map(|se| se.event.id));
         Ok(step.items)
     }
 
@@ -277,7 +315,8 @@ impl Community {
             if self.max_hlc.is_none_or(|max| ev.body.hlc > max) {
                 self.max_hlc = Some(ev.body.hlc);
             }
-            joined |= matches!(ev.body.payload, Payload::Join { .. });
+            joined |= open_event(ev, self.replayer.ring())
+                .is_ok_and(|plain| matches!(plain.body.payload, Payload::Join { .. }));
         }
         if joined || self.rejected_ids() != rejected_before {
             self.join_times_refresh();
@@ -285,7 +324,7 @@ impl Community {
     }
 
     fn join_times_refresh(&mut self) {
-        self.join_hlc = join_times(&self.dag, &self.state().rejected);
+        self.join_hlc = join_times(&self.dag, self.replayer.ring(), &self.state().rejected);
     }
 
     fn rejected_ids(&self) -> Vec<EventId> {
@@ -294,10 +333,13 @@ impl Community {
 }
 
 /// HLC of the latest accepted Join per author.
-fn join_times(dag: &Dag, rejected: &[(EventId, Rejection)]) -> BTreeMap<RootId, Hlc> {
+fn join_times(dag: &Dag, ring: &[SealKey], rejected: &[(EventId, Rejection)]) -> BTreeMap<RootId, Hlc> {
     let bad: BTreeSet<EventId> = rejected.iter().map(|(id, _)| *id).collect();
     let mut out: BTreeMap<RootId, Hlc> = BTreeMap::new();
-    for ev in dag.causal_order() {
+    for stored in dag.causal_order() {
+        let Ok(ev) = open_event(stored, ring) else {
+            continue;
+        };
         if !matches!(ev.body.payload, Payload::Join { .. }) || bad.contains(&ev.id) {
             continue;
         }

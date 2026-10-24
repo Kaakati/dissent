@@ -191,7 +191,10 @@ impl Engine {
     ) -> Result<SignedEvent> {
         let mut guard = self.write();
         let World {
-            paths, communities, ..
+            paths,
+            communities,
+            access,
+            ..
         } = &mut *guard;
         let c = communities
             .get_mut(&community)
@@ -206,7 +209,7 @@ impl Engine {
                 };
             }
         }
-        let body = EventBody {
+        let mut body = EventBody {
             community,
             channel,
             author: self.inner.me,
@@ -215,6 +218,11 @@ impl Engine {
             hlc,
             payload,
         };
+        // Control payloads are sealed under the current secret. Without one, nothing is sent.
+        if dissent_events::is_sealable(&body.payload) {
+            let keys = access.get(&community).ok_or_else(|| not_found(&community))?;
+            body.payload = dissent_events::seal(&keys.secret, keys.generation, &body)?;
+        }
         let event = Event::sign(body, &self.inner.identity.device);
         let se = SignedEvent {
             event,

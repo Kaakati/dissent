@@ -26,7 +26,7 @@ impl Engine {
         secret: [u8; 32],
         source: [u8; 32],
     ) -> bool {
-        let installed = {
+        let fx = {
             let mut w = self.write();
             let paths = w.paths.clone();
             let Some(keys) = w.access.get_mut(&community) else {
@@ -39,12 +39,11 @@ impl Engine {
             if let Err(e) = crate::access::save(&paths, &community, &saved) {
                 warn!(community = %community, error = %e, "could not save the community secret");
             }
-            true
+            w.install_ring(community, saved.history.clone())
         };
-        if installed {
-            self.move_topic(community).await;
-        }
-        installed
+        self.perform_effects(fx);
+        self.move_topic(community).await;
+        true
     }
 
     /// Joins the topic of the current secret, and keeps the old one running for a drain period.
@@ -102,6 +101,70 @@ impl Engine {
     pub(crate) async fn refresh_secret(&self, community: CommunityId) {
         self.adopt_rotations(community).await;
         self.fetch_secret_if_behind(community).await;
+        self.fetch_history_if_missing(community).await;
+    }
+
+    /// Asks the members' devices for the older secrets this device lacks. A joiner holds only the
+    /// secret from its invite, but the events from before a rotation are sealed under older ones.
+    async fn fetch_history_if_missing(&self, community: CommunityId) {
+        if !self.history_missing(community) {
+            return;
+        }
+        let devices: Vec<DeviceId> = {
+            let w = self.read();
+            w.communities
+                .get(&community)
+                .map(|c| w.member_devices(c))
+                .unwrap_or_default()
+        };
+        self.fetch_history_from(community, &devices).await;
+    }
+
+    /// Asks `devices` for the older secrets, one at a time, until none is missing. A joiner cannot
+    /// name the members yet, because their join events are sealed too, so it asks the invite peers.
+    pub(crate) async fn fetch_history_from(&self, community: CommunityId, devices: &[DeviceId]) {
+        for device in devices {
+            if !self.history_missing(community) {
+                return;
+            }
+            let reply = self.call(*device, &Request::SecretHistory { community }).await;
+            if let Ok(Response::SecretHistory(pairs)) = reply {
+                self.remember_secrets(community, &pairs).await;
+            }
+        }
+    }
+
+    /// Whether a generation below the current one is absent from this device's history.
+    fn history_missing(&self, community: CommunityId) -> bool {
+        let w = self.read();
+        let Some(keys) = w.access.get(&community) else {
+            return false;
+        };
+        (0..keys.generation).any(|g| !keys.history.iter().any(|(have, _)| *have == g))
+    }
+
+    /// Adds older secrets to this device's history, saves them, and rebuilds the replay with them.
+    pub(crate) async fn remember_secrets(&self, community: CommunityId, pairs: &[(u64, [u8; 32])]) {
+        let fx = {
+            let mut w = self.write();
+            let paths = w.paths.clone();
+            let Some(keys) = w.access.get_mut(&community) else {
+                return;
+            };
+            let before = keys.history.len();
+            for (generation, secret) in pairs {
+                keys.remember(*generation, *secret);
+            }
+            if keys.history.len() == before {
+                return;
+            }
+            let saved = keys.clone();
+            if let Err(e) = crate::access::save(&paths, &community, &saved) {
+                warn!(community = %community, error = %e, "could not save the community secrets");
+            }
+            w.install_ring(community, saved.history.clone())
+        };
+        self.perform_effects(fx);
     }
 
     /// Opens the winning rotation with the group, and installs its secret if it differs from ours.
@@ -158,16 +221,29 @@ impl Engine {
         }
     }
 
+    /// Whether `from` is a device of an active member of `community`.
+    fn is_active_device(&self, from: DeviceId, community: CommunityId) -> bool {
+        let root = self.read().directory.root_of(&from);
+        root.is_some_and(|r| self.commit_rules(community).is_active(&r))
+    }
+
     /// Serves the current secret to an active member's device. Anyone else is refused.
     pub(crate) fn serve_secret(&self, from: DeviceId, community: CommunityId) -> Response {
-        let active = {
-            let root = self.read().directory.root_of(&from);
-            root.is_some_and(|r| self.commit_rules(community).is_active(&r))
-        };
+        let active = self.is_active_device(from, community);
         match self.access_keys(community) {
             Some(keys) if active => {
                 Response::Secret(Some((keys.generation, keys.secret, keys.source)))
             }
+            _ => Response::Error("not an active member".into()),
+        }
+    }
+
+    /// Serves every secret this device holds to an active member's device. Anyone else is refused,
+    /// and so is a banned device, which is no longer active.
+    pub(crate) fn serve_secret_history(&self, from: DeviceId, community: CommunityId) -> Response {
+        let active = self.is_active_device(from, community);
+        match self.access_keys(community) {
+            Some(keys) if active => Response::SecretHistory(keys.history),
             _ => Response::Error("not an active member".into()),
         }
     }

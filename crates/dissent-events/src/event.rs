@@ -165,6 +165,13 @@ pub enum Payload {
         covers: Vec<RootId>,
         sealed: Vec<u8>,
     },
+    /// A control payload sealed under the community secret of `generation`. The kind and every
+    /// field are inside `ciphertext`, so only a member holding that generation's secret can replay
+    /// it. Appended, so the encoding of earlier variants is unchanged. See `control`.
+    SealedControl {
+        generation: u64,
+        ciphertext: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

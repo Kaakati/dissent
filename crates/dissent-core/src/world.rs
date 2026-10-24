@@ -88,7 +88,7 @@ impl World {
         for card in &contacts {
             directory.learn(&card.cert);
         }
-        let communities = load_communities(&paths, &mut directory, vault);
+        let mut communities = load_communities(&paths, &mut directory, vault);
         let dms = load_dms(&paths, &mut directory);
         let outbox: Vec<SignedDm> = read_bin::<Vec<SignedDm>>(&paths.outbox())?
             .unwrap_or_default()
@@ -104,6 +104,13 @@ impl World {
         let inbox = crate::inbox::InboxBook::load(&paths)?;
         let attach = crate::attachments::AttachBook::load(&paths)?;
         let access = crate::access::load(&paths, communities.keys().copied())?;
+        for (id, c) in communities.iter_mut() {
+            if let Some(keys) = access.get(id) {
+                c.set_ring(keys.history.clone());
+                // Startup runs no side effects. Events that were stored before are already applied.
+                let _ = c.take_unhandled(&[]);
+            }
+        }
         let identity_changes: Vec<IdentityChange> =
             crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
         let own = crate::presence::load_own(&paths);

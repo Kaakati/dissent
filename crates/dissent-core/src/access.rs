@@ -51,6 +51,10 @@ pub(crate) struct Keys {
     /// The rotation event that installed this secret. All zero for a secret taken from an invite,
     /// whose source is unknown.
     pub source: [u8; 32],
+    /// Every `(generation, secret)` this device has held, the current one included. Sealed control
+    /// events stay readable with these, so a member who joined after a rotation can replay the
+    /// events from before it.
+    pub history: Vec<(u64, [u8; 32])>,
 }
 
 impl Keys {
@@ -61,6 +65,14 @@ impl Keys {
             secret,
             retired: Vec::new(),
             source: [0; 32],
+            history: vec![(generation, secret)],
+        }
+    }
+
+    /// Records a `(generation, secret)` pair in the history, once.
+    pub fn remember(&mut self, generation: u64, secret: [u8; 32]) {
+        if !self.history.contains(&(generation, secret)) {
+            self.history.push((generation, secret));
         }
     }
 
@@ -83,6 +95,7 @@ impl Keys {
         self.generation = generation;
         self.secret = secret;
         self.source = source;
+        self.remember(generation, secret);
         true
     }
 
@@ -119,7 +132,8 @@ pub(crate) fn load(
 
 /// Reads a stored `Keys`, accepting the formats older versions wrote, so an upgrade never fails
 /// to start. v0.1.1 stored the bare 32-byte invite secret (generation 0). Builds before the
-/// rotation tie-break stored `Keys` without `source`.
+/// rotation tie-break stored `Keys` without `source`. Builds before the sealed control events
+/// stored `Keys` without `history`.
 fn decode_keys(bytes: &[u8]) -> Result<Keys> {
     #[derive(Deserialize)]
     struct KeysV2 {
@@ -127,11 +141,31 @@ fn decode_keys(bytes: &[u8]) -> Result<Keys> {
         secret: [u8; 32],
         retired: Vec<Retired>,
     }
+    #[derive(Deserialize)]
+    struct KeysV3 {
+        generation: u64,
+        secret: [u8; 32],
+        retired: Vec<Retired>,
+        source: [u8; 32],
+    }
     if let Ok(keys) = postcard::from_bytes::<Keys>(bytes) {
         return Ok(keys);
     }
+    if let Ok(v3) = postcard::from_bytes::<KeysV3>(bytes) {
+        let mut keys = Keys {
+            generation: v3.generation,
+            secret: v3.secret,
+            retired: v3.retired,
+            source: v3.source,
+            history: Vec::new(),
+        };
+        keys.remember(v3.generation, v3.secret);
+        return Ok(keys);
+    }
     if let Ok(v2) = postcard::from_bytes::<KeysV2>(bytes) {
-        return Ok(Keys { generation: v2.generation, secret: v2.secret, retired: v2.retired, source: [0; 32] });
+        let mut keys = Keys::from_invite(v2.generation, v2.secret);
+        keys.retired = v2.retired;
+        return Ok(keys);
     }
     let secret: [u8; 32] = postcard::from_bytes(bytes)
         .map_err(|e| CoreError::Encoding(format!("community access file: {e}")))?;

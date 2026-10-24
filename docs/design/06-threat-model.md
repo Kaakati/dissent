@@ -38,7 +38,7 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 
    Joiners apply the same check to a welcome, so they're never welcomed into a group containing
    non-members.
-2. **Phases 1 and 2 fixed; phase 3 partly fixed, the DHT record is sealed, control payloads and emoji are open.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Each ban rotates the secret: the new one is sealed under the group in a `SecretRotation` event, and storage members and joiners fetch it from an active member. A banned device is refused every community request, even with a valid token. A retired secret works for 30 days, so invites made before a ban keep working for that long. When two admins rotate at once, the replay keeps the rotation with the lowest event id, and every device adopts it. The losing secret is retired, with grace, like any other. Before the fix, anyone who knew a community id
+2. **Phases 1 and 2 fixed; phase 3 partly fixed, the DHT record and control payloads are sealed, emoji is open.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Each ban rotates the secret: the new one is sealed under the group in a `SecretRotation` event, and storage members and joiners fetch it from an active member. A banned device is refused every community request, even with a valid token. A retired secret works for 30 days, so invites made before a ban keep working for that long. When two admins rotate at once, the replay keeps the rotation with the lowest event id, and every device adopts it. The losing secret is retired, with grace, like any other. Before the fix, anyone who knew a community id
    can join its gossip topic or sync it, and read control events: display names, handles, roles,
    bans, membership timing and reaction emoji. DHT nodes learn the community id and the plaintext
    name in the community record. **Fix:**
@@ -56,7 +56,43 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
    from the same secret, so a stranger who knows only the community id does not find the packet. The
    record follows each rotation, because the publisher derives from the current secret. A holder whose
    invite names a retired secret looks in the wrong place, and its join falls back to the invite's own
-   peers. **Still open in phase 3:** control payloads and reaction emoji.
+   peers.
+  **Phase 3, control payloads: done.** The membership, role, name, handle, channel, relay and key
+  rotation payloads (`Join`, `JoinAsStorage`, `Leave`, `Ban`, `Unban`, role grants and revokes,
+  `HandleClaim`, `ChannelCreate`, `VoiceChannelCreate`, `SetRelays`, `KeyRotation`, `DeviceRevoke`)
+  are sealed as `SealedControl`. Each is encrypted with XChaCha20-Poly1305 under a key derived from
+  the community secret of the generation it was made in. The event's header (community, channel,
+  author, device, parents, hlc and generation) is the associated data, so a ciphertext cannot be
+  moved to another event. The event id and signature cover the ciphertext, so relays, gossip hops
+  and DHT nodes verify authorship without a key. Replay opens each payload with the secrets of every
+  generation the device holds, as `Keys.history`. A joiner or storage member fetches the older
+  generations from an active member with `SecretHistory`, which a banned device cannot get. A
+  payload whose generation it lacks stays locked until the key arrives, and the replay is rebuilt
+  then. Message content was already under MLS, and the rotation payload stays readable, because it
+  carries the keys.
+  **What remains in phase 3:**
+  - *Storage members read control payloads.* They fetch the current secret and every older one, so
+    they hold what members hold. Sealing protects against outsiders, DHT observers and past members
+    who kept only the DAG bytes. It does not hide control events from a seeder.
+  - *The window before a ban rotates.* Control events made after a ban, but before the rotation that
+    covers it lands, are still sealed under the old generation. A banned member who kept that
+    secret can open them. The rotation waits until the removal commit has applied
+    here, then goes out on the next maintenance pass, so the window is short but not zero.
+  - *Leaving does not rotate.* A departed member who kept the secret can still sync, as before, and
+    reads control events until the next ban rotation.
+  - *A member can send a wrong older secret.* A joiner stores what members send, and once a
+    generation has an entry it stops asking for that generation. A bad entry therefore leaves that
+    generation's events locked for the joiner. The member cannot forge or read anything, because
+    every payload is authenticated. Committing the older secrets to the rotation would close this.
+  - *Two admins rotating at once.* Events sealed under the losing secret open only on devices that
+    held it. Other devices show them as locked, so their replay can differ until they fetch it. The
+    history fetch reaches only the devices that answer, so this is a known gap.
+  - *Residual cleartext metadata.* Anyone with the DAG sees the event id, author root and device,
+    channel, parents, hlc, the generation and the payload length. The kind of a sealed control
+    event is hidden. Clear kinds remain: message content kinds, `Delete`, reaction emoji, and
+    `SecretRotation`. A rotation names the banned roots it covers, so a banned root's id and the time
+    of the ban are visible, though not the ban's author or reason.
+  **Still open in phase 3:** reaction emoji.
 3. **Fixed: key-change warnings.** The engine raises `IdentityChanged` when someone you share a
    server with or have messaged rotates their key through recovery, or when a person you've
    messaged gains a new device. The change is recorded on their profile, and the app shows a

@@ -1,6 +1,7 @@
 //! Signed, hash-linked event DAG with deterministic permission replay, plus direct messages.
 //!
 //! * [`event`]: signed events. An event's id is the blake3 hash of its body.
+//! * [`control`]: control payloads sealed under a community secret, opened by replay.
 //! * [`hlc`]: hybrid logical clock stamps used to order concurrent events.
 //! * [`dag`]: in-memory store. Holds events whose parents have not arrived yet.
 //! * [`state`]: replays the causal order into [`CommunityState`].
@@ -10,6 +11,7 @@
 //! Every peer that holds the same set of events computes the same state,
 //! regardless of the order in which it received them.
 
+pub mod control;
 pub mod dag;
 pub mod dm;
 pub mod emoji;
@@ -23,6 +25,7 @@ pub mod state;
 pub(crate) mod testutil;
 pub mod wire;
 
+pub use control::{is_sealable, open_event, seal, OpenError, SealKey};
 pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
 pub use emoji::{normalize_emoji, EmojiError};
@@ -31,7 +34,7 @@ pub use hlc::{Hlc, HlcClock};
 pub use names::{confusable, normalize_handle, skeleton, NameError};
 pub use relay::{valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
 pub use replayer::{ReplayStats, Replayer};
-pub use state::{replay, CommunityState, Member, MessageView, Rejection};
+pub use state::{replay, replay_with, CommunityState, Member, MessageView, Rejection};
 pub use wire::SignedEvent;
 
 #[derive(Debug, thiserror::Error)]

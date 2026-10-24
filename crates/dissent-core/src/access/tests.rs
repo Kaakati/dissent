@@ -302,6 +302,119 @@ async fn two_admins_rotating_at_once_converge_on_one_secret() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_who_joins_after_a_ban_reads_the_control_events_from_before_it() {
+    crate::testutil::bounded(async {
+        use crate::membership::tests::{eventually, three_members, Node};
+        use crate::ModAction;
+        // The "general" channel was created under generation 0, before the ban rotates to 1.
+        let (alice, bob, _carol, id, _old_invite) = three_members().await;
+        alice
+            .engine
+            .moderate(id, ModAction::Ban, bob.root())
+            .await
+            .expect("alice bans bob");
+        eventually("alice holds the rotated secret", || {
+            alice.engine.access_keys(id).map(|k| k.generation) == Some(1)
+        })
+        .await;
+
+        // Dave joins with an invite from after the ban, so he starts with generation 1 only.
+        let fresh = alice.engine.create_invite(id).await.expect("invite");
+        let dave = Node::named("dave").await;
+        dave.engine.join_community(&fresh).await.expect("dave joins");
+        eventually("dave fetches the older secret", || {
+            dave.engine.access_keys(id).is_some_and(|k| k.history.len() == 2)
+        })
+        .await;
+        eventually("dave replays the channel sealed before the ban", || {
+            dave.engine
+                .community_view(id)
+                .is_ok_and(|v| v.channels.iter().any(|c| c.name == "general"))
+        })
+        .await;
+    })
+    .await;
+}
+
+/// A rotation that arrives while its generation is unknown is locked. Its notice must come when
+/// the key arrives, and only then, however often the key or the event is seen again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_key_rotation_raises_its_notice_once_when_the_key_arrives() {
+    crate::testutil::bounded(async {
+        use crate::engine::now_ms;
+        use crate::membership::tests::Node;
+        use crate::views::EngineEvent;
+        use dissent_events::{seal, ChannelId, Event, EventBody, Hlc, Payload, SignedEvent};
+        use dissent_identity::{DeviceKey, KeyRotation, RootKey};
+
+        let alice = Node::named("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Rotating".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        let mut events = alice.engine.subscribe();
+        let notices = |events: &mut tokio::sync::broadcast::Receiver<EngineEvent>| {
+            let mut n = 0;
+            while let Ok(ev) = events.try_recv() {
+                n += usize::from(matches!(ev, EngineEvent::IdentityChanged { .. }));
+            }
+            n
+        };
+
+        // Alice's root moves to a fresh root. The rotation is sealed under generation 7, which
+        // alice does not hold yet.
+        let now = now_ms();
+        let old = alice.identity.root.as_ref().expect("alice holds her root key");
+        let new = RootKey::generate();
+        let rotation = KeyRotation::by_owner(old, &new, now);
+        let device = DeviceKey::generate();
+        let cert = new.certify(device.id(), 0);
+        let body = EventBody {
+            community: id,
+            channel: ChannelId::CONTROL,
+            author: new.id(),
+            device: device.id(),
+            parents: vec![],
+            hlc: Hlc { wall_ms: now, counter: 0 },
+            payload: Payload::KeyRotation(rotation),
+        };
+        let secret = [42u8; 32];
+        let payload = seal(&secret, 7, &body).unwrap();
+        let se = SignedEvent {
+            event: Event::sign(EventBody { payload, ..body }, &device),
+            cert,
+        };
+
+        alice.engine.ingest(id, vec![se.clone()]).expect("the locked rotation is stored");
+        assert_eq!(notices(&mut events), 0, "locked: no notice yet");
+
+        // The key arrives. The rotation unlocks and its notice fires once.
+        alice.engine.remember_secrets(id, &[(7, secret)]).await;
+        assert_eq!(notices(&mut events), 1, "the notice fires when the key arrives");
+
+        // Seeing the key again, or the event again, raises nothing more.
+        alice.engine.remember_secrets(id, &[(7, secret)]).await;
+        alice.engine.ingest(id, vec![se]).expect("duplicate is ignored");
+        assert_eq!(notices(&mut events), 0, "no duplicate notice");
+    })
+    .await;
+}
+
+#[test]
+fn keys_remember_every_generation_they_install() {
+    use super::Keys;
+    let mut keys = Keys::from_invite(0, [1; 32]);
+    assert!(keys.install(1, [2; 32], [9; 32], 1_000));
+    assert_eq!(keys.history, vec![(0, [1; 32]), (1, [2; 32])]);
+    keys.remember(1, [2; 32]);
+    assert_eq!(keys.history.len(), 2, "a pair is kept once");
+}
+
 /// Upgrades must never fail to start: every format an older build wrote still loads.
 #[test]
 fn access_files_from_older_versions_still_load() {
@@ -323,9 +436,24 @@ fn access_files_from_older_versions_still_load() {
     let keys = decode_keys(&v2).unwrap();
     assert_eq!((keys.generation, keys.secret, keys.retired, keys.source), (3, [8; 32], retired, [0; 32]));
 
+    // Before sealed control events: Keys without `history`. The history is rebuilt from the
+    // current secret, which is the only one such a file could have used.
+    #[derive(serde::Serialize)]
+    struct KeysV3 {
+        generation: u64,
+        secret: [u8; 32],
+        retired: Vec<Retired>,
+        source: [u8; 32],
+    }
+    let v3 = postcard::to_allocvec(&KeysV3 { generation: 4, secret: [6; 32], retired: vec![Retired { secret: [1; 32], until_ms: 99 }], source: [5; 32] }).unwrap();
+    let keys = decode_keys(&v3).unwrap();
+    assert_eq!((keys.generation, keys.secret, keys.source), (4, [6; 32], [5; 32]));
+    assert_eq!(keys.history, vec![(4, [6; 32])]);
+
     // The current format round-trips unchanged.
     let mut now = Keys::from_invite(5, [9; 32]);
     now.source = [4; 32];
+    now.remember(3, [7; 32]);
     assert_eq!(decode_keys(&postcard::to_allocvec(&now).unwrap()).unwrap(), now);
 
     // Garbage is an error, not a panic.
