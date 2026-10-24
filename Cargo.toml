@@ -6,6 +6,9 @@ members = [
     "crates/dissent-net",
     "crates/dissent-discovery",
     "crates/dissent-core",
+    "crates/dissent-mls",
+    "apps/seeder",
+    "apps/relay",
     "apps/desktop/src-tauri",
 ]
 
@@ -21,6 +24,7 @@ dissent-events = { path = "crates/dissent-events" }
 dissent-net = { path = "crates/dissent-net" }
 dissent-discovery = { path = "crates/dissent-discovery" }
 dissent-core = { path = "crates/dissent-core" }
+dissent-mls = { path = "crates/dissent-mls" }
 
 anyhow = "1"
 thiserror = "2"
@@ -43,6 +47,12 @@ pkarr = { version = "8", default-features = false, features = ["dht", "signed_pa
 url = { version = "2", features = ["serde"] }
 futures-lite = "2"
 negentropy = "0.5"
+clap = { version = "4", features = ["derive"] }
+iroh-relay = { version = "1.4.1", features = ["server"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_basic_credential = "0.6"
 
 [profile.dev.package.ed25519-dalek]
 opt-level = 3
