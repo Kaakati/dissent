@@ -235,6 +235,26 @@ export const deleteMessage = guard(async (messageId) => {
   return true;
 });
 
+// ---- replies and reactions (only offered when the backend reports them, see views/chat.js) ----
+
+export const sendReply = guard(async (messageId, text) => {
+  const community = state.community;
+  if (!community || !state.channelId) return false;
+  await api.sendReply(community.id, state.channelId, messageId, text);
+  await loadMessages();
+  return true;
+});
+
+// Adds the reaction, or removes it when `mine` says the current user already reacted with it.
+export const toggleReaction = guard(async (messageId, emoji, mine) => {
+  const community = state.community;
+  if (!community || !state.channelId) return false;
+  if (mine) await api.unreact(community.id, state.channelId, messageId, emoji);
+  else await api.react(community.id, state.channelId, messageId, emoji);
+  await loadMessages();
+  return true;
+});
+
 // ---- direct messages ----
 
 export const sendDm = guard(async (text) => {

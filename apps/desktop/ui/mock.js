@@ -19,9 +19,10 @@ if (!window.__TAURI__) {
   const suffix = (root) => root.slice(0, 8);
 
   // Messages are written as [minutes ago, author, text]. Gaps longer than 7 minutes start a new group.
+  // Reactions are kept as { emoji, users } and replies as the original's id; messageItem shapes them for the UI.
   const at = (daysAgo, minutesAgo) => now - daysAgo * DAY - minutesAgo * MIN;
   const msg = (daysAgo, minutesAgo, author, text) => ({
-    id: id(`m${++seq}`), author, text, ms: at(daysAgo, minutesAgo), edited: false, deleted: false,
+    id: id(`m${++seq}`), author, text, ms: at(daysAgo, minutesAgo), edited: false, deleted: false, reactions: [], replyTo: null,
   });
 
   const generalMessages = [
@@ -42,6 +43,23 @@ if (!window.__TAURI__) {
     msg(0, 20, ME, 'Retry passed. Tagging the release candidate after lunch.'),
     msg(0, 4, GRACE, 'Thanks all. Changelog is in the repo under docs/.'),
   ];
+  // Sample replies and reactions on #general.
+  generalMessages[5].replyTo = generalMessages[3].id; // Ada answers Ken's "Yes, it compiled first try"
+  generalMessages[9].replyTo = generalMessages[8].id; // Grace asks for the gist link
+  generalMessages[6].reactions = [{ emoji: '👍', users: [KEN, ME, RADIA] }, { emoji: '🔥', users: [RADIA] }];
+  generalMessages[15].reactions = [{ emoji: '🙏', users: [KEN, LINUS, RADIA, ME] }];
+  generalMessages[13].reactions = [{ emoji: '😅', users: [LINUS] }];
+
+  // #off-topic shows the two broken reply cases: the original was deleted, or it is sealed for this device.
+  function offTopicMessages() {
+    const gone = msg(0, 40, RADIA, 'Deleted joke');
+    gone.deleted = true;
+    const reply = msg(0, 30, KEN, 'Anyone else tracking the weather radar in the background?');
+    reply.replyTo = gone.id;
+    const sealed = msg(0, 12, RADIA, 'Still cannot read the old ones since I rejoined.');
+    sealed.replyTo = id('sealed-elsewhere');
+    return [gone, reply, sealed];
+  }
 
   const servers = {
     c1: {
@@ -60,7 +78,7 @@ if (!window.__TAURI__) {
         ch1: generalMessages,
         ch2: [msg(1, 300, RADIA, 'How do I borrow from a struct field inside a closure?'), msg(1, 298, GRACE, 'Capture the field by reference, or use a local binding.')],
         ch3: [msg(5, 0, GRACE, 'Dissent 0.1 is tagged. Release notes are in the announcements post.')],
-        ch4: [msg(0, 30, RADIA, 'Anyone else tracking the weather radar in the background?')],
+        ch4: offTopicMessages(),
       },
     },
     c2: {
@@ -130,7 +148,15 @@ if (!window.__TAURI__) {
       banned: c.banned.has(r),
     })),
   });
-  const messageItem = (m) => ({
+  // The reply reference: a snippet of the original, or text null when it is deleted or sealed for this device.
+  const replyRef = (c, channelId, originalId) => {
+    const orig = (c.msgs[channelId] ?? []).find((m) => m.id === originalId);
+    if (!orig) return { id: originalId, author_name: '', text: null, locked: true };
+    if (orig.deleted) return { id: orig.id, author: orig.author, author_name: people[orig.author], text: null };
+    return { id: orig.id, author: orig.author, author_name: people[orig.author], text: orig.text.slice(0, 120) };
+  };
+  // `window.__mockNoReactions = true` simulates a backend without replies and reactions: the fields are left out.
+  const messageItem = (c, channelId, m) => ({
     id: m.id,
     author: m.author,
     author_name: people[m.author],
@@ -138,6 +164,15 @@ if (!window.__TAURI__) {
     ms: m.ms,
     edited: m.edited,
     deleted: m.deleted,
+    ...(window.__mockNoReactions ? {} : {
+      reply_to: m.replyTo ? replyRef(c, channelId, m.replyTo) : null,
+      reactions: m.reactions.map((r) => ({
+        emoji: r.emoji,
+        count: r.users.length,
+        me: r.users.includes(ME),
+        names: r.users.slice(0, 3).map((u) => people[u]),
+      })),
+    }),
   });
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
@@ -190,12 +225,40 @@ if (!window.__TAURI__) {
     },
     channel_messages: async ({ communityId, channelId, limit }) => {
       await pause();
-      return (servers[communityId].msgs[channelId] ?? []).slice(-limit).map(messageItem);
+      const c = servers[communityId];
+      return (c.msgs[channelId] ?? []).slice(-limit).map((m) => messageItem(c, channelId, m));
     },
     send_message: ({ communityId, channelId, text }) => {
-      const m = { id: id(`m${++seq}`), author: ME, text, ms: Date.now(), edited: false, deleted: false };
-      servers[communityId].msgs[channelId].push(m);
-      return messageItem(m);
+      const c = servers[communityId];
+      const m = { ...msg(0, 0, ME, text), ms: Date.now() };
+      c.msgs[channelId].push(m);
+      return messageItem(c, channelId, m);
+    },
+    send_reply: ({ communityId, channelId, messageId, text }) => {
+      const c = servers[communityId];
+      need(findMessage(c, channelId, messageId), 'Cannot reply: message not found');
+      const m = { ...msg(0, 0, ME, text), ms: Date.now(), replyTo: messageId };
+      c.msgs[channelId].push(m);
+      return messageItem(c, channelId, m);
+    },
+    react: ({ communityId, channelId, messageId, emoji }) => {
+      const m = findMessage(servers[communityId], channelId, messageId);
+      need(m && !m.deleted, 'Cannot react: message not found');
+      const r = m.reactions.find((x) => x.emoji === emoji);
+      if (r) {
+        if (!r.users.includes(ME)) r.users.push(ME);
+      } else {
+        m.reactions.push({ emoji, users: [ME] });
+      }
+      return null;
+    },
+    unreact: ({ communityId, channelId, messageId, emoji }) => {
+      const m = findMessage(servers[communityId], channelId, messageId);
+      need(m, 'Cannot react: message not found');
+      const r = m.reactions.find((x) => x.emoji === emoji);
+      if (r) r.users = r.users.filter((u) => u !== ME);
+      m.reactions = m.reactions.filter((x) => x.users.length > 0);
+      return null;
     },
     edit_message: ({ communityId, channelId, messageId, text }) => {
       const m = findMessage(servers[communityId], channelId, messageId);
@@ -292,7 +355,7 @@ if (!window.__TAURI__) {
 
   // Screenshot helpers: post a message into any channel or DM, as if another person sent it.
   window.__mockPost = (communityId, channelId, author, text) => {
-    const m = { id: id(`m${++seq}`), author, text, ms: Date.now(), edited: false, deleted: false };
+    const m = { ...msg(0, 0, author, text), ms: Date.now() };
     servers[communityId].msgs[channelId].push(m);
     emit({ kind: 'message', community_id: communityId, channel_id: channelId });
   };

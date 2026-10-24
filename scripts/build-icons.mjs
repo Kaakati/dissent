@@ -10,7 +10,7 @@ const ICONS = [
   'at-sign', 'ban', 'check', 'chevron-down', 'circle-alert', 'clock', 'copy', 'hash', 'house', 'info',
   'key-round', 'log-out', 'message-circle', 'message-square', 'pencil', 'plus', 'send-horizontal',
   'link', 'panel-right', 'search', 'settings', 'shield-minus', 'shield-plus', 'trash-2', 'undo-2', 'user-plus',
-  'users', 'x',
+  'users', 'x', 'shield-check', 'user', 'palette', 'wifi', 'external-link', 'download', 'reply', 'smile-plus',
 ];
 
 // Original marks drawn here, not from Lucide. Filled with currentColor.

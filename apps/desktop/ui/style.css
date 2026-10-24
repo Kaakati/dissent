@@ -534,3 +534,62 @@ html[data-density="compact"] .skel-lines { padding-top: 0; gap: var(--s-1); }
   .settings-body > * { max-width: none; }
   .settings-close-col { padding-top: 48px; }
 }
+
+/* ---- replies and reactions (shown only when the backend reports them) ---- */
+:root { --emoji: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif; }
+.messages:focus-visible { outline-offset: -2px; }
+.msg:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* Jump flash: an overlay whose opacity fades, nothing else moves. */
+.msg::after { content: ""; position: absolute; inset: 0; background: var(--accent-text); opacity: 0; pointer-events: none; }
+.msg.flash::after { animation: msg-flash 1.2s ease-out; }
+@keyframes msg-flash { from { opacity: .18; } to { opacity: 0; } }
+.avatar.xs { width: 16px; height: 16px; font-size: 8px; }
+
+.reply-ref {
+  grid-column: 1 / -1; position: relative; display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
+  height: 22px; margin-bottom: 2px; padding: 0 0 0 var(--msg-gutter); border: 0; border-radius: 0; background: none; justify-content: flex-start;
+  color: var(--muted); font: 500 var(--fs-ui) / var(--lh-ui) var(--font); text-align: left;
+}
+/* The connector: down from the reply line to the avatar, and across to the text, like the reference. */
+.reply-ref::before {
+  content: ""; position: absolute; left: 36px; top: 11px; width: 32px; height: calc(100% - 11px + 2px);
+  border: 2px solid var(--border-strong); border-right: 0; border-bottom: 0; border-top-left-radius: 6px;
+}
+.reply-ref:hover:not(:disabled) { background: none; color: var(--text); }
+.reply-ref:focus-visible { outline-offset: -2px; }
+.reply-author { flex: none; max-width: 40%; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-snippet { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-missing { font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html[data-density="compact"] .reply-ref::before { left: 30px; width: 22px; }
+
+.reactions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+.reaction {
+  height: 24px; min-width: 40px; padding: 0 var(--s-2) 0 6px; gap: 6px; border: 1px solid transparent; border-radius: var(--r-2);
+  background: rgb(255 255 255 / .06); color: var(--muted); font: 500 var(--fs-ui) / var(--lh-ui) var(--font); font-variant-numeric: tabular-nums;
+}
+.reaction:hover:not(:disabled) { background: rgb(255 255 255 / .1); border-color: var(--border-strong); color: var(--text); }
+.reaction.me { border-color: var(--accent-text); background: rgb(255 130 102 / .12); color: var(--text-strong); }
+.reaction.me:hover:not(:disabled) { background: rgb(255 130 102 / .2); border-color: var(--accent-text); }
+.reaction-emoji { font: 16px / 1 var(--emoji); }
+.reaction.add { min-width: 32px; padding: 0 6px; opacity: 0; }
+.reaction.add > .icon { width: var(--icon-sm); height: var(--icon-sm); }
+.msg:hover .reaction.add, .msg:focus-within .reaction.add { opacity: 1; }
+
+.composer-stack { display: flex; flex-direction: column; }
+.reply-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); height: var(--hit); padding: 0 var(--s-1) 0 var(--s-4);
+  background: var(--elevated); border-radius: var(--r-2) var(--r-2) 0 0; box-shadow: inset 0 -1px 0 var(--border);
+  color: var(--muted); font: var(--fs-ui) / var(--lh-ui) var(--font);
+}
+.reply-bar strong { color: var(--text); font-weight: 600; }
+.reply-bar-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-stack:has(.reply-bar:not([hidden])) .composer { border-radius: 0 0 var(--r-2) var(--r-2); }
+
+.emoji-picker { position: fixed; z-index: 35; width: 304px; padding: var(--s-2); background: var(--ink); border-radius: var(--r-2); box-shadow: var(--shadow-2); }
+.emoji-search { height: var(--hit); min-height: 0; margin-bottom: var(--s-2); padding: 0 var(--s-2); font: var(--fs-ui) / var(--lh-ui) var(--font); }
+.emoji-grid { display: grid; grid-template-columns: repeat(8, 36px); }
+.emoji-cell { width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--r-1); background: none; font: 22px / 1 var(--emoji); }
+.emoji-cell:hover:not(:disabled) { background: var(--hover); }
+.emoji-cell:focus-visible { outline-offset: -2px; }
+.emoji-empty { grid-column: 1 / -1; padding: var(--s-2); font: var(--fs-ui) / var(--lh-ui) var(--font); }
+@media (prefers-reduced-motion: reduce) { .msg.flash::after { animation: none; } }

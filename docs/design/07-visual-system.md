@@ -288,6 +288,26 @@ Measured again after the redesign with the same driver. Every value below is at 
 - Toasts stay bottom-right above the status bar; the references pop notices at the top centre.
 - Header features that do not exist here (topic, pins, threads, voice) are not drawn.
 
+## Part 4. Replies and reactions
+
+Built against the engine contract that core2 will implement: `MessageItem.reply_to: { id, author_name, text | null }`, `MessageItem.reactions: [{ emoji, count, me }]`, and the commands `send_reply`, `react` and `unreact`. The UI feature-detects: reply and reaction affordances appear only when the channel's message items carry a `reactions` array (`view.social` in `views/chat.js`). Without it the channel renders exactly as before, and R in the message list does nothing. DMs never show them (the contract is channel-only).
+
+| Piece | Size and placement |
+|---|---|
+| Hover bar | Reply (`reply`) and Add reaction (`smile-plus`) lead the bar, then Edit and Delete; 32 px buttons, 20 px icons |
+| Reply reference | 22 px row above the message spanning both grid columns, 2 px below it; 16 px avatar (`.avatar.xs`), author in `--text`, one-line muted snippet, 14/18 weight 500; connector 2 px `--border-strong` from x 36 (avatar centre) across to x 68, curving down to the avatar top with a 6 px radius (x 30 to 52 in Compact); a reply always starts a new group |
+| Missing original | "Original message was deleted" or "Original message is encrypted" in italic muted 14/18 (the optional `locked: true` on `reply_to` picks the second) |
+| Jump | click scrolls the original to the centre, focuses it and fades a `--accent-text` overlay from 18 % to 0 over 1.2 s (opacity only, off under reduced motion) |
+| Reply bar | 32 px band above the composer on `--elevated` with the top radii, "Replying to **Name**" 14/18 and a 32 px ✕; the composer loses its top radii while the bar shows; Esc in the composer cancels |
+| Reaction pills | 24 px tall, 8 px radius, 6/8 padding, 16 px emoji in the system emoji font, tabular count 14/18; mine: `--accent-text` border and a 12 % tint; hover tooltip "Grace, Ken and 2 others" from the optional `names` (up to three) or the count and `me` |
+| Add pill | 32 px wide `smile-plus` pill at the end of the row, shown on hover and focus-within |
+| Picker | 304 px on `--ink`, 8 px padding, 32 px search, 8 × 36 px cells with 22 px emoji; 32 curated emoji with a name list; Down from the search enters the grid, arrows and Home/End move, Enter picks, Esc closes and returns focus to the opener; no emoji font or list is downloaded |
+| Keyboard | the message list is focusable; Up/Down move focus between messages (a focused message shows its bar, so Tab reaches the actions); R replies to the focused message |
+
+Contract notes for core2, all optional and already handled when absent: `reactions[].names` (up to three display names, for the tooltip), `reply_to.author` (root id, so the 16 px avatar takes the author's colour), `reply_to.locked` (true when the original is sealed, to say "encrypted" instead of "deleted"). The mock implements all three, and `window.__mockNoReactions = true` simulates a backend without the feature.
+
+Screenshots: `social-1600/` (`server-top`, `server`, `hover-reactions`, `pill-hover`, `reply-bar`, `reply-typing`, `reply-sent`, `jump-flash`, `picker`, `picker-filtered`, `reacted`, `picker-from-pill`, `missing-originals`, `keyboard-reply`, `compact`, `unsupported-hover`).
+
 ### Screenshots
 
 Kept outside the repo, in `C:/Users/Kaaka/AppData/Local/Temp/claude/H--Rust-Projects-Dissent/dcb79fca-de63-4c46-81d0-05654136d058/scratchpad/design/`:

@@ -152,6 +152,18 @@
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
     <path d="m7 10 5 5 5-5" />
   </symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+    <path d="m9 17-5-5 5-5" />
+  </symbol>
+  <symbol id="i-smile-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13.267 2.08a10 10 0 108.653 8.653" />
+    <path d="M15 10V9" />
+    <path d="M16 5h6" />
+    <path d="M16.472 15a6 6 0 01-8.943 0" />
+    <path d="M19 2v6" />
+    <path d="M9 10V9" />
+  </symbol>
   <symbol id="i-dissent-mark" viewBox="0 0 24 24" fill="currentColor">
     <path fill="currentColor" fill-rule="evenodd" d="M4 3h7.5a9 9 0 0 1 0 18H4z M8.5 7v10h3a5 5 0 0 0 0-10z" />
   </symbol>

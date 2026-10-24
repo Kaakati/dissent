@@ -21,6 +21,11 @@ export const api = {
     call('edit_message', { communityId, channelId, messageId, text }),
   deleteMessage: (communityId, channelId, messageId) =>
     call('delete_message', { communityId, channelId, messageId }),
+  // Replies and reactions. The UI shows them only when message items carry a `reactions` array.
+  sendReply: (communityId, channelId, messageId, text) =>
+    call('send_reply', { communityId, channelId, messageId, text }),
+  react: (communityId, channelId, messageId, emoji) => call('react', { communityId, channelId, messageId, emoji }),
+  unreact: (communityId, channelId, messageId, emoji) => call('unreact', { communityId, channelId, messageId, emoji }),
   moderate: (communityId, action, user) => call('moderate', { communityId, action, user }),
   claimHandle: (communityId, handle) => call('claim_handle', { communityId, handle }),
   userProfile: (user) => call('user_profile', { user }),

@@ -4,8 +4,10 @@ import * as actions from '../actions.js';
 import { el, avatar, icon, linkify, dayKey, dayLabel, clockLabel, stampLabel, setHue, toast, copyText, skeletonRows } from '../ui.js';
 import { confirmDialog, openInviteDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
+import { openEmojiPicker } from './emoji.js';
 
 const GROUP_MS = 7 * 60 * 1000; // consecutive messages by one author within this gap share a header
+const FLASH_MS = 1200; // how long a jumped-to message stays highlighted
 
 // The header and composer keep their DOM across renders, so the search box keeps focus while typing.
 const titleBox = el('div', { class: 'chat-title' });
@@ -13,7 +15,7 @@ const tools = el('div', { class: 'header-tools' });
 const searchInput = el('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search messages', autocomplete: 'off' });
 searchInput.addEventListener('input', () => actions.setFilter(searchInput.value));
 const header = el('header', { class: 'chat-header' }, titleBox, tools, el('div', { class: 'update-host', id: 'update-host' }), el('div', { class: 'search' }, searchInput, icon('search')));
-const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages', 'aria-live': 'polite' });
+const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages', 'aria-live': 'polite', tabindex: '0' });
 const composerHost = el('div', { class: 'composer-host' });
 
 let composerKey = null;
@@ -21,11 +23,39 @@ let listKey = null;
 let editingId = null;
 let editInput = null; // kept across refreshes so an unsent edit survives
 let plusMenu = null;
+let replyTo = null; // { id, authorName } while composing a reply
+let composerInput = null;
+let replyBar = null;
 
 export function initChat() {
   document.getElementById('main').replaceChildren(header, list, composerHost);
+  list.addEventListener('keydown', onListKey);
   subscribe('main', render);
   render();
+}
+
+// Keyboard in the message list: Up and Down move focus between messages, R replies to the focused one.
+// A focused message shows its action bar, so Tab then reaches those buttons.
+function onListKey(e) {
+  const focused = e.target.closest?.('.msg');
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (e.target !== list && !(focused && e.target === focused)) return;
+    const rows = [...list.querySelectorAll('.msg')];
+    if (!rows.length) return;
+    const i = rows.indexOf(focused);
+    const next = e.key === 'ArrowDown' ? (i < 0 ? 0 : Math.min(rows.length - 1, i + 1)) : (i < 0 ? rows.length - 1 : Math.max(0, i - 1));
+    e.preventDefault();
+    rows[next].focus();
+    return;
+  }
+  if (e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey && focused && e.target === focused) {
+    const view = current();
+    const item = view?.items.find((m) => m.id === focused.dataset.id);
+    if (view?.social && item && !item.deleted) {
+      e.preventDefault();
+      startReply(item);
+    }
+  }
 }
 
 // Normalises the open channel or DM into one shape the renderer understands.
@@ -34,23 +64,28 @@ function current() {
   if (inServer()) {
     const channel = state.community.channels.find((c) => c.id === state.channelId);
     if (!channel) return null;
+    const items = state.messages.map((m) => ({
+      id: m.id,
+      author: m.author,
+      authorName: m.author_name,
+      text: m.text,
+      ms: m.ms,
+      edited: m.edited,
+      deleted: m.deleted,
+      own: m.author === me?.root_id,
+      pending: false,
+      replyTo: m.reply_to ?? null,
+      reactions: Array.isArray(m.reactions) ? m.reactions : null,
+    }));
     return {
       key: `ch:${state.community.id}:${channel.id}`,
       dm: false,
       title: channel.name,
       hash: true,
       placeholder: `Message #${channel.name}`,
-      items: state.messages.map((m) => ({
-        id: m.id,
-        author: m.author,
-        authorName: m.author_name,
-        text: m.text,
-        ms: m.ms,
-        edited: m.edited,
-        deleted: m.deleted,
-        own: m.author === me?.root_id,
-        pending: false,
-      })),
+      items,
+      // Replies and reactions exist only when the backend sends a `reactions` array on messages.
+      social: items.some((m) => m.reactions !== null),
     };
   }
   if (state.route.kind === 'home' && state.peer) {
@@ -73,8 +108,11 @@ function current() {
           deleted: false,
           own,
           pending: m.pending,
+          replyTo: null,
+          reactions: null,
         };
       }),
+      social: false,
     };
   }
   return null;
@@ -113,9 +151,12 @@ function render() {
     return;
   }
 
-  // A search applies to one conversation; switching clears it.
+  // A search applies to one conversation; switching clears it, and drops a reply in progress.
   const switched = view.key !== listKey;
-  if (switched) state.ui.filter = '';
+  if (switched) {
+    state.ui.filter = '';
+    replyTo = null;
+  }
   if (searchInput.value !== state.ui.filter) searchInput.value = state.ui.filter;
 
   titleBox.replaceChildren(...titleNodes(view));
@@ -182,7 +223,7 @@ function rowsFor(items, view) {
   for (const item of items) {
     const newDay = !prev || dayKey(prev.ms) !== dayKey(item.ms);
     if (newDay) out.push(el('div', { class: 'date-divider', role: 'separator' }, el('span', { text: dayLabel(item.ms) })));
-    const start = newDay || prev.author !== item.author || Number(item.ms) - Number(prev.ms) > GROUP_MS;
+    const start = newDay || prev.author !== item.author || Number(item.ms) - Number(prev.ms) > GROUP_MS || Boolean(item.replyTo);
     if (item.id === state.newFromId) {
       out.push(el('div', { class: 'new-divider', role: 'separator' }, el('span', { text: 'New messages' })));
     }
@@ -200,14 +241,127 @@ function messageRow(item, view, start) {
   const gutter = start
     ? el('div', { class: 'gutter' }, avatar(item.authorName, item.author, 'lg'))
     : el('div', { class: 'gutter' }, el('span', { class: 'gutter-time', text: clockLabel(item.ms) }));
+  const reactions = view.social && item.reactions?.length && !item.deleted ? reactionsNode(item) : null;
   const content = start
     ? el('div', { class: 'msg-content' },
       el('div', { class: 'msg-head' },
         authorButton(item),
         el('time', { title: stampLabel(item.ms), text: clockLabel(item.ms) })),
-      body, pending)
-    : el('div', { class: 'msg-content' }, body, pending);
-  return el('article', { class: classes, 'data-id': item.id }, gutter, content, view.dm || editing ? null : rowActions(item));
+      body, pending, reactions)
+    : el('div', { class: 'msg-content' }, body, pending, reactions);
+  return el('article', { class: classes, 'data-id': item.id, tabindex: '-1' },
+    item.replyTo ? replyRef(item.replyTo) : null,
+    gutter, content, view.dm || editing ? null : rowActions(item, view));
+}
+
+// ---- replies ----
+
+// The line above a reply: a connector from the avatar column, the original's author and a one-line snippet.
+function replyRef(ref) {
+  const missing = ref.text === null || ref.text === undefined;
+  const label = missing
+    ? (ref.locked ? 'Original message is encrypted' : 'Original message was deleted')
+    : `Replying to ${ref.author_name}: ${ref.text}`;
+  return el('button', {
+    class: 'reply-ref',
+    title: label,
+    'aria-label': label,
+    onclick: () => jumpTo(ref.id),
+  },
+  missing
+    ? el('span', { class: 'reply-missing', text: ref.locked ? 'Original message is encrypted' : 'Original message was deleted' })
+    : [
+      avatar(ref.author_name, ref.author ?? ref.author_name, 'xs'),
+      el('span', { class: 'reply-author', text: ref.author_name || 'unknown' }),
+      el('span', { class: 'reply-snippet', text: ref.text }),
+    ]);
+}
+
+// Scrolls to a message and flashes it. The flash is an opacity animation on the row's overlay.
+function jumpTo(messageId) {
+  const node = [...list.querySelectorAll('.msg')].find((n) => n.dataset.id === messageId);
+  if (!node) {
+    toast('The original message is not in the loaded history.', 'info');
+    return;
+  }
+  node.scrollIntoView({ block: 'center' });
+  node.focus();
+  node.classList.remove('flash');
+  void node.offsetWidth; // restart the animation when flashing the same row twice
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), FLASH_MS);
+}
+
+function startReply(item) {
+  replyTo = { id: item.id, authorName: item.authorName || 'unknown' };
+  renderReplyBar();
+  composerInput?.focus();
+}
+
+function cancelReply() {
+  if (!replyTo) return;
+  replyTo = null;
+  renderReplyBar();
+}
+
+function renderReplyBar() {
+  if (!replyBar) return;
+  replyBar.hidden = !replyTo;
+  if (!replyTo) return;
+  replyBar.replaceChildren(
+    el('span', { class: 'reply-bar-text' }, 'Replying to ', el('strong', { text: replyTo.authorName })),
+    el('button', { class: 'icon-btn', 'aria-label': 'Cancel reply', title: 'Cancel reply (Esc)', icon: 'x', onclick: () => { cancelReply(); composerInput?.focus(); } }),
+  );
+}
+
+// ---- reactions ----
+
+function reactionsNode(item) {
+  const pills = item.reactions.map((r) => {
+    const who = whoReacted(r);
+    return el('button', {
+      class: `reaction${r.me ? ' me' : ''}`,
+      'aria-pressed': r.me ? 'true' : 'false',
+      'aria-label': `${r.emoji} ${r.count}, ${who}`,
+      title: who,
+      onclick: () => actions.toggleReaction(item.id, r.emoji, Boolean(r.me)),
+    },
+    el('span', { class: 'reaction-emoji', text: r.emoji }),
+    el('span', { class: 'reaction-count', text: String(r.count) }));
+  });
+  pills.push(el('button', {
+    class: 'reaction add',
+    'aria-label': 'Add reaction',
+    title: 'Add reaction',
+    icon: 'smile-plus',
+    onclick: (e) => pickReaction(item, e.currentTarget),
+  }));
+  return el('div', { class: 'reactions', role: 'group', 'aria-label': 'Reactions' }, pills);
+}
+
+// "Grace, Ken and 2 others". `names` is optional in the contract; without it the count and `me` are used.
+function whoReacted(r) {
+  const count = Number(r.count) || 0;
+  const names = Array.isArray(r.names) ? r.names.filter(Boolean).slice(0, 3) : [];
+  if (names.length === 0) {
+    if (r.me) return count > 1 ? `You and ${count - 1} other${count === 2 ? '' : 's'}` : 'You';
+    return `${count} reaction${count === 1 ? '' : 's'}`;
+  }
+  const rest = count - names.length;
+  if (rest > 0) {
+    const shown = names.length > 2 ? names.slice(0, 2) : names;
+    const others = count - shown.length;
+    return `${shown.join(', ')} and ${others} other${others === 1 ? '' : 's'}`;
+  }
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function pickReaction(item, anchor) {
+  openEmojiPicker(anchor, (emoji) => {
+    const mine = item.reactions?.some((r) => r.emoji === emoji && r.me) ?? false;
+    actions.toggleReaction(item.id, emoji, mine);
+  });
 }
 
 function authorButton(item) {
@@ -227,9 +381,26 @@ function bodyNode(item) {
     item.edited ? el('span', { class: 'edited', text: ' (edited)' }) : null);
 }
 
-function rowActions(item) {
+function rowActions(item, view) {
   if (item.deleted) return null;
   const buttons = [];
+  if (view.social) {
+    buttons.push(el('button', {
+      class: 'icon-btn',
+      'aria-label': 'Reply',
+      title: 'Reply (R)',
+      icon: 'reply',
+      onclick: () => startReply(item),
+    }));
+    buttons.push(el('button', {
+      class: 'icon-btn',
+      'aria-label': 'Add reaction',
+      title: 'Add reaction',
+      'aria-haspopup': 'dialog',
+      icon: 'smile-plus',
+      onclick: (e) => pickReaction(item, e.currentTarget),
+    }));
+  }
   if (item.own) {
     buttons.push(el('button', {
       class: 'icon-btn',
@@ -301,19 +472,31 @@ function editForm(item) {
 function composer(view) {
   const input = el('textarea', { rows: 1, placeholder: view.placeholder, 'aria-label': 'Message' });
   const wrap = el('div', { class: 'composer' });
+  composerInput = input;
+  replyBar = el('div', { class: 'reply-bar', role: 'status', hidden: true });
+  renderReplyBar();
   const send = async () => {
     const text = input.value.trim();
     if (!text) return;
     input.disabled = true;
-    const ok = view.dm ? await actions.sendDm(text) : await actions.sendMessage(text);
+    const reply = replyTo;
+    const ok = view.dm ? await actions.sendDm(text)
+      : reply ? await actions.sendReply(reply.id, text)
+        : await actions.sendMessage(text);
     input.disabled = false;
-    if (ok) input.value = '';
+    if (ok) {
+      input.value = '';
+      if (replyTo === reply) cancelReply();
+    }
     input.focus();
   };
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
+    } else if (e.key === 'Escape' && replyTo) {
+      e.preventDefault();
+      cancelReply();
     }
   });
   wrap.append(
@@ -328,7 +511,7 @@ function composer(view) {
     input,
     el('button', { class: 'icon-btn lg send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
   );
-  return wrap;
+  return el('div', { class: 'composer-stack' }, replyBar, wrap);
 }
 
 // Server: invite. DM: copy my contact link, so the other person can add me without a shared server.
