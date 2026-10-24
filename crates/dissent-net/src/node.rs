@@ -33,6 +33,9 @@ pub enum RelayChoice {
     Disabled,
 }
 
+/// Default gossip frame limit: 128 KiB, enough for large MLS commits and long messages.
+pub const DEFAULT_GOSSIP_MAX_MESSAGE: usize = 128 * 1024;
+
 #[derive(Clone)]
 pub struct NodeConfig {
     pub relay: RelayChoice,
@@ -49,6 +52,10 @@ pub struct NodeConfig {
     pub loopback_only: bool,
     /// Handler for inbound media links on the media ALPN. `None` refuses media.
     pub media: Option<Arc<dyn MediaHandler>>,
+    /// Largest gossip frame in bytes, framing included (about 256 bytes of it). Every peer on a
+    /// topic must use the same value or a larger one: a peer receiving a bigger frame closes the
+    /// connection. `TopicSender::broadcast` rejects payloads that would not fit.
+    pub gossip_max_message: usize,
 }
 
 impl Default for NodeConfig {
@@ -60,6 +67,7 @@ impl Default for NodeConfig {
             dht_lookup: true,
             loopback_only: false,
             media: None,
+            gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
         }
     }
 }
@@ -72,6 +80,7 @@ impl fmt::Debug for NodeConfig {
             .field("rpc", &self.rpc.as_ref().map(|_| "RpcHandler"))
             .field("dht_lookup", &self.dht_lookup)
             .field("media", &self.media.as_ref().map(|_| "MediaHandler"))
+            .field("gossip_max_message", &self.gossip_max_message)
             .field("loopback_only", &self.loopback_only)
             .finish()
     }
@@ -89,6 +98,7 @@ struct Inner {
     router: Router,
     gossip: Gossip,
     lookup: MemoryLookup,
+    gossip_max: usize,
 }
 
 impl Node {
@@ -105,6 +115,13 @@ impl Node {
     /// Key exchange prefers hybrid X25519 + ML-KEM-768 and falls back to classical X25519, P-256
     /// or P-384 for peers that lack it.
     pub async fn spawn(device: &DeviceKey, cfg: NodeConfig) -> Result<Node> {
+        if cfg.gossip_max_message < iroh_gossip::proto::MIN_MAX_MESSAGE_SIZE {
+            return Err(NetError::Config(format!(
+                "gossip_max_message must be at least {} bytes",
+                iroh_gossip::proto::MIN_MAX_MESSAGE_SIZE
+            )));
+        }
+        let gossip_max = cfg.gossip_max_message;
         let lookup = MemoryLookup::new();
         let use_dht = cfg.dht_lookup && !matches!(cfg.relay, RelayChoice::Disabled);
         let preset = match cfg.relay {
@@ -142,7 +159,9 @@ impl Node {
             builder = builder.bind_addr(addr).map_err(|e| NetError::Config(e.to_string()))?;
         }
         let endpoint = builder.bind().await?;
-        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let gossip = Gossip::builder()
+            .max_message_size(gossip_max)
+            .spawn(endpoint.clone());
         let mut router = Router::builder(endpoint.clone())
             .accept(PING_ALPN, PingHandler)
             .accept(GOSSIP_ALPN, gossip.clone());
@@ -154,7 +173,7 @@ impl Node {
         }
         let router = router.spawn();
         Ok(Node {
-            inner: Arc::new(Inner { id: device.id(), endpoint, router, gossip, lookup }),
+            inner: Arc::new(Inner { id: device.id(), endpoint, router, gossip, lookup, gossip_max }),
         })
     }
 
@@ -211,7 +230,7 @@ impl Node {
             .subscribe(iroh_gossip::TopicId::from_bytes(topic.0), peers)
             .await?;
         let (tx, rx) = sub.split();
-        Ok((TopicSender(tx), TopicReceiver(rx)))
+        Ok((TopicSender::new(tx, self.inner.gossip_max), TopicReceiver(rx)))
     }
 
     pub async fn shutdown(self) -> Result<()> {

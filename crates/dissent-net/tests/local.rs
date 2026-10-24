@@ -193,3 +193,46 @@ async fn dial_by_id_via_mainline_dht() {
     b.shutdown().await.expect("shutdown b");
     a.shutdown().await.expect("shutdown a");
 }
+
+#[tokio::test]
+async fn large_gossip_message_round_trips_and_oversize_is_rejected() {
+    let a = Node::spawn(&DeviceKey::generate(), cfg(None)).await.expect("spawn a");
+    let b = Node::spawn(&DeviceKey::generate(), cfg(None)).await.expect("spawn b");
+    b.remember(&a.addr().await).expect("remember a");
+    let topic = TopicId::for_channel(&CommunityKey::generate().id(), &[11; 32]);
+    let (tx_a, mut rx_a) = a.subscribe(topic, vec![]).await.expect("subscribe a");
+    let (_tx_b, mut rx_b) = b.subscribe(topic, vec![a.id()]).await.expect("subscribe b");
+    wait_neighbor(&mut rx_a, b.id(), true).await;
+
+    // Rejected before anything is sent, so the neighbour connection stays up.
+    let max = tx_a.max_payload();
+    let err = tx_a.broadcast(vec![0u8; max + 1]).await.unwrap_err();
+    assert!(matches!(err, NetError::FrameTooLarge { len, max: m } if len == max + 1 && m == max), "{err:?}");
+    assert!(rx_a.neighbors().contains(&b.id()), "oversize send must not drop the neighbour");
+
+    // 100 KB is well inside the default 128 KiB limit. Resend until B has a neighbour to hear it.
+    let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    let expected = payload.clone();
+    let sender = tokio::spawn(async move {
+        loop {
+            let _ = tx_a.broadcast(payload.clone()).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
+    let msg = tokio::time::timeout(Duration::from_secs(20), rx_b.next())
+        .await
+        .expect("100 KB message not received within 20 s")
+        .expect("topic closed");
+    sender.abort();
+    assert_eq!(msg.bytes, expected);
+
+    b.shutdown().await.expect("shutdown b");
+    a.shutdown().await.expect("shutdown a");
+}
+
+#[tokio::test]
+async fn gossip_limit_below_minimum_is_rejected() {
+    let cfg = NodeConfig { gossip_max_message: 100, ..cfg(None) };
+    let err = Node::spawn(&DeviceKey::generate(), cfg).await.err().expect("should fail");
+    assert!(matches!(err, NetError::Config(_)), "{err:?}");
+}

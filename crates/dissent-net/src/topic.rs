@@ -3,7 +3,7 @@ use futures_lite::StreamExt;
 use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
 use tracing::{debug, warn};
 
-use crate::error::Result;
+use crate::error::{NetError, Result};
 
 /// Gossip topic id. One per channel, derived with [`TopicId::for_channel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,11 +32,33 @@ pub struct GossipMsg {
 /// Gossip leaves the topic once both this and the matching [`TopicReceiver`] are dropped.
 /// `Node` keeps no references to either half, so dropping them is enough. Use [`Self::leave`]
 /// to do that explicitly.
-pub struct TopicSender(pub(crate) GossipSender);
+/// Bytes gossip adds around a payload: topic id, enum tags, message id, length prefixes. Padded
+/// generously so the payload check below is conservative and never admits an oversize frame.
+const GOSSIP_FRAME_OVERHEAD: usize = 256;
+
+pub struct TopicSender {
+    inner: GossipSender,
+    max_payload: usize,
+}
 
 impl TopicSender {
+    pub(crate) fn new(inner: GossipSender, gossip_max: usize) -> Self {
+        Self { inner, max_payload: gossip_max.saturating_sub(GOSSIP_FRAME_OVERHEAD) }
+    }
+
+    /// Largest payload `broadcast` accepts, for this node's gossip limit.
+    pub fn max_payload(&self) -> usize {
+        self.max_payload
+    }
+
+    /// Broadcasts `bytes` to the topic. Fails with `FrameTooLarge` if the payload exceeds
+    /// [`Self::max_payload`]. Nothing is sent in that case. Gossip itself would close the
+    /// connection to every neighbour instead of reporting an error.
     pub async fn broadcast(&self, bytes: Vec<u8>) -> Result<()> {
-        Ok(self.0.broadcast(bytes.into()).await?)
+        if bytes.len() > self.max_payload {
+            return Err(NetError::FrameTooLarge { len: bytes.len(), max: self.max_payload });
+        }
+        Ok(self.inner.broadcast(bytes.into()).await?)
     }
 
     /// Leaves the topic by dropping both halves. Pass the receiver from the same subscription;
