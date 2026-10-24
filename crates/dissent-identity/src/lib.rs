@@ -13,6 +13,12 @@
 
 pub mod keystore;
 pub mod mnemonic;
+pub mod recovery;
+pub mod safety;
+mod link;
+
+pub use recovery::{GuardianApproval, GuardianSet, KeyRotation, RotationProof, RotationRequest};
+pub use safety::{safety_fingerprint, safety_number};
 
 use ed25519_dalek::{Signature as DalekSig, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -47,6 +53,8 @@ pub enum IdentityError {
     Io(#[from] std::io::Error),
     #[error("serialisation: {0}")]
     Serde(String),
+    #[error("recovery: {0}")]
+    Recovery(String),
 }
 
 pub type Result<T> = std::result::Result<T, IdentityError>;
