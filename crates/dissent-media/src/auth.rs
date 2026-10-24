@@ -87,6 +87,28 @@ impl Auth {
     }
 }
 
+/// Adds or replaces a member's certificate in a shared receiver state. Fails on an
+/// unauthenticated state, which has no roster to update.
+pub(crate) fn learn_into(
+    state: &Mutex<RxState>,
+    sender: u64,
+    cert: DeviceCert,
+) -> crate::error::Result<()> {
+    let mut state = state.lock().expect("receiver state");
+    if !state.is_authenticated() {
+        return Err(crate::error::MediaError::BadState(
+            "an unauthenticated link has no certificates to learn",
+        ));
+    }
+    state.learn_cert(sender, cert);
+    Ok(())
+}
+
+/// Stops verifying a member's digests in a shared receiver state.
+pub(crate) fn forget_into(state: &Mutex<RxState>, sender: u64) {
+    state.lock().expect("receiver state").forget_cert(sender);
+}
+
 /// The receiver-side state of one link, or shared by several links of one participant.
 #[derive(Clone)]
 pub(crate) struct LinkConfig {
@@ -117,7 +139,7 @@ impl LinkConfig {
     /// all of its links.
     pub(crate) fn shared_state(auth: &Auth) -> Arc<Mutex<RxState>> {
         Arc::new(Mutex::new(RxState::with_deadline(
-            Some(auth.certs.clone()),
+            Some((*auth.certs).clone()),
             batch_span(auth.digest_frames) + PENDING_DEADLINE,
         )))
     }
@@ -361,7 +383,9 @@ pub(crate) struct Step {
 
 /// Receiver-side authentication and replay state, shared by a participant's links.
 pub(crate) struct RxState {
-    certs: Option<Arc<HashMap<u64, DeviceCert>>>,
+    /// The device certificate of every member, when the link authenticates. Members can join and
+    /// leave, so this changes through `learn_cert` and `forget_cert`.
+    certs: Option<HashMap<u64, DeviceCert>>,
     senders: BTreeMap<(u64, u64), SenderRx>,
     /// Epoch bits this link accepts, the current one and the previous one during its grace period.
     epochs: BTreeSet<u64>,
@@ -369,20 +393,38 @@ pub(crate) struct RxState {
 }
 
 impl RxState {
-    pub(crate) fn new(certs: Option<Arc<HashMap<u64, DeviceCert>>>) -> Self {
+    pub(crate) fn new(certs: Option<HashMap<u64, DeviceCert>>) -> Self {
         Self::with_deadline(certs, PENDING_DEADLINE)
     }
 
-    pub(crate) fn with_deadline(
-        certs: Option<Arc<HashMap<u64, DeviceCert>>>,
-        deadline: Duration,
-    ) -> Self {
+    pub(crate) fn with_deadline(certs: Option<HashMap<u64, DeviceCert>>, deadline: Duration) -> Self {
         Self {
             certs,
             senders: BTreeMap::new(),
             epochs: BTreeSet::new(),
             deadline,
         }
+    }
+
+    /// Whether this state verifies digests. An unauthenticated link has no certificates.
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.certs.is_some()
+    }
+
+    /// Starts verifying `sender`'s digests with `cert`, replacing any earlier one.
+    pub(crate) fn learn_cert(&mut self, sender: u64, cert: DeviceCert) {
+        if let Some(certs) = self.certs.as_mut() {
+            certs.insert(sender, cert);
+        }
+    }
+
+    /// Stops verifying `sender`'s digests, and forgets its replay and pending state, so an id
+    /// reused by a later member starts clean.
+    pub(crate) fn forget_cert(&mut self, sender: u64) {
+        if let Some(certs) = self.certs.as_mut() {
+            certs.remove(&sender);
+        }
+        self.senders.retain(|(id, _), _| *id != sender);
     }
 
     /// Handles a decrypted frame.
@@ -468,13 +510,15 @@ impl RxState {
     pub(crate) fn on_digest(&mut self, wire: &[u8], now: Instant) -> Step {
         let mut step = Step::default();
         let deadline = self.deadline;
-        let Some(certs) = self.certs.clone() else {
-            return step;
-        };
         let Some(parsed) = parse_digest(wire) else {
             return step;
         };
-        let Some(cert) = certs.get(&parsed.sender) else {
+        let Some(cert) = self
+            .certs
+            .as_ref()
+            .and_then(|certs| certs.get(&parsed.sender))
+            .cloned()
+        else {
             return step;
         };
         if !self.epochs.contains(&(parsed.epoch as u64)) {
@@ -488,7 +532,7 @@ impl RxState {
             .or_default();
         step.unauthenticated += state.expire(now, deadline);
 
-        if !verify_digest(&parsed, cert) {
+        if !verify_digest(&parsed, &cert) {
             // A digest that does not verify is a forgery in the sender's name.
             if !state.muted {
                 step.impersonations = 1;
@@ -619,7 +663,7 @@ mod tests {
 
     impl Receiver {
         fn new(certs: HashMap<u64, DeviceCert>) -> Self {
-            let mut state = RxState::new(Some(Arc::new(certs)));
+            let mut state = RxState::new(Some(certs));
             state.accept_epoch(0);
             Self {
                 rx: SframeReceiver::new(media_key(), 0),

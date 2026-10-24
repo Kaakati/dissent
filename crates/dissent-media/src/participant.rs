@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use crate::auth::{Auth, LinkConfig, RxState};
+use crate::auth::{forget_into, learn_into, Auth, LinkConfig, RxState};
+use dissent_identity::DeviceCert;
 use crate::call::{Call, CallStats};
-use crate::e2ee::{redundancy_for, SframeSender};
+use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender};
 use crate::election::{elect, ranked, Candidate, Election, Mode, PeerId};
 use crate::error::{MediaError, Result};
 use crate::frame::ReceivedFrame;
@@ -59,6 +60,8 @@ type FrameOut = Result<Option<ReceivedFrame>>;
 pub struct Participant<T: PacketTransport> {
     my_id: PeerId,
     key: MediaKey,
+    /// The epoch of `key`. Links opened from now on use it.
+    epoch: u64,
     tx: SframeSender,
     mode: Mode,
     participants: usize,
@@ -120,6 +123,7 @@ impl<T: PacketTransport> Participant<T> {
         Ok(Self {
             my_id,
             key: media_key,
+            epoch: 0,
             tx,
             mode,
             participants,
@@ -135,13 +139,48 @@ impl<T: PacketTransport> Participant<T> {
         })
     }
 
+    /// Replaces the media key, typically after the MLS group changes. Frames from now on are
+    /// encrypted under `new_key` at `new_epoch`. Frames of the previous epoch still decrypt for
+    /// the grace period on every forwarder link, and the epoch before that no longer does.
+    /// Forwarders hold no key, so a rekey changes nothing for them.
+    ///
+    /// `new_epoch` must differ from the current epoch in its low key-id bits, which is 8 bits.
+    pub fn set_key(&mut self, new_key: MediaKey, new_epoch: u64) -> Result<()> {
+        if epoch_lsb(new_epoch) == epoch_lsb(self.epoch) {
+            return Err(MediaError::BadState(
+                "the new epoch must differ from the current one in its key id bits",
+            ));
+        }
+        let tx = self.tx.rekeyed(&new_key, self.my_id, new_epoch)?;
+        let now = Instant::now();
+        for call in self.links.values_mut() {
+            call.rotate_keys(new_key.clone(), new_epoch, now)?;
+        }
+        self.tx = tx;
+        self.key = new_key;
+        self.epoch = new_epoch;
+        Ok(())
+    }
+
+    /// Starts verifying `sender`'s digests with its device certificate. Call it when a member
+    /// joins. Fails on an unauthenticated participant.
+    pub fn learn_cert(&mut self, sender_id: u64, cert: DeviceCert) -> Result<()> {
+        learn_into(&self.link.state, sender_id, cert)
+    }
+
+    /// Stops verifying `sender_id`'s digests, and forgets its replay state. Call it when a member
+    /// leaves. A removed member is cut off from new frames only by a rekey.
+    pub fn forget_cert(&mut self, sender_id: u64) {
+        forget_into(&self.link.state, sender_id);
+    }
+
     /// Opens a link to the forwarder `sfu`, and returns the offer to send to it.
     pub async fn offer_sfu(&mut self, sfu: PeerId, transport: T) -> Result<Signal> {
         let (call, offer) = Call::offer_at(
             transport,
             self.key.clone(),
             self.my_id,
-            0,
+            self.epoch,
             self.link.clone(),
         )
         .await?;

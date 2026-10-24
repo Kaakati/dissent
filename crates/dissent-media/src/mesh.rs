@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Instant;
 
-use crate::auth::{Auth, LinkConfig, RxState};
+use dissent_identity::DeviceCert;
+use crate::auth::{forget_into, learn_into, Auth, LinkConfig, RxState};
 use crate::call::{Call, CallStats};
 use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender, DEFAULT_LEVEL};
 use crate::error::{MediaError, Result};
@@ -148,6 +149,18 @@ impl<T: PacketTransport> Mesh<T> {
         self.key = new_key;
         self.epoch = new_epoch;
         Ok(())
+    }
+
+    /// Starts verifying `sender`'s digests with its device certificate. Call it when a member
+    /// joins. Fails on an unauthenticated link.
+    pub fn learn_cert(&mut self, sender_id: u64, cert: DeviceCert) -> Result<()> {
+        learn_into(&self.link.state, sender_id, cert)
+    }
+
+    /// Stops verifying `sender_id`'s digests, and forgets its replay state. Call it when a member
+    /// leaves. A removed member is cut off from new frames only by a rekey.
+    pub fn forget_cert(&mut self, sender_id: u64) {
+        forget_into(&self.link.state, sender_id);
     }
 
     /// Waits until every peer's ICE and DTLS complete. Frames that arrive meanwhile are kept.

@@ -16,7 +16,10 @@ use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
-use crate::auth::{frame_hash, is_digest, Auth, FrameSigner, LinkConfig, RxState, Step};
+use crate::auth::{
+    forget_into, frame_hash, is_digest, learn_into, Auth, FrameSigner, LinkConfig, RxState, Step,
+};
+use dissent_identity::DeviceCert;
 use crate::bwe::BandwidthEstimator;
 use crate::e2ee::{
     epoch_lsb, peek_counter, redundancy_for, SframeReceiver, SframeSender, DEFAULT_LEVEL,
@@ -382,6 +385,18 @@ impl<T: PacketTransport> Call<T> {
             }
             self.pump_once().await?;
         }
+    }
+
+    /// Starts verifying `sender`'s digests with its device certificate. Call it when a member
+    /// joins. Fails on an unauthenticated link.
+    pub fn learn_cert(&mut self, sender_id: u64, cert: DeviceCert) -> Result<()> {
+        learn_into(&self.state, sender_id, cert)
+    }
+
+    /// Stops verifying `sender_id`'s digests, and forgets its replay state. Call it when a member
+    /// leaves. A removed member is cut off from new frames only by a rekey.
+    pub fn forget_cert(&mut self, sender_id: u64) {
+        forget_into(&self.state, sender_id);
     }
 
     /// Encrypts one audio frame with SFrame and sends it as an Opus payload.
