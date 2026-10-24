@@ -5,38 +5,96 @@ if (!window.__TAURI__) {
 
   let seq = 0;
   const id = (name) => name.padEnd(52, 'a').slice(0, 52);
-  const ME = id('mealice');
-  const GRACE = id('gracehopper');
-  const LINUS = id('linustorvalds');
-  const KEN = id('kenthompson');
-  const people = { [ME]: 'Ada', [GRACE]: 'Grace', [LINUS]: 'Linus', [KEN]: 'Ken' };
+  const MIN = 60 * 1000;
+  const DAY = 24 * 60 * MIN;
+  const now = Date.now();
+
+  const ME = id('mz7q4p2cmealice');
+  const GRACE = id('k3f9q2xagrace');
+  const LINUS = id('w8r2d6nblinus');
+  const KEN = id('h5t7c3vyken');
+  const RADIA = id('e4j9m1sqradia');
+  const people = { [ME]: 'Ada', [GRACE]: 'Grace', [LINUS]: 'Linus', [KEN]: 'Ken', [RADIA]: 'Radia' };
+  const handles = { [GRACE]: 'grace', [LINUS]: 'torvalds' };
   const suffix = (root) => root.slice(0, 8);
+
+  // Messages are written as [minutes ago, author, text]. Gaps longer than 7 minutes start a new group.
+  const at = (daysAgo, minutesAgo) => now - daysAgo * DAY - minutesAgo * MIN;
+  const msg = (daysAgo, minutesAgo, author, text) => ({
+    id: id(`m${++seq}`), author, text, ms: at(daysAgo, minutesAgo), edited: false, deleted: false,
+  });
+
+  const generalMessages = [
+    msg(3, 300, GRACE, 'Welcome to Rust Chat. Read the pinned rules before posting, please.'),
+    msg(3, 296, GRACE, 'Help channel is for questions. Announcements are for releases only.'),
+    msg(3, 180, LINUS, 'Anyone tried the new async trait stabilisation yet?'),
+    msg(2, 600, KEN, 'Yes, it compiled first try on my side. Nice.'),
+    msg(2, 598, KEN, 'The error messages got a lot clearer too.'),
+    msg(2, 590, ME, 'Agreed. I was worried about the lifetimes but they just work now.'),
+    msg(2, 455, LINUS, 'The reference page for it is up: https://doc.rust-lang.org/stable/releases.html'),
+    msg(1, 900, RADIA, 'Has anyone benchmarked the new allocator against the old one?'),
+    msg(1, 880, RADIA, 'I got about 8% on the parser benchmark. Numbers in the gist.'),
+    msg(1, 860, GRACE, 'Please post the gist link here so people can reproduce it.'),
+    msg(1, 200, ME, 'Working on the event log replay tonight. Hopefully done by Friday.'),
+    msg(0, 90, KEN, 'Morning. Did the nightly build go out?'),
+    msg(0, 88, KEN, 'It failed on the Windows runner again.'),
+    msg(0, 86, LINUS, 'Known flake, retrying now.'),
+    msg(0, 20, ME, 'Retry passed. Tagging the release candidate after lunch.'),
+    msg(0, 4, GRACE, 'Thanks all. Changelog is in the repo under docs/.'),
+  ];
 
   const servers = {
     c1: {
       id: 'c1',
       name: 'Rust Chat',
       owner: GRACE,
-      channels: [{ id: 'ch1', name: 'general' }, { id: 'ch2', name: 'random' }],
-      roles: { [GRACE]: 'owner', [ME]: 'member', [LINUS]: 'admin', [KEN]: 'moderator' },
+      channels: [
+        { id: 'ch1', name: 'general' },
+        { id: 'ch2', name: 'help' },
+        { id: 'ch3', name: 'announcements' },
+        { id: 'ch4', name: 'off-topic' },
+      ],
+      roles: { [GRACE]: 'owner', [ME]: 'member', [LINUS]: 'admin', [KEN]: 'moderator', [RADIA]: 'member' },
       banned: new Set(),
       msgs: {
-        ch1: [{ id: id('m1'), author: GRACE, text: 'Welcome to Rust Chat.', ms: Date.now() - 3600e3, edited: false, deleted: false }],
-        ch2: [],
+        ch1: generalMessages,
+        ch2: [msg(1, 300, RADIA, 'How do I borrow from a struct field inside a closure?'), msg(1, 298, GRACE, 'Capture the field by reference, or use a local binding.')],
+        ch3: [msg(5, 0, GRACE, 'Dissent 0.1 is tagged. Release notes are in the announcements post.')],
+        ch4: [msg(0, 30, RADIA, 'Anyone else tracking the weather radar in the background?')],
       },
     },
     c2: {
       id: 'c2',
       name: 'Book Club',
       owner: ME,
-      channels: [{ id: 'ch3', name: 'general' }],
-      roles: { [ME]: 'owner', [KEN]: 'member' },
+      channels: [{ id: 'ch5', name: 'general' }, { id: 'ch6', name: 'reading-list' }],
+      roles: { [ME]: 'owner', [KEN]: 'member', [RADIA]: 'member' },
       banned: new Set(),
-      msgs: { ch3: [] },
+      msgs: {
+        ch5: [msg(2, 500, KEN, 'This month: the Dispossessed. Starting Monday.'), msg(2, 498, KEN, 'Chapters 1 to 6.')],
+        ch6: [],
+      },
+    },
+    c3: {
+      id: 'c3',
+      name: 'Field Notes',
+      owner: LINUS,
+      channels: [{ id: 'ch7', name: 'general' }, { id: 'ch8', name: 'photos' }],
+      roles: { [LINUS]: 'owner', [ME]: 'member', [GRACE]: 'member' },
+      banned: new Set(),
+      msgs: { ch7: [msg(0, 60, GRACE, 'Saturday walk along the ridge, anyone?')], ch8: [] },
     },
   };
+
   const dms = {
-    [GRACE]: [{ id: id('d1'), from: GRACE, text: 'Can you review my PR?', ms: Date.now() - 7200e3, pending: false }],
+    [GRACE]: [
+      { id: id(`d${++seq}`), from: GRACE, text: 'Can you review my PR when you get a minute?', ms: at(1, 400), pending: false },
+      { id: id(`d${++seq}`), from: ME, text: 'Yes, reading it now.', ms: at(1, 380), pending: false },
+      { id: id(`d${++seq}`), from: GRACE, text: 'Thanks. The diff is mostly the replay tests.', ms: at(0, 40), pending: false },
+    ],
+    [LINUS]: [
+      { id: id(`d${++seq}`), from: LINUS, text: 'Did you see the kernel mailing list thread? https://lore.kernel.org/', ms: at(2, 120), pending: false },
+    ],
   };
 
   const listeners = [];
@@ -45,6 +103,7 @@ if (!window.__TAURI__) {
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
   const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c) });
+  const sharedServers = (user) => Object.values(servers).filter((c) => c.roles[user] && c.roles[ME]);
   const conversations = () =>
     Object.entries(dms)
       .map(([peer, items]) => {
@@ -62,7 +121,7 @@ if (!window.__TAURI__) {
       root_id: r,
       suffix: suffix(r),
       display_name: people[r],
-      handle: null,
+      handle: handles[r] ?? null,
       role: c.roles[r],
       banned: c.banned.has(r),
     })),
@@ -156,19 +215,21 @@ if (!window.__TAURI__) {
       }
       return null;
     },
-    claim_handle: () => null,
-    user_profile: ({ user }) => ({
-      root_id: user,
-      suffix: suffix(user),
-      display_name: people[user] ?? `anon·${suffix(user)}`,
-      is_contact: Boolean(dms[user]),
-      handles: Object.values(servers)
-        .filter((c) => c.roles[user] && c.roles[ME])
-        .map((c) => ({ community_id: c.id, community_name: c.name, handle: null })),
-      mutual_communities: Object.values(servers)
-        .filter((c) => c.roles[user] && c.roles[ME])
-        .map((c) => ({ id: c.id, name: c.name })),
-    }),
+    claim_handle: ({ communityId, handle }) => {
+      handles[ME] = handle;
+      return null;
+    },
+    user_profile: ({ user }) => {
+      const shared = sharedServers(user);
+      return {
+        root_id: user,
+        suffix: suffix(user),
+        display_name: people[user] ?? `anon·${suffix(user)}`,
+        is_contact: Boolean(dms[user]),
+        handles: shared.map((c) => ({ community_id: c.id, community_name: c.name, handle: handles[user] ?? null })),
+        mutual_communities: shared.map((c) => ({ id: c.id, name: c.name })),
+      };
+    },
 
     list_conversations: () => conversations(),
     dm_messages: ({ peer, limit }) =>
@@ -185,13 +246,13 @@ if (!window.__TAURI__) {
     },
 
     app_version: () => '0.1.0 (mock)',
+    identity_export_phrase: () => 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art',
+    identity_import_phrase: () => null,
     net_status: () => ({
       dht: { size_estimate: 9200000, confidence: 0.82, firewalled: false },
       peers: 3,
-      relay: 'https://use1-1.relay.n0.iroh.network./',
+      relay: 'use1-1.relay.n0.iroh.network',
     }),
-    identity_export_phrase: () => 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art',
-    identity_import_phrase: () => null,
   };
 
   window.__TAURI__ = {

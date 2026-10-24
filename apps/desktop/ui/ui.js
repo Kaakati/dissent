@@ -22,7 +22,7 @@ export function el(tag, props, ...children) {
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-// A Lucide icon from the vendored sprite (icons.svg, built by scripts/build-icons.mjs).
+// A Lucide icon (or the Dissent mark) from the vendored sprite, icons.svg.
 // Decorative only: put any accessible name on the button that contains it.
 export function icon(name) {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -34,12 +34,15 @@ export function icon(name) {
   return svg;
 }
 
-const AVATAR_COLOURS = 6;
+// ---- generated avatars: a hue from the id's hash, initials on top. No images. ----
 
-export function avClass(seed) {
-  let h = 0;
-  for (const ch of String(seed ?? '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return `av-${h % AVATAR_COLOURS}`;
+export function hueOf(seed) {
+  let h = 0x811c9dc5;
+  for (const ch of String(seed ?? '')) h = Math.imul(h ^ ch.codePointAt(0), 0x01000193);
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  return (h >>> 0) % 360;
 }
 
 export function initials(name) {
@@ -48,14 +51,67 @@ export function initials(name) {
   return parts.slice(0, 2).map((p) => [...p][0]).join('').toUpperCase();
 }
 
-export function avatar(name, seed) {
-  return el('span', { class: `avatar ${avClass(seed || name)}`, text: initials(name) });
+// size: '' (32px), 'lg' (40px), 'xl' (80px). Colour follows the seed, so one person always gets one colour.
+export function avatar(name, seed, size = '') {
+  const node = el('span', { class: `avatar ${size}`.trim(), text: initials(name) });
+  node.style.setProperty('--hue', String(hueOf(seed || name)));
+  return node;
 }
+
+// Sets the --hue custom property on any node, for banners and name colours.
+export function setHue(node, seed) {
+  node.style.setProperty('--hue', String(hueOf(seed)));
+  return node;
+}
+
+// ---- text: links are built as elements, never parsed as HTML ----
+
+const URL_RE = /\bhttps?:\/\/[^\s<>"']+/g;
+
+// Returns a list of text nodes and <a> elements. Only http and https links become anchors.
+export function linkify(text) {
+  const out = [];
+  let last = 0;
+  for (const match of String(text).matchAll(URL_RE)) {
+    if (match.index > last) out.push(document.createTextNode(text.slice(last, match.index)));
+    out.push(el('a', { href: match[0], target: '_blank', rel: 'noopener noreferrer', text: match[0] }));
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
+// ---- time ----
+
+export function dayKey(ms) {
+  const d = new Date(Number(ms));
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+export function dayLabel(ms) {
+  return new Date(Number(ms)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+export function clockLabel(ms) {
+  return new Date(Number(ms)).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+export function stampLabel(ms) {
+  const d = new Date(Number(ms));
+  return `${d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })} ${clockLabel(ms)}`;
+}
+
+// ---- feedback ----
 
 export function toast(err, kind = 'error') {
   const text = typeof err === 'string' ? err : (err?.message ?? String(err));
   const host = document.getElementById('toasts');
-  const node = el('div', { class: `toast ${kind}`, role: 'status', icon: kind === 'info' ? 'info' : 'circle-alert', text });
+  const node = el('div', {
+    class: `toast ${kind}`,
+    role: 'status',
+    icon: kind === 'info' ? 'info' : 'circle-alert',
+    text,
+  });
   host.append(node);
   setTimeout(() => node.remove(), 4500);
 }

@@ -1,18 +1,26 @@
 // Main pane: header, message list and composer. The same markup serves channels and DMs.
-import { state, subscribe, canModerate, inServer, handleOf } from '../state.js';
+import { state, subscribe, canModerate, inServer } from '../state.js';
 import * as actions from '../actions.js';
-import { el } from '../ui.js';
-import { confirmDialog } from './dialogs.js';
+import { el, avatar, icon, linkify, dayKey, dayLabel, clockLabel, stampLabel, setHue, toast, copyText } from '../ui.js';
+import { confirmDialog, openInviteDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
 
-const header = el('header', { class: 'chat-header' });
-const list = el('div', { class: 'messages' });
+const GROUP_MS = 7 * 60 * 1000; // consecutive messages by one author within this gap share a header
+
+// The header and composer keep their DOM across renders, so the search box keeps focus while typing.
+const titleBox = el('div', { class: 'chat-title' });
+const tools = el('div', { class: 'header-tools' });
+const searchInput = el('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search messages', autocomplete: 'off' });
+searchInput.addEventListener('input', () => actions.setFilter(searchInput.value));
+const header = el('header', { class: 'chat-header' }, titleBox, tools, el('div', { class: 'search' }, searchInput, icon('search')));
+const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages' });
 const composerHost = el('div', { class: 'composer-host' });
 
 let composerKey = null;
 let listKey = null;
 let editingId = null;
-let editInput = null; // kept across refreshes so an unsent draft survives
+let editInput = null; // kept across refreshes so an unsent edit survives
+let plusMenu = null;
 
 export function initChat() {
   document.getElementById('main').replaceChildren(header, list, composerHost);
@@ -31,7 +39,6 @@ function current() {
       dm: false,
       title: channel.name,
       hash: true,
-      subtitle: state.community.name,
       placeholder: `Message #${channel.name}`,
       items: state.messages.map((m) => ({
         id: m.id,
@@ -51,8 +58,8 @@ function current() {
     return {
       key: `dm:${state.peer}`,
       dm: true,
+      peer: state.peer,
       title: name,
-      subtitle: `·${state.peer.slice(0, 8)}`,
       placeholder: `Message ${name}`,
       items: state.dmMessages.map((m) => {
         const own = m.from === me?.root_id;
@@ -88,54 +95,123 @@ function emptyText() {
 function render() {
   const view = current();
   if (!view) {
-    header.replaceChildren();
+    titleBox.replaceChildren();
+    tools.replaceChildren();
     list.replaceChildren(el('p', { class: 'empty', text: emptyText() }));
     composerHost.replaceChildren();
     composerKey = null;
     listKey = null;
+    searchInput.value = '';
+    state.ui.filter = '';
     return;
   }
-  header.replaceChildren(
-    el('h2', { icon: view.hash ? 'hash' : null, text: view.title }),
-    el('span', { class: 'muted', text: view.subtitle }),
-  );
-  // Measure before replacing rows: follow new messages only if the reader was already at the bottom.
-  const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+
+  // A search applies to one conversation; switching clears it.
   const switched = view.key !== listKey;
-  list.replaceChildren(...(view.items.length
-    ? view.items.map((item) => messageRow(item, view))
-    : [el('p', { class: 'empty', text: 'No messages yet. Say hello.' })]));
+  if (switched) state.ui.filter = '';
+  if (searchInput.value !== state.ui.filter) searchInput.value = state.ui.filter;
+
+  titleBox.replaceChildren(...titleNodes(view));
+  tools.replaceChildren(...toolNodes(view));
+
+  const shown = filtered(view.items);
+  const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  let rows;
+  if (view.items.length === 0) rows = [el('p', { class: 'empty', text: 'No messages yet. Say hello.' })];
+  else if (shown.length === 0) rows = [el('p', { class: 'empty', text: `No messages match "${state.ui.filter}".` })];
+  else rows = rowsFor(shown, view);
+  list.replaceChildren(...rows);
   if (switched || wasAtBottom) list.scrollTop = list.scrollHeight;
   listKey = view.key;
-  // Rebuild the composer only when the conversation changes, so a half-typed draft survives refreshes.
+
+  // The composer is rebuilt only when the conversation changes, so a half-typed draft survives refreshes.
   if (view.key !== composerKey) {
     composerHost.replaceChildren(composer(view));
     composerKey = view.key;
   }
 }
 
-function messageRow(item, view) {
+function titleNodes(view) {
+  if (view.dm) {
+    return [avatar(view.title, view.peer), el('h2', { text: view.title })];
+  }
+  return [icon('hash'), el('h2', { text: view.title })];
+}
+
+function iconButton(name, label, onclick, on = false) {
+  return el('button', {
+    class: `icon-btn${on ? ' on' : ''}`,
+    'aria-label': label,
+    title: label,
+    'aria-pressed': on ? 'true' : 'false',
+    icon: name,
+    onclick,
+  });
+}
+
+function toolNodes(view) {
+  if (view.dm) {
+    const open = state.ui.profileOpen;
+    return [iconButton('panel-right', open ? 'Hide profile panel' : 'Show profile panel', () => actions.toggleProfile(), open)];
+  }
+  const open = state.ui.membersOpen;
+  return [iconButton('users', open ? 'Hide member list' : 'Show member list', () => actions.toggleMembers(), open)];
+}
+
+function filtered(items) {
+  const q = state.ui.filter.trim().toLowerCase();
+  if (!q) return items;
+  return items.filter((item) =>
+    (item.text ?? '').toLowerCase().includes(q) || (item.authorName ?? '').toLowerCase().includes(q));
+}
+
+// Adds date dividers and groups consecutive messages from one author into a single header.
+function rowsFor(items, view) {
+  const out = [];
+  let prev = null;
+  for (const item of items) {
+    const newDay = !prev || dayKey(prev.ms) !== dayKey(item.ms);
+    if (newDay) out.push(el('div', { class: 'date-divider', role: 'separator' }, el('span', { text: dayLabel(item.ms) })));
+    const start = newDay || prev.author !== item.author || Number(item.ms) - Number(prev.ms) > GROUP_MS;
+    out.push(messageRow(item, view, start));
+    prev = item;
+  }
+  return out;
+}
+
+function messageRow(item, view, start) {
   const editing = editingId === item.id;
-  const meta = el('div', { class: 'meta' },
-    el('button', {
-      class: 'author',
-      text: item.authorName || 'unknown',
-      onclick: (e) => openProfile(item.author, e.clientX, e.clientY),
-    }),
-    handleOf(item.author) ? el('span', { class: 'handle', text: `@${handleOf(item.author)}` }) : null,
-    el('time', { text: formatTime(item.ms) }),
-    item.edited && !item.deleted ? el('span', { class: 'edited', text: '(edited)' }) : null,
-  );
-  let body;
-  if (editing) body = editForm(item);
-  else if (item.deleted) body = el('p', { class: 'body deleted', text: 'message deleted' });
-  else body = el('p', { class: 'body', text: item.text });
-  return el('article', { class: `msg${item.pending ? ' pending' : ''}`, 'data-id': item.id },
-    meta,
-    body,
-    item.pending ? el('span', { class: 'pending-note', icon: 'clock', text: 'sending…' }) : null,
-    view.dm || editing ? null : rowActions(item, view),
-  );
+  const classes = ['msg', start ? 'start' : 'cont', item.pending ? 'pending' : ''].filter(Boolean).join(' ');
+  const body = editing ? editForm(item) : bodyNode(item);
+  const pending = item.pending ? el('span', { class: 'pending-note', icon: 'clock', text: 'sending…' }) : null;
+  const gutter = start
+    ? el('div', { class: 'gutter' }, avatar(item.authorName, item.author, 'lg'))
+    : el('div', { class: 'gutter' }, el('span', { class: 'gutter-time', text: clockLabel(item.ms) }));
+  const content = start
+    ? el('div', { class: 'msg-content' },
+      el('div', { class: 'msg-head' },
+        authorButton(item),
+        el('time', { title: stampLabel(item.ms), text: clockLabel(item.ms) })),
+      body, pending)
+    : el('div', { class: 'msg-content' }, body, pending);
+  return el('article', { class: classes, 'data-id': item.id }, gutter, content, view.dm || editing ? null : rowActions(item));
+}
+
+function authorButton(item) {
+  const btn = el('button', {
+    class: 'author',
+    text: item.authorName || 'unknown',
+    onclick: (e) => openProfile(item.author, e.clientX, e.clientY),
+  });
+  setHue(btn, item.author);
+  return btn;
+}
+
+function bodyNode(item) {
+  if (item.deleted) return el('p', { class: 'body deleted', text: 'message deleted' });
+  return el('p', { class: 'body' },
+    linkify(item.text),
+    item.edited ? el('span', { class: 'edited', text: ' (edited)' }) : null);
 }
 
 function rowActions(item) {
@@ -143,8 +219,10 @@ function rowActions(item) {
   const buttons = [];
   if (item.own) {
     buttons.push(el('button', {
+      class: 'icon-btn',
+      'aria-label': 'Edit message',
+      title: 'Edit',
       icon: 'pencil',
-      text: 'Edit',
       onclick: () => {
         editingId = item.id;
         editInput = null;
@@ -153,7 +231,13 @@ function rowActions(item) {
     }));
   }
   if (item.own || canModerate()) {
-    buttons.push(el('button', { class: 'danger-text', icon: 'trash-2', text: 'Delete', onclick: () => removeMessage(item.id) }));
+    buttons.push(el('button', {
+      class: 'icon-btn danger-text',
+      'aria-label': 'Delete message',
+      title: 'Delete',
+      icon: 'trash-2',
+      onclick: () => removeMessage(item.id),
+    }));
   }
   return buttons.length ? el('div', { class: 'msg-actions' }, buttons) : null;
 }
@@ -199,8 +283,11 @@ function editForm(item) {
   );
 }
 
+// ---- composer ----
+
 function composer(view) {
   const input = el('textarea', { rows: 1, placeholder: view.placeholder, 'aria-label': 'Message' });
+  const wrap = el('div', { class: 'composer' });
   const send = async () => {
     const text = input.value.trim();
     if (!text) return;
@@ -216,9 +303,55 @@ function composer(view) {
       send();
     }
   });
-  return el('div', { class: 'composer' }, input, el('button', { class: 'primary', icon: 'send-horizontal', text: 'Send', onclick: send }));
+  wrap.append(
+    el('button', {
+      class: 'icon-btn',
+      'aria-label': 'More actions',
+      'aria-haspopup': 'menu',
+      title: 'More actions',
+      icon: 'plus',
+      onclick: (e) => togglePlusMenu(wrap, view, e.currentTarget),
+    }),
+    input,
+    el('button', { class: 'icon-btn send', 'aria-label': 'Send message', title: 'Send', icon: 'send-horizontal', onclick: send }),
+  );
+  return wrap;
 }
 
-function formatTime(ms) {
-  return new Date(Number(ms)).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+// Server: invite. DM: copy my contact link, so the other person can add me without a shared server.
+function togglePlusMenu(wrap, view, anchor) {
+  if (plusMenu) {
+    closePlusMenu();
+    return;
+  }
+  const item = (label, iconName, onPick) => el('button', {
+    class: 'menu-item',
+    role: 'menuitem',
+    icon: iconName,
+    text: label,
+    onclick: () => {
+      closePlusMenu();
+      onPick();
+    },
+  });
+  plusMenu = el('div', { class: 'menu plus-menu', role: 'menu' },
+    view.dm
+      ? item('Copy contact link', 'link', async () => {
+        const link = await actions.contactLink();
+        if (link && (await copyText(link))) toast('Contact link copied', 'info');
+      })
+      : item('Create invite', 'user-plus', () => openInviteDialog(state.community.id)));
+  anchor.setAttribute('aria-expanded', 'true');
+  wrap.append(plusMenu);
+  document.addEventListener('pointerdown', onPlusOutside, true);
+}
+
+function onPlusOutside(e) {
+  if (plusMenu && !plusMenu.contains(e.target) && !e.target.closest?.('[aria-haspopup="menu"]')) closePlusMenu();
+}
+
+function closePlusMenu() {
+  plusMenu?.remove();
+  plusMenu = null;
+  document.removeEventListener('pointerdown', onPlusOutside, true);
 }

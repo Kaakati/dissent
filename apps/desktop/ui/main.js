@@ -6,7 +6,7 @@ import { toast } from './ui.js';
 import { initRail } from './views/rail.js';
 import { initSidebar } from './views/sidebar.js';
 import { initChat } from './views/chat.js';
-import { initMembers } from './views/members.js';
+import { initRight } from './views/right.js';
 import { initStatus } from './views/status.js';
 
 async function start() {
@@ -14,7 +14,7 @@ async function start() {
   initRail();
   initSidebar();
   initChat();
-  initMembers();
+  initRight();
   initStatus();
   if (window.__DISSENT_MOCK__) document.getElementById('mock-note').hidden = false;
 

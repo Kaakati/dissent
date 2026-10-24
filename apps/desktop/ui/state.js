@@ -10,7 +10,13 @@ export const state = {
   messages: [], // MessageItem[] of the open channel
   peer: null, // root id of the open DM
   peerName: '',
+  peerProfile: null, // UserView of the open DM peer, for the profile panel
   dmMessages: [], // DmItem[] of the open DM
+  ui: {
+    membersOpen: true, // server member list, right column
+    profileOpen: true, // DM profile panel, right column
+    filter: '', // client-side message search
+  },
 };
 
 const subscribers = new Map();
@@ -26,5 +32,5 @@ export function notify(...parts) {
 
 export const inServer = () => state.route.kind === 'server' && state.community !== null;
 export const myRole = () => state.community?.my_role ?? null;
-export const handleOf = (rootId) => state.community?.members.find((m) => m.root_id === rootId)?.handle ?? null;
 export const canModerate = () => ['owner', 'admin', 'moderator'].includes(myRole());
+export const canManage = () => ['owner', 'admin'].includes(myRole());

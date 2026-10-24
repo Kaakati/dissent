@@ -29,7 +29,7 @@ export async function boot() {
   state.me = await api.me();
   await loadCommunities();
   await loadConversations();
-  notify('rail', 'sidebar', 'main', 'members');
+  notify('rail', 'sidebar', 'main', 'right');
 }
 
 export async function loadCommunities() {
@@ -52,7 +52,7 @@ async function loadCommunity(communityId) {
   if (!view.channels.some((c) => c.id === state.channelId)) {
     state.channelId = (view.channels.find((c) => c.name === 'general') ?? view.channels[0])?.id ?? null;
   }
-  notify('sidebar', 'members');
+  notify('sidebar', 'right');
   await loadMessages();
 }
 
@@ -94,7 +94,7 @@ export const openHome = guard(async () => {
   state.community = null;
   state.channelId = null;
   state.messages = [];
-  notify('rail', 'sidebar', 'main', 'members');
+  notify('rail', 'sidebar', 'main', 'right');
   await loadConversations();
 });
 
@@ -103,7 +103,7 @@ export const openServer = guard(async (communityId) => {
   state.community = null;
   state.channelId = null;
   state.messages = [];
-  notify('rail', 'sidebar', 'main', 'members');
+  notify('rail', 'sidebar', 'main', 'right');
   await loadCommunity(communityId);
 });
 
@@ -122,9 +122,21 @@ export const openDm = guard(async (peer, displayName = '') => {
   state.peer = peer;
   state.peerName = displayName;
   state.dmMessages = [];
-  notify('rail', 'sidebar', 'main', 'members');
-  await loadDm();
+  state.peerProfile = null;
+  notify('rail', 'sidebar', 'main', 'right');
+  await Promise.all([loadDm(), loadPeerProfile(peer)]);
 });
+
+async function loadPeerProfile(peer) {
+  try {
+    const view = await api.userProfile(peer);
+    if (state.peer !== peer) return;
+    state.peerProfile = view;
+    notify('right', 'main');
+  } catch {
+    state.peerProfile = null;
+  }
+}
 
 // ---- servers ----
 
@@ -265,3 +277,20 @@ export const handleEngineEvent = guard(async (ev) => {
       return undefined;
   }
 });
+
+// ---- UI toggles (no backend call) ----
+
+export function toggleMembers() {
+  state.ui.membersOpen = !state.ui.membersOpen;
+  notify('right', 'main');
+}
+
+export function toggleProfile() {
+  state.ui.profileOpen = !state.ui.profileOpen;
+  notify('right', 'main');
+}
+
+export function setFilter(text) {
+  state.ui.filter = text;
+  notify('main');
+}

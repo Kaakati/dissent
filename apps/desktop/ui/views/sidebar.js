@@ -1,13 +1,12 @@
-// Second column. For a server: name header with menu, channel list. For Home: conversations and contact actions.
-// Both end with the footer showing my name and the settings gear.
-import { state, subscribe } from '../state.js';
+// Second column. Server: header with its menu, channel list. Home: find box, direct messages.
+// Both end with the user panel: my avatar, name, `you·suffix`, and the settings gear.
+import { state, subscribe, canManage } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar } from '../ui.js';
 import {
   confirmDialog,
   openAddContactDialog,
   openClaimHandleDialog,
-  openContactDialog,
   openCreateChannelDialog,
   openInviteDialog,
   openSettings,
@@ -23,33 +22,94 @@ export function initSidebar() {
 function render() {
   closeMenu();
   const column = document.getElementById('sidebar');
-  const body = state.route.kind === 'server' && state.community ? serverBody(state.community) : homeBody();
-  column.replaceChildren(body, footer());
-}
-
-// ---- server ----
-
-function serverBody(community) {
-  const canManage = ['owner', 'admin'].includes(community.my_role);
-  const menuBtn = el('button', {
-    class: 'server-menu-btn',
-    'aria-haspopup': 'menu',
-    onclick: (e) => toggleMenu(e.currentTarget, community, canManage),
-  }, el('span', { class: 'server-name', text: community.name }), el('span', { class: 'caret', icon: 'chevron-down' }));
-  const channels = community.channels.map((ch) => el('button', {
-    class: `channel${ch.id === state.channelId ? ' active' : ''}`,
-    icon: 'hash',
-    text: ch.name,
-    onclick: () => actions.openChannel(ch.id),
-  }));
-  return el('div', { class: 'sidebar-body' },
-    el('header', { class: 'sidebar-head server-header' }, menuBtn),
-    el('div', { class: 'section-label', text: 'Channels' }),
-    el('div', { class: 'list' }, channels.length ? channels : el('p', { class: 'muted', text: 'No channels.' })),
+  const serverOpen = state.route.kind === 'server' && state.community;
+  column.replaceChildren(
+    serverOpen ? serverTop(state.community) : homeTop(),
+    el('div', { class: 'sidebar-scroll' }, serverOpen ? serverList(state.community) : homeList()),
+    userPanel(),
   );
 }
 
-function toggleMenu(anchor, community, canManage) {
+// ---- top: find box (Home) or server header (server) ----
+
+function homeTop() {
+  return el('div', { class: 'sidebar-top' },
+    el('button', {
+      class: 'find-btn',
+      'aria-label': 'Find or start a conversation',
+      onclick: () => openAddContactDialog(),
+      text: 'Find or start a conversation',
+    }));
+}
+
+function serverTop(community) {
+  const menuBtn = el('button', {
+    class: 'server-menu-btn',
+    'aria-haspopup': 'menu',
+    'aria-label': `${community.name} menu`,
+    onclick: (e) => toggleMenu(e.currentTarget.closest('.sidebar-top'), community),
+  }, el('span', { class: 'server-name', text: community.name }), el('span', { class: 'caret', icon: 'chevron-down' }));
+  return el('div', { class: 'sidebar-top' }, menuBtn);
+}
+
+// ---- server: channels ----
+
+function serverList(community) {
+  const manage = canManage();
+  const channels = community.channels.map((ch) => el('button', {
+    class: `row-item${ch.id === state.channelId ? ' active' : ''}`,
+    'aria-current': ch.id === state.channelId ? 'true' : null,
+    icon: 'hash',
+    onclick: () => actions.openChannel(ch.id),
+  }, el('span', { class: 'name', text: ch.name })));
+  return [
+    el('div', { class: 'section-head' },
+      el('span', { text: 'Channels' }),
+      manage
+        ? el('button', {
+          class: 'icon-btn',
+          'aria-label': 'Server actions',
+          title: 'Server actions',
+          icon: 'settings',
+          onclick: (e) => toggleMenu(e.currentTarget.closest('.sidebar').querySelector('.sidebar-top'), community),
+        })
+        : null),
+    ...(channels.length ? channels : [el('p', { class: 'muted', text: 'No channels.' })]),
+  ];
+}
+
+// ---- home: direct messages ----
+
+function homeList() {
+  const convos = state.conversations.map((conv) => {
+    const active = state.route.kind === 'home' && state.peer === conv.peer;
+    return el('button', {
+      class: `row-item convo${active ? ' active' : ''}`,
+      'aria-current': active ? 'true' : null,
+      onclick: () => actions.openDm(conv.peer, conv.display_name),
+    },
+    avatar(conv.display_name, conv.peer),
+    el('span', { class: 'convo-text' },
+      el('span', { class: 'name', text: conv.display_name }),
+      el('span', { class: 'convo-last', text: conv.last_text ?? '' })));
+  });
+  return [
+    el('div', { class: 'section-head' },
+      el('span', { text: 'Direct Messages' }),
+      el('button', {
+        class: 'icon-btn',
+        'aria-label': 'Add contact',
+        title: 'Add contact',
+        icon: 'plus',
+        onclick: () => openAddContactDialog(),
+      })),
+    ...(convos.length ? convos : [el('p', { class: 'muted', text: 'No conversations yet.' })]),
+  ];
+}
+
+// ---- server menu (existing actions) ----
+
+function toggleMenu(anchor, community) {
   if (menu) {
     closeMenu();
     return;
@@ -64,22 +124,23 @@ function toggleMenu(anchor, community, canManage) {
       onPick();
     },
   });
+  const manage = canManage();
   menu = el('div', { class: 'menu', role: 'menu' },
     item('Create invite', 'user-plus', () => openInviteDialog(community.id)),
     item('Claim handle', 'at-sign', () => openClaimHandleDialog(community.id)),
-    canManage ? item('Create channel', 'plus', () => openCreateChannelDialog(community.id)) : null,
+    manage ? item('Create channel', 'plus', () => openCreateChannelDialog(community.id)) : null,
     item('Leave server', 'log-out', async () => {
       if (await confirmDialog(`Leave ${community.name}? You can rejoin with an invite link.`, 'Leave')) {
         actions.leaveCommunity(community.id);
       }
     }, 'danger'),
   );
-  anchor.parentElement.append(menu);
+  anchor.append(menu);
   document.addEventListener('pointerdown', onMenuOutside, true);
 }
 
 function onMenuOutside(e) {
-  if (menu && !menu.contains(e.target) && !e.target.closest?.('.server-menu-btn')) closeMenu();
+  if (menu && !menu.contains(e.target) && !e.target.closest?.('.server-menu-btn, [aria-label="Server actions"]')) closeMenu();
 }
 
 function closeMenu() {
@@ -88,32 +149,9 @@ function closeMenu() {
   document.removeEventListener('pointerdown', onMenuOutside, true);
 }
 
-// ---- home ----
+// ---- user panel ----
 
-function homeBody() {
-  const convos = state.conversations.map((conv) => {
-    const active = state.route.kind === 'home' && state.peer === conv.peer;
-    return el('button', {
-      class: `convo${active ? ' active' : ''}`,
-      onclick: () => actions.openDm(conv.peer, conv.display_name),
-    },
-      avatar(conv.display_name, conv.peer),
-      el('span', { class: 'convo-text' },
-        el('span', { class: 'convo-name', text: conv.display_name }),
-        el('span', { class: 'convo-last', text: conv.last_text ?? '' })));
-  });
-  return el('div', { class: 'sidebar-body' },
-    el('header', { class: 'sidebar-head' }, el('h2', { text: 'Direct messages' })),
-    el('div', { class: 'row-btns' },
-      el('button', { class: 'btn-small', icon: 'user-plus', onclick: () => openAddContactDialog() }, 'Add contact'),
-      el('button', { class: 'btn-small', icon: 'copy', onclick: () => openContactDialog() }, 'My contact link')),
-    el('div', { class: 'list' }, convos.length ? convos : el('p', { class: 'muted', text: 'No conversations yet.' })),
-  );
-}
-
-// ---- footer: me + settings ----
-
-function footer() {
+function userPanel() {
   const me = state.me;
   return el('div', { class: 'me' },
     avatar(me?.display_name || '?', me?.root_id),
