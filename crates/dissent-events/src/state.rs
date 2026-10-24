@@ -11,27 +11,43 @@
 //! * Moderator: delete any message, ban and unban plain users.
 //! * User: message, edit and delete own messages, claim a handle.
 //!
-//! Handle claims are compared after trimming and lowercasing. The first claim in
-//! causal order wins. A user who claims a new handle gives up the old one.
+//! Handle claims are checked with TR39 confusables. The first claim in causal
+//! order wins. A user who claims a new handle gives up the old one.
+//!
+//! Key rotation: a `KeyRotation` signed by the new root makes the new root the
+//! same user as the old one. All state is keyed by the canonical root, and
+//! events from an old root are rejected once it has rotated away. Device
+//! revocation is handled the same way.
 //!
 //! Each event goes through `check` (read only) and then `commit`. The incremental
 //! [`crate::Replayer`] uses the same two steps, so both paths agree.
 
+use crate::names::{normalize_handle, skeleton};
 use crate::{ChannelId, Dag, Event, EventId, Hlc, Payload, Role};
-use dissent_identity::RootId;
+use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommunityState {
     pub owner: RootId,
+    /// Keys are canonical roots. Use [`CommunityState::canonical`] for any root.
     pub roles: BTreeMap<RootId, BTreeSet<Role>>,
     pub banned: BTreeSet<RootId>,
+    /// Normalized handle to holder. See [`crate::names::normalize_handle`].
     pub handles: BTreeMap<String, RootId>,
+    /// TR39 skeleton of each held handle to its holder. Keeps look-alike claims out.
+    pub handle_skeletons: BTreeMap<String, RootId>,
     pub channels: BTreeMap<ChannelId, String>,
     pub messages: BTreeMap<ChannelId, Vec<MessageView>>,
     /// Owner is not implicitly a member. The creator emits a Join like everyone else.
     pub members: BTreeMap<RootId, Member>,
+    /// Old root to the root that replaced it, applied in causal order.
+    pub aliases: BTreeMap<RootId, RootId>,
+    /// Revoked device to the HLC of the first accepted revocation.
+    pub revoked_devices: BTreeMap<DeviceId, Hlc>,
+    /// Device to the root that signed its events. Learned from every event applied.
+    pub device_roots: BTreeMap<DeviceId, RootId>,
     pub rejected: Vec<(EventId, Rejection)>,
 }
 
@@ -46,6 +62,7 @@ pub struct Member {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageView {
     pub id: EventId,
+    /// Canonical root of the author.
     pub author: RootId,
     pub hlc: Hlc,
     pub text: String,
@@ -62,9 +79,17 @@ pub enum Rejection {
     UnknownChannel,
     UnknownTarget,
     HandleTaken,
+    /// The handle's TR39 skeleton matches a handle someone else holds.
+    HandleConfusable,
     NotAuthorOfTarget,
     /// Wrong channel for the payload, or an empty name or handle.
     Malformed,
+    /// The author rotated to a new root before this event.
+    RotatedAway,
+    /// The old root was already rotated by an earlier event.
+    AlreadyRotated,
+    /// The author's device was revoked before this event.
+    DeviceRevoked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +112,9 @@ pub fn replay(owner: RootId, dag: &Dag) -> CommunityState {
 
 /// Apply one event at its causal position, recording a rejection if it has one.
 pub(crate) fn apply_event(st: &mut CommunityState, ev: &Event) {
+    st.device_roots
+        .entry(ev.body.device)
+        .or_insert(ev.body.author);
     match st.check(ev) {
         Ok(()) => st.commit(ev),
         Err(why) => st.rejected.push((ev.id, why)),
@@ -100,11 +128,24 @@ impl CommunityState {
             roles: BTreeMap::new(),
             banned: BTreeSet::new(),
             handles: BTreeMap::new(),
+            handle_skeletons: BTreeMap::new(),
             channels: BTreeMap::new(),
             messages: BTreeMap::new(),
             members: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            revoked_devices: BTreeMap::new(),
+            device_roots: BTreeMap::new(),
             rejected: Vec::new(),
         }
+    }
+
+    /// The root that now stands for `root`. Follows rotations transitively.
+    pub fn canonical(&self, root: &RootId) -> RootId {
+        let mut cur = *root;
+        while let Some(next) = self.aliases.get(&cur) {
+            cur = *next;
+        }
+        cur
     }
 
     fn rank(&self, user: &RootId) -> Rank {
@@ -121,9 +162,33 @@ impl CommunityState {
         }
     }
 
+    /// True if `r` already names a user in this state, in any role.
+    fn is_known_root(&self, r: &RootId) -> bool {
+        self.owner == *r
+            || self.aliases.contains_key(r)
+            || self.aliases.values().any(|v| v == r)
+            || self.roles.contains_key(r)
+            || self.banned.contains(r)
+            || self.members.contains_key(r)
+            || self.handles.values().any(|h| h == r)
+            || self.messages.values().flatten().any(|m| m.author == *r)
+    }
+
     /// Would `ev` be rejected by this state? Reads only, never mutates.
     pub(crate) fn check(&self, ev: &Event) -> Result<(), Rejection> {
+        // Events are authored by a raw root. Rotated-away roots are not canonical,
+        // so the raw author is the canonical actor whenever the event is accepted.
         let actor = ev.body.author;
+        if self.aliases.contains_key(&actor) {
+            return Err(Rejection::RotatedAway);
+        }
+        if self
+            .revoked_devices
+            .get(&ev.body.device)
+            .is_some_and(|revoked_at| ev.body.hlc > *revoked_at)
+        {
+            return Err(Rejection::DeviceRevoked);
+        }
         if self.banned.contains(&actor) {
             return Err(Rejection::Banned);
         }
@@ -168,18 +233,53 @@ impl CommunityState {
             }
             Payload::Ban { user } | Payload::Unban { user } => {
                 require_control(chan)?;
-                if self.rank(user) >= rank {
+                if self.rank(&self.canonical(user)) >= rank {
                     return Err(Rejection::NoPermission);
                 }
             }
             Payload::HandleClaim { handle } => {
                 require_control(chan)?;
-                let key = handle.trim().to_lowercase();
-                if key.is_empty() {
+                let key = normalize_handle(handle).map_err(|_| Rejection::Malformed)?;
+                match self.handles.get(&key) {
+                    Some(holder) if *holder != actor => return Err(Rejection::HandleTaken),
+                    Some(_) => {}
+                    None => {
+                        let skel = skeleton(&key);
+                        if self
+                            .handle_skeletons
+                            .get(&skel)
+                            .is_some_and(|h| *h != actor)
+                        {
+                            return Err(Rejection::HandleConfusable);
+                        }
+                    }
+                }
+            }
+            Payload::DeviceRevoke(rev) => {
+                require_control(chan)?;
+                rev.verify().map_err(|_| Rejection::Malformed)?;
+                // Any device of the author's root may revoke a sibling device.
+                let device_root = self
+                    .device_roots
+                    .get(&rev.device)
+                    .map(|r| self.canonical(r));
+                if rev.root != self.canonical(&actor) || device_root != Some(rev.root) {
                     return Err(Rejection::Malformed);
                 }
-                if self.handles.get(&key).is_some_and(|h| *h != actor) {
-                    return Err(Rejection::HandleTaken);
+            }
+            Payload::KeyRotation(rot) => {
+                require_control(chan)?;
+                rot.verify().map_err(|_| Rejection::Malformed)?;
+                let req = &rot.request;
+                // Only the new root can announce the rotation.
+                if actor != req.new_root {
+                    return Err(Rejection::Malformed);
+                }
+                if self.aliases.contains_key(&req.old_root) {
+                    return Err(Rejection::AlreadyRotated);
+                }
+                if self.is_known_root(&req.new_root) {
+                    return Err(Rejection::Malformed);
                 }
             }
         }
@@ -233,28 +333,74 @@ impl CommunityState {
                 }
             }
             Payload::RoleGrant { user, role } => {
-                self.roles.entry(*user).or_default().insert(*role);
+                let user = self.canonical(user);
+                self.roles.entry(user).or_default().insert(*role);
             }
             Payload::RoleRevoke { user, role } => {
-                if let Some(set) = self.roles.get_mut(user) {
+                let user = self.canonical(user);
+                if let Some(set) = self.roles.get_mut(&user) {
                     set.remove(role);
                     if set.is_empty() {
-                        self.roles.remove(user);
+                        self.roles.remove(&user);
                     }
                 }
             }
             Payload::Ban { user } => {
-                self.banned.insert(*user);
+                let user = self.canonical(user);
+                self.banned.insert(user);
             }
             Payload::Unban { user } => {
-                self.banned.remove(user);
+                let user = self.canonical(user);
+                self.banned.remove(&user);
             }
             Payload::HandleClaim { handle } => {
-                let key = handle.trim().to_lowercase();
+                // `check` has already validated the handle.
+                let Ok(key) = normalize_handle(handle) else {
+                    return;
+                };
                 if self.handles.get(&key) != Some(&actor) {
                     self.handles.retain(|_, u| *u != actor);
+                    self.handle_skeletons.retain(|_, u| *u != actor);
+                    self.handle_skeletons.insert(skeleton(&key), actor);
                     self.handles.insert(key, actor);
                 }
+            }
+            Payload::DeviceRevoke(rev) => {
+                self.revoked_devices
+                    .entry(rev.device)
+                    .or_insert(ev.body.hlc);
+            }
+            Payload::KeyRotation(rot) => self.migrate(rot.request.old_root, rot.request.new_root),
+        }
+    }
+
+    /// Make `new` the same user as `old` from here on. Moves every stored reference.
+    fn migrate(&mut self, old: RootId, new: RootId) {
+        self.aliases.insert(old, new);
+        if let Some(roles) = self.roles.remove(&old) {
+            self.roles.insert(new, roles);
+        }
+        if self.banned.remove(&old) {
+            self.banned.insert(new);
+        }
+        if let Some(member) = self.members.remove(&old) {
+            self.members.insert(new, member);
+        }
+        for holder in self
+            .handles
+            .values_mut()
+            .chain(self.handle_skeletons.values_mut())
+        {
+            if *holder == old {
+                *holder = new;
+            }
+        }
+        if self.owner == old {
+            self.owner = new;
+        }
+        for m in self.messages.values_mut().flatten() {
+            if m.author == old {
+                m.author = new;
             }
         }
     }
@@ -588,5 +734,462 @@ mod tests {
         let msgs = &st.messages[&general];
         assert!(msgs[0].edited);
         assert_eq!(msgs[0].text, "b");
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+    use crate::testutil::{on_channel, User};
+    use crate::Hlc;
+
+    fn claim(evs: &mut Vec<Event>, u: &User, handle: &str) -> EventId {
+        let parents = evs.last().map(|e| vec![e.id]).unwrap_or_default();
+        let hlc = Hlc {
+            wall_ms: evs.len() as u64,
+            counter: 0,
+        };
+        let ev = on_channel(
+            u,
+            ChannelId::CONTROL,
+            parents,
+            hlc,
+            Payload::HandleClaim {
+                handle: handle.into(),
+            },
+        );
+        let id = ev.id;
+        evs.push(ev);
+        id
+    }
+
+    #[test]
+    fn look_alike_and_invalid_handles_are_refused() {
+        let (owner, user, admin) = (User::new(), User::new(), User::new());
+        let mut evs = Vec::new();
+        claim(&mut evs, &owner, "paypal");
+        let mixed = claim(&mut evs, &user, "p\u{0430}ypal");
+        let bidi = claim(&mut evs, &user, "ali\u{202E}ce");
+        let copy = claim(&mut evs, &owner, "copy");
+        let cyr = claim(&mut evs, &admin, "\u{0441}\u{043E}\u{0440}\u{0443}");
+        let fullwidth = claim(&mut evs, &admin, "ＣＯＰＹ");
+        // The holder can re-claim a look-alike of its own handle.
+        let own = claim(&mut evs, &owner, "\u{0441}\u{043E}\u{0440}\u{0443}");
+
+        let mut dag = Dag::new();
+        for ev in &evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        let st = replay(owner.id(), &dag);
+
+        assert!(st.rejected.contains(&(mixed, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(bidi, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(cyr, Rejection::HandleConfusable)));
+        assert!(st.rejected.contains(&(fullwidth, Rejection::HandleTaken)));
+        assert!(!st.rejected.iter().any(|(id, _)| *id == copy || *id == own));
+        assert_eq!(st.rejected.len(), 4);
+
+        // Owner gave up "paypal" for "copy" and then the Cyrillic form. Only one handle remains.
+        assert_eq!(st.handles.len(), 1);
+        assert_eq!(st.handles.get("copy"), None);
+        assert_eq!(st.handles.get("сору"), Some(&owner.id()));
+        assert_eq!(st.handle_skeletons.get("copy"), Some(&owner.id()));
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use crate::testutil::{on_channel, User};
+    use crate::Hlc;
+    use dissent_identity::KeyRotation;
+
+    /// Append a child of the last event on the control channel or `chan`.
+    fn chain(evs: &mut Vec<Event>, u: &User, chan: ChannelId, payload: Payload) -> EventId {
+        let parents = evs.last().map(|e| vec![e.id]).unwrap_or_default();
+        let hlc = Hlc {
+            wall_ms: evs.len() as u64,
+            counter: 0,
+        };
+        let ev = on_channel(u, chan, parents, hlc, payload);
+        let id = ev.id;
+        evs.push(ev);
+        id
+    }
+
+    fn replay_all(owner: &User, evs: &[Event]) -> CommunityState {
+        let mut dag = Dag::new();
+        for ev in evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        replay(owner.id(), &dag)
+    }
+
+    fn rotate(old: &User, new: &User, now: u64) -> Payload {
+        Payload::KeyRotation(KeyRotation::by_owner(&old.root, &new.root, now))
+    }
+
+    #[test]
+    fn rotation_moves_roles_handles_and_moderation() {
+        let (owner, user, victim, newer) = (User::new(), User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        let general = ChannelId(
+            chain(
+                &mut evs,
+                &owner,
+                ctl,
+                Payload::ChannelCreate { name: "g".into() },
+            )
+            .0,
+        );
+        chain(
+            &mut evs,
+            &owner,
+            ctl,
+            Payload::RoleGrant {
+                user: user.id(),
+                role: Role::Moderator,
+            },
+        );
+        chain(
+            &mut evs,
+            &user,
+            ctl,
+            Payload::HandleClaim {
+                handle: "neo".into(),
+            },
+        );
+        let v_msg = chain(
+            &mut evs,
+            &victim,
+            general,
+            Payload::Message {
+                text: "spam".into(),
+            },
+        );
+        chain(&mut evs, &newer, ctl, rotate(&user, &newer, 10));
+        let del = chain(&mut evs, &newer, general, Payload::Delete { target: v_msg });
+        let old_msg = chain(
+            &mut evs,
+            &user,
+            general,
+            Payload::Message {
+                text: "late".into(),
+            },
+        );
+
+        let st = replay_all(&owner, &evs);
+        assert_eq!(st.canonical(&user.id()), newer.id());
+        assert_eq!(st.aliases.get(&user.id()), Some(&newer.id()));
+        assert!(st.roles[&newer.id()].contains(&Role::Moderator));
+        assert!(!st.roles.contains_key(&user.id()));
+        assert_eq!(st.handles.get("neo"), Some(&newer.id()));
+        assert_eq!(st.handle_skeletons.get("neo"), Some(&newer.id()));
+        assert!(
+            !st.rejected.iter().any(|(id, _)| *id == del),
+            "new root moderates"
+        );
+        assert!(st.rejected.contains(&(old_msg, Rejection::RotatedAway)));
+        assert_eq!(st.rejected.len(), 1);
+        assert!(st.messages[&general].iter().any(|m| m.deleted));
+    }
+
+    #[test]
+    fn owner_rotation_moves_ownership() {
+        let (owner, successor, user) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(
+            &mut evs,
+            &owner,
+            ctl,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        chain(&mut evs, &successor, ctl, rotate(&owner, &successor, 5));
+        let old_owner_grant = chain(
+            &mut evs,
+            &owner,
+            ctl,
+            Payload::RoleGrant {
+                user: user.id(),
+                role: Role::Admin,
+            },
+        );
+        let grant = chain(
+            &mut evs,
+            &successor,
+            ctl,
+            Payload::RoleGrant {
+                user: user.id(),
+                role: Role::Admin,
+            },
+        );
+
+        let st = replay_all(&owner, &evs);
+        assert_eq!(st.owner, successor.id());
+        assert!(st
+            .rejected
+            .contains(&(old_owner_grant, Rejection::RotatedAway)));
+        assert!(!st.rejected.iter().any(|(id, _)| *id == grant));
+        assert!(st.roles[&user.id()].contains(&Role::Admin));
+    }
+
+    #[test]
+    fn rotation_chain_resolves_transitively() {
+        let (a, b, c) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(
+            &mut evs,
+            &a,
+            ctl,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        chain(
+            &mut evs,
+            &a,
+            ctl,
+            Payload::RoleGrant {
+                user: a.id(),
+                role: Role::Moderator,
+            },
+        );
+        chain(&mut evs, &b, ctl, rotate(&a, &b, 2));
+        chain(&mut evs, &c, ctl, rotate(&b, &c, 3));
+
+        let st = replay_all(&a, &evs);
+        assert!(st.rejected.is_empty(), "{:?}", st.rejected);
+        assert_eq!(st.aliases.len(), 2);
+        assert_eq!(st.canonical(&a.id()), c.id());
+        assert_eq!(st.canonical(&b.id()), c.id());
+        assert_eq!(st.canonical(&c.id()), c.id());
+        assert!(st.roles[&c.id()].contains(&Role::Moderator));
+        assert_eq!(st.owner, c.id());
+    }
+
+    #[test]
+    fn competing_rotations_first_in_causal_order_wins() {
+        let (a, b1, b2) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        let g = chain(
+            &mut evs,
+            &a,
+            ctl,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let parents = vec![g];
+        let first = on_channel(
+            &b1,
+            ctl,
+            parents.clone(),
+            Hlc {
+                wall_ms: 2,
+                counter: 0,
+            },
+            rotate(&a, &b1, 2),
+        );
+        let second = on_channel(
+            &b2,
+            ctl,
+            parents,
+            Hlc {
+                wall_ms: 3,
+                counter: 0,
+            },
+            rotate(&a, &b2, 3),
+        );
+        let second_id = second.id;
+        evs.push(second);
+        evs.push(first);
+
+        let st = replay_all(&a, &evs);
+        assert_eq!(st.canonical(&a.id()), b1.id());
+        assert!(st
+            .rejected
+            .contains(&(second_id, Rejection::AlreadyRotated)));
+        assert_eq!(st.rejected.len(), 1);
+    }
+
+    #[test]
+    fn invalid_rotation_proofs_are_malformed() {
+        let (a, b, c) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(
+            &mut evs,
+            &a,
+            ctl,
+            Payload::ChannelCreate { name: "g".into() },
+        );
+
+        let mut forged = KeyRotation::by_owner(&a.root, &b.root, 4);
+        forged.new_root_sig.0[0] ^= 1;
+        let bad_sig = chain(&mut evs, &b, ctl, Payload::KeyRotation(forged));
+
+        // Valid proof, but authored by the old root rather than the new one.
+        let wrong_author = chain(&mut evs, &a, ctl, rotate(&a, &c, 5));
+
+        let st = replay_all(&a, &evs);
+        assert!(st.rejected.contains(&(bad_sig, Rejection::Malformed)));
+        assert!(st.rejected.contains(&(wrong_author, Rejection::Malformed)));
+        assert!(st.aliases.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+    use crate::testutil::{on_channel, User};
+    use crate::{EventBody, Hlc};
+    use dissent_identity::{CommunityId, DeviceKey};
+
+    /// Event from a specific device of `root`. Used for multi-device users.
+    fn on_device(
+        root: &User,
+        device: &DeviceKey,
+        chan: ChannelId,
+        parents: Vec<EventId>,
+        wall: u64,
+        payload: Payload,
+    ) -> Event {
+        let body = EventBody {
+            community: CommunityId([0; 32]),
+            channel: chan,
+            author: root.id(),
+            device: device.id(),
+            parents,
+            hlc: Hlc {
+                wall_ms: wall,
+                counter: 0,
+            },
+            payload,
+        };
+        Event::sign(body, device)
+    }
+
+    fn replay_all(owner: &User, evs: &[Event]) -> CommunityState {
+        let mut dag = Dag::new();
+        for ev in evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        replay(owner.id(), &dag)
+    }
+
+    #[test]
+    fn revoked_device_is_cut_off_and_sibling_still_posts() {
+        let (owner, user, other) = (User::new(), User::new(), User::new());
+        let d1 = user.device.id();
+        let d2 = DeviceKey::generate();
+        let ctl = ChannelId::CONTROL;
+        let g = on_channel(
+            &owner,
+            ctl,
+            vec![],
+            Hlc {
+                wall_ms: 1,
+                counter: 0,
+            },
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let chan = ChannelId(g.id.0);
+        let mut evs = vec![g.clone()];
+
+        // Device 1 posts before the revoke sorts first, so it is accepted.
+        let before = on_device(
+            &user,
+            &user.device,
+            chan,
+            vec![g.id],
+            3,
+            Payload::Message {
+                text: "before".into(),
+            },
+        );
+        // Device 2 revokes device 1.
+        let rev = on_device(
+            &user,
+            &d2,
+            ctl,
+            vec![g.id],
+            4,
+            Payload::DeviceRevoke(user.root.revoke(d1, 4)),
+        );
+        let rev_id = rev.id;
+        let after = on_device(
+            &user,
+            &user.device,
+            chan,
+            vec![rev_id],
+            6,
+            Payload::Message {
+                text: "after".into(),
+            },
+        );
+        let after_id = after.id;
+        let sibling = on_device(
+            &user,
+            &d2,
+            chan,
+            vec![rev_id],
+            7,
+            Payload::Message {
+                text: "sibling".into(),
+            },
+        );
+        // Another root cannot revoke this user's device.
+        let forged = on_device(
+            &other,
+            &other.device,
+            ctl,
+            vec![g.id],
+            5,
+            Payload::DeviceRevoke(other.root.revoke(d1, 5)),
+        );
+        let forged_id = forged.id;
+        evs.extend([before, rev, after, sibling, forged]);
+
+        let st = replay_all(&owner, &evs);
+        assert_eq!(
+            st.revoked_devices.get(&d1),
+            Some(&Hlc {
+                wall_ms: 4,
+                counter: 0
+            })
+        );
+        assert!(st.rejected.contains(&(after_id, Rejection::DeviceRevoked)));
+        assert!(st.rejected.contains(&(forged_id, Rejection::Malformed)));
+        assert_eq!(st.rejected.len(), 2);
+        assert_eq!(st.messages[&chan].len(), 2, "before and sibling are kept");
+        assert_eq!(st.canonical(&user.id()), user.id());
+    }
+
+    #[test]
+    fn revocation_of_unknown_device_is_malformed() {
+        let (owner, user) = (User::new(), User::new());
+        let stranger = DeviceKey::generate();
+        let ctl = ChannelId::CONTROL;
+        let g = on_channel(
+            &owner,
+            ctl,
+            vec![],
+            Hlc {
+                wall_ms: 1,
+                counter: 0,
+            },
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let rev = on_device(
+            &user,
+            &user.device,
+            ctl,
+            vec![g.id],
+            2,
+            Payload::DeviceRevoke(user.root.revoke(stranger.id(), 2)),
+        );
+        let rev_id = rev.id;
+        let st = replay_all(&owner, &[g, rev]);
+        assert!(st.rejected.contains(&(rev_id, Rejection::Malformed)));
     }
 }

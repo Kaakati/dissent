@@ -1,5 +1,8 @@
 //! Network settings: which relays the engine uses. Persisted as `network.json` in the data dir.
 //! Read at engine start; changing them restarts the engine.
+//!
+//! The relay modes are never `Disabled`. Disabling relays also turns off the DHT, which leaves the node
+//! offline, so settings that would need it are rejected.
 
 use std::path::Path;
 
@@ -11,11 +14,22 @@ use url::Url;
 pub const FILE: &str = "network.json";
 /// Upper bound on custom relays, so one settings file cannot make the node dial a long list.
 const MAX_RELAYS: usize = 8;
+/// Shown when public relays are off and no custom relay is listed.
+pub const EMPTY_OFF_MESSAGE: &str = "Add at least one relay, or turn public relays back on.";
+
+/// number0's public relays, as `iroh::defaults::prod::default_relay_map()` returns them in iroh 1.4.1.
+/// Kept here because dissent-core does not re-export iroh's defaults. Update this list when iroh changes.
+const N0_RELAYS: &[&str] = &[
+    "https://use1-1.relay.n0.iroh.link./",
+    "https://usw1-1.relay.n0.iroh.link./",
+    "https://euc1-1.relay.n0.iroh.link./",
+    "https://aps1-1.relay.n0.iroh.link./",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkSettings {
-    /// True uses iroh's public n0 relays. False uses only `relays`, and no relay when that list is empty.
+    /// True adds number0's relays to any custom ones. False uses only the custom relays.
     pub use_public_relays: bool,
     /// Custom relay URLs. Each must be https.
     pub relays: Vec<String>,
@@ -54,10 +68,19 @@ pub fn normalize(relays: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parses and validates a settings document. Missing fields take their defaults.
+/// Checks a whole settings value: relay URLs, and that the choice leaves at least one relay.
+pub fn check(settings: &NetworkSettings) -> Result<NetworkSettings, String> {
+    let relays = normalize(&settings.relays)?;
+    if !settings.use_public_relays && relays.is_empty() {
+        return Err(EMPTY_OFF_MESSAGE.to_string());
+    }
+    Ok(NetworkSettings { use_public_relays: settings.use_public_relays, relays })
+}
+
+/// Parses and checks a settings document. Missing fields take their defaults.
 pub fn parse_settings(json: &str) -> Result<NetworkSettings, String> {
     let raw: NetworkSettings = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    Ok(NetworkSettings { use_public_relays: raw.use_public_relays, relays: normalize(&raw.relays)? })
+    check(&raw)
 }
 
 /// Reads the settings file. A missing or invalid file gives the defaults, and an invalid file is logged.
@@ -71,12 +94,9 @@ pub fn load(data_dir: &Path) -> NetworkSettings {
     }
 }
 
-/// Validates and writes the settings file atomically.
+/// Checks and writes the settings file atomically. Returns what was written.
 pub fn save(data_dir: &Path, settings: &NetworkSettings) -> Result<NetworkSettings, String> {
-    let checked = NetworkSettings {
-        use_public_relays: settings.use_public_relays,
-        relays: normalize(&settings.relays)?,
-    };
+    let checked = check(settings)?;
     let text = serde_json::to_string_pretty(&checked).map_err(|e| e.to_string())?;
     let tmp = data_dir.join("network.json.tmp");
     std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
@@ -84,14 +104,23 @@ pub fn save(data_dir: &Path, settings: &NetworkSettings) -> Result<NetworkSettin
     Ok(checked)
 }
 
-/// The relay mode for these settings.
+/// The relay mode for these settings. Checked settings always leave at least one relay, so this never disables relays.
 pub fn relay_choice(settings: &NetworkSettings) -> RelayChoice {
-    if settings.use_public_relays {
-        RelayChoice::Default
-    } else if settings.relays.is_empty() {
-        RelayChoice::Disabled
-    } else {
-        RelayChoice::Custom(settings.relays.iter().filter_map(|r| validate_relay(r).ok()).collect())
+    let custom = settings.relays.iter().filter_map(|r| validate_relay(r).ok());
+    match (settings.use_public_relays, settings.relays.is_empty()) {
+        (true, true) => RelayChoice::Default,
+        (true, false) => {
+            let mut urls: Vec<Url> = N0_RELAYS.iter().filter_map(|r| validate_relay(r).ok()).collect();
+            for url in custom {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
+            }
+            RelayChoice::Custom(urls)
+        }
+        (false, false) => RelayChoice::Custom(custom.collect()),
+        // Unreachable for checked settings; fall back to the defaults rather than disable relays.
+        (false, true) => RelayChoice::Default,
     }
 }
 
@@ -104,6 +133,13 @@ pub fn node_config(settings: &NetworkSettings) -> NodeConfig {
 mod tests {
     use super::*;
 
+    fn custom_urls(choice: RelayChoice) -> Vec<Url> {
+        match choice {
+            RelayChoice::Custom(urls) => urls,
+            other => panic!("expected custom relays, got {other:?}"),
+        }
+    }
+
     #[test]
     fn missing_fields_take_defaults() {
         let s = parse_settings("{}").unwrap();
@@ -114,10 +150,9 @@ mod tests {
     #[test]
     fn accepts_https_relays_and_drops_duplicates() {
         let s = parse_settings(
-            r#"{"use_public_relays": false, "relays": ["https://relay.example.org", "https://relay.example.org/"]}"#,
+            r#"{"use_public_relays": true, "relays": ["https://relay.example.org", "https://relay.example.org/"]}"#,
         )
         .unwrap();
-        assert!(!s.use_public_relays);
         assert_eq!(s.relays, vec!["https://relay.example.org/".to_string()]);
     }
 
@@ -136,18 +171,33 @@ mod tests {
     }
 
     #[test]
-    fn maps_settings_to_relay_modes() {
+    fn public_on_without_custom_relays_uses_the_default_mode() {
         assert!(matches!(relay_choice(&NetworkSettings::default()), RelayChoice::Default));
-        let none = NetworkSettings { use_public_relays: false, relays: vec![] };
-        assert!(matches!(relay_choice(&none), RelayChoice::Disabled));
-        let custom = NetworkSettings {
-            use_public_relays: false,
-            relays: vec!["https://relay.example.org".into()],
-        };
-        match relay_choice(&custom) {
-            RelayChoice::Custom(urls) => assert_eq!(urls.len(), 1),
-            other => panic!("expected custom relays, got {other:?}"),
-        }
+    }
+
+    #[test]
+    fn public_on_with_custom_relays_adds_them_to_the_n0_set() {
+        let s = NetworkSettings { use_public_relays: true, relays: vec!["https://relay.example.org".into()] };
+        let urls = custom_urls(relay_choice(&s));
+        assert_eq!(urls.len(), N0_RELAYS.len() + 1);
+        assert!(urls.iter().any(|u| u.host_str() == Some("relay.example.org")));
+        assert!(urls.iter().any(|u| u.host_str() == Some("use1-1.relay.n0.iroh.link.")));
+    }
+
+    #[test]
+    fn public_off_uses_only_the_custom_relays() {
+        let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org".into()] };
+        let urls = custom_urls(relay_choice(&s));
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].host_str(), Some("relay.example.org"));
+    }
+
+    #[test]
+    fn public_off_with_no_relays_is_rejected_not_disabled() {
+        let s = NetworkSettings { use_public_relays: false, relays: vec![] };
+        assert_eq!(check(&s).unwrap_err(), EMPTY_OFF_MESSAGE);
+        assert!(parse_settings(r#"{"use_public_relays": false, "relays": []}"#).is_err());
+        assert!(!matches!(relay_choice(&s), RelayChoice::Disabled));
     }
 
     #[test]
@@ -157,6 +207,7 @@ mod tests {
         let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org/".into()] };
         let saved = save(&dir, &s).unwrap();
         assert_eq!(load(&dir), saved);
+        assert!(save(&dir, &NetworkSettings { use_public_relays: false, relays: vec![] }).is_err());
         std::fs::write(dir.join(FILE), "{ broken").unwrap();
         assert_eq!(load(&dir), NetworkSettings::default());
         let _ = std::fs::remove_dir_all(&dir);

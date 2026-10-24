@@ -16,3 +16,6 @@ pkarr.workspace = true
 url.workspace = true
 data-encoding.workspace = true
 ed25519-dalek.workspace = true
+hickory-resolver.workspace = true
+idna.workspace = true
+unicode-security.workspace = true

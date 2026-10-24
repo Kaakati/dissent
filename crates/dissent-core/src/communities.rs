@@ -21,7 +21,8 @@ const JOIN_GOSSIP_WAIT: Duration = Duration::from_secs(5);
 /// How long leaving waits for the receive loop to stop before the loop is aborted.
 const LEAVE_WAIT: Duration = Duration::from_secs(2);
 /// How long a join waits for the DHT to return a community record.
-const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(30);
+/// Resolve can take a DHT warm-up plus retries, so give it room.
+const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(90);
 
 impl Engine {
     /// Creates a community with a `general` channel. Publishes its DHT record in the background.
@@ -105,10 +106,13 @@ impl Engine {
         };
         let mut all_ok = true;
         for (key, record) in jobs {
-            let published = discovery.publish(&key, &record).await;
-            if let Err(e) = published {
-                all_ok = false;
-                warn!(error = %e, "could not publish community record to the DHT");
+            // Discovery retries until enough nodes hold the record, so Ok means it is stored.
+            match discovery.publish(&key, &record).await {
+                Ok(stored_on) => debug!(stored_on, "published community record"),
+                Err(e) => {
+                    all_ok = false;
+                    warn!(error = %e, "could not publish community record to the DHT");
+                }
             }
         }
         self.inner.records_current.store(all_ok, Ordering::Relaxed);

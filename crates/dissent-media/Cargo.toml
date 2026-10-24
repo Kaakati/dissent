@@ -1,0 +1,17 @@
+[package]
+name = "dissent-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+str0m.workspace = true
+sframe.workspace = true
+tokio = { workspace = true, features = ["net"] }
+thiserror.workspace = true
+serde.workspace = true
+postcard.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

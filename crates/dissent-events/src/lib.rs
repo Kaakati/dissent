@@ -14,6 +14,7 @@ pub mod dag;
 pub mod dm;
 pub mod event;
 pub mod hlc;
+pub mod names;
 pub mod replayer;
 pub mod state;
 #[cfg(test)]
@@ -24,6 +25,7 @@ pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
 pub use event::{ChannelId, Event, EventBody, EventId, Payload, Role};
 pub use hlc::{Hlc, HlcClock};
+pub use names::{confusable, normalize_handle, skeleton, NameError};
 pub use replayer::{ReplayStats, Replayer};
 pub use state::{replay, CommunityState, Member, MessageView, Rejection};
 pub use wire::SignedEvent;

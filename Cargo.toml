@@ -7,6 +7,7 @@ members = [
     "crates/dissent-discovery",
     "crates/dissent-core",
     "crates/dissent-mls",
+    "crates/dissent-media",
     "apps/seeder",
     "apps/relay",
     "apps/desktop/src-tauri",
@@ -46,6 +47,10 @@ iroh-mainline-address-lookup = "0.6"
 pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
 url = { version = "2", features = ["serde"] }
 futures-lite = "2"
+unicode-security = "0.1"
+unicode-normalization = "0.1"
+idna = "1"
+hickory-resolver = { version = "0.25", features = ["tokio"] }
 negentropy = "0.5"
 clap = { version = "4", features = ["derive"] }
 iroh-relay = { version = "1.4.1", features = ["server"] }
@@ -53,6 +58,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 openmls = "0.9"
 openmls_rust_crypto = "0.6"
 openmls_basic_credential = "0.6"
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+sframe = { version = "2", default-features = false, features = ["rust-crypto"] }
 
 [profile.dev.package.ed25519-dalek]
 opt-level = 3

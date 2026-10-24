@@ -49,6 +49,10 @@ pub(crate) struct Inner {
     pub records_current: AtomicBool,
     /// Serializes DHT record publishes.
     pub publish_lock: tokio::sync::Mutex<()>,
+    /// Next member to try first in anti-entropy, per community.
+    pub sync_cursor: Mutex<BTreeMap<CommunityId, usize>>,
+    /// Devices whose last anti-entropy attempt failed, until the given instant.
+    pub sync_backoff: Mutex<BTreeMap<DeviceId, std::time::Instant>>,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
 }
@@ -94,6 +98,8 @@ impl Engine {
             founded: Mutex::new(founded),
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),
+            sync_cursor: Mutex::new(BTreeMap::new()),
+            sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
         });
         let config = NodeConfig {

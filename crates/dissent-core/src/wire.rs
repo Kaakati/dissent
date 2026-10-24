@@ -12,8 +12,8 @@ const ADDR_DOMAIN: &[u8] = b"dissent/addr/v1";
 /// Everything that travels on a community topic.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum GossipMsg {
-    Event(SignedEvent),
-    Addr(SignedAddr),
+    Event(Box<SignedEvent>),
+    Addr(Box<SignedAddr>),
 }
 
 pub(crate) fn encode_gossip(msg: &GossipMsg) -> Result<Vec<u8>> {

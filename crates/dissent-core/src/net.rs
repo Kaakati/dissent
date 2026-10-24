@@ -14,7 +14,7 @@ use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicReceiver};
 use std::collections::BTreeSet;
 use std::sync::{PoisonError, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -91,7 +91,7 @@ impl Engine {
     /// Handles one gossip message. The sender is the neighbour that relayed it, not the author.
     pub(crate) async fn on_gossip(&self, community: CommunityId, neighbour: DeviceId, bytes: &[u8]) {
         match decode_gossip(bytes) {
-            Ok(GossipMsg::Event(se)) => match self.ingest(community, vec![se]) {
+            Ok(GossipMsg::Event(se)) => match self.ingest(community, vec![*se]) {
                 Ok(true) => {
                     if let Err(e) = self.sync_with(community, neighbour).await {
                         debug!(community = %community, error = %e, "sync after gossip failed");
@@ -101,7 +101,7 @@ impl Engine {
                 Err(e) => debug!(community = %community, error = %e, "could not store gossip event"),
             },
             Ok(GossipMsg::Addr(sa)) => {
-                if let Err(e) = self.accept_addr(sa) {
+                if let Err(e) = self.accept_addr(*sa) {
                     debug!(error = %e, "rejected gossiped address");
                 }
             }
@@ -258,24 +258,93 @@ impl Engine {
     }
 
     /// Syncs each community with one member, so a missed gossip message still arrives.
+    ///
+    /// The member tried first rotates from round to round, so one offline device cannot hold up
+    /// the others. A round makes at most `ANTI_ENTROPY_ATTEMPTS` tries. A device that just failed
+    /// is skipped for `FAILED_PEER_BACKOFF`.
     pub(crate) async fn anti_entropy(&self) {
-        let targets: Vec<(CommunityId, DeviceId)> = {
+        let targets: Vec<(CommunityId, Vec<DeviceId>)> = {
             let w = self.read();
             w.communities
                 .values()
-                .filter_map(|c| w.member_devices(c).first().map(|d| (c.id(), *d)))
+                .map(|c| (c.id(), w.member_devices(c)))
                 .collect()
         };
-        for (community, device) in targets {
-            if let Err(e) = self.sync_with(community, device).await {
-                debug!(community = %community, error = %e, "anti-entropy sync failed");
+        for (community, devices) in targets {
+            if devices.is_empty() {
+                continue;
+            }
+            let start = self.next_sync_start(community, devices.len());
+            let mut attempts = 0;
+            for offset in 0..devices.len() {
+                if attempts == ANTI_ENTROPY_ATTEMPTS {
+                    break;
+                }
+                let device = devices[(start + offset) % devices.len()];
+                if self.is_backing_off(device) {
+                    continue;
+                }
+                attempts += 1;
+                let outcome = self.sync_with(community, device).await;
+                match outcome {
+                    Ok(()) => {
+                        self.clear_backoff(device);
+                        break;
+                    }
+                    Err(e) => {
+                        debug!(community = %community, device = %device, error = %e, "anti-entropy sync failed");
+                        self.back_off(device);
+                    }
+                }
             }
         }
+    }
+
+    /// Returns where this community's rotation starts, and moves it on by one.
+    fn next_sync_start(&self, community: CommunityId, members: usize) -> usize {
+        let mut cursor = self
+            .inner
+            .sync_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let next = cursor.entry(community).or_insert(0);
+        let start = *next % members;
+        *next = next.wrapping_add(1);
+        start
+    }
+
+    fn is_backing_off(&self, device: DeviceId) -> bool {
+        self.inner
+            .sync_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&device)
+            .is_some_and(|until| Instant::now() < *until)
+    }
+
+    fn back_off(&self, device: DeviceId) {
+        self.inner
+            .sync_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(device, Instant::now() + FAILED_PEER_BACKOFF);
+    }
+
+    fn clear_backoff(&self, device: DeviceId) {
+        self.inner
+            .sync_backoff
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&device);
     }
 }
 
 /// How often a receive loop refreshes its neighbour list while the topic is quiet.
 const NEIGHBOUR_TICK: Duration = Duration::from_secs(2);
+/// Members tried in one anti-entropy round.
+const ANTI_ENTROPY_ATTEMPTS: usize = 3;
+/// How long a device that failed a sync is skipped.
+const FAILED_PEER_BACKOFF: Duration = Duration::from_secs(20);
 
 /// Feeds one community's gossip into the engine until the topic closes, the engine is dropped,
 /// or `stop` fires. Returns the receiver, so the caller can leave the topic with it. Keeps the
@@ -347,3 +416,6 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

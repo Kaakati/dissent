@@ -107,6 +107,10 @@ pub enum Payload {
         display_name: String,
     },
     Leave,
+    /// Move the community membership to a new root. Must be authored by the new root.
+    KeyRotation(dissent_identity::KeyRotation),
+    /// Revoke one device of the author's root. Takes effect for later events from that device.
+    DeviceRevoke(dissent_identity::DeviceRevocation),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

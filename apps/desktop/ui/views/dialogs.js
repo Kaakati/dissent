@@ -204,7 +204,7 @@ export function openSettings() {
 
   const importInput = el('textarea', { rows: 3, placeholder: '24 recovery words, separated by spaces', 'aria-label': 'Recovery phrase to import' });
   const importBtn = el('button', {
-    class: 'danger',
+    class: 'danger-outline',
     icon: 'key-round',
     text: 'Import phrase',
     onclick: async () => {
@@ -280,9 +280,14 @@ function networkSection() {
   const list = el('ul', { class: 'plain relay-list', 'aria-label': 'Custom relays' });
   const input = el('input', { placeholder: 'https://relay.example.org', 'aria-label': 'Relay URL' });
   const status = el('p', { class: 'muted', role: 'status' });
+  const hint = el('p', { class: 'warning', role: 'status' });
   const saveBtn = el('button', { class: 'primary', text: 'Save network settings' });
 
+  // With public relays off and no custom relay, the engine would have no relay at all. Save is disabled instead.
   const render = () => {
+    const empty = !settings.use_public_relays && settings.relays.length === 0;
+    hint.textContent = empty ? 'Add at least one relay, or turn public relays back on.' : '';
+    saveBtn.disabled = empty;
     toggle.checked = settings.use_public_relays;
     list.replaceChildren(...settings.relays.map((url, i) => el('li', { class: 'relay-item' },
       el('span', { class: 'mono', text: url }),
@@ -301,6 +306,7 @@ function networkSection() {
 
   toggle.addEventListener('change', () => {
     settings.use_public_relays = toggle.checked;
+    render();
   });
   const addBtn = el('button', {
     class: 'ghost',
@@ -347,9 +353,10 @@ function networkSection() {
   return el('section', {},
     el('h3', { text: 'Network' }),
     el('label', { class: 'toggle-row' }, toggle, el('span', { text: 'Use public n0 relays' })),
-    el('p', { class: 'muted', text: 'Custom relays are used only when public relays are off. Each must be an https URL.' }),
+    el('p', { class: 'muted', text: 'With public relays on, your relays are added to number0’s. With it off, only your relays are used, and you need at least one. Each must be an https URL.' }),
     list,
     el('div', { class: 'row' }, input, addBtn),
     status,
+    hint,
     el('div', { class: 'row end' }, saveBtn));
 }

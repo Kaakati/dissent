@@ -33,6 +33,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 button.primary { background: var(--accent); color: #fff; }
 button.danger { background: var(--danger); color: #fff; }
 button.danger-text { color: var(--danger); }
+button.danger-outline { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
 button.ghost { background: transparent; border: 1px solid rgb(255 255 255 / .12); }
 input, textarea { background: var(--rail); border: 1px solid rgb(255 255 255 / .1); border-radius: 4px; padding: 8px; width: 100%; }
 textarea { resize: vertical; }

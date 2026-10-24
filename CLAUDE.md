@@ -11,6 +11,7 @@ crates/dissent-net        iroh endpoint wrapper: dial by DeviceId, ping ALPN, go
 crates/dissent-discovery  pkarr community records on Mainline DHT, invite links
 crates/dissent-core       Engine: multi-community state, gossip, sync, DMs, persistence (no tauri)
 crates/dissent-mls        OpenMLS group encryption for community messages (standalone, not yet wired into core)
+crates/dissent-media      voice/video spike: str0m (sans-IO WebRTC) sessions with SFrame end-to-end media encryption
 apps/seeder               headless always-on member: keeps community history available (uses dissent-core)
 apps/relay                open-source iroh relay server binary anyone can run
 apps/desktop/src-tauri    Tauri 2 app (commands + state); apps/desktop/ui = static HTML/JS frontend

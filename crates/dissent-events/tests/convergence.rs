@@ -4,7 +4,7 @@ use dissent_events::{
     replay, ChannelId, CommunityState, Dag, Event, EventBody, EventId, Hlc, InsertOutcome, Payload,
     Rejection, Replayer, Role,
 };
-use dissent_identity::{CommunityId, CommunityKey, DeviceCert, DeviceKey, RootKey};
+use dissent_identity::{CommunityId, CommunityKey, DeviceCert, DeviceKey, KeyRotation, RootKey};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
@@ -14,6 +14,7 @@ const OWNER: usize = 0;
 const ADMIN: usize = 1;
 const MOD: usize = 2;
 const USER: usize = 3;
+const NEW: usize = 4;
 
 struct Member {
     root: RootKey,
@@ -26,11 +27,14 @@ struct Builder {
     members: Vec<Member>,
     events: Vec<Event>,
     hlcs: BTreeMap<EventId, Hlc>,
+    /// A second device of USER, certified by USER's root.
+    extra_device: DeviceKey,
+    extra_cert: DeviceCert,
 }
 
 impl Builder {
     fn new() -> Self {
-        let members = (0..4)
+        let members: Vec<Member> = (0..5)
             .map(|_| {
                 let root = RootKey::generate();
                 let device = DeviceKey::generate();
@@ -38,11 +42,15 @@ impl Builder {
                 Member { root, device, cert }
             })
             .collect();
+        let extra_device = DeviceKey::generate();
+        let extra_cert = members[USER].root.certify(extra_device.id(), 0);
         Self {
             community: CommunityKey::generate().id(),
             members,
             events: Vec::new(),
             hlcs: BTreeMap::new(),
+            extra_device,
+            extra_cert,
         }
     }
 
@@ -53,6 +61,19 @@ impl Builder {
     fn push(
         &mut self,
         who: usize,
+        chan: ChannelId,
+        parents: Vec<EventId>,
+        wall: u64,
+        payload: Payload,
+    ) -> EventId {
+        let device = self.members[who].device.clone();
+        self.push_as(who, &device, chan, parents, wall, payload)
+    }
+
+    fn push_as(
+        &mut self,
+        who: usize,
+        device: &DeviceKey,
         chan: ChannelId,
         parents: Vec<EventId>,
         wall: u64,
@@ -80,12 +101,12 @@ impl Builder {
             community: self.community,
             channel: chan,
             author: m.root.id(),
-            device: m.device.id(),
+            device: device.id(),
             parents,
             hlc,
             payload,
         };
-        let ev = Event::sign(body, &m.device);
+        let ev = Event::sign(body, device);
         let id = ev.id;
         self.hlcs.insert(id, hlc);
         self.events.push(ev);
@@ -186,6 +207,26 @@ fn build() -> Builder {
             handle: "alice ".into(),
         },
     );
+    // Owner moves to "copy" in causal order, then an admin claims the all-Cyrillic
+    // look-alike "сору". It is refused as confusable with the held handle.
+    b.push(
+        OWNER,
+        ctl,
+        vec![g],
+        33,
+        Payload::HandleClaim {
+            handle: "copy".into(),
+        },
+    );
+    b.push(
+        ADMIN,
+        ctl,
+        vec![g],
+        34,
+        Payload::HandleClaim {
+            handle: "\u{0441}\u{043E}\u{0440}\u{0443}".into(),
+        },
+    );
 
     // Join, Leave, Join for one user, all concurrent (parent `g`). Then a Join from the
     // banned user at wall 1200, which sorts after the ban and is rejected.
@@ -217,6 +258,56 @@ fn build() -> Builder {
             display_name: "u3".into(),
         },
     );
+
+    // Device revocation. USER's main device posts early, then USER's extra device revokes it at
+    // wall 900. A main-device message at 950 sorts after the revoke and is refused.
+    let early = b.push(
+        USER,
+        general,
+        vec![g],
+        800,
+        Payload::Message {
+            text: "early".into(),
+        },
+    );
+    let revoke = b.members[USER]
+        .root
+        .revoke(b.members[USER].device.id(), 900);
+    let extra = b.extra_device.clone();
+    b.push_as(
+        USER,
+        &extra,
+        ctl,
+        vec![early],
+        900,
+        Payload::DeviceRevoke(revoke),
+    );
+    b.push(
+        USER,
+        general,
+        vec![g],
+        950,
+        Payload::Message {
+            text: "after revoke".into(),
+        },
+    );
+
+    // Rotation of the banned user to NEW at wall 1500. The ban migrates to NEW. Messages from
+    // the old root sort after the rotation and are refused as RotatedAway.
+    // The extra device is not revoked, so this post after the ban is refused as Banned.
+    b.push_as(
+        USER,
+        &extra,
+        general,
+        vec![g],
+        1200,
+        Payload::Message {
+            text: "banned".into(),
+        },
+    );
+
+    let rot = KeyRotation::by_owner(&b.members[USER].root, &b.members[NEW].root, 1500);
+    b.push(NEW, ctl, vec![g], 1500, Payload::KeyRotation(rot));
 
     // Random filler. Parents never include the ban, so the scripted conflicts stay concurrent.
     let mut channels = vec![general, dev];
@@ -300,8 +391,17 @@ fn build() -> Builder {
                 },
             ),
             5 => {
-                let handle =
-                    ["Alice", "bob", "BOB ", "carol"][rng.random_range(0..4usize)].to_string();
+                let handle = [
+                    "Alice",
+                    "bob",
+                    "BOB ",
+                    "carol",
+                    "copy",
+                    "\u{0441}\u{043E}\u{0440}\u{0443}",
+                    "mango",
+                    "rnango",
+                ][rng.random_range(0..8usize)]
+                .to_string();
                 b.push(author, ctl, parents, wall, Payload::HandleClaim { handle })
             }
             6 if !messages.is_empty() => {
@@ -372,7 +472,12 @@ fn replay_converges_across_200_shuffles() {
             .iter()
             .find(|m| m.root.id() == ev.body.author)
             .unwrap();
-        ev.verify(&author.cert).unwrap();
+        let cert = if ev.body.device == b.extra_device.id() {
+            &b.extra_cert
+        } else {
+            &author.cert
+        };
+        ev.verify(cert).unwrap();
     }
 
     let owner = b.owner();
@@ -391,6 +496,19 @@ fn replay_converges_across_200_shuffles() {
             .any(|(_, r)| *r == Rejection::HandleTaken),
         "no HandleTaken rejection exercised"
     );
+    assert!(
+        reference
+            .rejected
+            .iter()
+            .any(|(_, r)| *r == Rejection::HandleConfusable),
+        "no HandleConfusable rejection exercised"
+    );
+    for expected in [Rejection::RotatedAway, Rejection::DeviceRevoked] {
+        assert!(
+            reference.rejected.iter().any(|(_, r)| *r == expected),
+            "no {expected:?} rejection exercised"
+        );
+    }
     let reference_bytes = postcard::to_allocvec(&reference).unwrap();
 
     for seed in 0..200u64 {

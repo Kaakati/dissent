@@ -53,3 +53,18 @@ A device without the root key can chat but cannot add or revoke devices. Only ro
 - Refuse a revocation that does not verify against the root the device belongs to.
 
 The rule above depends on events and the hybrid logical clock, which are future core work.
+
+## DNS-verified handles (optional)
+
+A handle like `@example.com` lets people recognise you by a domain you own. It is optional. Your normal name still works without it.
+
+**How to set one up:**
+
+1. Pick a domain you control, such as `example.com`, and ask the app for its verification text.
+2. The text starts with `dissent-root=`. It is tied to your root key, so keep it exactly as shown.
+3. In your domain's DNS settings, add a **TXT** record. Name it `_dissent`, so the full name is `_dissent.example.com`. Put the text in as the content.
+4. DNS changes can take a while to spread. Ask the app to check again once the record exists.
+
+**How checking works:** each person's app looks up the TXT record itself, using the system DNS and a public fallback. It accepts the handle only if the value matches your root key exactly. A handle is never trusted because a peer says it is verified. If a peer shows you a handle, your own app checks it again before you see the verified mark.
+
+**Limits:** the check proves who controls the domain, not who the person is. Look-alike domains that mix scripts are refused. Losing control of the domain, or the TXT record being removed, makes the handle stop verifying.

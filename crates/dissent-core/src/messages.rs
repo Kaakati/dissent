@@ -210,7 +210,7 @@ impl Engine {
             .get(&community)
             .and_then(|c| c.sender.clone());
         if let Some(sender) = sender {
-            match encode_gossip(&GossipMsg::Event(se.clone())) {
+            match encode_gossip(&GossipMsg::Event(Box::new(se.clone()))) {
                 Ok(bytes) => {
                     if let Err(e) = sender.broadcast(bytes).await {
                         warn!(community = %community, error = %e, "gossip broadcast failed");

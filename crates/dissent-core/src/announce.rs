@@ -58,7 +58,7 @@ impl Engine {
             .values()
             .filter_map(|c| c.sender.clone())
             .collect();
-        match encode_gossip(&GossipMsg::Addr(signed.clone())) {
+        match encode_gossip(&GossipMsg::Addr(Box::new(signed.clone()))) {
             Ok(bytes) => {
                 for sender in senders {
                     if let Err(e) = sender.broadcast(bytes.clone()).await {

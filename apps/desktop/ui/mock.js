@@ -256,6 +256,7 @@ if (!window.__TAURI__) {
         need(url.protocol === 'https:', `A relay must use https: ${r}`);
         return url.toString();
       });
+      need(settings.use_public_relays || relays.length > 0, 'Add at least one relay, or turn public relays back on.');
       mockNetwork = { use_public_relays: Boolean(settings.use_public_relays), relays: [...new Set(relays)] };
       return { ...mockNetwork, relays: [...mockNetwork.relays] };
     },

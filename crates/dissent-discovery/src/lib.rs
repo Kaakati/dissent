@@ -6,6 +6,7 @@
 //! carries the same peer addresses directly so a joiner can connect without the DHT.
 
 mod contact;
+mod dns;
 mod invite;
 mod record;
 
@@ -19,6 +20,7 @@ use tracing::debug;
 use url::Url;
 
 pub use contact::ContactCard;
+pub use dns::{dns_record_value, normalize_domain, verify_dns_handle};
 pub use invite::Invite;
 pub use record::{CommunityRecord, MAX_PEERS};
 
@@ -52,6 +54,10 @@ pub enum DiscoveryError {
     InvalidInvite(String),
     #[error("invalid contact card: {0}")]
     InvalidContact(String),
+    #[error("invalid domain: {0}")]
+    InvalidDomain(String),
+    #[error("DNS lookup failed: {0}")]
+    Dns(String),
 }
 
 pub type Result<T> = std::result::Result<T, DiscoveryError>;

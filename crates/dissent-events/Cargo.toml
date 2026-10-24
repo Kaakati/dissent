@@ -12,6 +12,8 @@ postcard.workspace = true
 blake3.workspace = true
 ed25519-dalek.workspace = true
 data-encoding.workspace = true
+unicode-security.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
