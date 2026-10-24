@@ -2,6 +2,7 @@
 import { api } from './api.js';
 import { state, notify } from './state.js';
 import { toast } from './ui.js';
+import { seenMs, markSeen } from './unread.js';
 
 const MSG_LIMIT = 200;
 
@@ -29,6 +30,7 @@ export async function boot() {
   state.me = await api.me();
   await loadCommunities();
   await loadConversations();
+  await refreshUnread();
   notify('rail', 'sidebar', 'main', 'right');
 }
 
@@ -67,6 +69,7 @@ async function loadMessages() {
   const messages = await api.channelMessages(community.id, channelId, MSG_LIMIT);
   if (state.community?.id !== community.id || state.channelId !== channelId) return;
   state.messages = messages;
+  state.historyStart = messages.length < MSG_LIMIT;
   notify('main');
 }
 
@@ -78,6 +81,7 @@ async function loadDm() {
   const items = await api.dmMessages(peer, MSG_LIMIT);
   if (state.peer !== peer) return;
   state.dmMessages = items;
+  state.historyStart = items.length < MSG_LIMIT;
   notify('main');
   // Pending DMs are retried by the engine outbox, so re-read while any are still in flight.
   clearTimeout(dmTimer);
@@ -105,13 +109,21 @@ export const openServer = guard(async (communityId) => {
   state.messages = [];
   notify('rail', 'sidebar', 'main', 'right');
   await loadCommunity(communityId);
+  // The first channel is picked automatically; open it the same way a click would, so unread markers apply.
+  if (state.route.kind === 'server' && state.channelId) await openChannel(state.channelId);
 });
 
 export const openChannel = guard(async (channelId) => {
+  const key = `ch:${state.community?.id}:${channelId}`;
+  const seenBefore = seenMs(key);
   state.channelId = channelId;
   state.messages = [];
+  state.newFromId = null;
   notify('sidebar', 'main');
   await loadMessages();
+  if (seenBefore !== null) state.newFromId = state.messages.find((m) => Number(m.ms) > seenBefore)?.id ?? null;
+  markLatestRead(key, state.messages);
+  notify('sidebar', 'rail', 'main');
 });
 
 export const openDm = guard(async (peer, displayName = '') => {
@@ -125,6 +137,8 @@ export const openDm = guard(async (peer, displayName = '') => {
   state.peerProfile = null;
   notify('rail', 'sidebar', 'main', 'right');
   await Promise.all([loadDm(), loadPeerProfile(peer)]);
+  markLatestRead(`dm:${peer}`, state.dmMessages);
+  notify('sidebar', 'rail');
 });
 
 async function loadPeerProfile(peer) {
@@ -258,21 +272,33 @@ export async function loadVersion() {
 export const handleEngineEvent = guard(async (ev) => {
   switch (ev?.kind) {
     case 'communities_changed':
-      return loadCommunities();
+      await loadCommunities();
+      return refreshUnread();
     case 'community_updated':
       if (state.route.kind === 'server' && state.route.communityId === ev.community_id) {
         return loadCommunity(ev.community_id);
       }
       return undefined;
-    case 'message':
-      if (state.community?.id === ev.community_id && state.channelId === ev.channel_id) {
-        return loadMessages();
+    case 'message': {
+      const key = `ch:${ev.community_id}:${ev.channel_id}`;
+      if (state.route.kind === 'server' && state.community?.id === ev.community_id && state.channelId === ev.channel_id) {
+        await loadMessages();
+        markLatestRead(key, state.messages);
+        return notify('sidebar', 'rail');
       }
-      return undefined;
-    case 'dm':
+      state.unread.add(key);
+      return notify('sidebar', 'rail');
+    }
+    case 'dm': {
       await loadConversations();
-      if (state.peer === ev.peer) await loadDm();
-      return undefined;
+      if (state.route.kind === 'home' && state.peer === ev.peer) {
+        await loadDm();
+        markLatestRead(`dm:${ev.peer}`, state.dmMessages);
+        return notify('sidebar', 'rail');
+      }
+      state.unread.add(`dm:${ev.peer}`);
+      return notify('sidebar', 'rail');
+    }
     default:
       return undefined;
   }
@@ -294,3 +320,64 @@ export function setFilter(text) {
   state.ui.filter = text;
   notify('main');
 }
+
+// ---- unread markers ----
+
+// Marks a conversation read up to its newest message. Called when it is on screen.
+function markLatestRead(key, items) {
+  const last = items[items.length - 1];
+  if (!last) return;
+  markSeen(key, last.id, Number(last.ms));
+  state.unread.delete(key);
+}
+
+// Checks every channel and DM against its last-seen marker. A marker that does not exist yet is set to the
+// current newest message, so an existing install does not start with everything unread.
+export async function refreshUnread() {
+  const openChannelKey = state.route.kind === 'server' && state.community && state.channelId
+    ? `ch:${state.community.id}:${state.channelId}` : null;
+  for (const c of state.communities) {
+    let view;
+    try {
+      view = await api.communityView(c.id);
+    } catch {
+      continue;
+    }
+    for (const ch of view.channels) {
+      const key = `ch:${c.id}:${ch.id}`;
+      if (key === openChannelKey) continue;
+      let latest;
+      try {
+        latest = (await api.channelMessages(c.id, ch.id, 1))[0];
+      } catch {
+        continue;
+      }
+      if (!latest) continue;
+      const seen = seenMs(key);
+      if (seen === null) markSeen(key, latest.id, Number(latest.ms));
+      else if (Number(latest.ms) > seen) state.unread.add(key);
+    }
+  }
+  const openPeer = state.route.kind === 'home' ? state.peer : null;
+  for (const conv of state.conversations) {
+    const key = `dm:${conv.peer}`;
+    if (conv.peer === openPeer) continue;
+    const seen = seenMs(key);
+    if (seen === null) markSeen(key, conv.peer, Number(conv.last_ms));
+    else if (Number(conv.last_ms) > seen) state.unread.add(key);
+  }
+  notify('rail', 'sidebar');
+}
+
+// ---- network settings ----
+
+export const loadNetworkSettings = guard(() => api.getNetworkSettings());
+
+// Saves relays and restarts the engine. The community and conversation lists are reloaded after the restart.
+export const setNetworkSettings = guard(async (settings) => {
+  const saved = await api.setNetworkSettings(settings);
+  await loadCommunities();
+  await loadConversations();
+  toast('Network settings saved. The engine restarted.', 'info');
+  return saved;
+});

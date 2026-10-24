@@ -56,12 +56,16 @@ function serverTop(community) {
 
 function serverList(community) {
   const manage = canManage();
-  const channels = community.channels.map((ch) => el('button', {
-    class: `row-item${ch.id === state.channelId ? ' active' : ''}`,
-    'aria-current': ch.id === state.channelId ? 'true' : null,
-    icon: 'hash',
-    onclick: () => actions.openChannel(ch.id),
-  }, el('span', { class: 'name', text: ch.name })));
+  const channels = community.channels.map((ch) => {
+    const active = ch.id === state.channelId;
+    const unread = state.unread.has(`ch:${community.id}:${ch.id}`) && !active;
+    return el('button', {
+      class: `row-item${active ? ' active' : ''}${unread ? ' unread' : ''}`,
+      'aria-current': active ? 'true' : null,
+      icon: 'hash',
+      onclick: () => actions.openChannel(ch.id),
+    }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name }));
+  });
   return [
     el('div', { class: 'section-head' },
       el('span', { text: 'Channels' }),
@@ -83,11 +87,13 @@ function serverList(community) {
 function homeList() {
   const convos = state.conversations.map((conv) => {
     const active = state.route.kind === 'home' && state.peer === conv.peer;
+    const unread = state.unread.has(`dm:${conv.peer}`) && !active;
     return el('button', {
-      class: `row-item convo${active ? ' active' : ''}`,
+      class: `row-item convo${active ? ' active' : ''}${unread ? ' unread' : ''}`,
       'aria-current': active ? 'true' : null,
       onclick: () => actions.openDm(conv.peer, conv.display_name),
     },
+    unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null,
     avatar(conv.display_name, conv.peer),
     el('span', { class: 'convo-text' },
       el('span', { class: 'name', text: conv.display_name }),

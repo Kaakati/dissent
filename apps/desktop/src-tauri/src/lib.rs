@@ -1,29 +1,30 @@
 mod commands;
 mod events;
+mod network;
 mod storage;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use commands::AppState;
-use dissent_core::{Engine, NodeConfig, RelayChoice};
+use dissent_core::{Engine, NodeConfig};
 use dissent_identity::keystore;
 use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
 
-/// Production defaults, or loopback-only with no relays and no DHT when `DISSENT_LOOPBACK=1`.
+/// The node config: the saved network settings, or loopback-only when `DISSENT_LOOPBACK=1`.
 /// Loopback mode avoids the firewall prompt on Windows and only works for instances on one machine.
-pub(crate) fn node_config() -> NodeConfig {
+pub(crate) fn node_config(settings: &network::NetworkSettings) -> NodeConfig {
     if std::env::var_os("DISSENT_LOOPBACK").is_some_and(|v| v == "1") {
         tracing::warn!("loopback mode is on (DISSENT_LOOPBACK=1): binding 127.0.0.1 only, no relays, no DHT");
         return NodeConfig {
-            relay: RelayChoice::Disabled,
+            relay: dissent_core::RelayChoice::Disabled,
             loopback_only: true,
             dht_lookup: false,
             ..Default::default()
         };
     }
-    NodeConfig::default()
+    network::node_config(settings)
 }
 
 /// `DISSENT_DATA_DIR` overrides the app data directory, so two instances can run on one machine.
@@ -51,10 +52,11 @@ pub fn run() {
             std::fs::create_dir_all(&profile)?;
             tracing::info!(dir = %profile.display(), "engine data dir");
 
+            let settings = network::load(&data_dir);
             let (engine, rx) = tauri::async_runtime::block_on(Engine::start(
                 identity.clone(),
                 profile,
-                node_config(),
+                node_config(&settings),
             ))?;
 
             app.manage(AppState {
@@ -92,6 +94,8 @@ pub fn run() {
             commands::dm_messages,
             commands::send_dm,
             commands::net_status,
+            commands::get_network_settings,
+            commands::set_network_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Dissent");

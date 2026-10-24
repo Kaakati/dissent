@@ -11,6 +11,7 @@ export function initRail() {
 
 function render() {
   const onHome = state.route.kind === 'home';
+  const dmUnread = [...state.unread].filter((k) => k.startsWith('dm:')).length;
   const servers = state.communities.map((c) => {
     const active = state.route.kind === 'server' && state.route.communityId === c.id;
     const btn = el('button', {
@@ -21,10 +22,12 @@ function render() {
       onclick: () => actions.openServer(c.id),
     }, initials(c.name));
     setHue(btn, c.id);
-    return el('div', { class: `rail-item${active ? ' active' : ''}` }, btn);
+    const unread = [...state.unread].some((k) => k.startsWith(`ch:${c.id}:`));
+    return el('div', { class: `rail-item${active ? ' active' : ''}${unread ? ' unread' : ''}` }, btn);
   });
   document.getElementById('rail').replaceChildren(
     el('div', { class: `rail-item${onHome ? ' active' : ''}` },
+      dmUnread > 0 ? el('span', { class: 'rail-badge', text: String(dmUnread), 'aria-label': `${dmUnread} unread conversations` }) : null,
       el('button', {
         class: 'rail-btn home',
         'aria-label': 'Direct messages',

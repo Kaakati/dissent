@@ -120,7 +120,8 @@ function render() {
   if (view.items.length === 0) rows = [el('p', { class: 'empty', text: 'No messages yet. Say hello.' })];
   else if (shown.length === 0) rows = [el('p', { class: 'empty', text: `No messages match "${state.ui.filter}".` })];
   else rows = rowsFor(shown, view);
-  list.replaceChildren(...rows);
+  const head = state.historyStart && !state.ui.filter ? [welcomeNode(view)] : [];
+  list.replaceChildren(...head, ...rows);
   if (switched || wasAtBottom) list.scrollTop = list.scrollHeight;
   listKey = view.key;
 
@@ -173,7 +174,10 @@ function rowsFor(items, view) {
     const newDay = !prev || dayKey(prev.ms) !== dayKey(item.ms);
     if (newDay) out.push(el('div', { class: 'date-divider', role: 'separator' }, el('span', { text: dayLabel(item.ms) })));
     const start = newDay || prev.author !== item.author || Number(item.ms) - Number(prev.ms) > GROUP_MS;
-    out.push(messageRow(item, view, start));
+    if (item.id === state.newFromId) {
+      out.push(el('div', { class: 'new-divider', role: 'separator' }, el('span', { text: 'New messages' })));
+    }
+    out.push(messageRow(item, view, start || item.id === state.newFromId));
     prev = item;
   }
   return out;
@@ -354,4 +358,22 @@ function closePlusMenu() {
   plusMenu?.remove();
   plusMenu = null;
   document.removeEventListener('pointerdown', onPlusOutside, true);
+}
+
+// The top of a history that has no older messages: channel welcome, or DM history start.
+function welcomeNode(view) {
+  if (view.dm) {
+    const mutual = state.peerProfile?.mutual_communities.length ?? 0;
+    const suffix = state.peerProfile?.suffix ?? view.peer.slice(0, 8);
+    return el('div', { class: 'welcome' },
+      avatar(view.title, view.peer, 'xl'),
+      el('h2', { text: view.title }),
+      el('div', { class: 'suffix mono', text: `${view.title}·${suffix}` }),
+      el('p', { class: 'muted', text: `This is the beginning of your direct message history with ${view.title}.` }),
+      el('p', { class: 'muted', text: mutual ? `${mutual} mutual server${mutual === 1 ? '' : 's'}` : 'No mutual servers' }));
+  }
+  return el('div', { class: 'welcome' },
+    el('div', { class: 'welcome-mark' }, icon('hash')),
+    el('h2', { text: `Welcome to #${view.title}!` }),
+    el('p', { class: 'muted', text: `This is the start of the #${view.title} channel.` }));
 }

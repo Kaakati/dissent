@@ -118,6 +118,14 @@ pub async fn identity_import_phrase(
     let identity = Identity { root: Some(root), device, cert };
     keystore::save(&identity, &state.identity_path()).map_err(err)?;
 
+    restart_engine(&app, &state, identity).await?;
+    let me = engine(&state).await?.me();
+    Ok(identity_view(&me, true))
+}
+
+/// Stops the running engine and starts one on `identity`, with the saved network settings.
+/// The identity's data folder is reused, so an earlier identity's data comes back when it is restored.
+pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identity) -> Result<(), String> {
     let old = state.engine.write().await.take();
     if let Some(old) = old {
         if let Err(e) = old.shutdown().await {
@@ -126,15 +134,35 @@ pub async fn identity_import_phrase(
     }
     let profile = crate::storage::profile_dir(&state.data_dir, &identity);
     std::fs::create_dir_all(&profile).map_err(err)?;
-    let (new_engine, rx) = Engine::start(identity.clone(), profile, crate::node_config())
+    let settings = crate::network::load(&state.data_dir);
+    let (engine, rx) = Engine::start(identity.clone(), profile, crate::node_config(&settings))
         .await
         .map_err(err)?;
-    let view = identity_view(&new_engine.me(), identity.root.is_some());
     *state.identity.lock().map_err(err)? = identity;
-    *state.engine.write().await = Some(new_engine);
+    *state.engine.write().await = Some(engine);
     forward_events(app.clone(), rx);
     let _ = app.emit(crate::events::EVENT, dissent_core::EngineEvent::CommunitiesChanged);
-    Ok(view)
+    Ok(())
+}
+
+// ---- network settings ----
+
+#[tauri::command]
+pub fn get_network_settings(state: State<'_, AppState>) -> crate::network::NetworkSettings {
+    crate::network::load(&state.data_dir)
+}
+
+/// Saves the relay settings and restarts the engine on them. Invalid settings are rejected before anything changes.
+#[tauri::command]
+pub async fn set_network_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: crate::network::NetworkSettings,
+) -> Result<crate::network::NetworkSettings, String> {
+    let saved = crate::network::save(&state.data_dir, &settings)?;
+    let identity = state.identity.lock().map_err(err)?.clone();
+    restart_engine(&app, &state, identity).await?;
+    Ok(saved)
 }
 
 #[tauri::command]

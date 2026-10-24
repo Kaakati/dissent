@@ -31,6 +31,8 @@ export const api = {
 
   appVersion: () => call('app_version'),
   netStatus: () => call('net_status'),
+  getNetworkSettings: () => call('get_network_settings'),
+  setNetworkSettings: (settings) => call('set_network_settings', { settings }),
   identityExportPhrase: () => call('identity_export_phrase'),
   identityImportPhrase: (phrase) => call('identity_import_phrase', { phrase }),
 };

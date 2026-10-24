@@ -237,6 +237,7 @@ export function openSettings() {
         el('p', { class: 'muted', text: 'Restoring replaces the identity stored on this device.' }),
         importInput,
         el('div', { class: 'row end' }, importBtn)),
+      networkSection(),
       el('section', {}, versionLine)),
   }));
 }
@@ -270,4 +271,85 @@ export function openClaimHandleDialog(communityId) {
 function flashCopied(btn) {
   btn.replaceChildren(icon('check'), 'Copied');
   setTimeout(() => btn.replaceChildren(icon('copy'), 'Copy'), 1500);
+}
+
+// Relay settings. Public relays are the default. Custom relays apply only when public relays are off.
+function networkSection() {
+  let settings = { use_public_relays: true, relays: [] };
+  const toggle = el('input', { type: 'checkbox', 'aria-label': 'Use public n0 relays' });
+  const list = el('ul', { class: 'plain relay-list', 'aria-label': 'Custom relays' });
+  const input = el('input', { placeholder: 'https://relay.example.org', 'aria-label': 'Relay URL' });
+  const status = el('p', { class: 'muted', role: 'status' });
+  const saveBtn = el('button', { class: 'primary', text: 'Save network settings' });
+
+  const render = () => {
+    toggle.checked = settings.use_public_relays;
+    list.replaceChildren(...settings.relays.map((url, i) => el('li', { class: 'relay-item' },
+      el('span', { class: 'mono', text: url }),
+      el('button', {
+        class: 'icon-btn',
+        'aria-label': `Remove ${url}`,
+        title: 'Remove',
+        icon: 'x',
+        onclick: () => {
+          settings.relays = settings.relays.filter((_, j) => j !== i);
+          render();
+        },
+      }))));
+    list.hidden = settings.relays.length === 0;
+  };
+
+  toggle.addEventListener('change', () => {
+    settings.use_public_relays = toggle.checked;
+  });
+  const addBtn = el('button', {
+    class: 'ghost',
+    text: 'Add relay',
+    onclick: () => {
+      let url;
+      try {
+        url = new URL(input.value.trim());
+      } catch {
+        status.textContent = 'Enter a full URL, for example https://relay.example.org';
+        return;
+      }
+      if (url.protocol !== 'https:') {
+        status.textContent = 'A relay URL must use https.';
+        return;
+      }
+      if (settings.relays.length >= 8) {
+        status.textContent = 'Up to 8 custom relays.';
+        return;
+      }
+      if (!settings.relays.includes(url.toString())) settings.relays = [...settings.relays, url.toString()];
+      input.value = '';
+      status.textContent = '';
+      render();
+    },
+  });
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    const saved = await actions.setNetworkSettings(settings);
+    saveBtn.disabled = false;
+    if (saved) {
+      settings = saved;
+      render();
+    }
+  });
+
+  actions.loadNetworkSettings().then((loaded) => {
+    if (loaded) {
+      settings = loaded;
+      render();
+    }
+  });
+  render();
+  return el('section', {},
+    el('h3', { text: 'Network' }),
+    el('label', { class: 'toggle-row' }, toggle, el('span', { text: 'Use public n0 relays' })),
+    el('p', { class: 'muted', text: 'Custom relays are used only when public relays are off. Each must be an https URL.' }),
+    list,
+    el('div', { class: 'row' }, input, addBtn),
+    status,
+    el('div', { class: 'row end' }, saveBtn));
 }

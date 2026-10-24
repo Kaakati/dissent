@@ -12,6 +12,9 @@ export const state = {
   peerName: '',
   peerProfile: null, // UserView of the open DM peer, for the profile panel
   dmMessages: [], // DmItem[] of the open DM
+  historyStart: false, // true when the loaded history reaches the first message
+  unread: new Set(), // keys of channels and DMs with newer messages
+  newFromId: null, // first message after the last-seen point, for the divider
   ui: {
     membersOpen: true, // server member list, right column
     profileOpen: true, // DM profile panel, right column

@@ -97,6 +97,7 @@ if (!window.__TAURI__) {
     ],
   };
 
+  let mockNetwork = { use_public_relays: true, relays: [] };
   const listeners = [];
   const emit = (payload) => listeners.forEach((cb) => cb({ payload }));
   const roleOf = (c, user) => c.roles[user] ?? null;
@@ -248,11 +249,32 @@ if (!window.__TAURI__) {
     app_version: () => '0.1.0 (mock)',
     identity_export_phrase: () => 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art',
     identity_import_phrase: () => null,
+    get_network_settings: () => ({ ...mockNetwork, relays: [...mockNetwork.relays] }),
+    set_network_settings: ({ settings }) => {
+      const relays = settings.relays.map((r) => {
+        const url = new URL(r);
+        need(url.protocol === 'https:', `A relay must use https: ${r}`);
+        return url.toString();
+      });
+      mockNetwork = { use_public_relays: Boolean(settings.use_public_relays), relays: [...new Set(relays)] };
+      return { ...mockNetwork, relays: [...mockNetwork.relays] };
+    },
     net_status: () => ({
       dht: { size_estimate: 9200000, confidence: 0.82, firewalled: false },
       peers: 3,
       relay: 'use1-1.relay.n0.iroh.network',
     }),
+  };
+
+  // Screenshot helpers: post a message into any channel or DM, as if another person sent it.
+  window.__mockPost = (communityId, channelId, author, text) => {
+    const m = { id: id(`m${++seq}`), author, text, ms: Date.now(), edited: false, deleted: false };
+    servers[communityId].msgs[channelId].push(m);
+    emit({ kind: 'message', community_id: communityId, channel_id: channelId });
+  };
+  window.__mockDm = (peer, text) => {
+    (dms[peer] ??= []).push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false });
+    emit({ kind: 'dm', peer });
   };
 
   window.__TAURI__ = {
