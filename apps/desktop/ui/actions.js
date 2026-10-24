@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { state, notify } from './state.js';
 import { toast } from './ui.js';
 import { seenMs, markSeen } from './unread.js';
+import { has } from './features.js';
 
 const MSG_LIMIT = 200;
 
@@ -26,12 +27,15 @@ export async function boot() {
   state.channelId = null;
   state.messages = [];
   state.peer = null;
+  state.group = null;
   state.dmMessages = [];
+  state.ui.page = null;
   state.me = await api.me();
   await loadCommunities();
   await loadConversations();
   await refreshUnread();
-  notify('rail', 'sidebar', 'main', 'right');
+  await Promise.all([loadContacts(), loadIgnored(), loadTransfers(), loadCallState()]);
+  notify('rail', 'sidebar', 'main', 'right', 'me');
 }
 
 export async function loadCommunities() {
@@ -44,14 +48,16 @@ export async function loadCommunities() {
 
 export async function loadConversations() {
   state.conversations = await api.listConversations();
-  notify('sidebar');
+  if (state.group) state.group = state.conversations.find((c) => c.kind === 'group' && c.id === state.group.id) ?? state.group;
+  notify('sidebar', 'right');
 }
 
 async function loadCommunity(communityId) {
   const view = await api.communityView(communityId);
   if (state.route.kind !== 'server' || state.route.communityId !== communityId) return;
   state.community = view;
-  if (!view.channels.some((c) => c.id === state.channelId)) {
+  if (state.voiceChannelId && !(view.voice_channels ?? []).some((c) => c.id === state.voiceChannelId)) state.voiceChannelId = null;
+  if (!state.voiceChannelId && !view.channels.some((c) => c.id === state.channelId)) {
     state.channelId = (view.channels.find((c) => c.name === 'general') ?? view.channels[0])?.id ?? null;
   }
   notify('sidebar', 'right');
@@ -78,7 +84,8 @@ let dmTimer = null;
 async function loadDm() {
   const peer = state.peer;
   if (!peer) return;
-  const items = await api.dmMessages(peer, MSG_LIMIT);
+  const group = state.group;
+  const items = group ? await api.groupMessages(group.id, MSG_LIMIT) : await api.dmMessages(peer, MSG_LIMIT);
   if (state.peer !== peer) return;
   state.dmMessages = items;
   state.historyStart = items.length < MSG_LIMIT;
@@ -93,21 +100,27 @@ async function loadDm() {
 
 // ---- navigation ----
 
-export const openHome = guard(async () => {
-  state.route = { kind: 'home' };
+function resetConversation() {
   state.community = null;
   state.channelId = null;
+  state.voiceChannelId = null;
   state.messages = [];
-  notify('rail', 'sidebar', 'main', 'right');
+  state.ui.page = null;
+  state.ui.transferId = null;
+}
+
+export const openHome = guard(async () => {
+  state.route = { kind: 'home' };
+  resetConversation();
+  notify('rail', 'sidebar', 'main', 'right', 'title');
   await loadConversations();
 });
 
-export const openServer = guard(async (communityId) => {
+export const openServer = guard(async (communityId, channelId = null) => {
   state.route = { kind: 'server', communityId };
-  state.community = null;
-  state.channelId = null;
-  state.messages = [];
-  notify('rail', 'sidebar', 'main', 'right');
+  resetConversation();
+  state.channelId = channelId;
+  notify('rail', 'sidebar', 'main', 'right', 'title');
   await loadCommunity(communityId);
   // The first channel is picked automatically; open it the same way a click would, so unread markers apply.
   if (state.route.kind === 'server' && state.channelId) await openChannel(state.channelId);
@@ -117,10 +130,13 @@ export const openChannel = guard(async (channelId) => {
   const key = `ch:${state.community?.id}:${channelId}`;
   const seenBefore = seenMs(key);
   state.channelId = channelId;
+  state.voiceChannelId = null;
+  state.ui.page = null;
+  state.ui.transferId = null;
   state.messages = [];
   state.newFromId = null;
   state.loading.messages = true;
-  notify('sidebar', 'main');
+  notify('sidebar', 'main', 'right', 'title');
   try {
     await loadMessages();
   } finally {
@@ -132,16 +148,27 @@ export const openChannel = guard(async (channelId) => {
   notify('sidebar', 'rail', 'main');
 });
 
+// Opens a voice channel's call board without joining; Join is a separate step on the board.
+export const openVoiceChannel = guard(async (channelId) => {
+  state.voiceChannelId = channelId;
+  state.ui.page = null;
+  state.ui.transferId = null;
+  notify('sidebar', 'main', 'right', 'title');
+  // Opening a voice channel joins its call (calls feature), so the call pane shows the people in it.
+  if (has('calls') && state.community && state.call?.channel_id !== channelId) {
+    await joinCall(state.community.id, channelId);
+  }
+});
+
 export const openDm = guard(async (peer, displayName = '') => {
   state.route = { kind: 'home' };
-  state.community = null;
-  state.channelId = null;
-  state.messages = [];
+  resetConversation();
   state.peer = peer;
   state.peerName = displayName;
+  state.group = null;
   state.dmMessages = [];
   state.peerProfile = null;
-  notify('rail', 'sidebar', 'main', 'right');
+  notify('rail', 'sidebar', 'main', 'right', 'title');
   state.loading.messages = true;
   notify('main');
   try {
@@ -152,6 +179,47 @@ export const openDm = guard(async (peer, displayName = '') => {
   }
   markLatestRead(`dm:${peer}`, state.dmMessages);
   notify('sidebar', 'rail');
+});
+
+// A group conversation (groups feature). `conv` is its ConversationSummary.
+export const openGroup = guard(async (conv) => {
+  state.route = { kind: 'home' };
+  resetConversation();
+  state.peer = conv.id;
+  state.peerName = conv.name;
+  state.group = conv;
+  state.dmMessages = [];
+  state.peerProfile = null;
+  notify('rail', 'sidebar', 'main', 'right', 'title');
+  state.loading.messages = true;
+  notify('main');
+  try {
+    await loadDm();
+  } finally {
+    state.loading.messages = false;
+    notify('main');
+  }
+  markLatestRead(`group:${conv.id}`, state.dmMessages);
+  notify('sidebar', 'rail');
+});
+
+export function openConversation(conv) {
+  return conv.kind === 'group' ? openGroup(conv) : openDm(conv.peer, conv.display_name);
+}
+
+// Pages replace the chat pane on Home: 'contacts' or 'transfers'. null returns to the conversation.
+export const openPage = guard(async (page) => {
+  if (page === 'contacts' && !has('contacts')) return;
+  if (page === 'transfers' && !has('transfers')) return;
+  if (state.route.kind !== 'home') {
+    state.route = { kind: 'home' };
+    resetConversation();
+  }
+  state.ui.page = page;
+  state.ui.transferId = null;
+  notify('rail', 'sidebar', 'main', 'right', 'title');
+  if (page === 'contacts') await loadContacts();
+  if (page === 'transfers') await loadTransfers();
 });
 
 async function loadPeerProfile(peer) {
@@ -226,7 +294,7 @@ function markOwnSend() {
   if (state.route.kind === 'server' && state.community && state.channelId) {
     markLatestRead(`ch:${state.community.id}:${state.channelId}`, state.messages);
   } else if (state.route.kind === 'home' && state.peer) {
-    markLatestRead(`dm:${state.peer}`, state.dmMessages);
+    markLatestRead(state.group ? `group:${state.peer}` : `dm:${state.peer}`, state.dmMessages);
   }
 }
 
@@ -271,19 +339,29 @@ export const toggleReaction = guard(async (messageId, emoji, mine) => {
 
 export const pickFiles = guard(() => api.pickFiles());
 
-// Sends the staged files with an optional caption to the open channel, or the open DM.
-export const sendFiles = guard(async (paths, text) => {
-  if (state.route.kind === 'home' && state.peer) {
-    await api.sendDmFiles(state.peer, paths, text ?? null);
-    await Promise.all([loadDm(), loadConversations()]);
-    markOwnSend();
-    return true;
+// The file whose details panel is open in the right column (null closes it).
+export function openFileDetail(attachmentId) {
+  state.ui.fileDetail = attachmentId;
+  notify('right');
+}
+
+// Sends files with an optional caption. target: { kind: 'channel', communityId, channelId } | { kind: 'dm', peer }.
+// Without a target, the open conversation receives them.
+export const sendFiles = guard(async (paths, text, target = null) => {
+  const t = target ?? (state.route.kind === 'home' && state.peer
+    ? { kind: 'dm', peer: state.peer }
+    : { kind: 'channel', communityId: state.community?.id, channelId: state.channelId });
+  if (t.kind === 'dm') {
+    await api.sendDmFiles(t.peer, paths, text ?? null);
+    if (state.peer === t.peer) await loadDm();
+    await loadConversations();
+  } else {
+    if (!t.communityId || !t.channelId) return false;
+    await api.sendFiles(t.communityId, t.channelId, paths, text ?? null, { seed: t.seed ?? true });
+    if (state.community?.id === t.communityId && state.channelId === t.channelId) await loadMessages();
   }
-  const community = state.community;
-  if (!community || !state.channelId) return false;
-  await api.sendFiles(community.id, state.channelId, paths, text ?? null);
-  await loadMessages();
   markOwnSend();
+  if (has('transfers')) await loadTransfers();
   return true;
 });
 
@@ -305,18 +383,22 @@ export function handleAttachmentProgress(p) {
     if (a) {
       a.state = 'downloading';
       a.progress = Math.max(0, Math.min(1, Number(p.progress) || 0));
+      if (p.rate_bps !== undefined) a.rate_bps = p.rate_bps;
+      if (p.eta_s !== undefined) a.eta_s = p.eta_s;
+      if (p.transfer !== undefined) a.transfer = p.transfer;
       notify('main');
       return;
     }
   }
 }
 
-// ---- direct messages ----
+// ---- direct messages and groups ----
 
 export const sendDm = guard(async (text) => {
   const peer = state.peer;
   if (!peer) return false;
-  await api.sendDm(peer, text);
+  if (state.group) await api.sendGroupMessage(state.group.id, text);
+  else await api.sendDm(peer, text);
   await Promise.all([loadDm(), loadConversations()]);
   markOwnSend();
   return true;
@@ -331,6 +413,261 @@ export const addContact = guard(async (link) => {
 
 export const contactLink = guard(() => api.contactLink());
 
+export const createGroup = guard(async (name, peers) => {
+  const conv = await api.createGroup(name, peers);
+  await loadConversations();
+  await openGroup(conv);
+  return conv;
+});
+
+export const leaveGroup = guard(async (groupId) => {
+  await api.leaveGroup(groupId);
+  await loadConversations();
+  if (state.group?.id === groupId) await openHome();
+  return true;
+});
+
+export const groupInviteLink = guard((groupId) => api.groupInviteLink(groupId));
+export const addGroupMembers = guard(async (groupId, peers) => {
+  await api.addGroupMembers(groupId, peers);
+  await loadConversations();
+  await loadDm();
+  return true;
+});
+
+// ---- contacts (contacts feature) ----
+
+// Ignored users: their messages render collapsed. Without the command nobody is ignored.
+export async function loadIgnored() {
+  if (!has('ignore')) return;
+  try {
+    state.ignored = new Set((await api.ignoredUsers()).map((x) => x.root_id ?? x));
+  } catch {
+    state.ignored = new Set();
+  }
+  notify('main', 'sidebar');
+}
+
+export const setIgnored = guard(async (rootId, ignore) => {
+  if (ignore) await api.ignoreUser(rootId);
+  else await api.unignoreUser(rootId);
+  await loadIgnored();
+  return true;
+});
+
+export const closeDm = guard(async (key) => {
+  await api.closeConversation(key);
+  await loadConversations();
+  return true;
+});
+
+export async function loadContacts() {
+  if (!has('contacts')) return;
+  try {
+    state.contacts = await api.listContacts();
+  } catch {
+    state.contacts = null;
+  }
+  notify('sidebar', 'page');
+}
+
+const contactAction = (fn) => guard(async (...args) => {
+  await fn(...args);
+  await Promise.all([loadContacts(), loadConversations()]);
+  return true;
+});
+export const sendContactRequest = contactAction((link) => api.sendContactRequest(link));
+export const acceptContact = contactAction((rootId) => api.acceptContact(rootId));
+export const declineContact = contactAction((rootId) => api.declineContact(rootId));
+export const cancelContactRequest = contactAction((rootId) => api.cancelContactRequest(rootId));
+export const removeContact = contactAction((rootId) => api.removeContact(rootId));
+export const blockUser = contactAction((rootId) => api.blockUser(rootId));
+export const unblockUser = contactAction((rootId) => api.unblockUser(rootId));
+export const peerContactLink = guard((rootId) => api.peerContactLink(rootId));
+
+// ---- transfers (transfers feature) ----
+
+export async function loadTransfers() {
+  if (!has('transfers')) return;
+  try {
+    const result = await api.listTransfers();
+    state.transfers = Array.isArray(result) ? result : result?.transfers ?? [];
+    state.transferRates = Array.isArray(result) ? null : result?.rates ?? null;
+  } catch {
+    state.transfers = [];
+  }
+  try {
+    state.transferSettings = await api.transferSettings();
+  } catch {
+    state.transferSettings = null; // the Storage panel then shows no folder and no Change button
+  }
+  notify('sidebar', 'page', 'right', 'main');
+}
+
+const transferAction = (fn) => guard(async (id) => {
+  await fn(id);
+  await loadTransfers();
+  return true;
+});
+export const pauseTransfer = transferAction((id) => api.pauseTransfer(id));
+export const resumeTransfer = transferAction((id) => api.resumeTransfer(id));
+export const cancelTransfer = transferAction((id) => api.cancelTransfer(id));
+export const retryTransfer = transferAction((id) => api.retryTransfer(id));
+export const removeTransfer = transferAction((id) => api.removeTransfer(id));
+export const transferSettings = guard(() => api.transferSettings());
+export const setTransferSettings = guard((settings) => api.setTransferSettings(settings));
+export const pickDownloadDir = guard(() => api.pickDownloadDir());
+
+// The transfer whose details panel is open in the right column (null closes it).
+export function openTransferDetails(transferId) {
+  state.ui.transferId = transferId;
+  notify('right', 'main');
+}
+
+// dissent://transfers carries the full list, or { transfers, rates }.
+export function handleTransfersEvent(payload) {
+  if (!has('transfers')) return;
+  if (Array.isArray(payload)) state.transfers = payload;
+  else if (payload && Array.isArray(payload.transfers)) {
+    state.transfers = payload.transfers;
+    state.transferRates = payload.rates ?? state.transferRates;
+  }
+  notify('sidebar', 'page', 'right', 'main');
+}
+
+// ---- calls (calls feature) ----
+
+export async function loadCallState() {
+  if (!has('calls')) return;
+  try {
+    state.call = await api.callState();
+  } catch {
+    state.call = null;
+  }
+  notify('me', 'sidebar', 'main', 'right');
+}
+
+export function handleCallEvent(call) {
+  if (!has('calls')) return;
+  state.call = call ?? null;
+  notify('me', 'sidebar', 'main', 'right', 'title');
+}
+
+export const joinCall = guard(async (communityId, channelId) => {
+  state.call = await api.joinCall(communityId, channelId);
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+export const startCall = guard(async (peer) => {
+  state.call = await api.startCall(peer);
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+export const leaveCall = guard(async () => {
+  await api.leaveCall();
+  state.call = null;
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+// Ringing: answer or decline a direct call. Answering with the mic muted mutes it once the call connects.
+export const acceptCall = guard(async (callId, { muted = false } = {}) => {
+  await api.acceptCall(callId);
+  state.call = await api.callState();
+  if (muted && state.call && !state.call.muted) {
+    await api.setMuted(true);
+    state.call.muted = true;
+  }
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+export const declineCall = guard(async (callId) => {
+  await api.declineCall(callId);
+  return true;
+});
+
+// Joining a call that is already live (the lobby). Mic state comes from the lobby.
+export const joinGroupCall = guard(async (groupId, { muted = false } = {}) => {
+  state.call = await api.joinGroupCall(groupId);
+  if (muted && state.call && !state.call.muted) { await api.setMuted(true); state.call.muted = true; }
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+export const joinDmCall = guard(async (peer, { muted = false } = {}) => {
+  state.call = await api.joinDmCall(peer);
+  if (muted && state.call && !state.call.muted) { await api.setMuted(true); state.call.muted = true; }
+  notify('me', 'sidebar', 'main', 'right');
+  return true;
+});
+
+const callToggle = (field, fn) => guard(async () => {
+  if (!state.call) return false;
+  const next = !state.call[field];
+  await fn(next);
+  state.call[field] = next;
+  notify('me', 'main');
+  return true;
+});
+export const toggleMuted = callToggle('muted', (v) => api.setMuted(v));
+export const toggleDeafened = callToggle('deafened', (v) => api.setDeafened(v));
+export const toggleCamera = callToggle('camera', (v) => api.setCamera(v));
+
+export const sendCallMessage = guard(async (text) => {
+  await api.sendCallMessage(text);
+  await loadCallState();
+  return true;
+});
+
+export function toggleCallChat() {
+  state.ui.callChatOpen = !state.ui.callChatOpen;
+  notify('main');
+}
+
+export function toggleCallDetails() {
+  state.ui.callDetailsOpen = !state.ui.callDetailsOpen;
+  notify('right', 'main');
+}
+
+// ---- recovery guardians and devices (settings) ----
+
+export const listGuardians = guard(() => api.listGuardians());
+export const signGuardians = guard(async (guardians, threshold) => {
+  await api.signGuardians(guardians, threshold);
+  toast('Guardian list signed and shared with your devices', 'info');
+  return true;
+});
+export const listDevices = guard(() => api.listDevices());
+export const revokeDevice = guard((deviceId) => api.revokeDevice(deviceId));
+export const linkDeviceCode = guard(() => api.linkDeviceCode());
+
+// ---- safety numbers, pins, read markers ----
+
+export const markSafetyVerified = guard(async (user) => {
+  await api.markSafetyVerified(user);
+  if (state.peer === user) await loadPeerProfile(user);
+  toast('Safety number marked as compared', 'info');
+  return true;
+});
+
+export const pinnedMessages = guard(() => api.pinnedMessages(state.community?.id, state.channelId));
+
+export const pinConversation = guard(async (key, pinned) => {
+  await api.pinConversation(key, pinned);
+  await loadConversations();
+  return true;
+});
+
+export const markRead = guard(async (key) => {
+  if (has('pins')) await api.markRead(key);
+  state.unread.delete(key);
+  notify('sidebar', 'rail');
+  return true;
+});
+
 // ---- profile and settings ----
 
 export const userProfile = guard((user) => api.userProfile(user));
@@ -339,7 +676,7 @@ export const safetyNumber = guard((user) => api.safetyNumber(user));
 export const setDisplayName = guard(async (name) => {
   await api.setDisplayName(name);
   state.me = await api.me();
-  notify('sidebar');
+  notify('sidebar', 'me');
   toast('Display name saved', 'info');
   return true;
 });
@@ -390,6 +727,22 @@ export const handleEngineEvent = guard(async (ev) => {
       state.unread.add(`dm:${ev.peer}`);
       return notify('sidebar', 'rail');
     }
+    case 'group': {
+      await loadConversations();
+      if (state.route.kind === 'home' && state.group?.id === ev.group_id) {
+        await loadDm();
+        markLatestRead(`group:${ev.group_id}`, state.dmMessages);
+        return notify('sidebar', 'rail');
+      }
+      state.unread.add(`group:${ev.group_id}`);
+      return notify('sidebar', 'rail');
+    }
+    case 'contacts':
+      return loadContacts();
+    case 'presence':
+      await loadConversations();
+      if (state.route.kind === 'server' && state.community) await loadCommunity(state.community.id);
+      return notify('main');
     default:
       return undefined;
   }
@@ -422,6 +775,8 @@ function markLatestRead(key, items) {
   state.unread.delete(key);
 }
 
+export const convKey = (conv) => (conv.kind === 'group' ? `group:${conv.id}` : `dm:${conv.peer}`);
+
 // Checks every channel and DM against its last-seen marker. A marker that does not exist yet is set to the
 // current newest message, so an existing install does not start with everything unread.
 export async function refreshUnread() {
@@ -451,10 +806,10 @@ export async function refreshUnread() {
   }
   const openPeer = state.route.kind === 'home' ? state.peer : null;
   for (const conv of state.conversations) {
-    const key = `dm:${conv.peer}`;
-    if (conv.peer === openPeer) continue;
+    const key = convKey(conv);
+    if ((conv.kind === 'group' ? conv.id : conv.peer) === openPeer) continue;
     const seen = seenMs(key);
-    if (seen === null) markSeen(key, conv.peer, Number(conv.last_ms));
+    if (seen === null) markSeen(key, conv.peer ?? conv.id, Number(conv.last_ms));
     else if (Number(conv.last_ms) > seen) state.unread.add(key);
   }
   notify('rail', 'sidebar');
@@ -481,3 +836,12 @@ export function setUpdate(info) {
   state.updateDismissed = false;
   notify('update');
 }
+
+// Private note or nickname on a contact (notes feature). kind is 'note' or 'nickname'.
+export const setNote = guard(async (peer, kind, text) => {
+  if (!has('notes')) return false;
+  await api.setNote(peer, kind, text);
+  await loadConversations();
+  return true;
+});
+

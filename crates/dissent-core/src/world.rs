@@ -10,18 +10,20 @@ const REACTION_NAMES: usize = 3;
 use crate::identity_watch::IdentityChange;
 use crate::directory::{AddressBook, Directory, StoredAddr};
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, read_records, write_bin, Paths};
+use crate::store::{
+    content_vault, migrate_plain_log, read_bin, read_records, read_sealed_records, write_bin, Paths,
+};
 use crate::views::{
     ChannelInfo, CommunityRef, CommunitySummary, CommunityView, HandleView, MemberInfo,
-    MessageItem, ReactionView, ReplyPreview, UserView,
+    MessageItem, ReplyPreview, UserView,
 };
 use crate::wire::SignedAddr;
 use dissent_discovery::ContactCard;
 use dissent_events::{ChannelId, EventId, Hlc, MessageView, SignedDm, SignedEvent};
-use dissent_identity::{CommunityId, DeviceId, Genesis, Identity, RootId};
+use dissent_identity::{CommunityId, DeviceId, Genesis, Identity, RootId, Vault};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::str::FromStr;
 use tracing::warn;
@@ -44,7 +46,7 @@ pub(crate) struct World {
     /// Changes of identity seen for the people we talk to.
     pub identity_changes: Vec<IdentityChange>,
     /// Community secrets, from creating a community or from an invite.
-    pub access: BTreeMap<CommunityId, [u8; 32]>,
+    pub access: BTreeMap<CommunityId, crate::access::Keys>,
     /// Outgoing direct messages not yet acknowledged.
     pub outbox: Vec<SignedDm>,
     /// Contact requests and accepts, the DM privacy policy.
@@ -53,8 +55,12 @@ pub(crate) struct World {
     pub conv_book: crate::groups::ConvBook,
     /// Stored text messages, by conversation.
     pub conv_msgs: BTreeMap<crate::groups::ConvId, Vec<crate::groups::ConvMsg>>,
+    /// Attachment downloads and mirror settings.
+    pub attach: crate::attachments::AttachBook,
     /// Inbox service state: envelopes and key packages held for our root.
     pub inbox: crate::inbox::InboxBook,
+    /// When each device last sent us a request. Presence is judged from this, with no pings.
+    pub last_seen: BTreeMap<DeviceId, u64>,
     pub directory: Directory,
     pub addresses: AddressBook,
     /// Our dialable address. Set once the endpoint is up.
@@ -67,7 +73,7 @@ pub(crate) struct World {
 
 impl World {
     /// Reads everything under `paths`. Communities that fail to load are skipped with a warning.
-    pub fn load(paths: Paths, identity: &Identity) -> Result<World> {
+    pub fn load(paths: Paths, identity: &Identity, vault: &Vault) -> Result<World> {
         let profile: Profile = read_bin(&paths.profile())?.unwrap_or_default();
         let contacts: Vec<ContactCard> = read_bin(&paths.contacts())?.unwrap_or_default();
         let addrs: Vec<StoredAddr> = read_bin(&paths.addresses())?.unwrap_or_default();
@@ -78,7 +84,7 @@ impl World {
         for card in &contacts {
             directory.learn(&card.cert);
         }
-        let communities = load_communities(&paths, &mut directory);
+        let communities = load_communities(&paths, &mut directory, vault);
         let dms = load_dms(&paths, &mut directory);
         let outbox: Vec<SignedDm> = read_bin::<Vec<SignedDm>>(&paths.outbox())?
             .unwrap_or_default()
@@ -92,6 +98,7 @@ impl World {
         let conv_book = crate::groups::ConvBook::load(&paths)?;
         let conv_msgs = crate::groups::load_messages(&paths, &conv_book);
         let inbox = crate::inbox::InboxBook::load(&paths)?;
+        let attach = crate::attachments::AttachBook::load(&paths)?;
         let access = crate::access::load(&paths, communities.keys().copied())?;
         let identity_changes: Vec<IdentityChange> =
             crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
@@ -110,6 +117,8 @@ impl World {
             conv_book,
             conv_msgs,
             inbox,
+            attach,
+            last_seen: BTreeMap::new(),
             directory,
             addresses: AddressBook::from_list(addrs),
             my_addr: None,
@@ -253,6 +262,7 @@ impl World {
             verified_ms: fields.verified_ms,
             note: fields.note,
             nickname: fields.nickname,
+            ignored: fields.ignored,
             handles: shared
                 .iter()
                 .map(|c| HandleView {
@@ -286,6 +296,7 @@ impl World {
         };
         let start = msgs.len().saturating_sub(limit);
         let by_id: BTreeMap<EventId, &MessageView> = msgs.iter().map(|m| (m.id, m)).collect();
+        let reaction_ops = reaction_index(c);
         msgs[start..]
             .iter()
             .map(|m| {
@@ -301,7 +312,9 @@ impl World {
                     id: m.id.to_string(),
                     author: m.author.to_string(),
                     author_name: self.display_name(&m.author),
-                    text,
+                    attachments: self.attachment_views(&text),
+                    embeds: crate::attachments::embeds_of(&text),
+                    text: crate::attachments::text_of(&text),
                     ms: m.hlc.wall_ms,
                     edited: m.edited,
                     deleted: m.deleted,
@@ -309,7 +322,7 @@ impl World {
                     reply_to: m
                         .reply_to
                         .and_then(|target| self.reply_preview(c, &by_id, target)),
-                    reactions: self.reaction_views(m),
+                    reactions: self.reaction_views(&reaction_ops.get(&m.id).cloned().unwrap_or_default()),
                 }
             })
             .collect()
@@ -344,25 +357,6 @@ impl World {
         })
     }
 
-    /// The reactions on a message, in the order each emoji first got one.
-    fn reaction_views(&self, m: &MessageView) -> Vec<ReactionView> {
-        m.reaction_order
-            .iter()
-            .filter_map(|emoji| {
-                let reactors = m.reactions.get(emoji)?;
-                Some(ReactionView {
-                    emoji: emoji.clone(),
-                    count: reactors.len(),
-                    me: reactors.contains(&self.me),
-                    names: reactors
-                        .iter()
-                        .take(REACTION_NAMES)
-                        .map(|root| self.display_name(root))
-                        .collect(),
-                })
-            })
-            .collect()
-    }
 
     /// Devices of the current members of `c`, excluding our own root and device.
     pub fn member_devices(&self, c: &Community) -> Vec<DeviceId> {
@@ -376,7 +370,11 @@ impl World {
     }
 }
 
-fn load_communities(paths: &Paths, directory: &mut Directory) -> BTreeMap<CommunityId, Community> {
+fn load_communities(
+    paths: &Paths,
+    directory: &mut Directory,
+    vault: &Vault,
+) -> BTreeMap<CommunityId, Community> {
     let mut out = BTreeMap::new();
     let Ok(entries) = fs::read_dir(paths.communities_dir()) else {
         return out;
@@ -391,7 +389,7 @@ fn load_communities(paths: &Paths, directory: &mut Directory) -> BTreeMap<Commun
             warn!(dir = %name, "skipping community directory with an invalid name");
             continue;
         };
-        match load_community(paths, &id, directory) {
+        match load_community(paths, &id, directory, vault) {
             Ok(c) => {
                 out.insert(id, c);
             }
@@ -405,6 +403,7 @@ fn load_community(
     paths: &Paths,
     id: &CommunityId,
     directory: &mut Directory,
+    vault: &Vault,
 ) -> Result<Community> {
     let genesis: Genesis = read_bin(&paths.genesis(id))?
         .ok_or_else(|| CoreError::NotFound(format!("genesis for community {id}")))?;
@@ -420,7 +419,7 @@ fn load_community(
         directory.learn(&se.cert);
     }
     let mut community = Community::load(genesis, valid);
-    community.content = load_content(paths, id);
+    community.content = load_content(paths, id, vault);
     Ok(community)
 }
 
@@ -458,8 +457,22 @@ fn load_dms(paths: &Paths, directory: &mut Directory) -> BTreeMap<RootId, Vec<Si
 }
 
 /// Decrypted content records. Each key keeps the record with the newest hlc.
-fn load_content(paths: &Paths, id: &CommunityId) -> BTreeMap<EventId, (Hlc, String)> {
-    let records: Vec<ContentRecord> = read_records(&paths.content_log(id)).unwrap_or_default();
+fn load_content(paths: &Paths, id: &CommunityId, vault: &Vault) -> BTreeMap<EventId, (Hlc, String)> {
+    let key = content_vault(vault, id);
+    if let Err(e) = migrate_plain_log::<ContentRecord>(
+        &paths.legacy_content_log(id),
+        &paths.content_log(id),
+        &key,
+    ) {
+        warn!(community = %id, error = %e, "could not migrate the plaintext content log");
+    }
+    let records: Vec<ContentRecord> = match read_sealed_records(&paths.content_log(id), &key) {
+        Ok(records) => records,
+        Err(e) => {
+            warn!(community = %id, error = %e, "content log could not be read");
+            Vec::new()
+        }
+    };
     let mut out: BTreeMap<EventId, (Hlc, String)> = BTreeMap::new();
     for rec in records {
         let newer = out.get(&rec.key).is_none_or(|(hlc, _)| rec.hlc > *hlc);
@@ -476,4 +489,88 @@ pub(crate) struct ContentRecord {
     pub key: EventId,
     pub hlc: Hlc,
     pub text: String,
+}
+
+/// A reaction event, read by members: its time, author, whether it adds the reaction, and the emoji.
+pub(crate) type ReactionOp = (Hlc, RootId, bool, String);
+
+/// Every reaction event in a community that this device can read, by the message it targets.
+/// Non-members have no emoji for these, so they are left out.
+pub(crate) fn reaction_index(c: &Community) -> BTreeMap<EventId, Vec<ReactionOp>> {
+    let mut out: BTreeMap<EventId, Vec<ReactionOp>> = BTreeMap::new();
+    for se in c.sealed_in_order() {
+        let dissent_events::Payload::Sealed { kind, .. } = &se.event.body.payload else {
+            continue;
+        };
+        let (target, react) = match kind {
+            dissent_events::SealedKind::React { target } => (*target, true),
+            dissent_events::SealedKind::Unreact { target } => (*target, false),
+            _ => continue,
+        };
+        let Some((_, emoji)) = c.content.get(&se.event.id) else {
+            continue;
+        };
+        out.entry(target)
+            .or_default()
+            .push((se.event.body.hlc, se.event.body.author, react, emoji.clone()));
+    }
+    out
+}
+
+/// The reactions on one message: the latest choice of each person for each emoji, counted, in the
+/// order each emoji first gained a reaction.
+pub(crate) fn reaction_summary(me: &RootId, ops: &[ReactionOp]) -> Vec<crate::views::ReactionView> {
+    let mut latest: BTreeMap<(String, RootId), (Hlc, bool)> = BTreeMap::new();
+    let mut first: BTreeMap<String, Hlc> = BTreeMap::new();
+    for (hlc, actor, react, emoji) in ops {
+        let entry = latest.entry((emoji.clone(), *actor)).or_insert((*hlc, *react));
+        if *hlc >= entry.0 {
+            *entry = (*hlc, *react);
+        }
+        if *react {
+            let f = first.entry(emoji.clone()).or_insert(*hlc);
+            if *hlc < *f {
+                *f = *hlc;
+            }
+        }
+    }
+    let mut by_emoji: BTreeMap<String, BTreeSet<RootId>> = BTreeMap::new();
+    for ((emoji, actor), (_, react)) in latest {
+        if react {
+            by_emoji.entry(emoji).or_default().insert(actor);
+        }
+    }
+    let mut order: Vec<String> = by_emoji.keys().cloned().collect();
+    order.sort_by_key(|e| first.get(e).copied());
+    order
+        .into_iter()
+        .filter_map(|emoji| {
+            let reactors = by_emoji.get(&emoji)?;
+            Some(crate::views::ReactionView {
+                count: reactors.len(),
+                me: reactors.contains(me),
+                emoji,
+                names: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+impl World {
+    /// The reactions on a message, with the names of up to `REACTION_NAMES` reactors.
+    pub(crate) fn reaction_views(&self, ops: &[ReactionOp]) -> Vec<crate::views::ReactionView> {
+        let mut views = reaction_summary(&self.me, ops);
+        for view in &mut views {
+            let reactors: Vec<RootId> = ops
+                .iter()
+                .filter(|(_, _, react, e)| *react && *e == view.emoji)
+                .map(|(_, a, _, _)| *a)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .take(REACTION_NAMES)
+                .collect();
+            view.names = reactors.iter().map(|r| self.display_name(r)).collect();
+        }
+        views
+    }
 }

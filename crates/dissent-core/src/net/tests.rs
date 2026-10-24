@@ -24,7 +24,7 @@ impl Node {
             bind_port: port,
             ..NodeConfig::default()
         };
-        let (engine, events) = Engine::start(identity.clone(), dir.clone(), net)
+        let (engine, events) = Engine::start(identity.clone(), dir.clone(), net, crate::test_support::vault_for(&dir))
             .await
             .expect("engine starts");
         Node {

@@ -46,7 +46,7 @@ impl Engine {
     fn is_current_member_device(&self, device: DeviceId, community: CommunityId) -> bool {
         let rules = self.commit_rules(community);
         let root = self.read().directory.root_of(&device);
-        root.is_some_and(|root| rules.is_active(&root))
+        root.is_some_and(|root| rules.is_person(&root))
     }
 
     /// Whether `device` already has a leaf in the group.
@@ -127,6 +127,9 @@ impl Engine {
 
     /// Joins the group of every community where this device is a member but has no group yet.
     pub(crate) async fn mls_join_missing(&self, community: CommunityId) {
+        if self.is_storage_here(community) {
+            return;
+        }
         if self.mls_epoch(community).is_some() {
             return;
         }
@@ -146,6 +149,9 @@ impl Engine {
     /// Removes the devices of banned or departed members from the group, once this device's turn
     /// comes. A device that is already gone when the turn comes is left alone.
     pub(crate) async fn mls_reconcile(&self, community: CommunityId) {
+        if self.is_storage_here(community) {
+            return;
+        }
         if self.departed_devices(community).is_empty() {
             return;
         }

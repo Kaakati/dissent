@@ -50,7 +50,9 @@ fn decode(bytes: &[u8]) -> Result<StoredIdentity> {
             })
         }
         Some(2 | 3) => postcard::from_bytes(bytes).map_err(de),
-        other => Err(IdentityError::Serde(format!("unsupported keystore version {other:?}"))),
+        other => Err(IdentityError::Serde(format!(
+            "unsupported keystore version {other:?}"
+        ))),
     }
 }
 
@@ -65,7 +67,12 @@ fn identity_from(stored: StoredIdentity) -> Result<Identity> {
     if root.as_ref().is_some_and(|r| r.id() != stored.cert.root) {
         return Err(IdentityError::BadCert);
     }
-    Ok(Identity { root, device, cert: stored.cert, device_name: stored.device_name })
+    Ok(Identity {
+        root,
+        device,
+        cert: stored.cert,
+        device_name: stored.device_name,
+    })
 }
 
 /// Seal the identity as a version 3 keystore file.
@@ -77,7 +84,8 @@ fn seal_identity(id: &Identity, vault: &Vault) -> Result<Vec<u8>> {
         cert: id.cert.clone(),
         device_name: id.device_name.clone(),
     };
-    let mut plain = postcard::to_allocvec(&stored).map_err(|e| IdentityError::Serde(e.to_string()))?;
+    let mut plain =
+        postcard::to_allocvec(&stored).map_err(|e| IdentityError::Serde(e.to_string()))?;
     let mut out = vec![VERSION];
     out.extend(vault.seal(AAD, &plain));
     plain.zeroize();
@@ -139,7 +147,9 @@ pub fn load(path: &Path, vault: &Vault) -> Result<Identity> {
             upgrade_plaintext(path, &id, bytes.len(), vault)?;
             Ok(id)
         }
-        other => Err(IdentityError::Serde(format!("unsupported keystore version {other:?}"))),
+        other => Err(IdentityError::Serde(format!(
+            "unsupported keystore version {other:?}"
+        ))),
     }
 }
 
@@ -192,7 +202,10 @@ mod tests {
             device_name: String::new(),
         };
         fs::write(&path, postcard::to_allocvec(&stored).unwrap()).unwrap();
-        assert!(matches!(load(&path, &Vault::ephemeral_for_tests()), Err(IdentityError::BadCert)));
+        assert!(matches!(
+            load(&path, &Vault::ephemeral_for_tests()),
+            Err(IdentityError::BadCert)
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 }

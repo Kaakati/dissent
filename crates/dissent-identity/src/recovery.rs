@@ -41,7 +41,9 @@ pub struct GuardianSet {
 
 fn check_policy(owner: &RootId, guardians: &[RootId], threshold: u8) -> Result<()> {
     if guardians.is_empty() || guardians.len() > MAX_GUARDIANS {
-        return Err(recovery_err(format!("guardian count must be 1..={MAX_GUARDIANS}")));
+        return Err(recovery_err(format!(
+            "guardian count must be 1..={MAX_GUARDIANS}"
+        )));
     }
     if guardians.windows(2).any(|w| w[0] >= w[1]) {
         return Err(recovery_err("guardians must be sorted and unique"));
@@ -57,12 +59,23 @@ fn check_policy(owner: &RootId, guardians: &[RootId], threshold: u8) -> Result<(
 
 impl GuardianSet {
     /// Sorts and dedups `guardians`, validates the policy, and signs it with `root`.
-    pub fn create(root: &RootKey, mut guardians: Vec<RootId>, threshold: u8, now_ms: u64) -> Result<Self> {
+    pub fn create(
+        root: &RootKey,
+        mut guardians: Vec<RootId>,
+        threshold: u8,
+        now_ms: u64,
+    ) -> Result<Self> {
         guardians.sort();
         guardians.dedup();
         let owner = root.id();
         check_policy(&owner, &guardians, threshold)?;
-        let mut set = Self { owner, guardians, threshold, created_ms: now_ms, sig: Signature([0; 64]) };
+        let mut set = Self {
+            owner,
+            guardians,
+            threshold,
+            created_ms: now_ms,
+            sig: Signature([0; 64]),
+        };
         set.sig = root.0.sign(&set.signing_bytes());
         Ok(set)
     }
@@ -106,7 +119,11 @@ pub struct RotationRequest {
 impl RotationRequest {
     /// Request made from a new device that holds `new_root`.
     pub fn new_for(new_root: &RootKey, old_root: RootId, now_ms: u64) -> Self {
-        Self { old_root, new_root: new_root.id(), requested_ms: now_ms }
+        Self {
+            old_root,
+            new_root: new_root.id(),
+            requested_ms: now_ms,
+        }
     }
 
     fn bytes(&self) -> Vec<u8> {
@@ -139,7 +156,11 @@ pub struct GuardianApproval {
 impl GuardianApproval {
     pub fn sign(guardian: &RootKey, request: RotationRequest) -> Self {
         let sig = guardian.0.sign(&over_request(APPROVAL_DOMAIN, &request));
-        Self { request, guardian: guardian.id(), sig }
+        Self {
+            request,
+            guardian: guardian.id(),
+            sig,
+        }
     }
 
     /// Checks that this approval is for `request` and signed by `self.guardian`.
@@ -147,7 +168,8 @@ impl GuardianApproval {
         if &self.request != request {
             return Err(recovery_err("approval is for a different request"));
         }
-        self.guardian.verify(&over_request(APPROVAL_DOMAIN, request), &self.sig)
+        self.guardian
+            .verify(&over_request(APPROVAL_DOMAIN, request), &self.sig)
     }
 
     /// `dissent://approve/...`
@@ -166,7 +188,10 @@ pub enum RotationProof {
     /// Signed directly by the old root key.
     Owner { sig: Signature },
     /// At least `set.threshold` distinct guardians approved.
-    Guardians { set: GuardianSet, approvals: Vec<GuardianApproval> },
+    Guardians {
+        set: GuardianSet,
+        approvals: Vec<GuardianApproval>,
+    },
 }
 
 /// A complete, self-verifying rotation from `request.old_root` to `request.new_root`.
@@ -184,7 +209,11 @@ impl KeyRotation {
         let request = RotationRequest::new_for(new, old.id(), now_ms);
         let sig = old.0.sign(&over_request(OWNER_DOMAIN, &request));
         let new_root_sig = new.0.sign(&over_request(NEW_ROOT_DOMAIN, &request));
-        Self { request, proof: RotationProof::Owner { sig }, new_root_sig }
+        Self {
+            request,
+            proof: RotationProof::Owner { sig },
+            new_root_sig,
+        }
     }
 
     /// Guardian-approved rotation, assembled on the new device. `new` must be
@@ -199,7 +228,11 @@ impl KeyRotation {
             return Err(recovery_err("new root key does not match the request"));
         }
         let new_root_sig = new.0.sign(&over_request(NEW_ROOT_DOMAIN, &request));
-        Ok(Self { request, proof: RotationProof::Guardians { set, approvals }, new_root_sig })
+        Ok(Self {
+            request,
+            proof: RotationProof::Guardians { set, approvals },
+            new_root_sig,
+        })
     }
 
     pub fn verify(&self) -> Result<()> {
@@ -207,15 +240,22 @@ impl KeyRotation {
         if req.old_root == req.new_root {
             return Err(recovery_err("new root equals old root"));
         }
-        req.new_root.verify(&over_request(NEW_ROOT_DOMAIN, req), &self.new_root_sig)?;
+        req.new_root
+            .verify(&over_request(NEW_ROOT_DOMAIN, req), &self.new_root_sig)?;
         match &self.proof {
-            RotationProof::Owner { sig } => req.old_root.verify(&over_request(OWNER_DOMAIN, req), sig),
+            RotationProof::Owner { sig } => {
+                req.old_root.verify(&over_request(OWNER_DOMAIN, req), sig)
+            }
             RotationProof::Guardians { set, approvals } => verify_guardians(set, approvals, req),
         }
     }
 }
 
-fn verify_guardians(set: &GuardianSet, approvals: &[GuardianApproval], req: &RotationRequest) -> Result<()> {
+fn verify_guardians(
+    set: &GuardianSet,
+    approvals: &[GuardianApproval],
+    req: &RotationRequest,
+) -> Result<()> {
     set.verify()?;
     if set.owner != req.old_root {
         return Err(recovery_err("guardian set belongs to a different root"));

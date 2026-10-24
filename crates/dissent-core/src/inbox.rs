@@ -204,7 +204,7 @@ impl Engine {
         let bytes = self.request_bytes(&Request::DepositKeyPackages(Box::new(body)))?;
         let node = self.node();
         for inbox in inboxes {
-            if let Ok(reply) = node.request(inbox, bytes.clone()).await {
+            if let Ok(reply) = crate::groups::direct(node.request(inbox, bytes.clone())).await {
                 if !matches!(decode::<Response>(&reply), Ok(Response::Ack)) {
                     debug!(inbox = %inbox, "inbox refused key packages");
                 }
@@ -309,7 +309,7 @@ impl Engine {
         };
         let node = self.node();
         for inbox in inboxes {
-            if let Ok(reply) = node.request(inbox, req.clone()).await {
+            if let Ok(reply) = crate::groups::direct(node.request(inbox, req.clone())).await {
                 if matches!(decode::<Response>(&reply), Ok(Response::Ack)) {
                     return true;
                 }

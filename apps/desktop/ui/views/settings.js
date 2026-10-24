@@ -8,19 +8,32 @@ import { confirmDialog } from './dialogs.js';
 import { cardContent } from './profile.js';
 import { getAppearance, setAppearance } from '../appearance.js';
 import { openUpdateDialog } from './updater.js';
+import { has } from '../features.js';
+import { recoveryNodes, devicesNodes } from './guardians.js';
 
+// One group, in the board's order. Recovery and Devices appear only when the engine reports them.
 const NAV = [
-  { group: 'User settings', items: [['account', 'My Account', 'user'], ['profile', 'Profile', 'shield-check']] },
-  { group: 'App settings', items: [['network', 'Network', 'wifi'], ['appearance', 'Appearance', 'palette']] },
-  { group: 'About', items: [['about', 'About', 'info']] },
+  { key: 'account', label: 'My identity', icon: 'user' },
+  { key: 'recovery', label: 'Recovery', icon: 'key-round', feature: 'guardians' },
+  { key: 'devices', label: 'Devices', icon: 'server', feature: 'devices' },
+  { key: 'profile', label: 'Contacts & privacy', icon: 'shield-check' },
+  { key: 'appearance', label: 'Appearance', icon: 'palette' },
+  { key: 'network', label: 'Network', icon: 'wifi' },
+  { key: 'updates', label: 'Updates', icon: 'download' },
 ];
-const TITLES = { account: 'My Account', profile: 'Profile', network: 'Network', appearance: 'Appearance', about: 'About' };
+const TITLES = Object.fromEntries(NAV.map((n) => [n.key, n.label]));
 const NET_REFRESH_MS = 15000;
 
 let page = null;
 let opener = null;
 let section = 'account';
 let netTimer = null;
+let navQuery = '';
+
+function navItems() {
+  const q = navQuery.trim().toLowerCase();
+  return NAV.filter((n) => (!n.feature || has(n.feature)) && n.label.toLowerCase().includes(q));
+}
 
 export function openSettingsPage(which = 'account') {
   if (page) {
@@ -28,7 +41,21 @@ export function openSettingsPage(which = 'account') {
     return;
   }
   opener = document.activeElement;
-  const nav = el('nav', { class: 'settings-nav', 'aria-label': 'Settings sections' });
+  const search = el('input', {
+    class: 'settings-search',
+    type: 'search',
+    placeholder: 'Search',
+    'aria-label': 'Search settings',
+    value: navQuery,
+    oninput: (e) => {
+      navQuery = e.target.value;
+      renderNav();
+    },
+  });
+  const nav = el('nav', { class: 'settings-nav', 'aria-label': 'Settings sections' },
+    search,
+    el('h2', { class: 'settings-nav-title', text: 'You' }),
+    el('div', { class: 'settings-nav-list' }));
   const content = el('div', { class: 'settings-content', id: 'settings-content' });
   const close = el('button', { class: 'settings-close icon-btn', 'aria-label': 'Close settings', title: 'Close (Esc)', icon: 'x', onclick: closeSettingsPage });
   page = el('div', { class: 'settings-page', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Settings' },
@@ -64,25 +91,38 @@ subscribe('sidebar', () => {
   if (page && section === 'profile') show('profile');
 });
 
+// The nav filters by the search text. Only the items list is rebuilt, so the search field keeps focus.
+function renderNav() {
+  const items = navItems();
+  page.querySelector('.settings-nav-list').replaceChildren(
+    ...items.map((n) => el('button', {
+      class: 'settings-nav-item',
+      icon: n.icon,
+      text: n.label,
+      'aria-current': n.key === section ? 'true' : null,
+      onclick: () => show(n.key),
+    })),
+    ...(items.length ? [] : [el('p', { class: 'muted settings-nav-empty', text: 'No matching settings' })]));
+}
+
 function show(which) {
   section = which;
   clearInterval(netTimer);
   netTimer = null;
-  const nav = page.querySelector('.settings-nav');
-  nav.replaceChildren(...NAV.map((g) => el('div', { class: 'settings-nav-group' },
-    el('h2', { class: 'settings-nav-title', text: g.group }),
-    g.items.map(([key, label, iconName]) => el('button', {
-      class: 'settings-nav-item',
-      icon: iconName,
-      text: label,
-      'aria-current': key === section ? 'true' : null,
-      onclick: () => show(key),
-    })))));
-  const body = { account, profile, network, appearance, about }[section]();
+  renderNav();
+  const asyncSection = { recovery: () => recoveryNodes({ onCancel: closeSettingsPage }), devices: devicesNodes }[section];
+  const host = el('div', { class: 'settings-async' }, asyncSection ? el('p', { class: 'muted', text: 'Loading…' }) : null);
+  const body = asyncSection ? host : { account, profile, network, appearance, updates }[section]();
   page.querySelector('.settings-content').replaceChildren(
     el('header', { class: 'settings-head' }, el('h1', { text: TITLES[section] })),
-    el('div', { class: 'settings-body' }, body),
+    el('div', { class: asyncSection ? 'settings-body settings-body-async' : 'settings-body' }, body),
   );
+  if (asyncSection) {
+    const current = section;
+    asyncSection().then((nodes) => {
+      if (section === current) host.replaceChildren(...nodes);
+    });
+  }
 }
 
 // ---- My Account ----
@@ -319,9 +359,9 @@ function appearance() {
       radio('scale', 110, '110%', current.scale === 110, (v) => setAppearance({ scale: v }))));
 }
 
-// ---- About ----
+// ---- Updates (version, the update check, and licences) ----
 
-function about() {
+function updates() {
   const version = el('p', { text: 'Version …' });
   api.appVersion().then((v) => {
     version.textContent = `Dissent ${v}`;

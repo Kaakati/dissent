@@ -12,12 +12,15 @@ const ICONS = [
   'link', 'panel-right', 'search', 'settings', 'shield-minus', 'shield-plus', 'trash-2', 'undo-2', 'user-plus',
   'users', 'x', 'shield-check', 'user', 'palette', 'wifi', 'external-link', 'download', 'reply', 'smile-plus',
   'paperclip', 'lock', 'file', 'file-text', 'file-archive', 'file-audio', 'file-video', 'file-code', 'image', 'folder-open', 'rotate-ccw',
+  'arrow-left', 'arrow-right', 'minus', 'square', 'pin', 'folder', 'file-plus', 'smile', 'phone', 'video', 'users-round', 'mic', 'mic-off',
+  'headphones', 'chevron-right', 'shield', 'arrow-up-down', 'circle-check', 'ellipsis', 'ellipsis-vertical', 'star', 'message-circle-plus',
+  'volume-2', 'phone-off', 'server', 'pause', 'play', 'file-down',
 ];
 
 // Original marks drawn here, not from Lucide. Filled with currentColor.
 const CUSTOM = {
-  // Dissent monogram: a stylised D with a notch through the bowl.
-  'dissent-mark': '<path fill="currentColor" fill-fill-rule="evenodd" d="M4 3h7.5a9 9 0 0 1 0 18H4z M8.5 7v10h3a5 5 0 0 0 0-10z" />',
+  // Dissent monogram: the app icon's D speech bubble, in its own coordinate space.
+  'dissent-mark': { viewBox: '192.5 189 870 870', body: '<path fill="currentColor" d="M235 230Q235 202 268 202H680C850 202 980 330 1012 490L780 588V535C778 450 710 374 632 374H450V750L238 850Q235 851 235 845Z M1017 547L780 638V665C778 760 710 828 630 828H410C385 828 362 838 350 858L244 1028Q238 1046 257 1046L340 1003Q345 1000 352 1000H705C900 1000 1020 860 1020 680Z" />' },
 };
 
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
@@ -33,9 +36,9 @@ if (!process.argv[2] || !existsSync(join(pkgDir, 'icons'))) {
 
 const STROKE = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
 
-const customSymbols = Object.entries(CUSTOM).map(([name, body]) =>
-  `  <symbol id="i-${name}" viewBox="0 0 24 24" fill="currentColor">
-    ${body.replace('fill-fill-rule', 'fill-rule')}
+const customSymbols = Object.entries(CUSTOM).map(([name, def]) =>
+  `  <symbol id="i-${name}" viewBox="${def.viewBox}" fill="currentColor">
+    ${def.body}
   </symbol>`);
 
 const symbols = ICONS.map((name) => {

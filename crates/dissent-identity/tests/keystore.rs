@@ -130,7 +130,10 @@ fn v2_plaintext_upgrades_to_sealed_and_removes_seeds() {
         device_name: "Desk".into(),
     };
     let plain = postcard::to_allocvec(&v2).unwrap();
-    assert!(contains(&plain, &root_seed), "fixture must contain the seed");
+    assert!(
+        contains(&plain, &root_seed),
+        "fixture must contain the seed"
+    );
     fs::write(&path, &plain).unwrap();
 
     let loaded = keystore::load(&path, &vault).unwrap();
@@ -139,8 +142,14 @@ fn v2_plaintext_upgrades_to_sealed_and_removes_seeds() {
 
     let raw = fs::read(&path).unwrap();
     assert_eq!(raw[0], 3, "file is rewritten as version 3");
-    assert!(!contains(&raw, &root_seed), "root seed must not appear on disk");
-    assert!(!contains(&raw, &device_seed), "device seed must not appear on disk");
+    assert!(
+        !contains(&raw, &root_seed),
+        "root seed must not appear on disk"
+    );
+    assert!(
+        !contains(&raw, &device_seed),
+        "device seed must not appear on disk"
+    );
     assert!(!path.with_extension("tmp").exists());
 
     let again = keystore::load(&path, &vault).unwrap();

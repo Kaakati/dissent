@@ -13,7 +13,7 @@ use dissent_core::{
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::warn;
 
 use crate::events::forward_events;
@@ -22,7 +22,7 @@ use crate::events::forward_events;
 pub struct AppState {
     pub data_dir: PathBuf,
     /// Encrypts identity.bin at rest. The key comes from the OS credential store.
-    pub vault: Vault,
+    pub vault: std::sync::Arc<Vault>,
     pub identity: Mutex<Identity>,
     pub engine: tokio::sync::RwLock<Option<Engine>>,
 }
@@ -51,11 +51,11 @@ fn identity_view(me: &MeView, has_root: bool) -> IdentityView {
     }
 }
 
-fn err<E: Display>(e: E) -> String {
+pub(crate) fn err<E: Display>(e: E) -> String {
     e.to_string()
 }
 
-fn parse<T: FromStr>(what: &str, s: &str) -> Result<T, String>
+pub(crate) fn parse<T: FromStr>(what: &str, s: &str) -> Result<T, String>
 where
     T::Err: Display,
 {
@@ -80,7 +80,7 @@ pub fn now_ms() -> Result<u64, String> {
 }
 
 /// Clones the running engine out of state so no lock is held across an await.
-async fn engine(state: &AppState) -> Result<Engine, String> {
+pub(crate) async fn engine(state: &AppState) -> Result<Engine, String> {
     state
         .engine
         .read()
@@ -102,12 +102,6 @@ pub async fn identity_status(state: State<'_, AppState>) -> Result<IdentityView,
 
 #[tauri::command]
 pub fn identity_export_phrase(state: State<'_, AppState>) -> Result<String, String> {
-    // Showing the phrase ends first run. The engine may be restarting, so only a ready one is told.
-    if let Ok(guard) = state.engine.try_read() {
-        if let Some(engine) = guard.as_ref() {
-            let _ = engine.mark_phrase_saved();
-        }
-    }
     let id = state.identity.lock().map_err(err)?;
     let root = id.root.as_ref().ok_or("this device holds no root key, so it cannot export a phrase")?;
     Ok(mnemonic::export(root))
@@ -134,6 +128,7 @@ pub async fn identity_import_phrase(
 /// Stops the running engine and starts one on `identity`, with the saved network settings.
 /// The identity's data folder is reused, so an earlier identity's data comes back when it is restored.
 pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identity) -> Result<(), String> {
+    crate::voice::stop(app).await;
     let old = state.engine.write().await.take();
     if let Some(old) = old {
         if let Err(e) = old.shutdown().await {
@@ -143,9 +138,10 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     let profile = crate::storage::profile_dir(&state.data_dir, &identity);
     std::fs::create_dir_all(&profile).map_err(err)?;
     let settings = crate::network::load(&state.data_dir);
-    let (engine, rx) = Engine::start(identity.clone(), profile, crate::node_config(&settings))
+    let (engine, rx) = Engine::start(identity.clone(), profile, crate::node_config(&settings), state.vault.clone())
         .await
         .map_err(err)?;
+    crate::voice::prepare(&engine, &app.state::<crate::voice::Voice>());
     *state.identity.lock().map_err(err)? = identity;
     *state.engine.write().await = Some(engine);
     forward_events(app.clone(), rx);

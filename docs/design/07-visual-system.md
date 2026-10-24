@@ -343,7 +343,7 @@ These surfaces come from the design boards in `scratchpad/newdesign/project` and
 
 `capabilities()` returns either a list of feature names or an object of booleans, for example `["calls", "contacts"]` or `{ "calls": true }`. The UI reads it once at boot (`ui/features.js`). A feature not reported hides its surface entirely, and a missing command or an error means no new feature is supported. Reactions, replies, attachments and presence are detected on message and member fields instead.
 
-Names the UI checks: `groups`, `contacts`, `calls`, `guardians`, `transfers`, `multi_source`, `offline_delivery`, `embeds`, `key_change`, `safety`, `devices`, `pins`, `notes`, `mute`, `onboarding`.
+Names the UI checks: `groups`, `contacts`, `calls`, `guardians`, `transfers`, `multi_source`, `offline_delivery`, `embeds`, `key_change`, `safety`, `devices`, `pins`, `notes`, `mute`, `onboarding`, `topics`, `close_dm`, `ignore`.
 
 ### 6.1 Group conversations (`groups`)
 
@@ -400,7 +400,7 @@ Event: `dissent://call-state` carries the call state or `null`.
 |---|---|---|
 | `list_transfers` | none | An array of `{ id, direction: "download" \| "upload", name, size, state, progress, route, route_kind, route_note?, where: { kind: "server" \| "direct", name }, sources, status_text?, error?, local_path? }`, or `{ transfers, rates }`. `state` is `active`, `paused`, `waiting`, `done` or `failed`. `route_kind` is `direct`, `relay`, `server`, `seeder`, `waiting` or `refused`. `progress` is `0..1`. |
 | `pause_transfer`, `resume_transfer`, `cancel_transfer`, `retry_transfer`, `remove_transfer` | `transferId` | `null`. Remove drops a row from the list only. |
-| `transfer_settings` | none | `{ max_accept_bytes, download_dir }`. |
+| `transfer_settings` | none | `{ max_accept_bytes, download_dir, auto_accept_bytes? }`. `auto_accept_bytes` is `null` for "Always ask". The Auto-accept picker (25, 50, 100 MB, Always ask) appears only when the backend reports it. `max_accept_bytes` stays the 10 GB cap. |
 | `set_transfer_settings` | `settings` | The saved settings. |
 | `pick_download_dir` | none | A path, or `null` on cancel. |
 
@@ -470,3 +470,25 @@ Channel messages may carry `queued: boolean`, true when no other member is onlin
 ### 6.12 First run (`onboarding`)
 
 `me` gains `first_run: boolean`. While it is true the window shows the identity screen with the recovery phrase from `identity_export_phrase()`. Showing the phrase does not clear the flag. `complete_first_run()` does, and the UI calls it only when the user ticks "I wrote these words down somewhere safe" and presses Continue. Returns `null`.
+
+### 6.16 Conversation menu, favorites, close and ignore
+
+The sidebar's conversation menu shows these items, each only when its feature is reported:
+
+| Menu item | Feature | Command | Notes |
+|---|---|---|---|
+| Add to favorites / Remove from favorites | `pins` | `pin_conversation({ key, pinned })` | Shows the star icon. The label says favorites and the command keeps its engine name `pin_conversation`. |
+| Close DM | `close_dm` | `close_conversation({ key })` | Removes a DM from the sidebar. `key` is the conversation key the sidebar lists. |
+| Ignore / Unignore | `ignore` | `ignore_user({ user })`, `unignore_user({ user })` | Ignore hides their messages without telling them, and their messages render collapsed. |
+
+`ignored_users()` returns the base32 root ids of ignored users as an array of strings. The UI loads it at boot and after each change. Without the `ignore` feature nobody is ignored, and the menu item does not render. Ignoring applies only to DMs. Group and channel menus never show it. The item stays hidden until the backend reports `ignore`.
+
+Settings navigation shows Recovery only with `guardians` and Devices only with `devices`. Recovery's Cancel drops unsaved guardian edits back to the last saved list before the page closes. The footer (Cancel, Sign and save) stays at the bottom of the content area.
+
+### 6.3a Incoming calls and the join lobby
+
+The incoming call dialog (IncomingCall board) opens when the backend announces a ringing call on `dissent://call-ringing`. Payload: `{ call_id, scope: "dm" | "group", peer?, group_id?, name, caller: { root_id, display_name }, verified, in_call, total, members_in: [{ root_id, display_name }] }`. Answer with `accept_call({ callId })` and decline with `decline_call({ callId })`, both present in `part6.rs`. Quick replies send a DM with `send_dm` or a group message with `send_group_message`, then decline. "Start with my microphone muted" mutes the call once it connects. The dialog shows the "Safety number verified" chip only when `verified` is true.
+
+The join lobby (JoinCall board) replaces the messages when you open a conversation whose live call you are not in. Conversations carry `live_call: { started_ms, started_by, total, route: { kind: "direct" | "forwarded", forwarder?, backup? }, participants: [{ root_id, display_name, muted, speaking, forwarder? }], not_in: [{ root_id, display_name }], scope? }`. The conversation row reads "Call · N in", or "In a call with you" when `scope` is `dm`. Joining uses `join_group_call({ groupId })` and `join_dm_call({ peer })`.
+
+Not built yet: the ringing event, `live_call` on `list_conversations`, `join_group_call`, `join_dm_call`, and a group call scope on `CallView`. The mock supplies all of them. The video answer and the camera toggle wait for `set_camera`, so the dialog and lobby show no camera control.

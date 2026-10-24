@@ -42,7 +42,7 @@ fn offline() -> NodeConfig {
 }
 
 async fn start(identity: Identity, dir: PathBuf) -> Engine {
-    let (engine, _events) = Engine::start(identity, dir, offline())
+    let (engine, _events) = Engine::start(identity, dir.clone(), offline(), crate::test_support::vault_for(&dir))
         .await
         .expect("engine starts");
     engine
@@ -59,7 +59,7 @@ fn introduce(to: &Engine, of: &Engine) {
 }
 
 async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(100)).await;

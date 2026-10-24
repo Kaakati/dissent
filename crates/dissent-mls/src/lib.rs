@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use dissent_identity::{DeviceCert, DeviceId, DeviceKey};
+use dissent_identity::{DeviceCert, DeviceId, DeviceKey, Vault};
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
@@ -32,6 +32,11 @@ use serde::{Deserialize, Serialize};
 /// key exchange, AES-256-GCM, SHA-384 and Ed25519 signatures. It comes from the IETF draft
 /// `draft-ietf-mls-pq-ciphersuites`, so the wire format may change before the RFC is published.
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519;
+
+/// Label bound to the sealed MLS state. A blob sealed for another file does not open here.
+const SNAPSHOT_AAD: &[u8] = b"dissent/mls-state.bin";
+/// Purpose of the per-file subkey that seals the MLS state.
+const SNAPSHOT_PURPOSE: &[u8] = b"dissent/mls-state/v1";
 
 /// Prefix on every snapshot: a format tag and the ciphersuite it was taken under.
 /// Snapshots without it, or from another suite, cannot be restored.
@@ -68,6 +73,8 @@ pub enum MlsError {
     WrongCiphersuite { expected: u16, found: u16 },
     #[error("snapshot is not from this format or ciphersuite and cannot be restored")]
     IncompatibleSnapshot,
+    #[error("sealed state could not be opened: {0}")]
+    Sealed(String),
     #[error("message rejected: {0}")]
     Rejected(&'static str),
     #[error("encoding: {0}")]
@@ -179,15 +186,31 @@ impl MlsClient {
         })
     }
 
-    /// Rebuilds a client from a [`snapshot`](Self::snapshot). Groups listed in `groups` are
-    /// loaded from the restored storage. A listed group with no stored state is skipped.
-    pub fn restore(
+    /// Rebuilds a client from a sealed snapshot made by [`snapshot_sealed`](Self::snapshot_sealed).
+    /// Groups listed in `groups` are loaded from the restored storage. A listed group with no stored
+    /// state is skipped. A wrong vault is refused with [`MlsError::Sealed`]. A plaintext file is
+    /// refused too, and [`migrate_legacy`](Self::migrate_legacy) converts one.
+    pub fn restore_sealed(
         device: &DeviceKey,
         cert: &DeviceCert,
+        vault: &Vault,
         snapshot: &[u8],
         groups: &[[u8; 32]],
     ) -> Result<Self> {
-        let body = snapshot
+        let plain = vault
+            .subkey(SNAPSHOT_PURPOSE)
+            .open_sealed(SNAPSHOT_AAD, snapshot)
+            .map_err(|e| MlsError::Sealed(e.to_string()))?;
+        Self::restore_body(device, cert, &plain, groups)
+    }
+
+    fn restore_body(
+        device: &DeviceKey,
+        cert: &DeviceCert,
+        plain: &[u8],
+        groups: &[[u8; 32]],
+    ) -> Result<Self> {
+        let body = plain
             .strip_prefix(&SNAPSHOT_HEADER[..])
             .ok_or(MlsError::IncompatibleSnapshot)?;
         let mut client = Self::new(device, cert)?;
@@ -212,8 +235,32 @@ impl MlsClient {
         Ok(client)
     }
 
-    /// Serialised state, for [`restore`](Self::restore). Includes the key package pool.
-    pub fn snapshot(&self) -> Result<Vec<u8>> {
+    /// Serialised state, sealed under `vault` for [`restore_sealed`](Self::restore_sealed). Includes the key
+    /// package pool. The sealing key is a subkey of `vault`, so the file reveals no group or key
+    /// material.
+    pub fn snapshot_sealed(&self, vault: &Vault) -> Result<Vec<u8>> {
+        let plain = self.plain_snapshot()?;
+        Ok(vault.subkey(SNAPSHOT_PURPOSE).seal(SNAPSHOT_AAD, &plain))
+    }
+
+    /// Whether `bytes` is a plaintext snapshot written before sealing was added.
+    pub fn is_legacy_snapshot(bytes: &[u8]) -> bool {
+        bytes.starts_with(&SNAPSHOT_HEADER[..4])
+    }
+
+    /// Seals a plaintext snapshot from before sealing was added, so it can be restored under
+    /// `vault`. Checks that the snapshot decodes under the current ciphersuite. Save the result in
+    /// place of the old file.
+    pub fn migrate_legacy(legacy: &[u8], vault: &Vault) -> Result<Vec<u8>> {
+        let body = legacy
+            .strip_prefix(&SNAPSHOT_HEADER[..])
+            .ok_or(MlsError::IncompatibleSnapshot)?;
+        let _: Snapshot = postcard::from_bytes(body).map_err(encoding)?;
+        Ok(vault.subkey(SNAPSHOT_PURPOSE).seal(SNAPSHOT_AAD, legacy))
+    }
+
+    /// The plaintext snapshot: header, then the postcard body. Sealed by [`snapshot_sealed`](Self::snapshot_sealed).
+    fn plain_snapshot(&self) -> Result<Vec<u8>> {
         let values = self
             .provider
             .storage()
@@ -814,4 +861,59 @@ fn om<E: Display>(err: E) -> MlsError {
 
 fn encoding<E: Display>(err: E) -> MlsError {
     MlsError::Encoding(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dissent_identity::RootKey;
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    #[test]
+    fn legacy_plaintext_snapshot_is_refused_then_migrated() {
+        let group = [9u8; 32];
+        let device = DeviceKey::generate();
+        let root = RootKey::generate();
+        let cert = root.certify(device.id(), 1);
+        let mut client = MlsClient::new(&device, &cert).unwrap();
+        client.create_group(group).unwrap();
+
+        // The plaintext form holds the device and group ids in the clear, as the old files did.
+        let plain = client.plain_snapshot().unwrap();
+        assert!(MlsClient::is_legacy_snapshot(&plain));
+        // The field name of the group's init secret appears as text in the plaintext form.
+        let marker = b"init_secret";
+        assert!(contains(&plain, marker));
+
+        let vault = Vault::ephemeral_for_tests();
+        assert!(matches!(
+            MlsClient::restore_sealed(&device, &cert, &vault, &plain, &[group]),
+            Err(MlsError::Sealed(_))
+        ));
+
+        let sealed = MlsClient::migrate_legacy(&plain, &vault).unwrap();
+        assert!(!MlsClient::is_legacy_snapshot(&sealed));
+        assert!(!contains(&sealed, marker));
+        let restored =
+            MlsClient::restore_sealed(&device, &cert, &vault, &sealed, &[group]).unwrap();
+        assert_eq!(restored.epoch(&group).unwrap(), 0);
+    }
+
+    #[test]
+    fn migrate_legacy_rejects_a_sealed_blob() {
+        let device = DeviceKey::generate();
+        let cert = RootKey::generate().certify(device.id(), 1);
+        let client = MlsClient::new(&device, &cert).unwrap();
+        let vault = Vault::ephemeral_for_tests();
+        let sealed = client.snapshot_sealed(&vault).unwrap();
+        assert!(matches!(
+            MlsClient::migrate_legacy(&sealed, &vault),
+            Err(MlsError::IncompatibleSnapshot)
+        ));
+    }
 }

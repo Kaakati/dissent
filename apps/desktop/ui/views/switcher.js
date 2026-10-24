@@ -85,14 +85,22 @@ function buildBase() {
     unread: [...state.unread].some((k) => k.startsWith(`ch:${c.id}:`)),
     run: () => actions.openServer(c.id),
   }));
-  const dms = state.conversations.map((conv) => ({
-    kind: 'dm',
-    label: conv.display_name,
-    meta: 'Direct message',
-    peer: conv.peer,
-    unread: state.unread.has(`dm:${conv.peer}`),
-    run: () => actions.openDm(conv.peer, conv.display_name),
-  }));
+  const dms = state.conversations.map((conv) => (conv.kind === 'group'
+    ? {
+      kind: 'group',
+      label: conv.name,
+      meta: 'Group',
+      unread: state.unread.has(`group:${conv.id}`),
+      run: () => actions.openGroup(conv),
+    }
+    : {
+      kind: 'dm',
+      label: conv.display_name,
+      meta: 'Direct message',
+      peer: conv.peer,
+      unread: state.unread.has(`dm:${conv.peer}`),
+      run: () => actions.openDm(conv.peer, conv.display_name),
+    }));
   return [...servers, ...dms];
 }
 

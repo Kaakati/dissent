@@ -64,7 +64,9 @@ impl Vault {
                 Ok(Vault { key })
             }
             Err(keyring::Error::NoEntry) => {
-                let vault = Vault { key: rand::random() };
+                let vault = Vault {
+                    key: rand::random(),
+                };
                 entry.set_secret(&vault.key).map_err(keychain_err)?;
                 Ok(vault)
             }
@@ -89,11 +91,25 @@ impl Vault {
 
     /// A vault with a random key that lives only in memory. For tests.
     pub fn ephemeral_for_tests() -> Vault {
-        Vault { key: rand::random() }
+        Vault {
+            key: rand::random(),
+        }
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new((&self.key).into())
+    }
+    /// A vault for one purpose, keyed with a subkey derived from this vault's key. Each file
+    /// sealed under its own subkey stays separate from every other file, even if an AAD label
+    /// is reused by mistake. `purpose` names the file, for example `b"dissent/mls-state/v1"`.
+    pub fn subkey(&self, purpose: &[u8]) -> Vault {
+        let mut key = blake3::derive_key(
+            "dissent/vault-subkey/v1",
+            &[&self.key[..], purpose].concat(),
+        );
+        let vault = Vault { key };
+        key.zeroize();
+        vault
     }
 
     /// Encrypt `plaintext` and bind it to `aad`. Output: version || nonce || ciphertext.
@@ -103,7 +119,13 @@ impl Vault {
         let nonce: [u8; NONCE_LEN] = rand::random();
         let ct = self
             .cipher()
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
             .expect("XChaCha20-Poly1305 fails only past its 256 GiB limit");
         let mut out = Vec::with_capacity(1 + NONCE_LEN + ct.len());
         out.push(VAULT_VERSION);
@@ -186,6 +208,9 @@ mod tests {
         let sealed = first.seal(AAD, b"x");
         let second = Vault::open(app, &profile).unwrap();
         assert_eq!(second.open_sealed(AAD, &sealed).unwrap(), b"x");
-        keyring::Entry::new(app, &profile).unwrap().delete_credential().unwrap();
+        keyring::Entry::new(app, &profile)
+            .unwrap()
+            .delete_credential()
+            .unwrap();
     }
 }

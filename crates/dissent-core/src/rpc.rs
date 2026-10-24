@@ -42,6 +42,8 @@ pub(crate) enum Request {
     MlsCommits { community: CommunityId, after: u64 },
     /// The commit that entered `epoch`, fetched after its announcement on gossip.
     MlsCommit { community: CommunityId, epoch: u64 },
+    /// The current community secret, for a member that is behind on rotations and cannot open them.
+    Secret { community: CommunityId },
     /// A direct message. `from` is the sender's address, for replies.
     Dm { dm: Box<SignedDm>, from: PeerAddr },
     /// A contact request or an accept, signed by the sender's device.
@@ -87,6 +89,8 @@ pub(crate) enum Response {
     MlsCommits(Vec<Vec<u8>>),
     /// The commit for the requested epoch, if this device has it.
     MlsCommit(Option<Vec<u8>>),
+    /// The newest community secret and its generation, for an active member.
+    Secret(Option<(u64, [u8; 32], [u8; 32])>),
     Ack,
     /// Answer to a voice call step. See `calls`.
     Call(crate::calls::CallReply),
@@ -107,7 +111,8 @@ impl Request {
             | Request::MlsJoin { community, .. }
 
             | Request::MlsCommits { community, .. }
-            | Request::MlsCommit { community, .. } => Some(*community),
+            | Request::MlsCommit { community, .. }
+            | Request::Secret { community } => Some(*community),
             _ => None,
         }
     }

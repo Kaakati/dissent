@@ -151,7 +151,10 @@ async fn run_rekey_test() {
     let first = tokio::spawn(receive_side(meshes.next().unwrap(), barrier.clone()));
     let second = tokio::spawn(receive_side(meshes.next().unwrap(), barrier.clone()));
 
-    let _sender = sender.await.unwrap();
+    let sender_mesh = sender.await.unwrap();
+    for (peer, stats) in sender_mesh.stats() {
+        assert!(stats.target_kbps > 0, "the link to {peer} reports no bitrate target");
+    }
     let (_, got_first) = first.await.unwrap();
     let (_, got_second) = second.await.unwrap();
     assert_stream(&got_first);

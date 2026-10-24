@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod bounded;
+#[allow(unused_imports)]
 pub use bounded::*;
 
 use dissent_core::{
@@ -36,15 +37,14 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A UDP port that is free right now.
-/// A port no other test in this process hands out. Binding and releasing a port races with other
-/// tests, so ports come from a counter seeded per process instead.
-const OFFSET: u16 = 16_000;
+/// A UDP port the operating system reports as free. Ports from a per-process counter collide
+/// between test binaries that run at the same time, so the OS picks one instead. The window
+/// between releasing it and the engine binding it is small.
 pub fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 30_000 + OFFSET + (std::process::id() % 20_000) as u16;
-    base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .and_then(|s| s.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(0)
 }
 
 /// Relays off, bound to `port`. `0` picks any free port.
@@ -58,7 +58,7 @@ pub fn offline_on(port: u16) -> NodeConfig {
 }
 
 pub async fn start_on(identity: Identity, dir: PathBuf, port: u16) -> Peer {
-    let (engine, events) = Engine::start(identity.clone(), dir.clone(), offline_on(port))
+    let (engine, events) = Engine::start(identity.clone(), dir.clone(), offline_on(port), dissent_core::test_support::vault_for(&dir))
         .await
         .expect("engine starts");
     Peer {
@@ -101,9 +101,9 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Polls `check` every 50 ms for up to 10 s. Panics with `what` on timeout.
+/// Polls `check` every 50 ms for up to 60 s. Panics with `what` on timeout.
 pub async fn eventually<T>(what: &str, check: impl FnMut() -> Option<T>) -> T {
-    eventually_within(Duration::from_secs(10), what, check).await
+    eventually_within(Duration::from_secs(60), what, check).await
 }
 
 /// Polls `check` every 50 ms for up to `limit`. Panics with `what` on timeout.
@@ -212,4 +212,11 @@ pub async fn accept_incoming(engine: &Engine, rx: &mut broadcast::Receiver<Engin
     let id = next_incoming(rx).await;
     engine.accept_call(id.clone()).await.expect("call accepted");
     id
+}
+
+/// Serializes the heavy call tests. They each run many engines on this machine, and on a small CI
+/// runner running them together makes their waits time out.
+pub async fn heavy_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
 }

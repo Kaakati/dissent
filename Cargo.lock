@@ -2091,18 +2091,25 @@ dependencies = [
  "dissent-audio",
  "dissent-discovery",
  "dissent-events",
+ "dissent-files",
  "dissent-identity",
  "dissent-media",
  "dissent-mls",
  "dissent-net",
  "futures-lite",
+ "iroh",
+ "iroh-relay",
+ "mime_guess",
  "negentropy",
+ "noq-proto",
  "postcard",
  "rand 0.10.3",
+ "reqwest",
  "serde",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2111,6 +2118,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "dissent-audio",
  "dissent-core",
  "dissent-identity",
  "mime_guess",
@@ -2133,6 +2141,8 @@ name = "dissent-discovery"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
+ "chacha20poly1305",
  "data-encoding",
  "dissent-identity",
  "ed25519-dalek 3.0.0",

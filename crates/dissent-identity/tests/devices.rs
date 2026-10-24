@@ -70,7 +70,10 @@ fn revocation_verifies_and_foreign_root_fails() {
     rev.verify().unwrap();
     assert_eq!(rev.root, a.id());
 
-    let forged = DeviceRevocation { root: a.id(), ..b.revoke(dev, 5) };
+    let forged = DeviceRevocation {
+        root: a.id(),
+        ..b.revoke(dev, 5)
+    };
     assert!(forged.verify().is_err());
 }
 

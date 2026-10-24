@@ -26,7 +26,8 @@ pub fn safety_number(a: &RootId, b: &RootId) -> String {
     pair_hasher(a, b).finalize_xof().fill(&mut out);
     (0..GROUPS)
         .map(|i| {
-            let n = u32::from_be_bytes([out[4 * i], out[4 * i + 1], out[4 * i + 2], out[4 * i + 3]]);
+            let n =
+                u32::from_be_bytes([out[4 * i], out[4 * i + 1], out[4 * i + 2], out[4 * i + 3]]);
             format!("{:05}", n % 100_000)
         })
         .collect::<Vec<_>>()
@@ -59,6 +60,8 @@ mod tests {
         let n = safety_number(&RootKey::generate().id(), &RootKey::generate().id());
         let groups: Vec<&str> = n.split(' ').collect();
         assert_eq!(groups.len(), 12);
-        assert!(groups.iter().all(|g| g.len() == 5 && g.bytes().all(|b| b.is_ascii_digit())));
+        assert!(groups
+            .iter()
+            .all(|g| g.len() == 5 && g.bytes().all(|b| b.is_ascii_digit())));
     }
 }

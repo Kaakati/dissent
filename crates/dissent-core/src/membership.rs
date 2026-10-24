@@ -55,7 +55,7 @@ pub(crate) fn preference_order(c: &Community) -> Vec<RootId> {
     let mut ranked: Vec<(u8, Hlc, RootId)> = state
         .members
         .iter()
-        .filter(|(root, m)| !m.left && !state.banned.contains(root) && **root != owner)
+        .filter(|(root, m)| !m.left && !m.storage && !state.banned.contains(root) && **root != owner)
         .map(|(root, m)| {
             let tier = match state.roles.get(root) {
                 Some(roles) if roles.contains(&Role::Admin) => 0,
@@ -78,6 +78,8 @@ pub(crate) struct CommitRules {
     active: BTreeSet<RootId>,
     /// Members who have left, and banned members.
     departed: BTreeSet<RootId>,
+    /// Current members who are people, not storage. Only these commit, and only these join the group.
+    persons: BTreeSet<RootId>,
 }
 
 impl CommitRules {
@@ -89,6 +91,12 @@ impl CommitRules {
             .filter(|(root, m)| !m.left && !state.banned.contains(root))
             .map(|(root, _)| *root)
             .collect();
+        let persons = state
+            .members
+            .iter()
+            .filter(|(root, m)| !m.left && !m.storage && !state.banned.contains(root))
+            .map(|(root, _)| *root)
+            .collect();
         let departed = state
             .members
             .iter()
@@ -96,14 +104,14 @@ impl CommitRules {
             .map(|(root, _)| *root)
             .chain(state.banned.iter().copied())
             .collect();
-        Self { active, departed }
+        Self { active, departed, persons }
     }
 
     /// The author must be a current member. Added devices must belong to current members.
     /// Removed devices must belong to departed members, or to the author.
     pub(crate) fn allows_commit(&self, info: &CommitInfo) -> bool {
-        self.active.contains(&info.committer.root)
-            && info.adds.iter().all(|d| self.active.contains(&d.root))
+        self.persons.contains(&info.committer.root)
+            && info.adds.iter().all(|d| self.persons.contains(&d.root))
             && info
                 .removes
                 .iter()
@@ -119,6 +127,10 @@ impl CommitRules {
         self.active.contains(root)
     }
 
+    pub(crate) fn is_person(&self, root: &RootId) -> bool {
+        self.persons.contains(root)
+    }
+
     pub(crate) fn is_departed(&self, root: &RootId) -> bool {
         self.departed.contains(root)
     }
@@ -131,6 +143,15 @@ pub(crate) fn delay_for(ahead: u32) -> Duration {
 }
 
 impl Engine {
+    /// Whether this device is a storage member of `community`. Storage devices never join the group
+    /// and never commit.
+    pub(crate) fn is_storage_here(&self, community: CommunityId) -> bool {
+        self.read()
+            .communities
+            .get(&community)
+            .is_some_and(|c| c.state().members.get(&self.inner.me).is_some_and(|m| m.storage))
+    }
+
     pub(crate) fn commit_rules(&self, community: CommunityId) -> CommitRules {
         let w = self.read();
         w.communities
@@ -441,9 +462,13 @@ impl Engine {
         for community in communities {
             self.mls_join_missing(community).await;
             self.mls_reconcile(community).await;
+            self.rotate_if_due(community).await;
+            self.refresh_secret(community).await;
         }
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod storage_tests;

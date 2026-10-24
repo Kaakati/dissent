@@ -19,7 +19,7 @@ A sealed event is `Payload::Sealed { epoch, kind, ciphertext }`, where `kind` is
 ## Two views of a community
 
 - **Permission state** (`CommunityState` in `dissent-events`) is identical on every peer. A sealed message is recorded with its id, author, hlc, reply target and a `sealed` flag. Its text is empty in state.
-- **Content view** is local. Each device decrypts sealed text it can reach, and stores the plaintext in `content.log`. A message with no plaintext is `locked`.
+- **Content view** is local. Each device decrypts sealed text it can reach, and stores the plaintext in `content.sealed`, sealed under the vault. A message with no plaintext is `locked`.
 
 Replay never reads ciphertext, so every peer computes the same state regardless of keys.
 
@@ -58,7 +58,7 @@ A ban, leave or departure removes every device of that member. Any member runs t
 
 ## Persistence
 
-`openmls_sqlite_storage` is not in the local registry, so this uses OpenMLS's `MemoryStorage` and snapshots it. The storage's `values` map is written to `mls.bin`. Snapshots hold key material in plain text. This matches the keystore, and it needs hardening before 1.0.
+`openmls_sqlite_storage` is not in the local registry, so this uses OpenMLS's `MemoryStorage` and snapshots it. The storage's `values` map is sealed with XChaCha20-Poly1305 under a per-file subkey of the vault, then written to `mls.bin`. The decrypted content log, `content.sealed`, is sealed the same way, one record at a time under a subkey per community. A plaintext file from before sealing is migrated on first open.
 
 Writes are split by kind of change:
 
@@ -67,7 +67,7 @@ Writes are split by kind of change:
 
 Because sends are written at once, a crash never loses a sender ratchet step. So no key generation can be reused after a restart, and no self-update is needed to recover. Sends cost one synced write each, about 3.8 ms, which is invisible to people.
 
-A crash can lose the receive-side ratchet steps taken since the last write. The plaintext those steps produced is already in `content.log`, so decrypted history stays readable. The lost steps only mean that a later restart may decrypt the same ciphertexts again, which is harmless because the text is already stored.
+A crash can lose the receive-side ratchet steps taken since the last write. The plaintext those steps produced is already in `content.sealed`, so decrypted history stays readable. The lost steps only mean that a later restart may decrypt the same ciphertexts again, which is harmless because the text is already stored.
 
 ## History for new members
 

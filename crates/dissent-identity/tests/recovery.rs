@@ -17,7 +17,13 @@ fn setup(n: usize, threshold: u8) -> Setup {
     let set = GuardianSet::create(&owner, ids, threshold, 1).unwrap();
     let new_root = RootKey::generate();
     let request = RotationRequest::new_for(&new_root, owner.id(), 100);
-    Setup { owner, guardians, set, new_root, request }
+    Setup {
+        owner,
+        guardians,
+        set,
+        new_root,
+        request,
+    }
 }
 
 fn approve(s: &Setup, idx: usize) -> GuardianApproval {
@@ -63,7 +69,10 @@ fn approval_from_non_guardian_is_ignored() {
 #[test]
 fn approval_for_different_request_fails() {
     let s = setup(3, 2);
-    let other = RotationRequest { requested_ms: 999, ..s.request };
+    let other = RotationRequest {
+        requested_ms: 999,
+        ..s.request
+    };
     let bad = GuardianApproval::sign(&s.guardians[1], other);
     assert!(bad.verify_for(&s.request).is_err());
     let rot = guardian_rotation(&s, vec![approve(&s, 0), bad]);

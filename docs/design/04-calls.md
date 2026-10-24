@@ -254,3 +254,15 @@ Redundancy turns on above 10% reported loss, and off again below 5%, so it does 
 4. Add the Opus codec and an audio device path, then measure latency and loss on real networks.
 5. Add epoch changes to the key ID and rekeying when membership changes.
 6. A forwarder that is also a speaker, with its own participant link, and cascades over real links.
+
+## Tier migration
+
+A voice channel call starts as a mesh and moves between tiers as its live roster changes. The tiers are a mesh (up to six devices), a forwarded call (one elected forwarder relays between the others, from seven devices), and a cascade (a forwarded call above `cascade_at`, not built yet).
+
+- **Live roster.** Each device keeps the devices that are in the call, by sender id. The roster grows on joins and answers, and shrinks on leaves and bans.
+- **Hysteresis.** `TierPolicy::tier_for` moves a mesh up at seven devices and a forwarded call down at five, so a count that hovers at one edge does not flap. A device migrates only after its roster has wanted another tier for ten seconds.
+- **Staged room.** A migration builds the room for the new tier beside the current one. The new room carries a generation id derived from the tier and the roster hash. Offers name that generation, so an acceptor matches an offer to the room it is for.
+- **Link-ready swap.** The staged room links to every peer it should reach, and the call swaps to it once those links are up, or after twenty seconds if at least one link is up. It does not wait for a first frame: a staged room sends nothing until the swap, so two sides that each waited on the other's frames would deadlock. The old room carries the audio until the swap, and the audio state then moves to the new room.
+- **Signed tier message.** The migrating device signs a tier announcement over the room, tier, forwarder and roster hash, and sends it to the others. A receiver applies it only if the signature is from a device in its own roster and the roster hash matches its own. A forged or unsigned message, or one that names a different roster, is ignored.
+
+Migration is per device, so two devices can reach the same tier a little apart. The generation id and the tier message keep them in step.

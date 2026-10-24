@@ -61,7 +61,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
             .collect(),
         name,
         display_name,
-        last_text,
+        last_text: crate::attachments::text_of(&last_text),
         last_ms,
     }
 }
@@ -113,6 +113,8 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
         delivery: if w.outbox.iter().any(|o| o.dm.id == sd.dm.id) { "sending" } else { "delivered" }.to_string(),
         queued: false,
         reason: None,
+        attachments: Vec::new(),
+        embeds: Vec::new(),
     }
 }
 

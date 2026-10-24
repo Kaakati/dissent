@@ -57,20 +57,40 @@ impl Engine {
         text: String,
     ) -> Result<MessageItem> {
         let text = clean_message(&text)?;
-        let (epoch, ciphertext) = self.seal(community, &text)?;
+        let embeds = self.build_embeds(&text).await;
+        let plain = if embeds.is_empty() {
+            text
+        } else {
+            crate::attachments::pack_with_embeds(&text, &[], &embeds)?
+        };
+        self.send_channel_plain(community, channel, plain).await
+    }
+
+    /// Seals a payload for a channel and publishes it. `plain` is text, or packed attachments.
+    pub(crate) async fn send_channel_plain(
+        &self,
+        community: CommunityId,
+        channel: ChannelId,
+        plain: String,
+    ) -> Result<MessageItem> {
+        let (epoch, ciphertext) = self.seal(community, &plain)?;
+        let ciphertext = crate::attachments::wrap_manifest(&crate::attachments::manifest_of(&plain), ciphertext)?;
         let payload = Payload::Sealed {
             epoch,
             kind: SealedKind::Message,
             ciphertext,
         };
         let se = self.author_publish(community, channel, payload).await?;
-        self.store_content(community, se.event.id, se.event.body.hlc, text.clone());
+        self.store_content(community, se.event.id, se.event.body.hlc, plain.clone());
         let me = self.inner.me;
+        let attachments = self.read().attachment_views(&plain);
         Ok(MessageItem {
             id: se.event.id.to_string(),
             author: me.to_string(),
             author_name: self.read().display_name(&me),
-            text,
+            text: crate::attachments::text_of(&plain),
+            attachments,
+            embeds: crate::attachments::embeds_of(&plain),
             ms: se.event.body.hlc.wall_ms,
             edited: false,
             deleted: false,
@@ -140,6 +160,7 @@ impl Engine {
             .await?;
         // A ban takes effect in the group at once, if this device is the committer.
         self.mls_reconcile(community).await;
+        self.rotate_if_due(community).await;
         Ok(())
     }
 

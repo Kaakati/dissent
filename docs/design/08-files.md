@@ -106,3 +106,29 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
    known to hold the blob. Store the returned path in the message view.
 5. Seeders. Call `Files::mirror` with the public hash, the ciphertext size and a `MirrorPolicy`
    (the defaults are 2 GB per file and 50 GB in total) to keep an attachment available without its key.
+
+## Cleartext manifest (metadata)
+
+A sealed channel message that carries files is preceded, inside its signed event, by a cleartext
+manifest. For each file it lists the ciphertext hash, the ciphertext size, and whether members may
+mirror it. Nothing else is in clear: no key, name or MIME type. Storage-only members read the
+manifest and mirror within their `MirrorPolicy`, without any key.
+
+What this reveals: that a member shared a file, the file's ciphertext hash, and its size. Because
+each file has a random key, the hash reveals nothing about the content. The size reveals roughly how
+large the file was. Recipients check that the manifest matches the files in the sealed text, and
+refuse the message when it does not.
+
+Direct messages carry no manifest. Their files are fetched from the sender's devices after the
+recipient reads the sealed text.
+
+## Per-source progress (gap)
+
+A download lists its providers in `TransferView.sources`, each with its device, display name and a
+`state` (`waiting` while the transfer runs, `done` once it finishes). The `bytes` field of each
+source is always 0, and there is no `verified_pieces` field.
+
+The reason: `dissent-files` tries the providers one after another and reports only one progress
+callback, with the total held bytes. It does not say which provider served the bytes, or how many
+each one sent. A true per-source byte count needs `dissent-files` to expose its provider attempts,
+or the engine to drive one attempt per provider and count the progress deltas. Neither is built.

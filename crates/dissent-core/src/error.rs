@@ -6,6 +6,12 @@ pub enum CoreError {
     /// The community's replay refused the action, for example `"Banned"` or `"NoPermission"`.
     #[error("rejected: {0}")]
     Rejected(String),
+    /// A direct conversation was refused by the recipient's policy. The reply is rate-limited per sender.
+    #[error("refused: {reason}")]
+    PolicyRefused {
+        from: dissent_identity::RootId,
+        reason: String,
+    },
     #[error("not found: {0}")]
     NotFound(String),
     #[error("invalid: {0}")]

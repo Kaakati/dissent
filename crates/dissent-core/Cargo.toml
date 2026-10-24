@@ -8,6 +8,10 @@ license.workspace = true
 dissent-identity.workspace = true
 dissent-events.workspace = true
 dissent-net.workspace = true
+dissent-files.workspace = true
+reqwest.workspace = true
+iroh.workspace = true
+mime_guess.workspace = true
 dissent-discovery.workspace = true
 dissent-mls.workspace = true
 dissent-media.workspace = true
@@ -22,5 +26,8 @@ tracing.workspace = true
 futures-lite.workspace = true
 negentropy.workspace = true
 data-encoding.workspace = true
+url.workspace = true
 
 [dev-dependencies]
+iroh-relay = { workspace = true, features = ["test-utils"] }
+noq-proto.workspace = true

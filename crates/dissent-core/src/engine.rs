@@ -3,13 +3,13 @@
 use crate::error::{CoreError, Result};
 use crate::net::{maintenance, receive_loop, ReceiverTask};
 use crate::rpc::handler_for;
-use crate::store::Paths;
+use crate::store::{write_bytes_atomic, Paths};
 use crate::views::{CommunitySummary, EngineEvent, MeView, NetStatusView, UserView};
 use crate::world::World;
 use dissent_discovery::{ContactCard, Discovery};
 use dissent_mls::MlsClient;
 use dissent_events::{Hlc, HlcClock};
-use dissent_identity::{CommunityId, DeviceId, Identity, RootId};
+use dissent_identity::{CommunityId, DeviceId, Identity, RootId, Vault};
 use dissent_net::{Node, NodeConfig, RelayChoice, TopicReceiver};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -37,6 +37,8 @@ pub(crate) struct Inner {
     pub world: RwLock<World>,
     /// This device's MLS state. Every change goes through `Engine::with_mls`, which saves it.
     pub mls: Mutex<MlsClient>,
+    /// Seals the MLS state and the content log.
+    pub vault: Arc<Vault>,
     /// Where the MLS snapshot is written.
     pub mls_path: PathBuf,
     /// Ratchet steps since the last MLS flush. A flush writes the whole state.
@@ -72,6 +74,8 @@ pub(crate) struct Inner {
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
     /// The voice call on this device, and the media links waiting for it.
     pub calls: crate::calls::CallHub,
+    /// Encrypted file storage for attachments. Mounted on the node, so it shares its lifetime.
+    pub files: std::sync::Arc<dissent_files::Files>,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -86,14 +90,17 @@ impl Engine {
         identity: Identity,
         data_dir: PathBuf,
         net: NodeConfig,
+        vault: Arc<Vault>,
     ) -> Result<(Engine, broadcast::Receiver<EngineEvent>)> {
         let me = identity.root_id();
-        let world = World::load(Paths::new(data_dir), &identity)?;
+        let files_dir = data_dir.join("files");
+        let files = std::sync::Arc::new(Self::open_files(&files_dir).await?);
+        let world = World::load(Paths::new(data_dir), &identity, &vault)?;
         let newest_stored = world.max_hlc();
         let founded = load_founded(&world);
-        let mls = open_mls(&identity, &world);
+        let mls = open_mls(&identity, &world, &vault)?;
         let mls_path = world.paths.mls_state();
-        let discovery = if matches!(net.relay, RelayChoice::Disabled) {
+        let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only {
             None
         } else {
             match Discovery::new() {
@@ -116,6 +123,7 @@ impl Engine {
             discovery,
             founded: Mutex::new(founded),
             mls: Mutex::new(mls),
+            vault,
             mls_path,
             mls_dirty: std::sync::atomic::AtomicU64::new(0),
             mls_flushed_at: Mutex::new(std::time::Instant::now()),
@@ -128,8 +136,14 @@ impl Engine {
             sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
             calls: Default::default(),
+            files,
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
+        let mut net = net;
+        net.extra_protocols.push((
+            dissent_files::ALPN.to_vec(),
+            std::sync::Arc::new(inner.files.protocol_handler()),
+        ));
         let config = NodeConfig {
             rpc: Some(handler_for(&inner)),
             media: Some(media),
@@ -139,6 +153,7 @@ impl Engine {
         let addr = node.addr().await;
         let engine = Engine { inner };
         let _ = engine.inner.node.set(node.clone());
+        engine.adopt_all_relays().await;
         // Local stamps must sort after every stored event, so the clock starts past the newest.
         if let Some(newest) = newest_stored {
             engine.clock().observe(newest, now_ms());
@@ -181,6 +196,9 @@ impl Engine {
             task.abort();
         }
         self.node().shutdown().await?;
+        if let Err(e) = self.inner.files.shutdown().await {
+            warn!(error = %e, "could not shut down file storage");
+        }
         Ok(())
     }
 
@@ -366,6 +384,9 @@ pub(crate) const MAX_MESSAGE_CHARS: usize = 8_000;
 /// Message text, trimmed and capped at `MAX_MESSAGE_CHARS`.
 pub(crate) fn clean_message(value: &str) -> Result<String> {
     let text = clean_text(value, "message")?;
+    if text.contains(crate::attachments::MARK) {
+        return Err(CoreError::Invalid("message contains a reserved marker".into()));
+    }
     if text.chars().count() > MAX_MESSAGE_CHARS {
         return Err(CoreError::Invalid(format!("message is longer than {MAX_MESSAGE_CHARS} characters")));
     }
@@ -397,25 +418,49 @@ fn load_founded(w: &World) -> BTreeMap<CommunityId, [u8; 32]> {
         .collect()
 }
 
-/// Restores this device's MLS state from `mls.bin` and loads the groups of every community we
-/// hold. A missing or unreadable snapshot starts an empty client, so the device must rejoin.
-fn open_mls(identity: &Identity, w: &World) -> MlsClient {
+/// Restores this device's MLS state from `mls.bin`, which is sealed under `vault`, and loads the
+/// groups of every community we hold. A plaintext file from before sealing is sealed in place
+/// first. A snapshot that does not open under this vault is an error, because starting empty would
+/// overwrite it. Any other unreadable snapshot starts an empty client, so the device must rejoin.
+fn open_mls(identity: &Identity, w: &World, vault: &Vault) -> Result<MlsClient> {
     let groups: Vec<[u8; 32]> = w
         .communities
         .keys()
         .map(|id| id.0)
         .chain(w.conv_book.convs.values().filter(|m| m.ready && !m.left).map(|m| m.id.0))
         .collect();
-    let snapshot = std::fs::read(w.paths.mls_state()).ok();
+    let path = w.paths.mls_state();
+    let snapshot = std::fs::read(&path).ok().and_then(|bytes| {
+        if !MlsClient::is_legacy_snapshot(&bytes) {
+            return Some(bytes);
+        }
+        match MlsClient::migrate_legacy(&bytes, vault) {
+            Ok(sealed) => {
+                if let Err(e) = write_bytes_atomic(&path, &sealed) {
+                    warn!(error = %e, "could not save the migrated MLS state");
+                }
+                Some(sealed)
+            }
+            Err(e) => {
+                warn!(error = %e, "plaintext MLS state could not be migrated; starting empty");
+                None
+            }
+        }
+    });
     let restored = match snapshot {
-        Some(bytes) => MlsClient::restore(&identity.device, &identity.cert, &bytes, &groups),
+        Some(bytes) => {
+            MlsClient::restore_sealed(&identity.device, &identity.cert, vault, &bytes, &groups)
+        }
         None => MlsClient::new(&identity.device, &identity.cert),
     };
     match restored {
-        Ok(client) => client,
+        Ok(client) => Ok(client),
+        Err(dissent_mls::MlsError::Sealed(e)) => Err(CoreError::Invalid(format!(
+            "MLS state cannot be opened with this vault: {e}"
+        ))),
         Err(e) => {
             warn!(error = %e, "MLS state could not be restored; starting empty");
-            MlsClient::new(&identity.device, &identity.cert).expect("fresh MLS client")
+            Ok(MlsClient::new(&identity.device, &identity.cert).expect("fresh MLS client"))
         }
     }
 }

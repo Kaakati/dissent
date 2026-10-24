@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use dissent_identity::{CommunityKey, DeviceCert, DeviceId, DeviceKey, RootId, RootKey};
+use dissent_identity::{CommunityKey, DeviceCert, DeviceId, DeviceKey, RootId, RootKey, Vault};
 use dissent_mls::{Commit, CommitInfo, MlsClient, MlsError, Processed, WelcomeInfo, CIPHERSUITE};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
@@ -678,31 +678,79 @@ fn welcome_with_other_ciphersuite_is_rejected_before_any_key_is_used() {
 }
 
 #[test]
-fn snapshot_restores_under_current_suite_and_refuses_other_formats() {
+fn sealed_snapshot_round_trips_and_restored_client_still_decrypts() {
+    let group = community();
+    let root = RootKey::generate();
+    let alice_device = DeviceKey::generate();
+    let alice_cert = root.certify(alice_device.id(), 1);
+    let bob_device = DeviceKey::generate();
+    let bob_cert = root.certify(bob_device.id(), 1);
+    let mut alice = MlsClient::new(&alice_device, &alice_cert).unwrap();
+    let mut bob = MlsClient::new(&bob_device, &bob_cert).unwrap();
+    alice.create_group(group).unwrap();
+    let first = alice
+        .add_members(&group, &[bob.key_package().unwrap()])
+        .unwrap();
+    bob.join_from_welcome_with_policy(&first.welcome, allow_welcome)
+        .unwrap();
+
+    let vault = Vault::ephemeral_for_tests();
+    let sealed = bob.snapshot_sealed(&vault).unwrap();
+    let mut restored =
+        MlsClient::restore_sealed(&bob_device, &bob_cert, &vault, &sealed, &[group]).unwrap();
+    assert_eq!(restored.epoch(&group).unwrap(), 1);
+
+    let wire = alice.encrypt(&group, b"after restart").unwrap();
+    assert_eq!(
+        restored.decrypt_application(&group, &wire).unwrap(),
+        (b"after restart".to_vec(), alice_device.id())
+    );
+}
+
+#[test]
+fn restore_refuses_a_wrong_vault() {
     let group = community();
     let device = DeviceKey::generate();
-    let root = RootKey::generate();
-    let cert = root.certify(device.id(), 1);
-    let mut alice = MlsClient::new(&device, &cert).unwrap();
-    alice.create_group(group).unwrap();
+    let cert = RootKey::generate().certify(device.id(), 1);
+    let mut client = MlsClient::new(&device, &cert).unwrap();
+    client.create_group(group).unwrap();
 
-    let snapshot = alice.snapshot().unwrap();
-    let restored = MlsClient::restore(&device, &cert, &snapshot, &[group]).unwrap();
-    assert_eq!(restored.epoch(&group).unwrap(), 0);
+    let sealed = client
+        .snapshot_sealed(&Vault::ephemeral_for_tests())
+        .unwrap();
+    assert!(matches!(
+        MlsClient::restore_sealed(
+            &device,
+            &cert,
+            &Vault::ephemeral_for_tests(),
+            &sealed,
+            &[group]
+        ),
+        Err(MlsError::Sealed(_))
+    ));
+}
 
-    // A snapshot from before the header existed, under the classical suite, has no tag.
-    let untagged = &snapshot[6..];
-    assert!(matches!(
-        MlsClient::restore(&device, &cert, untagged, &[group]),
-        Err(MlsError::IncompatibleSnapshot)
-    ));
-    // A snapshot tagged with another ciphersuite is refused the same way.
-    let mut other_suite = snapshot.clone();
-    other_suite[4..6].copy_from_slice(&[0x00, 0x01]);
-    assert!(matches!(
-        MlsClient::restore(&device, &cert, &other_suite, &[group]),
-        Err(MlsError::IncompatibleSnapshot)
-    ));
+#[test]
+fn sealed_snapshot_has_no_plaintext_marker() {
+    let group = community();
+    let device = DeviceKey::generate();
+    let cert = RootKey::generate().certify(device.id(), 1);
+    let mut client = MlsClient::new(&device, &cert).unwrap();
+    client.create_group(group).unwrap();
+
+    let sealed = client
+        .snapshot_sealed(&Vault::ephemeral_for_tests())
+        .unwrap();
+    // The plaintext form contains these as text, for example the init secret's field name and the
+    // ciphersuite name. The sealed file must not. The unit test checks that the plaintext has them.
+    assert!(!contains(&sealed, b"init_secret"));
+    assert!(!contains(&sealed, b"MLS_128_MLKEM768X25519"));
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 #[test]

@@ -18,6 +18,10 @@ pub struct Invite {
     pub peers: Vec<String>,
     /// Random per community. Proves the holder may join its gossip topic and sync with its members.
     pub secret: [u8; 32],
+    /// Generation of `secret`. A joiner catches up on later rotations from it.
+    pub secret_generation: u64,
+    /// Relay servers the community asks members to use: https URLs, at most four.
+    pub relays: Vec<String>,
 }
 
 impl Invite {
@@ -43,6 +47,11 @@ impl Invite {
             .genesis
             .verify()
             .map_err(|e| DiscoveryError::InvalidInvite(format!("genesis: {e}")))?;
+        if invite.relays.len() > 4
+            || !invite.relays.iter().all(|r| r.starts_with("https://") && r.len() > 8 && r.len() <= 256)
+        {
+            return Err(DiscoveryError::InvalidInvite("relays must be at most four https URLs".into()));
+        }
         if invite.peers.len() > MAX_PEERS {
             return Err(DiscoveryError::InvalidInvite(format!(
                 "{} peers exceeds maximum {MAX_PEERS}",
@@ -65,6 +74,8 @@ mod tests {
             genesis,
             peers: vec!["a".repeat(90), "b".repeat(90)],
             secret: [7; 32],
+            secret_generation: 0,
+            relays: vec!["https://relay.example.org".into()],
         }
     }
 

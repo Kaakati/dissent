@@ -64,4 +64,11 @@ async fn the_target_bitrate_reaches_the_pipeline_and_stays_in_the_opus_range() {
     assert!(values.iter().all(|v| (MIN_KBPS..=MAX_KBPS).contains(v)));
     assert!((MIN_KBPS..=MAX_KBPS).contains(&caller.target_bitrate_kbps()));
     assert!(caller.loss_fraction() >= 0.0);
+    let stats = caller.stats();
+    assert_eq!(stats.target_kbps, caller.target_bitrate_kbps());
+    assert!(
+        (MIN_KBPS..=MAX_KBPS).contains(&stats.target_kbps),
+        "the stats carry an estimate outside the Opus range: {}",
+        stats.target_kbps
+    );
 }

@@ -266,3 +266,62 @@ pub async fn accept_call(state: State<'_, AppState>, call_id: String) -> Result<
 pub async fn decline_call(state: State<'_, AppState>, call_id: String) -> Result<(), String> {
     engine(&state).await?.decline_call(call_id).await.map_err(err)
 }
+
+/// Ends first run. Called only after the user confirms they wrote the recovery phrase down.
+#[tauri::command]
+pub async fn complete_first_run(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.complete_first_run().map_err(err)
+}
+
+/// Each conversation key with the time it was last marked read, in milliseconds.
+#[tauri::command]
+pub async fn read_markers(
+    state: State<'_, AppState>,
+) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    Ok(engine(&state).await?.read_markers())
+}
+
+/// Hides a conversation from the sidebar. It comes back when a new message arrives.
+#[tauri::command]
+pub async fn close_conversation(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    engine(&state).await?.close_conversation(key).map_err(err)
+}
+
+/// Shows a closed conversation again.
+#[tauri::command]
+pub async fn reopen_conversation(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    engine(&state).await?.reopen_conversation(key).map_err(err)
+}
+
+/// Closed conversations, each with the time it was closed, in milliseconds.
+#[tauri::command]
+pub async fn closed_conversations(
+    state: State<'_, AppState>,
+) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    Ok(engine(&state).await?.closed_conversations())
+}
+
+/// Ignores a person. Their messages still arrive, but collapsed and without notifications.
+#[tauri::command]
+pub async fn ignore_user(state: State<'_, AppState>, user: String) -> Result<(), String> {
+    let user: RootId = parse("user id", &user)?;
+    engine(&state).await?.ignore_user(user).map_err(err)
+}
+
+/// Stops ignoring a person.
+#[tauri::command]
+pub async fn unignore_user(state: State<'_, AppState>, user: String) -> Result<(), String> {
+    let user: RootId = parse("user id", &user)?;
+    engine(&state).await?.unignore_user(user).map_err(err)
+}
+
+/// Everyone this device ignores, as base32 root ids.
+#[tauri::command]
+pub async fn ignored_users(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(engine(&state)
+        .await?
+        .ignored_users()
+        .iter()
+        .map(|u| u.to_string())
+        .collect())
+}

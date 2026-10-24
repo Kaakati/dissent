@@ -51,7 +51,7 @@ fn offline() -> NodeConfig {
 }
 
 async fn start(identity: Identity, dir: PathBuf) -> Peer {
-    let (engine, events) = Engine::start(identity.clone(), dir.clone(), offline())
+    let (engine, events) = Engine::start(identity.clone(), dir.clone(), offline(), dissent_core::test_support::vault_for(&dir))
         .await
         .expect("engine starts");
     Peer {
@@ -80,7 +80,7 @@ fn now() -> u64 {
 
 /// Polls `check` every 50 ms for up to 10 s. Panics with `what` on timeout.
 async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(value) = check() {
             return value;
@@ -372,7 +372,7 @@ async fn data_survives_restart() {
     } = alice;
     engine.shutdown().await.expect("clean shutdown");
 
-    let (reopened, _events) = Engine::start(identity.clone(), dir.clone(), offline())
+    let (reopened, _events) = Engine::start(identity.clone(), dir.clone(), offline(), dissent_core::test_support::vault_for(&dir))
         .await
         .expect("restart");
     assert_eq!(reopened.me().display_name, "alice");

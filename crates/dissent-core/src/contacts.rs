@@ -152,6 +152,8 @@ pub(crate) struct ContactBook {
     pub known_inboxes: BTreeMap<RootId, Vec<DeviceId>>,
     /// Users we block. Their requests and messages are dropped without a reply.
     pub blocked: BTreeSet<RootId>,
+    /// When each sender was last sent an explicit refusal. One per sender per refusal window.
+    pub last_refusal: BTreeMap<RootId, u64>,
 }
 
 impl ContactBook {
@@ -638,11 +640,29 @@ impl Engine {
     /// The contacts page, as the desktop lists it.
     pub fn list_contacts(&self) -> ContactsView {
         let w = self.read();
+        let neighbours: BTreeSet<DeviceId> = self
+            .inner
+            .neighbours
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let now = now_ms();
+        let online = |root: &RootId| {
+            w.directory.devices_of(root).iter().any(|d| {
+                neighbours.contains(d)
+                    || w.last_seen
+                        .get(d)
+                        .is_some_and(|t| now.saturating_sub(*t) < PRESENCE_WINDOW_MS)
+            })
+        };
         let entry = |root: RootId| ContactEntry {
             root_id: root.to_string(),
             display_name: w.display_name(&root),
             suffix: root.suffix(),
-            online: false,
+            online: online(&root),
             shared_servers: w
                 .communities
                 .values()
@@ -734,4 +754,31 @@ impl Engine {
             .map(|c| c.to_url().to_string())
             .ok_or_else(|| CoreError::NotFound(format!("contact {user}")))
     }
+}
+
+/// How long a sender waits between explicit refusals. Within this window, a refused sender gets
+/// the same silent acknowledgement a blocked one does.
+pub(crate) const REFUSAL_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// A device counts as online if it sent us a request this recently, or is a gossip neighbour.
+pub(crate) const PRESENCE_WINDOW_MS: u64 = 60 * 1000;
+
+/// The reply to a message the recipient's policy refuses. At most one explicit refusal per sender
+/// per window. After that, the sender gets a silent acknowledgement, the same as a blocked sender,
+/// so repeated sends cannot show whether this person is around.
+pub(crate) fn refusal_for(w: &mut World, from: RootId, reason: String) -> Response {
+    if w.contact_book.blocked.contains(&from) {
+        return Response::Ack;
+    }
+    let now = now_ms();
+    w.contact_book
+        .last_refusal
+        .retain(|_, t| now.saturating_sub(*t) < REFUSAL_WINDOW_MS);
+    if w.contact_book.last_refusal.contains_key(&from) {
+        return Response::Ack;
+    }
+    w.contact_book.last_refusal.insert(from, now);
+    if let Err(e) = w.contact_book.save(&w.paths) {
+        warn!(error = %e, "could not save refusal state");
+    }
+    Response::Refused(reason)
 }

@@ -52,6 +52,16 @@ pub struct CommunityState {
     /// Device to the root that signed its events. Learned from every event applied.
     pub device_roots: BTreeMap<DeviceId, RootId>,
     pub rejected: Vec<(EventId, Rejection)>,
+    /// Relay servers members use, from the latest accepted `SetRelays`, and its HLC.
+    pub relays: Vec<String>,
+    pub relays_hlc: Hlc,
+    /// Generation of the community secret after the latest accepted rotation. Starts at 0.
+    pub secret_generation: u64,
+    /// Banned roots that some accepted rotation already answers.
+    pub secret_covered: BTreeSet<RootId>,
+    /// The event that set the current generation. A rival rotation with the same generation and a
+    /// lower event id replaces it, so concurrent rotations converge.
+    pub secret_winner: Option<EventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +70,8 @@ pub struct Member {
     /// HLC of the first accepted Join. A rejoin does not move it.
     pub joined: Hlc,
     pub left: bool,
+    /// A storage member holds and serves ciphertext, but is outside the MLS group and cannot post.
+    pub storage: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +161,11 @@ impl CommunityState {
             revoked_devices: BTreeMap::new(),
             device_roots: BTreeMap::new(),
             rejected: Vec::new(),
+            relays: Vec::new(),
+            relays_hlc: Hlc::default(),
+            secret_generation: 0,
+            secret_covered: BTreeSet::new(),
+            secret_winner: None,
         }
     }
 
@@ -206,6 +223,14 @@ impl CommunityState {
             return Err(Rejection::Banned);
         }
         let rank = self.rank(&actor);
+        // A storage member may only join, or leave. Anything else is for people.
+        let storage_only = matches!(
+            ev.body.payload,
+            Payload::Join { .. } | Payload::JoinAsStorage { .. } | Payload::Leave
+        );
+        if !storage_only && self.members.get(&actor).is_some_and(|m| m.storage) {
+            return Err(Rejection::NoPermission);
+        }
         let chan = ev.body.channel;
         match &ev.body.payload {
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
@@ -231,6 +256,9 @@ impl CommunityState {
                         return Err(Rejection::NotAuthorOfTarget);
                     }
                 }
+                SealedKind::React { target } | SealedKind::Unreact { target } => {
+                    self.live_message(chan, target)?;
+                }
             },
             Payload::Message { .. } => {
                 if !self.channels.contains_key(&chan) {
@@ -254,7 +282,46 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::JoinAsStorage { display_name } => {
+                require_control(chan)?;
+                if display_name.trim().is_empty() {
+                    return Err(Rejection::Malformed);
+                }
+            }
             Payload::Leave => require_control(chan)?,
+            Payload::SecretRotation {
+                generation,
+                covers,
+                sealed,
+            } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                // The next generation, or a same-generation rival that sorts before the current
+                // winner. Concurrent rotations converge on the lowest event id.
+                let next = *generation == self.secret_generation + 1
+                    && covers
+                        .iter()
+                        .all(|r| self.banned.contains(r))
+                    && covers.iter().any(|r| !self.secret_covered.contains(r));
+                let rival = *generation == self.secret_generation
+                    && self.secret_generation > 0
+                    && self.secret_winner.is_some_and(|w| ev.id < w)
+                    && covers.iter().all(|r| self.banned.contains(r));
+                if covers.is_empty() || sealed.is_empty() || !(next || rival) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::SetRelays { relays } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !crate::relay::valid_relays(relays) {
+                    return Err(Rejection::Malformed);
+                }
+            }
             Payload::RoleGrant { role, .. } | Payload::RoleRevoke { role, .. } => {
                 require_control(chan)?;
                 check_role_change(rank, *role)?;
@@ -370,6 +437,8 @@ impl CommunityState {
                         m.edited = true;
                     }
                 }
+                // Reactions are aggregated by members, from the sealed emoji. Nothing is stored here.
+                SealedKind::React { .. } | SealedKind::Unreact { .. } => {}
             },
             Payload::Message { text } => {
                 self.messages.entry(chan).or_default().push(MessageView {
@@ -405,13 +474,43 @@ impl CommunityState {
                     display_name: String::new(),
                     joined: ev.body.hlc,
                     left: false,
+                    storage: false,
                 });
                 m.display_name = display_name.clone();
+                m.left = false;
+            }
+            Payload::JoinAsStorage { display_name } => {
+                let m = self.members.entry(actor).or_insert_with(|| Member {
+                    display_name: String::new(),
+                    joined: ev.body.hlc,
+                    left: false,
+                    storage: true,
+                });
+                if m.display_name.is_empty() {
+                    m.display_name = display_name.clone();
+                }
                 m.left = false;
             }
             Payload::Leave => {
                 if let Some(m) = self.members.get_mut(&actor) {
                     m.left = true;
+                }
+            }
+            Payload::SecretRotation {
+                generation,
+                covers,
+                ..
+            } => {
+                if *generation > self.secret_generation {
+                    self.secret_generation = *generation;
+                }
+                self.secret_winner = Some(ev.id);
+                self.secret_covered.extend(covers.iter().copied());
+            }
+            Payload::SetRelays { relays } => {
+                if ev.body.hlc > self.relays_hlc {
+                    self.relays = relays.clone();
+                    self.relays_hlc = ev.body.hlc;
                 }
             }
             Payload::RoleGrant { user, role } => {
@@ -1666,5 +1765,44 @@ mod reply_reaction_tests {
             st.messages[&general][0].reactions["👍"],
             BTreeSet::from([newer.id()])
         );
+    }
+
+    #[test]
+    fn concurrent_rotations_converge_on_the_lowest_event_id() {
+        let (owner, admin, bob) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(
+            &mut evs,
+            &owner,
+            ctl,
+            Payload::RoleGrant {
+                user: admin.id(),
+                role: Role::Admin,
+            },
+        );
+        chain(&mut evs, &owner, ctl, Payload::Ban { user: bob.id() });
+        let base = evs.last().unwrap().id;
+        let hlc = Hlc {
+            wall_ms: 100,
+            counter: 0,
+        };
+        let rotation = |sealed: u8| Payload::SecretRotation {
+            generation: 1,
+            covers: vec![bob.id()],
+            sealed: vec![sealed],
+        };
+        // Two admins rotate from the same parent, neither having seen the other.
+        let a = on_channel(&owner, ctl, vec![base], hlc, rotation(1));
+        let b = on_channel(&admin, ctl, vec![base], hlc, rotation(2));
+        let lo = if a.id < b.id { a.id } else { b.id };
+
+        for order in [[a.clone(), b.clone()], [b.clone(), a.clone()]] {
+            let mut all = evs.clone();
+            all.extend(order);
+            let st = replay_all(&owner, &all);
+            assert_eq!(st.secret_generation, 1);
+            assert_eq!(st.secret_winner, Some(lo), "the lowest event id wins");
+        }
     }
 }

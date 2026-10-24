@@ -5,7 +5,10 @@ mod storage;
 mod tray;
 mod updates;
 mod attachments;
+mod voice;
+mod transfers_cmds;
 mod part6;
+mod contacts_cmds;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -52,7 +55,7 @@ fn data_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
 
 pub fn run() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mainline=error")))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mainline=error,mainline::rpc=off")))
         .init();
 
     let app = tauri::Builder::default()
@@ -76,17 +79,22 @@ pub fn run() {
                 }
             };
             let identity = keystore::load_or_create(&data_dir.join("identity.bin"), commands::now_ms()?, &vault)?;
+            let vault = std::sync::Arc::new(vault);
             let profile = storage::profile_dir(&data_dir, &identity);
             storage::migrate_legacy(&data_dir, &profile)?;
             std::fs::create_dir_all(&profile)?;
             tracing::info!(dir = %profile.display(), "engine data dir");
 
             let settings = network::load(&data_dir);
+            let voice = voice::Voice::new(data_dir.clone());
             let (engine, rx) = tauri::async_runtime::block_on(Engine::start(
                 identity.clone(),
                 profile,
                 node_config(&settings),
+                vault.clone(),
             ))?;
+            voice::prepare(&engine, &voice);
+            app.manage(voice);
 
             app.manage(part6::PendingLink::default());
             app.manage(AppState {
@@ -125,6 +133,50 @@ pub fn run() {
             commands::edit_message,
             commands::delete_message,
             commands::send_reply,
+            voice::audio_devices,
+            voice::set_audio_devices,
+            voice::get_cascade_at,
+            voice::set_cascade_at,
+            transfers_cmds::transfer_settings,
+            transfers_cmds::set_transfer_settings,
+            transfers_cmds::store_stats,
+            transfers_cmds::pick_download_dir,
+            transfers_cmds::send_files,
+            transfers_cmds::send_dm_files,
+            transfers_cmds::list_transfers,
+            transfers_cmds::download_attachment,
+            transfers_cmds::pause_transfer,
+            transfers_cmds::resume_transfer,
+            transfers_cmds::retry_transfer,
+            transfers_cmds::cancel_transfer,
+            transfers_cmds::remove_transfer,
+            transfers_cmds::create_group_invite,
+            transfers_cmds::group_invite_link,
+            transfers_cmds::revoke_group_invites,
+            transfers_cmds::join_group_by_invite,
+            transfers_cmds::group_join_requests,
+            transfers_cmds::approve_group_join,
+            transfers_cmds::decline_group_join,
+            transfers_cmds::pending_group_joins,
+            transfers_cmds::link_previews,
+            transfers_cmds::set_link_previews,
+            contacts_cmds::pinned_conversations,
+            contacts_cmds::list_contacts,
+            contacts_cmds::send_contact_request,
+            contacts_cmds::accept_contact,
+            contacts_cmds::decline_contact,
+            contacts_cmds::cancel_contact_request,
+            contacts_cmds::remove_contact,
+            contacts_cmds::block_user,
+            contacts_cmds::unblock_user,
+            contacts_cmds::peer_contact_link,
+            contacts_cmds::dm_policy,
+            contacts_cmds::set_dm_policy,
+            contacts_cmds::create_group,
+            contacts_cmds::group_messages,
+            contacts_cmds::send_group_message,
+            contacts_cmds::add_group_members,
+            contacts_cmds::leave_group,
             commands::react,
             commands::unreact,
             commands::list_conversations,
@@ -156,6 +208,14 @@ pub fn run() {
             part6::send_call_message,
             part6::accept_call,
             part6::decline_call,
+            part6::complete_first_run,
+            part6::read_markers,
+            part6::close_conversation,
+            part6::reopen_conversation,
+            part6::closed_conversations,
+            part6::ignore_user,
+            part6::unignore_user,
+            part6::ignored_users,
             part6::list_guardians,
             part6::sign_guardians,
             part6::list_devices,

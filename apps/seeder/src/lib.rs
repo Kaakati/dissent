@@ -260,7 +260,12 @@ async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Resul
     let identity = keystore::load_or_create(&data_dir.join(IDENTITY_FILE), now_ms(), &vault)
         .context("load or create identity")?;
     let started_ms = now_ms();
-    let (engine, _events) = Engine::start(identity, data_dir.join(PROFILE_DIR), node_config(run.loopback))
+    let (engine, _events) = Engine::start(
+        identity,
+        data_dir.join(PROFILE_DIR),
+        node_config(run.loopback),
+        Arc::new(vault),
+    )
         .await
         .context("start engine")?;
     engine
@@ -268,9 +273,11 @@ async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Resul
         .await
         .context("set display name")?;
 
+    // A seeder joins as storage. It keeps and serves sealed history, but it is never added to a
+    // community's encryption group, so it cannot read messages or attachments.
     for invite in &run.join {
-        match engine.join_community(invite).await {
-            Ok(summary) => info!(community = %summary.name, id = %summary.id, "joined community"),
+        match engine.join_as_storage(invite).await {
+            Ok(summary) => info!(community = %summary.name, id = %summary.id, "joined as storage"),
             Err(e) => warn!(error = %e, "could not join community, continuing"),
         }
     }

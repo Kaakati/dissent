@@ -432,6 +432,31 @@ impl Files {
             .map_err(store_err)
     }
 
+    /// Ciphertext bytes and file count of the blobs this node keeps pinned. Blobs still downloading
+    /// count as nothing.
+    pub async fn pinned_stats(&self) -> Result<(u64, u64)> {
+        let mut tags = self
+            .store
+            .tags()
+            .list_prefix(PIN_PREFIX)
+            .await
+            .map_err(store_err)?;
+        let mut hashes = Vec::new();
+        while let Some(tag) = tags.next().await {
+            hashes.push(tag.map_err(store_err)?.hash);
+        }
+        let (mut total, mut count) = (0u64, 0u64);
+        for hash in hashes {
+            if let BlobStatus::Complete { size } =
+                self.store.blobs().status(hash).await.map_err(store_err)?
+            {
+                total = total.saturating_add(size);
+                count += 1;
+            }
+        }
+        Ok((total, count))
+    }
+
     /// Ciphertext bytes of every pinned blob that is complete.
     async fn pinned_bytes(&self) -> Result<u64> {
         let mut tags = self

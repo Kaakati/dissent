@@ -18,6 +18,7 @@
 //! that the sender's cert root is a current member.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::PoisonError;
@@ -183,6 +184,14 @@ pub(crate) enum ConvPacket {
         id: [u8; 32],
         ciphertext: Vec<u8>,
     },
+    /// A holder of a group invite asks to join. Signed by the holder's device, for one invite version.
+    JoinRequest {
+        conv: ConvId,
+        version: u64,
+        cert: DeviceCert,
+        addr: String,
+        sig: Signature,
+    },
     /// The recipient read a message. Signed by the recipient's device.
     Receipt {
         conv: ConvId,
@@ -198,7 +207,8 @@ impl ConvPacket {
             ConvPacket::Welcome { conv, .. }
             | ConvPacket::Commit { conv, .. }
             | ConvPacket::Message { conv, .. }
-            | ConvPacket::Receipt { conv, .. } => *conv,
+            | ConvPacket::Receipt { conv, .. }
+            | ConvPacket::JoinRequest { conv, .. } => *conv,
         }
     }
 }
@@ -234,6 +244,15 @@ pub(crate) struct ConvBook {
     pub failures: BTreeMap<[u8; 32], String>,
     /// Conversations a blocked person started. Their packets are acknowledged and dropped.
     pub silenced: BTreeSet<ConvId>,
+    /// The creator's invite version per group. Revoking bumps it.
+    pub invite_version: BTreeMap<ConvId, u64>,
+    /// Join requests waiting for the creator, per group.
+    pub join_requests: BTreeMap<ConvId, Vec<crate::invites::JoinRequest>>,
+    /// Groups we asked to join with an invite. A welcome for one of them is accepted from anyone.
+    pub invite_joins: BTreeMap<ConvId, crate::invites::InviteJoin>,
+    /// The sender of each conversation the recipient's policy refused, so later packets for it are
+    /// answered the same way.
+    pub refused_convs: BTreeMap<ConvId, dissent_identity::RootId>,
     /// Conversations whose group is being created right now. Not stored.
     #[serde(skip)]
     pub creating: BTreeSet<ConvId>,
@@ -331,6 +350,18 @@ fn roots_of(certs: &[DeviceCert]) -> Vec<RootId> {
 
 fn packet_conv(packet: &ConvPacket) -> ConvId {
     packet.conv()
+}
+
+/// How long a direct request may take before we fall back to an inbox. Node requests wait up to 15 s
+/// for an offline device, which is too long to hold a send or a conversation start.
+pub(crate) const DIRECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Runs a direct request under `DIRECT_TIMEOUT`. A timeout reads as an error.
+pub(crate) async fn direct<T, E>(fut: impl std::future::Future<Output = std::result::Result<T, E>>) -> std::result::Result<T, ()> {
+    match tokio::time::timeout(DIRECT_TIMEOUT, fut).await {
+        Ok(Ok(v)) => Ok(v),
+        _ => Err(()),
+    }
 }
 
 /// What happened to one direct send attempt.
@@ -440,7 +471,7 @@ impl Engine {
             .collect();
         let req = self.request_bytes(&Request::DmKeyPackage)?;
         for device in devices {
-            if let Ok(reply) = node.request(device, req.clone()).await {
+            if let Ok(reply) = direct(node.request(device, req.clone())).await {
                 if let Ok(Response::KeyPackages(pkgs)) = decode::<Response>(&reply) {
                     if !pkgs.is_empty() {
                         return Ok(pkgs);
@@ -457,7 +488,7 @@ impl Engine {
             .unwrap_or_default();
         let take = self.request_bytes(&Request::TakeKeyPackage { root })?;
         for inbox in inboxes {
-            if let Ok(reply) = node.request(inbox, take.clone()).await {
+            if let Ok(reply) = direct(node.request(inbox, take.clone())).await {
                 if let Ok(Response::KeyPackages(pkgs)) = decode::<Response>(&reply) {
                     if !pkgs.is_empty() {
                         return Ok(pkgs);
@@ -819,6 +850,17 @@ impl Engine {
     /// locally and is sealed once it does.
     pub async fn send_to_conversation(&self, conv: ConvId, text: String) -> Result<DmItem> {
         let text = clean_message(&text)?;
+        let embeds = self.build_embeds(&text).await;
+        let plain = if embeds.is_empty() {
+            text
+        } else {
+            crate::attachments::pack_with_embeds(&text, &[], &embeds)?
+        };
+        self.send_conversation_plain(conv, plain).await
+    }
+
+    /// Seals a payload into a conversation and sends it. `plain` is text, or packed attachments.
+    pub(crate) async fn send_conversation_plain(&self, conv: ConvId, text: String) -> Result<DmItem> {
         let meta = self.active_meta(&conv)?;
         let body = Body {
             conv,
@@ -881,7 +923,9 @@ impl Engine {
         DmItem {
             id: data_encoding::BASE32_NOPAD.encode(&m.id).to_lowercase(),
             from: m.from.to_string(),
-            text: m.text.clone(),
+            text: crate::attachments::text_of(&m.text),
+            attachments: w.attachment_views(&m.text),
+            embeds: crate::attachments::embeds_of(&m.text),
             ms: m.hlc.wall_ms,
             pending: delivery == "sending",
             delivery: delivery.to_string(),
@@ -975,7 +1019,7 @@ impl Engine {
         let Ok(bytes) = self.request_bytes(&Request::Conv(Box::new(packet.clone()))) else {
             return Direct::Refused("could not encode the packet".into());
         };
-        match self.node().request(device, bytes).await {
+        match direct(self.node().request(device, bytes)).await {
             Ok(reply) => match decode::<Response>(&reply) {
                 Ok(Response::Ack) => Direct::Acked,
                 Ok(Response::Refused(reason)) => Direct::Refused(reason),
@@ -985,8 +1029,8 @@ impl Engine {
                 }
                 Err(_) => Direct::Refused("unreadable reply".into()),
             },
-            Err(e) => {
-                debug!(device = %device, error = %e, "conversation packet not delivered");
+            Err(()) => {
+                debug!(device = %device, "conversation packet not delivered");
                 Direct::Unreachable
             }
         }
@@ -1011,6 +1055,7 @@ impl Engine {
 
     /// Handles a conversation packet from another device. Replies `Ack`, or an error for a refusal.
     pub(crate) async fn receive_conv(&self, packet: ConvPacket) -> Response {
+        let conv = packet_conv(&packet);
         let result = match packet {
             ConvPacket::Welcome {
                 conv,
@@ -1028,11 +1073,24 @@ impl Engine {
             ConvPacket::Commit { conv, commit } => self.on_commit(conv, commit),
             ConvPacket::Message { conv, id, ciphertext } => self.on_message(conv, id, ciphertext),
             ConvPacket::Receipt { conv, id, cert, sig } => self.on_receipt(conv, id, cert, sig),
+            ConvPacket::JoinRequest {
+                conv,
+                version,
+                cert,
+                addr,
+                sig,
+            } => self.on_join_request(conv, version, cert, addr, sig),
         };
         self.kick_conv_flush();
         match result {
             Ok(()) => Response::Ack,
             Err(CoreError::Rejected(reason)) => Response::Refused(reason),
+            Err(CoreError::PolicyRefused { from, reason }) => {
+                let mut guard = self.write();
+                guard.conv_book.refused_convs.insert(conv, from);
+                let _ = Self::save_book(&guard);
+                crate::contacts::refusal_for(&mut guard, from, reason)
+            }
             Err(e) => Response::Error(e.to_string()),
         }
     }
@@ -1075,8 +1133,15 @@ impl Engine {
             Self::save_book(&guard)?;
             return Ok(());
         }
-        if !crate::contacts::dm_allowed(&self.read(), &cert.root) {
-            return Err(CoreError::Rejected("DM policy refuses this user".into()));
+        let now = now_ms();
+        let asked = self.read().conv_book.invite_joins.get(&conv).is_some_and(|j| {
+            now < j.expires_ms && crate::invites::join_allowed(j, &cert)
+        });
+        if !asked && !crate::contacts::dm_allowed(&self.read(), &cert.root) {
+            return Err(CoreError::PolicyRefused {
+                from: cert.root,
+                reason: "DM policy refuses this user".into(),
+            });
         }
         let existing = self.read().conv_book.convs.get(&conv).cloned();
         if let Some(meta) = existing.filter(|m| m.ready) {
@@ -1111,6 +1176,9 @@ impl Engine {
         {
             let mut guard = self.write();
             self.set_meta(&mut guard, meta.clone())?;
+            guard.conv_book.refused_convs.remove(&conv);
+            // The join is complete, so the invite allowance is spent.
+            guard.conv_book.invite_joins.remove(&conv);
         }
         self.notify_conv(&meta);
         self.release_unsent(conv)
@@ -1216,7 +1284,13 @@ impl Engine {
         }
         let meta = self
             .active_meta(&conv)
-            .map_err(|_| CoreError::Rejected("conversation not accepted".into()))?;
+            .map_err(|_| match self.read().conv_book.refused_convs.get(&conv).copied() {
+                Some(from) => CoreError::PolicyRefused {
+                    from,
+                    reason: "DM policy refuses this user".into(),
+                },
+                None => CoreError::Rejected("conversation not accepted".into()),
+            })?;
         if !meta.ready {
             return Err(CoreError::Invalid("message for a group we have not joined".into()));
         }
@@ -1243,7 +1317,10 @@ impl Engine {
             return Ok(());
         }
         if meta.kind == ConvKind::Dm && !crate::contacts::dm_allowed(&self.read(), &signed.cert.root) {
-            return Err(CoreError::Rejected("DM policy refuses this user".into()));
+            return Err(CoreError::PolicyRefused {
+                from: signed.cert.root,
+                reason: "DM policy refuses this user".into(),
+            });
         }
         if msg_id(&signed.body)? != id {
             return Err(CoreError::Invalid("message id does not match".into()));
@@ -1251,6 +1328,8 @@ impl Engine {
         let body = signed.body;
         match body.action {
             Action::Text(text) => {
+                self.maybe_mirror(&text);
+                self.auto_download(None, data_encoding::BASE32_NOPAD.encode(&id).to_lowercase(), &text);
                 let stored = ConvMsg {
                     id,
                     conv,

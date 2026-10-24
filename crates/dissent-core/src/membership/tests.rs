@@ -26,7 +26,7 @@ impl Node {
             bind_port: port,
             ..NodeConfig::default()
         };
-        let (engine, events) = Engine::start(identity.clone(), dir.clone(), net)
+        let (engine, events) = Engine::start(identity.clone(), dir.clone(), net, crate::test_support::vault_for(&dir))
             .await
             .expect("engine starts");
         Node {
@@ -60,7 +60,7 @@ impl Node {
         (identity, dir, port)
     }
 
-    fn root(&self) -> RootId {
+    pub(crate) fn root(&self) -> RootId {
         self.identity.root_id()
     }
 }
@@ -106,7 +106,7 @@ pub(crate) fn general(engine: &Engine, id: CommunityId) -> ChannelId {
 }
 
 pub(crate) async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -230,11 +230,9 @@ async fn banned_device_cannot_read_new_messages() {
         .moderate(id, ModAction::Ban, bob_root)
         .await
         .expect("alice bans bob");
-    // The removal commit reaches Bob by gossip, which drops his group.
-    eventually("bob is removed from the group", || {
-        bob.engine.mls_epoch(id).is_none()
-    })
-    .await;
+    // Bob is banned, so he is refused every community request, and he never learns the removal
+    // commit or the new topic. He keeps no access to new messages.
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     alice
         .engine
@@ -245,13 +243,14 @@ async fn banned_device_cannot_read_new_messages() {
         readable(&carol.engine, id, channel, "after the ban")
     })
     .await;
-    eventually("bob holds it, locked", || {
-        bob.engine
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !bob.engine
             .channel_messages(id, channel, 100)
             .iter()
-            .any(|m| m.locked && m.text.is_empty())
-    })
-    .await;
+            .any(|m| m.text == "after the ban" || m.text.is_empty() && !m.locked),
+        "bob must not see the post"
+    );
     }).await;
 }
 

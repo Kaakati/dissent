@@ -1,4 +1,6 @@
 // Every Tauri command the UI calls, in one place. Args are camelCase (Tauri maps them to snake_case params).
+// Commands below the "not in the engine yet" line are the contracts in docs/design/07-visual-system.md, Part 6.
+// The UI calls them only after `capabilities` reports the feature, so an engine without them never sees the call.
 const call = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 
 export const api = {
@@ -28,7 +30,8 @@ export const api = {
   unreact: (communityId, channelId, messageId, emoji) => call('unreact', { communityId, channelId, messageId, emoji }),
   // File attachments. The UI shows them only when message items carry an `attachments` array.
   pickFiles: () => call('pick_files'),
-  sendFiles: (communityId, channelId, paths, text) => call('send_files', { communityId, channelId, paths, text }),
+  // `seed` keeps an encrypted copy on the community seeder (servers only). Defaults to true on the engine side.
+  sendFiles: (communityId, channelId, paths, text, opts = {}) => call('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true }),
   sendDmFiles: (peer, paths, text) => call('send_dm_files', { peer, paths, text }),
   downloadAttachment: (communityId, messageId, attachmentId) =>
     call('download_attachment', { communityId, messageId, attachmentId }),
@@ -52,6 +55,74 @@ export const api = {
   setNetworkSettings: (settings) => call('set_network_settings', { settings }),
   identityExportPhrase: () => call('identity_export_phrase'),
   identityImportPhrase: (phrase) => call('identity_import_phrase', { phrase }),
+
+  // ---- not in the engine yet: see Part 6 of the design doc ----
+  capabilities: () => call('capabilities'),
+  setNote: (user, kind, text) => call('set_note', { user, kind, text }),
+  // contacts
+  listContacts: () => call('list_contacts'),
+  sendContactRequest: (link) => call('send_contact_request', { link }),
+  acceptContact: (rootId) => call('accept_contact', { rootId }),
+  declineContact: (rootId) => call('decline_contact', { rootId }),
+  cancelContactRequest: (rootId) => call('cancel_contact_request', { rootId }),
+  removeContact: (rootId) => call('remove_contact', { rootId }),
+  blockUser: (rootId) => call('block_user', { rootId }),
+  unblockUser: (rootId) => call('unblock_user', { rootId }),
+  closeConversation: (key) => call('close_conversation', { key }),
+  ignoreUser: (user) => call('ignore_user', { user }),
+  unignoreUser: (user) => call('unignore_user', { user }),
+  ignoredUsers: () => call('ignored_users'),
+  peerContactLink: (rootId) => call('peer_contact_link', { rootId }),
+  // group conversations
+  createGroup: (name, peers) => call('create_group', { name, peers }),
+  groupMessages: (groupId, limit) => call('group_messages', { groupId, limit }),
+  sendGroupMessage: (groupId, text) => call('send_group_message', { groupId, text }),
+  addGroupMembers: (groupId, peers) => call('add_group_members', { groupId, peers }),
+  leaveGroup: (groupId) => call('leave_group', { groupId }),
+  groupInviteLink: (groupId) => call('group_invite_link', { groupId }),
+  // calls
+  joinCall: (communityId, channelId) => call('join_call', { communityId, channelId }),
+  startCall: (peer) => call('start_call', { peer }),
+  leaveCall: () => call('leave_call'),
+  callState: () => call('call_state'),
+  setMuted: (muted) => call('set_muted', { muted }),
+  setDeafened: (deafened) => call('set_deafened', { deafened }),
+  setCamera: (on) => call('set_camera', { on }),
+  sendCallMessage: (text) => call('send_call_message', { text }),
+  acceptCall: (callId) => call('accept_call', { callId }),
+  declineCall: (callId) => call('decline_call', { callId }),
+  joinGroupCall: (groupId) => call('join_group_call', { groupId }),
+  joinDmCall: (peer) => call('join_dm_call', { peer }),
+  audioDevices: () => call('audio_devices'),
+  setAudioDevices: (input, output) => call('set_audio_devices', { input, output }),
+  storeStats: () => call('store_stats'),
+  // transfers
+  listTransfers: () => call('list_transfers'),
+  pauseTransfer: (transferId) => call('pause_transfer', { transferId }),
+  resumeTransfer: (transferId) => call('resume_transfer', { transferId }),
+  cancelTransfer: (transferId) => call('cancel_transfer', { transferId }),
+  retryTransfer: (transferId) => call('retry_transfer', { transferId }),
+  removeTransfer: (transferId) => call('remove_transfer', { transferId }),
+  transferSettings: () => call('transfer_settings'),
+  setTransferSettings: (settings) => call('set_transfer_settings', { settings }),
+  pickDownloadDir: () => call('pick_download_dir'),
+  // recovery guardians and devices
+  listGuardians: () => call('list_guardians'),
+  signGuardians: (guardians, threshold) => call('sign_guardians', { guardians, threshold }),
+  listDevices: () => call('list_devices'),
+  revokeDevice: (deviceId) => call('revoke_device', { deviceId }),
+  linkDeviceCode: () => call('link_device_code'),
+  // safety numbers and pins
+  markSafetyVerified: (user) => call('mark_safety_verified', { user }),
+  pinnedMessages: (communityId, channelId) => call('pinned_messages', { communityId, channelId }),
+  pinConversation: (key, pinned) => call('pin_conversation', { key, pinned }),
+  markRead: (key) => call('mark_read', { key }),
+  completeFirstRun: () => call('complete_first_run'),
+  pinMessage: (communityId, channelId, messageId, pinned) => call('pin_message', { communityId, channelId, messageId, pinned }),
+  pinnedConversations: () => call('pinned_conversations'),
+  readMarkers: () => call('read_markers'),
+  approveDevice: (link) => call('approve_device', { link }),
+  finishDeviceLink: (grant) => call('finish_device_link', { grant }),
 };
 
 // Calls handler with each EngineEvent payload, e.g. { kind: 'message', community_id, channel_id }.

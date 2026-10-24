@@ -27,6 +27,8 @@ pub const CAPABILITIES: &[&str] = &[
     "notes",
     "pins",
     "onboarding",
+    "close_dm",
+    "ignore",
 ];
 
 /// Which text a user note stores.
@@ -57,6 +59,7 @@ pub(crate) struct UserFields {
     pub verified_ms: Option<u64>,
     pub note: Option<String>,
     pub nickname: Option<String>,
+    pub ignored: bool,
 }
 
 fn load(w: &World) -> LocalState {
@@ -95,6 +98,7 @@ pub(crate) fn user_fields(w: &World, user: &RootId) -> UserFields {
         verified_ms,
         note: state.notes.get(user).cloned(),
         nickname: state.nicknames.get(user).cloned(),
+        ignored: is_ignored(w, user),
     }
 }
 
@@ -205,8 +209,9 @@ impl Engine {
         load(&self.read()).read_ms.get(key).copied()
     }
 
-    /// Records that the user has seen and saved the recovery phrase. Clears the first-run state.
-    pub fn mark_phrase_saved(&self) -> Result<()> {
+    /// Ends first run. The UI calls it after the user confirms they wrote the recovery phrase down.
+    /// Exporting the phrase does not end it.
+    pub fn complete_first_run(&self) -> Result<()> {
         self.update_local(|s| s.phrase_saved = true)
     }
 
@@ -218,5 +223,84 @@ impl Engine {
         let mut map: BTreeMap<RootId, u64> = read_bin(&path)?.unwrap_or_default();
         map.insert(user, now);
         write_bin(&path, &map)
+    }
+}
+
+impl Engine {
+    /// Every conversation key with the time it was last marked read, in milliseconds.
+    pub fn read_markers(&self) -> BTreeMap<String, u64> {
+        load(&self.read()).read_ms
+    }
+}
+
+/// Hidden conversations and ignored people. A separate file, so `local.bin` keeps its layout.
+#[derive(Default, Serialize, Deserialize)]
+struct ViewState {
+    /// Conversation key to the time it was closed, in milliseconds.
+    closed: BTreeMap<String, u64>,
+    ignored: BTreeSet<RootId>,
+}
+
+fn view_path(w: &World) -> PathBuf {
+    w.paths.local_state().with_file_name("local_view.bin")
+}
+
+fn load_view(w: &World) -> ViewState {
+    read_bin(&view_path(w)).ok().flatten().unwrap_or_default()
+}
+
+/// Whether `user` is ignored on this device.
+pub(crate) fn is_ignored(w: &World, user: &RootId) -> bool {
+    load_view(w).ignored.contains(user)
+}
+
+impl Engine {
+    /// Hides a conversation from the sidebar. It comes back when a new message arrives.
+    pub fn close_conversation(&self, key: String) -> Result<()> {
+        self.update_view(|s| {
+            s.closed.insert(key, now_ms());
+        })
+    }
+
+    /// Shows a closed conversation again.
+    pub fn reopen_conversation(&self, key: String) -> Result<()> {
+        self.update_view(|s| {
+            s.closed.remove(&key);
+        })
+    }
+
+    /// Closed conversations, each with the time it was closed, in milliseconds. The UI compares
+    /// that with the conversation's last message to bring it back.
+    pub fn closed_conversations(&self) -> BTreeMap<String, u64> {
+        load_view(&self.read()).closed
+    }
+
+    /// Ignores a person. Their messages still arrive, but the UI collapses them and never notifies.
+    /// Only this device knows.
+    pub fn ignore_user(&self, user: RootId) -> Result<()> {
+        self.update_view(|s| {
+            s.ignored.insert(user);
+        })
+    }
+
+    /// Stops ignoring a person.
+    pub fn unignore_user(&self, user: RootId) -> Result<()> {
+        self.update_view(|s| {
+            s.ignored.remove(&user);
+        })
+    }
+
+    /// Everyone this device ignores.
+    pub fn ignored_users(&self) -> Vec<RootId> {
+        load_view(&self.read()).ignored.into_iter().collect()
+    }
+
+    fn update_view<T>(&self, f: impl FnOnce(&mut ViewState) -> T) -> Result<T> {
+        let path = view_path(&self.read());
+        let _serial = self.write();
+        let mut state: ViewState = read_bin(&path)?.unwrap_or_default();
+        let out = f(&mut state);
+        write_bin(&path, &state)?;
+        Ok(out)
     }
 }

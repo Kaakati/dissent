@@ -132,7 +132,11 @@ impl RootKey {
     pub fn grant(&self, req: &LinkRequest, now_ms: u64) -> Result<LinkGrant> {
         req.verify()?;
         let cert = self.certify(req.device, now_ms);
-        Ok(LinkGrant { cert, nonce: req.nonce, root_seed_wrapped: None })
+        Ok(LinkGrant {
+            cert,
+            nonce: req.nonce,
+            root_seed_wrapped: None,
+        })
     }
 
     pub fn revoke(&self, device: DeviceId, now_ms: u64) -> DeviceRevocation {
@@ -155,10 +159,14 @@ impl Identity {
             return Err(IdentityError::BadCert);
         }
         if grant.nonce != pending.nonce {
-            return Err(IdentityError::Encoding("grant nonce does not match request".into()));
+            return Err(IdentityError::Encoding(
+                "grant nonce does not match request".into(),
+            ));
         }
         if grant.root_seed_wrapped.is_some() {
-            return Err(IdentityError::Encoding("root key transfer is not supported yet".into()));
+            return Err(IdentityError::Encoding(
+                "root key transfer is not supported yet".into(),
+            ));
         }
         if grant.cert.device != device.id() {
             return Err(IdentityError::BadCert);

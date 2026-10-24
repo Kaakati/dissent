@@ -16,7 +16,7 @@ use pkarr::dht::{DhtClient, DhtConfig, ResolveError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::Url;
 
 pub use contact::ContactCard;
@@ -129,8 +129,8 @@ impl Discovery {
     /// fewer than [`MIN_STORED_NODES`] nodes is retried every [`PUBLISH_RETRY_DELAY`]
     /// until [`PUBLISH_DEADLINE`] passes. Returns the highest count any attempt reached.
     /// It is an error only if no attempt stored on any node.
-    pub async fn publish(&self, key: &CommunityKey, rec: &CommunityRecord) -> Result<usize> {
-        let packet = rec.to_signed_packet(key)?;
+    pub async fn publish(&self, key: &CommunityKey, secret: &[u8; 32], rec: &CommunityRecord) -> Result<usize> {
+        let packet = rec.to_private_packet(key, secret)?;
         self.wait_warm().await;
         let deadline = tokio::time::Instant::now() + PUBLISH_DEADLINE;
         let mut best = 0usize;
@@ -172,7 +172,7 @@ impl Discovery {
 
     /// Waits until the DHT node's routing table is populated. A cold node's lookups end early
     /// and miss records. A node still cold after [`WARM_DEADLINE`] is replaced by a fresh one,
-    /// up to [`MAX_NODE_STARTS`] nodes. Gives up quietly after that and proceeds anyway.
+    /// up to [`MAX_NODE_STARTS`] nodes. After that it logs a warning and proceeds anyway.
     async fn wait_warm(&self) {
         for node in 1..=MAX_NODE_STARTS {
             let deadline = tokio::time::Instant::now() + WARM_DEADLINE;
@@ -183,6 +183,10 @@ impl Discovery {
                 tokio::time::sleep(WARM_POLL_INTERVAL).await;
             }
             if node == MAX_NODE_STARTS {
+                warn!(
+                    nodes = MAX_NODE_STARTS,
+                    "dht still has no peers after fresh nodes; publish and resolve may miss records"
+                );
                 break;
             }
             debug!(node, "dht node still cold; starting a fresh one");
@@ -210,16 +214,15 @@ impl Discovery {
     ///
     /// Waits for the node to warm up first, then retries a lookup that finds nothing
     /// up to [`RESOLVE_ATTEMPTS`] times. A lookup from a young node can miss the record.
-    pub async fn resolve(&self, id: &CommunityId) -> Result<Option<CommunityRecord>> {
+    pub async fn resolve(&self, id: &CommunityId, secret: &[u8; 32]) -> Result<Option<CommunityRecord>> {
         self.wait_warm().await;
-        let public_key = pkarr::PublicKey::try_from(id.as_bytes())
-            .map_err(|e| DiscoveryError::Pkarr(e.to_string()))?;
+        let public_key = record::dht_public_key(secret, id);
         // A lookup can end without reaching the nodes that hold the record. Retry before giving up.
         for attempt in 1..=RESOLVE_ATTEMPTS {
             let outcome = self.dht().resolve(&public_key, None).await.complete().await;
             match outcome.most_recent {
                 Ok(packet) => {
-                    return CommunityRecord::from_signed_packet_for(&packet, id).map(Some)
+                    return CommunityRecord::from_private_packet(&packet, id, secret).map(Some)
                 }
                 Err(ResolveError::NotFound) if attempt < RESOLVE_ATTEMPTS => {
                     tokio::time::sleep(RESOLVE_RETRY_DELAY).await;
@@ -235,6 +238,26 @@ impl Discovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SECRET: [u8; 32] = [7; 32];
+
+    #[test]
+    fn a_stranger_with_only_the_id_derives_another_dht_key() {
+        let id = CommunityKey::generate().id();
+        assert_ne!(
+            record::dht_public_key(&SECRET, &id),
+            record::dht_public_key(&[8; 32], &id),
+            "without the secret the packet is elsewhere on the DHT"
+        );
+    }
+
+    #[test]
+    fn a_rotated_secret_moves_the_record_to_a_new_key() {
+        let id = CommunityKey::generate().id();
+        let before = record::dht_public_key(&SECRET, &id);
+        let after = record::dht_public_key(&[9; 32], &id);
+        assert_ne!(before, after);
+    }
 
     /// Needs the Mainline DHT and network access; run with `cargo test -- --ignored`.
     #[ignore]
@@ -261,7 +284,7 @@ mod tests {
         };
         let publisher = Discovery::new().expect("publisher");
         let t0 = std::time::Instant::now();
-        let stored = publisher.publish(&key, &rec).await;
+        let stored = publisher.publish(&key, &SECRET, &rec).await;
         let publish_ms = t0.elapsed().as_millis();
         let pub_est = publisher.dht().info().await.dht_size_estimate().0;
 
@@ -269,7 +292,7 @@ mod tests {
         let t1 = std::time::Instant::now();
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            resolver.resolve(&key.id()),
+            resolver.resolve(&key.id(), &SECRET),
         )
         .await;
         let resolve_ms = t1.elapsed().as_millis();
@@ -296,8 +319,36 @@ mod tests {
             relays: vec![],
         };
         let discovery = Discovery::new().expect("client");
-        discovery.publish(&key, &rec).await.expect("publish");
-        let got = discovery.resolve(&key.id()).await.expect("resolve");
+        discovery.publish(&key, &SECRET, &rec).await.expect("publish");
+        let got = discovery.resolve(&key.id(), &SECRET).await.expect("resolve");
         assert_eq!(got, Some(rec));
+    }
+}
+
+#[cfg(test)]
+mod dht_privacy_tests {
+    use super::*;
+
+    /// Needs the Mainline DHT and network access. Run it through `scripts/fwtest.sh`.
+    #[tokio::test]
+    #[ignore]
+    async fn a_stranger_with_only_the_id_finds_nothing_and_a_holder_finds_the_record() {
+        let key = CommunityKey::generate();
+        let id = key.id();
+        let secret = [5u8; 32];
+        let rec = CommunityRecord {
+            name: "Private club".into(),
+            peers: vec![],
+            relays: vec![],
+        };
+        let discovery = Discovery::new().expect("dht node");
+        discovery
+            .publish(&key, &secret, &rec)
+            .await
+            .expect("publish");
+        let holder = discovery.resolve(&id, &secret).await.expect("holder resolves");
+        assert_eq!(holder, Some(rec));
+        let stranger = discovery.resolve(&id, &[6u8; 32]).await.expect("stranger resolves");
+        assert_eq!(stranger, None, "a stranger with only the id finds no record");
     }
 }

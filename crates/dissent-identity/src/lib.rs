@@ -13,16 +13,16 @@
 
 pub mod devices;
 pub mod keystore;
+mod link;
 pub mod mnemonic;
 pub mod recovery;
 pub mod safety;
 pub mod vault;
-mod link;
 
 pub use devices::{DeviceRevocation, LinkGrant, LinkRequest};
-pub use vault::Vault;
 pub use recovery::{GuardianApproval, GuardianSet, KeyRotation, RotationProof, RotationRequest};
 pub use safety::{safety_fingerprint, safety_number};
+pub use vault::Vault;
 
 use ed25519_dalek::{Signature as DalekSig, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,9 @@ impl fmt::Debug for Signature {
         write!(
             f,
             "Signature({}…)",
-            data_encoding::BASE32_NOPAD.encode(&self.0[..6]).to_lowercase()
+            data_encoding::BASE32_NOPAD
+                .encode(&self.0[..6])
+                .to_lowercase()
         )
     }
 }
@@ -116,9 +118,18 @@ macro_rules! public_key_newtype {
     };
 }
 
-public_key_newtype!(RootId, "Public half of a user's root key. The user's identity.");
-public_key_newtype!(DeviceId, "Public half of a device key. Also the iroh node id of that device.");
-public_key_newtype!(CommunityId, "Public half of a community key. The community's address.");
+public_key_newtype!(
+    RootId,
+    "Public half of a user's root key. The user's identity."
+);
+public_key_newtype!(
+    DeviceId,
+    "Public half of a device key. Also the iroh node id of that device."
+);
+public_key_newtype!(
+    CommunityId,
+    "Public half of a community key. The community's address."
+);
 
 /// Shared secret-key wrapper. `Debug` hides the seed.
 #[derive(Clone)]
@@ -171,7 +182,12 @@ impl RootKey {
     }
     /// Issue a certificate binding `device` to this root.
     pub fn certify(&self, device: DeviceId, issued_at_ms: u64) -> DeviceCert {
-        let mut cert = DeviceCert { root: self.id(), device, issued_at_ms, sig: Signature([0; 64]) };
+        let mut cert = DeviceCert {
+            root: self.id(),
+            device,
+            issued_at_ms,
+            sig: Signature([0; 64]),
+        };
         cert.sig = self.0.sign(&cert.signing_bytes());
         cert
     }
@@ -225,7 +241,9 @@ impl DeviceCert {
         v
     }
     pub fn verify(&self) -> Result<()> {
-        self.root.verify(&self.signing_bytes(), &self.sig).map_err(|_| IdentityError::BadCert)
+        self.root
+            .verify(&self.signing_bytes(), &self.sig)
+            .map_err(|_| IdentityError::BadCert)
     }
 }
 
@@ -252,12 +270,20 @@ impl Genesis {
         v
     }
     pub fn create(key: &CommunityKey, owner: RootId, name: String, created_ms: u64) -> Self {
-        let mut g = Genesis { community: key.id(), owner, name, created_ms, sig: Signature([0; 64]) };
+        let mut g = Genesis {
+            community: key.id(),
+            owner,
+            name,
+            created_ms,
+            sig: Signature([0; 64]),
+        };
         g.sig = key.sign(&g.signing_bytes());
         g
     }
     pub fn verify(&self) -> Result<()> {
-        self.community.verify(&self.signing_bytes(), &self.sig).map_err(|_| IdentityError::BadSignature)
+        self.community
+            .verify(&self.signing_bytes(), &self.sig)
+            .map_err(|_| IdentityError::BadSignature)
     }
 }
 
@@ -278,7 +304,12 @@ impl Identity {
         let root = RootKey::generate();
         let device = DeviceKey::generate();
         let cert = root.certify(device.id(), now_ms);
-        Self { root: Some(root), device, cert, device_name: String::new() }
+        Self {
+            root: Some(root),
+            device,
+            cert,
+            device_name: String::new(),
+        }
     }
     pub fn root_id(&self) -> RootId {
         self.cert.root
@@ -300,11 +331,14 @@ mod serde_bytes64 {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<[u8; 64], D::Error> {
         let v: Vec<u8> = if d.is_human_readable() {
             let s = String::deserialize(d)?;
-            data_encoding::BASE64URL_NOPAD.decode(s.as_bytes()).map_err(serde::de::Error::custom)?
+            data_encoding::BASE64URL_NOPAD
+                .decode(s.as_bytes())
+                .map_err(serde::de::Error::custom)?
         } else {
             Vec::<u8>::deserialize(d)?
         };
-        v.try_into().map_err(|_| serde::de::Error::custom("signature must be 64 bytes"))
+        v.try_into()
+            .map_err(|_| serde::de::Error::custom("signature must be 64 bytes"))
     }
 }
 

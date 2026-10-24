@@ -1,5 +1,6 @@
 //! Replies and reactions. A reply seals its text under the community's MLS group, and its target
-//! stays in clear. Reactions carry the emoji in clear for now. See `docs/design/05-encrypted-servers.md`.
+//! stays in clear. A reaction seals its emoji the same way, so only members learn which emoji it
+//! is. Members count reactions from the decrypted emoji. See `docs/design/05-encrypted-servers.md`.
 
 use dissent_events::{normalize_emoji, ChannelId, EventId, Payload, SealedKind};
 use dissent_identity::CommunityId;
@@ -38,7 +39,7 @@ impl Engine {
             .ok_or_else(|| CoreError::Invalid("the reply is not in its channel".into()))
     }
 
-    /// Adds our reaction `emoji` to `target`. The emoji is checked and normalised first.
+    /// Adds our reaction `emoji` to `target`. The emoji is checked and normalised, then sealed.
     pub async fn react(
         &self,
         community: CommunityId,
@@ -46,11 +47,7 @@ impl Engine {
         target: EventId,
         emoji: String,
     ) -> Result<()> {
-        let emoji = normalize_emoji(&emoji)
-            .map_err(|e| CoreError::Invalid(format!("emoji: {e:?}")))?;
-        self.author_publish(community, channel, Payload::React { target, emoji })
-            .await?;
-        Ok(())
+        self.publish_reaction(community, channel, target, emoji, true).await
     }
 
     /// Removes our reaction `emoji` from `target`. A no-op if we had not reacted with it.
@@ -61,10 +58,32 @@ impl Engine {
         target: EventId,
         emoji: String,
     ) -> Result<()> {
+        self.publish_reaction(community, channel, target, emoji, false).await
+    }
+
+    async fn publish_reaction(
+        &self,
+        community: CommunityId,
+        channel: ChannelId,
+        target: EventId,
+        emoji: String,
+        react: bool,
+    ) -> Result<()> {
         let emoji = normalize_emoji(&emoji)
             .map_err(|e| CoreError::Invalid(format!("emoji: {e:?}")))?;
-        self.author_publish(community, channel, Payload::Unreact { target, emoji })
-            .await?;
+        let (epoch, ciphertext) = self.seal(community, &emoji)?;
+        let kind = if react {
+            SealedKind::React { target }
+        } else {
+            SealedKind::Unreact { target }
+        };
+        let payload = Payload::Sealed {
+            epoch,
+            kind,
+            ciphertext,
+        };
+        let se = self.author_publish(community, channel, payload).await?;
+        self.store_content(community, se.event.id, se.event.body.hlc, emoji);
         Ok(())
     }
 }

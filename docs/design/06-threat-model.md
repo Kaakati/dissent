@@ -22,6 +22,7 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 | Message text confidentiality | Channel message text, replies and edits are sealed with MLS (RFC 9420, X25519, AES-128-GCM, Ed25519). There is no plaintext fallback: sending fails if the group isn't ready. |
 | Media confidentiality | Call frames are SFrame-encrypted (RFC 9605) with keys from the MLS exporter. Forwarders hold no key. |
 | Direct messages | Sent only device to device over the authenticated QUIC connection, never stored by third parties. Signed by the sender and bound to the recipient. |
+| Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 16 per device. |
 
 ## Findings
 
@@ -36,7 +37,7 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 
    Joiners apply the same check to a welcome, so they're never welcomed into a group containing
    non-members.
-2. **Phase 1 fixed, phases 2 and 3 open: community metadata is readable without an invite.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Responders refuse a community request without a valid token. Anyone who knows a community id
+2. **Phases 1 and 2 fixed; phase 3 partly fixed, the DHT record is sealed, control payloads and emoji are open.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Each ban rotates the secret: the new one is sealed under the group in a `SecretRotation` event, and storage members and joiners fetch it from an active member. A banned device is refused every community request, even with a valid token. A retired secret works for 30 days, so invites made before a ban keep working for that long. When two admins rotate at once, the replay keeps the rotation with the lowest event id, and every device adopts it. The losing secret is retired, with grace, like any other. Before the fix, anyone who knew a community id
    can join its gossip topic or sync it, and read control events: display names, handles, roles,
    bans, membership timing and reaction emoji. DHT nodes learn the community id and the plaintext
    name in the community record. **Fix:**
@@ -48,6 +49,13 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
    Decided and phased: old invites stop working; phase 1 gates the gossip topic and sync RPCs
    behind the invite secret; phase 2 rotates the secret on every ban; phase 3 encrypts control
    payloads, the DHT record name and reaction emoji.
+   **Phase 3, DHT record: done.** The record is sealed with XChaCha20-Poly1305 under a key derived
+   from the current community secret, with the community id as associated data. The community key
+   signs the record inside the ciphertext, so a secret holder cannot forge it. The DHT key is derived
+   from the same secret, so a stranger who knows only the community id does not find the packet. The
+   record follows each rotation, because the publisher derives from the current secret. A holder whose
+   invite names a retired secret looks in the wrong place, and its join falls back to the invite's own
+   peers. **Still open in phase 3:** control payloads and reaction emoji.
 3. **Fixed: key-change warnings.** The engine raises `IdentityChanged` when someone you share a
    server with or have messaged rotates their key through recovery, or when a person you've
    messaged gains a new device. The change is recorded on their profile, and the app shows a
@@ -73,11 +81,11 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 6. **Accepted, documented:** a peer forwarder in a large call sees who is speaking and how
    loudly, through the audio-level byte. Message metadata (author, time, channel) is visible to
    members, as in any group chat.
-7. **Partly fixed: data at rest.** The identity file is sealed with XChaCha20-Poly1305 under a
-   data key held in the OS credential store: Windows Credential Manager, macOS Keychain or Linux
-   Secret Service. Argon2id passphrase derivation is the fallback for headless machines. **Open:**
-   the MLS state and the decrypted content log are still plaintext, and core will adopt the same
-   `Vault`. Malware running as the user is out of scope.
+7. **Fixed: data at rest.** The identity file, the MLS state and the decrypted content log are sealed with
+   XChaCha20-Poly1305 under a per-file subkey of the data key. The data key is held in the OS credential store: Windows
+   Credential Manager, macOS Keychain or Linux Secret Service. Argon2id passphrase derivation is the fallback for
+   headless machines. A plaintext MLS snapshot or content log from before this change is sealed on first open. A wrong
+   key refuses to start the engine rather than overwrite the state. Malware running as the user is out of scope.
 
 ## How the fixes are verified
 

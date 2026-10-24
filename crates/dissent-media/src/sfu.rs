@@ -19,7 +19,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::auth::{digest_sender, is_digest};
-use crate::call::Call;
+use crate::call::{Call, CallStats};
 use crate::e2ee::{audio_level, peek_sender};
 use crate::election::{Mode, PeerId, AUDIO_TOP_SPEAKERS};
 use crate::error::{MediaError, Result};
@@ -182,6 +182,15 @@ impl<T: PacketTransport> Sfu<T> {
             .into_iter()
             .take(AUDIO_TOP_SPEAKERS as usize)
             .map(|(_, sender)| sender)
+            .collect()
+    }
+
+    /// The stats of each downlink, keyed by the participant it serves. Each carries that
+    /// downlink's bandwidth target in `target_kbps`.
+    pub fn downlink_stats(&self) -> BTreeMap<PeerId, CallStats> {
+        self.links
+            .iter()
+            .map(|(peer, call)| (*peer, call.stats()))
             .collect()
     }
 

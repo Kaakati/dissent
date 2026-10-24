@@ -49,6 +49,7 @@ impl Engine {
             ..
         } = &mut *guard;
         let mut emitted: Vec<EngineEvent> = Vec::new();
+        let mut relay_sets: Vec<Vec<String>> = Vec::new();
         let mut valid = Vec::with_capacity(items.len());
         for se in items {
             let hlc = se.event.body.hlc;
@@ -92,6 +93,9 @@ impl Engine {
             if c.is_rejected(&se.event.id) {
                 continue;
             }
+            if let Payload::SetRelays { relays } = &se.event.body.payload {
+                relay_sets.push(relays.clone());
+            }
             if let Payload::KeyRotation(rot) = &se.event.body.payload {
                 let (old, new) = (rot.request.old_root, rot.request.new_root);
                 if c.is_member(&new)
@@ -116,6 +120,10 @@ impl Engine {
         }
         drop(guard);
         self.retry_deferred_commits(community);
+        for relays in relay_sets {
+            let engine = self.clone();
+            self.spawn_task(async move { engine.adopt_relays(&relays).await });
+        }
         self.unseal_pending(community);
         for ev in emitted {
             self.emit(ev);
@@ -160,9 +168,10 @@ impl Engine {
             Ok(env) => env,
             Err(e) => return Response::Error(format!("bad request: {e}")),
         };
-        if let Err(e) = self.check_request(&env) {
+        if let Err(e) = self.check_request(&env, conn_from) {
             return Response::Error(e.to_string());
         }
+        self.write().last_seen.insert(conn_from, now_ms());
         match env.req {
             Request::Genesis { community } => {
                 let genesis = self
@@ -203,6 +212,7 @@ impl Engine {
             Request::MlsCommits { community, after } => {
                 Response::MlsCommits(self.commits_after(community, after))
             }
+            Request::Secret { community } => self.serve_secret(conn_from, community),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }
@@ -264,7 +274,7 @@ impl Engine {
                 return Response::Ack;
             }
             if !crate::contacts::dm_allowed(w, &peer) {
-                return Response::Refused("this user does not accept direct messages from you".into());
+                return crate::contacts::refusal_for(w, peer, "this user does not accept direct messages from you".into());
             }
             device_notice = identity_watch::learn_device(
                 &mut w.directory,

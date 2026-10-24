@@ -1,12 +1,8 @@
 # Dissent seeder
 
-A seeder is a Dissent member that never sleeps. It runs on a server or an always-on PC and keeps a community's history. When everyone's phone and laptop is off, a new member can still join from the seeder and receive the messages.
+A seeder keeps encrypted copies of a community's messages, so the history stays available when the people in it are offline. A new member who joins while everyone else is away can still receive that history from the seeder.
 
-A seeder has no screen and no user. It joins the communities you give it, syncs their messages, and stays online.
-
-## What it can read
-
-A seeder joins as a member, so it can see what the members can see. Messages are encrypted for the community's group, and a seeder can read a message only from the time it joined the group. Older messages reach it as locked, which means it stores them without being able to read them. New members who join later also receive the locked history.
+A seeder cannot read anything. It stores and passes along the same sealed bytes that the members' devices hold. It is never added to the community's encryption group, so it has no keys to open messages or files. It also cannot admit anyone to the group. Only people in the group can do that.
 
 ## Running it
 
@@ -16,7 +12,7 @@ Build it with `cargo build --release -p dissent-seeder`. Then run it with an inv
 dissent-seeder --data-dir /var/lib/dissent-seeder --passphrase-file /etc/dissent/seeder.pass --join <invite>
 ```
 
-The seeder's identity is stored encrypted in the data directory. Its key comes from the operating system's keychain when there is one, which is the normal case on Windows and macOS. Headless Linux servers usually have no keychain, so give a passphrase instead:
+The seeder's own identity is stored encrypted in the data directory. Its key comes from the operating system's keychain when there is one, which is the normal case on Windows and macOS. Headless Linux servers usually have no keychain, so give a passphrase instead:
 
 - `--passphrase-file <path>`: a file whose first line is the passphrase. Keep it readable only by the account that runs the seeder.
 - `DISSENT_SEEDER_PASSPHRASE`: the same passphrase, as an environment variable.
@@ -56,6 +52,10 @@ Paths in the run arguments must be absolute, because a service does not run from
 
 `service stop` asks the seeder to shut down cleanly, and gives it 5 seconds before it ends the task. On Windows the task runs in your session, so signing out stops the seeder. It starts again at your next logon.
 
-## What it can and cannot see
+## What it can and cannot do
 
-A seeder can see the community's structure: its channels, its members, and the times messages were posted. It can read only the messages it was a group member for. It cannot read messages from before it joined. It holds the encrypted history for everyone, so it is only as private as the community's own membership. Anyone who can read a seeder's data directory and its passphrase can read what the seeder can read.
+- It keeps every encrypted message and file for the communities you give it, and serves them to members who ask.
+- It knows who is in a community, and when messages were sent, because that is visible in the community's structure.
+- It cannot read message text or files. It has no keys for them.
+- It cannot add anyone to a community's encryption group. A member who is in the group does that when they are online.
+- Anyone who gets the seeder's data directory and its passphrase gets the encrypted copies. They still cannot read them without the community's keys.

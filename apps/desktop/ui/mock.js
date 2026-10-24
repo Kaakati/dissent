@@ -13,39 +13,40 @@ if (!window.__TAURI__) {
   const GRACE = id('k3f9q2xagrace');
   const LINUS = id('w8r2d6nblinus');
   const KEN = id('h5t7c3vyken');
+  const RANA = id('rana-z6q1e8jd');
   const RADIA = id('e4j9m1sqradia');
-  const people = { [ME]: 'Ada', [GRACE]: 'Grace', [LINUS]: 'Linus', [KEN]: 'Ken', [RADIA]: 'Radia' };
-  const handles = { [GRACE]: 'grace', [LINUS]: 'torvalds' };
+  const people = { [ME]: 'Sami', [GRACE]: 'Maya', [LINUS]: 'Jonas', [KEN]: 'Omar', [RADIA]: 'Leila', [RANA]: 'Rana' };
+  const handles = { [ME]: 'sami', [GRACE]: 'maya', [LINUS]: 'jonas', [KEN]: 'omar', [RADIA]: 'leila', [RANA]: 'rana' };
   const suffix = (root) => root.slice(0, 8);
 
   // Messages are written as [minutes ago, author, text]. Gaps longer than 7 minutes start a new group.
   // Reactions are kept as { emoji, users } and replies as the original's id; messageItem shapes them for the UI.
   const at = (daysAgo, minutesAgo) => now - daysAgo * DAY - minutesAgo * MIN;
   const msg = (daysAgo, minutesAgo, author, text) => ({
-    id: id(`m${++seq}`), author, text, ms: at(daysAgo, minutesAgo), edited: false, deleted: false, reactions: [], replyTo: null,
+    id: id(`m${++seq}`), author, text, ms: at(daysAgo, minutesAgo), edited: false, deleted: false, reactions: [], replyTo: null, queued: false,
   });
 
   const generalMessages = [
-    msg(3, 300, GRACE, 'Welcome to Rust Chat. Read the pinned rules before posting, please.'),
-    msg(3, 296, GRACE, 'Help channel is for questions. Announcements are for releases only.'),
-    msg(3, 180, LINUS, 'Anyone tried the new async trait stabilisation yet?'),
-    msg(2, 600, KEN, 'Yes, it compiled first try on my side. Nice.'),
-    msg(2, 598, KEN, 'The error messages got a lot clearer too.'),
-    msg(2, 590, ME, 'Agreed. I was worried about the lifetimes but they just work now.'),
-    msg(2, 455, LINUS, 'The reference page for it is up: https://doc.rust-lang.org/stable/releases.html'),
-    msg(1, 900, RADIA, 'Has anyone benchmarked the new allocator against the old one?'),
-    msg(1, 880, RADIA, 'I got about 8% on the parser benchmark. Numbers in the gist.'),
-    msg(1, 860, GRACE, 'Please post the gist link here so people can reproduce it.'),
-    msg(1, 200, ME, 'Working on the event log replay tonight. Hopefully done by Friday.'),
-    msg(0, 90, KEN, 'Morning. Did the nightly build go out?'),
-    msg(0, 88, KEN, 'It failed on the Windows runner again.'),
-    msg(0, 86, LINUS, 'Known flake, retrying now.'),
-    msg(0, 20, ME, 'Retry passed. Tagging the release candidate after lunch.'),
-    msg(0, 4, GRACE, 'Thanks all. Changelog is in the repo under docs/.'),
+    msg(3, 300, GRACE, 'Welcome to Riverside Makers. Read the pinned rules before posting, please.'),
+    msg(3, 296, GRACE, 'Booking sheet for the laser is pinned in #announcements.'),
+    msg(3, 180, LINUS, 'Anyone booked the laser cutter for Saturday?'),
+    msg(2, 600, KEN, 'Yes, 10:00 works for me. I can bring the spare birch ply.'),
+    msg(2, 598, KEN, 'The extraction fan is fixed too, so the room stays clear.'),
+    msg(2, 590, ME, 'Counting me in. I will bring the soldering kits.'),
+    msg(2, 455, LINUS, 'Cut file for the enclosure is here: https://example.org/files/enclosure-v3'),
+    msg(1, 900, RADIA, 'Has anyone tried the new PLA spool on the printer?'),
+    msg(1, 880, RADIA, 'Mine jammed twice at 210 degrees. Settings are in the photo.'),
+    msg(1, 860, GRACE, 'Please post the settings here so people can reproduce the print.'),
+    msg(1, 200, ME, 'Booking the laser for 10:00 now.'),
+    msg(0, 90, KEN, 'Morning. The printer is free from 14:00 if anyone needs it.'),
+    msg(0, 88, KEN, 'The print log shows a clog at the nozzle again.'),
+    msg(0, 86, LINUS, 'I will swap the nozzle on Friday.'),
+    msg(0, 20, ME, 'Thanks. The enclosure photos are in the attachments.'),
+    msg(0, 4, GRACE, 'Thanks all. The walkthrough video is in the attachments.'),
   ];
   // Sample replies and reactions on #general.
-  generalMessages[5].replyTo = generalMessages[3].id; // Ada answers Ken's "Yes, it compiled first try"
-  generalMessages[9].replyTo = generalMessages[8].id; // Grace asks for the gist link
+  generalMessages[5].replyTo = generalMessages[3].id; // Sami answers Omar's "Yes, 10:00 works"
+  generalMessages[9].replyTo = generalMessages[8].id; // Maya asks for the print settings
   generalMessages[6].reactions = [{ emoji: '👍', users: [KEN, ME, RADIA] }, { emoji: '🔥', users: [RADIA] }];
   generalMessages[15].reactions = [{ emoji: '🙏', users: [KEN, LINUS, RADIA, ME] }];
   generalMessages[13].reactions = [{ emoji: '😅', users: [LINUS] }];
@@ -54,15 +55,15 @@ if (!window.__TAURI__) {
   const MB = 1024 * 1024;
   const att = (name, size, mime, state = 'available', extra = {}) => ({ id: id(`a${++seq}`), name, size, mime, state, progress: null, local_path: null, ...extra });
 
-  // #off-topic shows the two broken reply cases: the original was deleted, or it is sealed for this device.
+  // 3d-printing shows the two broken reply cases: the original was deleted, or it is sealed for this device.
   function offTopicMessages() {
-    const gone = msg(0, 40, RADIA, 'Deleted joke');
+    const gone = msg(0, 40, RADIA, 'Deleted message');
     gone.deleted = true;
-    const reply = msg(0, 30, KEN, 'Anyone else tracking the weather radar in the background?');
+    const reply = msg(0, 30, KEN, 'Who is bringing the spare 3 mm ply on Saturday?');
     reply.replyTo = gone.id;
-    const sealed = msg(0, 12, RADIA, 'Still cannot read the old ones since I rejoined.');
+    const sealed = msg(0, 12, RADIA, 'I cannot open the older photos since I rejoined.');
     sealed.replyTo = id('sealed-elsewhere');
-    const trap = msg(0, 6, KEN, 'Here is the invoice you asked for.');
+    const trap = msg(0, 6, KEN, 'The shop invoice is attached.');
     trap.attachments = [att('invoice.pdf.exe', 2.3 * MB, 'application/x-msdownload', 'downloaded', { local_path: 'C:/Users/ada/Downloads/invoice.pdf.exe' }), att('diagram.svg', 14 * 1024, 'image/svg+xml')];
     return [gone, reply, sealed, trap];
   }
@@ -70,26 +71,44 @@ if (!window.__TAURI__) {
   const servers = {
     c1: {
       id: 'c1',
-      name: 'Rust Chat',
+      hue: 25,
+      name: 'Riverside Makers',
       owner: GRACE,
+      voice: [{ id: 'vc1', name: 'workshop', participants: [] }],
       channels: [
-        { id: 'ch1', name: 'general' },
-        { id: 'ch2', name: 'help' },
+        { id: 'ch1', name: 'general', topic: 'Workshop chat, bookings and Saturday plans' },
+        { id: 'ch2', name: 'hardware' },
         { id: 'ch3', name: 'announcements' },
-        { id: 'ch4', name: 'off-topic' },
+        { id: 'ch4', name: '3d-printing' },
       ],
-      roles: { [GRACE]: 'owner', [ME]: 'member', [LINUS]: 'admin', [KEN]: 'moderator', [RADIA]: 'member' },
+      roles: { [GRACE]: 'owner', [ME]: 'member', [LINUS]: 'admin', [KEN]: 'moderator', [RADIA]: 'member', [RANA]: 'member' },
       banned: new Set(),
       msgs: {
         ch1: generalMessages,
-        ch2: [msg(1, 300, RADIA, 'How do I borrow from a struct field inside a closure?'), msg(1, 298, GRACE, 'Capture the field by reference, or use a local binding.')],
-        ch3: [msg(5, 0, GRACE, 'Dissent 0.1 is tagged. Release notes are in the announcements post.')],
+        ch2: [
+          msg(1, 300, RADIA, 'Drawings for the new mount are in the hardware folder.'),
+          msg(1, 298, GRACE, 'Thanks, I will check the tolerances on the 3 mm ply.'),
+          // FilesServer board: one file per state, all in #hardware.
+          { ...msg(0, 492, GRACE, 'Updated enclosure drawings for the CNC.'), attachments: [att('cnc-enclosure-v3.pdf', 24.6 * MB, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/cnc-enclosure-v3.pdf', verified: true })] },
+          { ...msg(0, 482, LINUS, 'Walkthrough video of the new dust extraction.'), attachments: [att('workshop-walkthrough.mp4', 86.4 * MB, 'video/mp4', 'downloading', {
+            progress: 0.41, transfer_id: 't1', fingerprint: 'b3:7k2q…fz4m', shared_in: '#hardware · only its 6 members get the key',
+            pieces: { total: 1383, verified: 567 },
+            sources: [
+              { display_name: 'Jonas', note: 'Sender', route: 'direct', rate_bps: 3.1 * MB },
+              { display_name: 'Shop seeder', note: 'Holds the encrypted copy only', route: 'direct', rate_bps: 2.4 * MB },
+              { display_name: 'Maya', note: 'Downloaded it earlier', route: 'relay', rate_bps: 0.7 * MB },
+            ] })] },
+          { ...msg(0, 470, RADIA, 'Inventory sheet for Saturday.'), attachments: [att('shop-inventory.xlsx', 1.1 * MB, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'waiting', { note: 'Only Leila has it and she’s offline. It downloads when she or the seeder is back.' })] },
+          { ...msg(0, 450, KEN, 'Full-resolution scan of the old panel.'), attachments: [att('panel-scan-full.tiff', 12.4 * 1024 * MB, 'image/tiff', 'too_large')] },
+        ],
+        ch3: [msg(5, 0, GRACE, 'The laser cutter is back from repair. Booking sheet is pinned here.')],
         ch4: offTopicMessages(),
       },
     },
     c2: {
       id: 'c2',
-      name: 'Book Club',
+      hue: 150,
+      name: 'Open Source Arabic',
       owner: ME,
       channels: [{ id: 'ch5', name: 'general' }, { id: 'ch6', name: 'reading-list' }],
       roles: { [ME]: 'owner', [KEN]: 'member', [RADIA]: 'member' },
@@ -101,7 +120,8 @@ if (!window.__TAURI__) {
     },
     c3: {
       id: 'c3',
-      name: 'Field Notes',
+      hue: 300,
+      name: 'Book Club',
       owner: LINUS,
       channels: [{ id: 'ch7', name: 'general' }, { id: 'ch8', name: 'photos' }],
       roles: { [LINUS]: 'owner', [ME]: 'member', [GRACE]: 'member' },
@@ -135,31 +155,50 @@ if (!window.__TAURI__) {
   };
   const localPathFor = (name, mime) => (mime.startsWith('image/') ? mockImage(640, 420, 200, name) : `C:/Users/ada/Downloads/${name}`);
   // Real attachments carry a filesystem path; the mock's convertFileSrc hands the data URL straight back.
-  generalMessages[8].attachments = [att('parser-bench.png', 1.7 * MB, 'image/png', 'downloaded', { local_path: mockImage(640, 420, 150, 'parser benchmark') }), att('bench-results.csv', 48 * 1024, 'text/csv')];
+  generalMessages[8].attachments = [att('print-test.png', 1.7 * MB, 'image/png', 'downloaded', { local_path: mockImage(640, 420, 150, 'print test') }), att('settings.csv', 48 * 1024, 'text/csv')];
   generalMessages[0].attachments = [att('rules.pdf', 180 * 1024, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/rules.pdf' })];
-  generalMessages[12].attachments = [att('runner-log.txt', 1.2 * MB, 'text/plain')];
+  generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
   generalMessages[13].attachments = [
-    att('ci-snapshot.zip', 24 * MB, 'application/zip'),
-    att('photos.zip', 12.4 * GB, 'application/zip', 'too_large'),
-    att('raw-capture.mkv', 9.8 * GB, 'video/x-matroska', 'paused', { progress: 0.12 }),
-    att('dataset-2026.tar', 9.6 * GB, 'application/x-tar', 'disk_full', { needed: 19.6 * GB }),
+    att('print-jobs.zip', 24 * MB, 'application/zip'),
+    att('workshop-photos.zip', 12.4 * GB, 'application/zip', 'too_large'),
+    att('walkthrough.mkv', 9.8 * GB, 'video/x-matroska', 'paused', { progress: 0.12 }),
+    att('shop-inventory.tar', 9.6 * GB, 'application/x-tar', 'disk_full', { needed: 19.6 * GB }),
   ];
-  generalMessages[15].attachments = [att('screenshot.png', 1.1 * MB, 'image/png')];
+  // A message Sami sent while nobody else in the channel was online (Part 6.8, channels).
+  generalMessages.push({ ...msg(0, 2, ME, 'Counting me in. I will bring the soldering kits.'), queued: true });
+  generalMessages[15].attachments = [att('enclosure.png', 1.1 * MB, 'image/png')];
 
   const dms = {
     [GRACE]: [
-      { id: id(`d${++seq}`), from: GRACE, text: 'Can you review my PR when you get a minute?', ms: at(1, 400), pending: false },
+      { id: id(`d${++seq}`), from: GRACE, text: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(1, 420), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay') }] },
+      { id: id(`d${++seq}`), from: GRACE, text: 'Can you look at the laser booking sheet when you get a minute?', ms: at(1, 400), pending: false },
       { id: id(`d${++seq}`), from: ME, text: 'Yes, reading it now.', ms: at(1, 380), pending: false },
-      { id: id(`d${++seq}`), from: GRACE, text: 'Thanks. The diff is mostly the replay tests.', ms: at(0, 40), pending: false, attachments: [att('replay-flow.png', 640 * 1024, 'image/png', 'downloaded', { local_path: mockImage(640, 420, 330, 'replay flow') }), att('notes.md', 12 * 1024, 'text/markdown', 'failed')] },
+      { id: id(`d${++seq}`), from: GRACE, text: 'Bring the ply on Saturday?', ms: at(0, 40), pending: false, attachments: [att('booking-sheet.png', 640 * 1024, 'image/png', 'downloaded', { local_path: mockImage(640, 420, 330, 'booking sheet') }), att('notes.md', 12 * 1024, 'text/markdown', 'failed'), att('laser-rates.pdf', 2.4 * MB, 'application/pdf')] },
+      // FilesDirect board: a direct upload to Maya, in progress.
+      { id: id(`d${++seq}`), from: ME, text: 'All the photos from Saturday.', ms: at(0, 5), pending: false, attachments: [att('saturday-photos.zip', 62.3 * MB, 'application/zip', 'sending', {
+        progress: 0.58, transfer_id: 't2', status: 'Sending · 36.1 of 62.3 MB · 11.4 MB/s · about 2 s left',
+        direct: { peer: 'Maya', speed_bps: 11.4 * MB, sent: 36.1 * MB, total: 62.3 * MB, time_left_s: 2 },
+      })] },
     ],
     [LINUS]: [
-      { id: id(`d${++seq}`), from: LINUS, text: 'Did you see the kernel mailing list thread? https://lore.kernel.org/', ms: at(2, 120), pending: false },
+      { id: id(`d${++seq}`), from: LINUS, text: 'Have a look at the relay code: https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(2, 120), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay') }] },
     ],
   };
 
   let mockNetwork = { use_public_relays: true, relays: [] };
   const listeners = [];
+  // ?view=dm&peer=maya&plain: the DM board's thread. Maya's messages, one queued message from me (offline delivery,
+  // Part 6.8), a verified safety number and no key change. Other mock states are unchanged.
+  const PLAIN_DM = new URLSearchParams(location.search).has('plain');
+  if (PLAIN_DM) {
+    const dayAt = (daysAgo, h, m) => { const d = new Date(); d.setDate(d.getDate() - daysAgo); d.setHours(h, m, 0, 0); return d.getTime(); };
+    dms[GRACE] = [
+      { id: id(`d${++seq}`), from: GRACE, text: 'Bring the ply on Saturday?', ms: dayAt(1, 22, 40), pending: false },
+      { id: id(`d${++seq}`), from: GRACE, text: 'And the 3 mm sheets if you still have some.', ms: dayAt(1, 22, 41), pending: false },
+      { id: id(`d${++seq}`), from: ME, text: 'Yes to both. I’ll be there by 09:45 to set up.', ms: dayAt(0, 9, 5), pending: false, queued: true },
+    ];
+  }
   // Named events, like Tauri's. Engine events use the 'dissent://event' name.
   const emitTo = (name, payload) => listeners.filter((l) => l.name === name).forEach((l) => l.cb({ payload }));
   const emit = (payload) => emitTo('dissent://event', payload);
@@ -180,6 +219,7 @@ if (!window.__TAURI__) {
     id: c.id,
     name: c.name,
     owner: c.owner,
+    voice_channels: c.voice ?? [],
     my_role: myRole(c),
     channels: c.channels,
     members: Object.keys(c.roles).map((r) => ({
@@ -204,6 +244,7 @@ if (!window.__TAURI__) {
     author: m.author,
     author_name: people[m.author],
     text: m.deleted ? '' : m.text,
+    queued: Boolean(m.queued),
     ms: m.ms,
     edited: m.edited,
     deleted: m.deleted,
@@ -220,7 +261,7 @@ if (!window.__TAURI__) {
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
   });
   const dmItem = (m) => ({
-    id: m.id, from: m.from, text: m.text, ms: m.ms, pending: m.pending,
+    id: m.id, from: m.from, text: m.text, ms: m.ms, pending: m.pending, embeds: m.embeds ?? [], queued: Boolean(m.queued),
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
   });
   const PICK = [
@@ -258,8 +299,11 @@ if (!window.__TAURI__) {
     if (!cond) throw reason;
   };
 
+  // The first-run flag stays set until the user completes onboarding (complete_first_run), never on export.
+  let firstRunPending = window.__mockFirstRun ?? new URLSearchParams(location.search).has('firstrun');
   const handlers = {
-    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME] }),
+    complete_first_run: () => { firstRunPending = false; return null; },
+    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
       return null;
@@ -371,7 +415,7 @@ if (!window.__TAURI__) {
       return null;
     },
     pick_files: () => (window.__mockPickBig ? [...PICK, PICK_BIG] : [...PICK]).map((f) => ({ ...f })),
-    send_files: ({ communityId, channelId, paths, text }) => {
+    send_files: ({ communityId, channelId, paths, text, seed }) => {
       const c = servers[communityId];
       const m = { ...msg(0, 0, ME, text ?? ''), ms: Date.now(), attachments: uploaded(paths) };
       c.msgs[channelId].push(m);
@@ -389,6 +433,11 @@ if (!window.__TAURI__) {
       let step = a.state === 'paused' ? Math.round((a.progress ?? 0) * 5) : 0;
       a.state = 'downloading';
       a.progress = step / 5;
+      a.sources = communityId
+        ? [{ display_name: 'Maya', route: 'direct', rate_bps: 4 * MB }, { display_name: 'Jonas', route: 'relay', rate_bps: 1.2 * MB }, { display_name: 'Seeder', route: 'seeder', rate_bps: 2 * MB }]
+        : [{ display_name: people[GRACE], route: 'direct', rate_bps: 3 * MB }];
+      a.pieces = { total: 24, verified: Math.round(step / 5 * 24) };
+      refreshFor(communityId, m); // the card reads sources from the reloaded message
       a.needed = undefined;
       const tick = () => {
         step += 1;
@@ -447,6 +496,10 @@ if (!window.__TAURI__) {
         suffix: suffix(user),
         display_name: people[user] ?? `anon·${suffix(user)}`,
         is_contact: Boolean(dms[user]),
+        key_changed_ms: user === GRACE && !PLAIN_DM ? Date.now() - DAY : null,
+        verified_ms: user === GRACE ? (PLAIN_DM ? new Date(2026, 9, 12).getTime() : Date.now() - 2 * DAY) : null,
+        mutual_contacts: user === GRACE ? 1 : 0,
+        first_seen_ms: at(120, 0),
         handles: shared.map((c) => ({ community_id: c.id, community_name: c.name, handle: handles[user] ?? null })),
         mutual_communities: shared.map((c) => ({ id: c.id, name: c.name })),
       };
@@ -466,7 +519,7 @@ if (!window.__TAURI__) {
     },
 
     app_version: () => '0.1.0 (mock)',
-    identity_export_phrase: () => 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art',
+    identity_export_phrase: () => 'harbor velvet ocean pistol arctic gentle meadow ribbon canyon lunar orbit fabric timber violin elder copper saddle raven maple hollow quartz ember ladder pilot',
     identity_import_phrase: () => null,
     get_network_settings: () => ({ ...mockNetwork, relays: [...mockNetwork.relays] }),
     set_network_settings: ({ settings }) => {
@@ -486,7 +539,235 @@ if (!window.__TAURI__) {
     }),
   };
 
+  // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
+  // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
+  // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore'];
+  const ignoredSet = new Set();
+  const NADIA = id('nadia-c5v8m1wk');
+  const YUSUF = id('yusuf-r3j6t0pb');
+  const KARIM = id('karim-n2w5d8fx');
+  Object.assign(people, { [NADIA]: 'Nadia', [YUSUF]: 'Yusuf', [KARIM]: 'Karim' });
+  Object.assign(handles, { [NADIA]: 'nadia', [YUSUF]: 'yusuf', [KARIM]: 'karim' });
+  window.__mockHues = { [GRACE]: 25, [LINUS]: 250, [RADIA]: 140, [ME]: 200, [KEN]: 80, [RANA]: 330, [NADIA]: 280, [YUSUF]: 60, [KARIM]: 170 };
+  const contactSet = new Set([GRACE, LINUS, KEN, RADIA]);
+  const incomingSet = new Set([NADIA, YUSUF]);
+  const outgoingSet = new Set([KARIM]);
+  const calls = { current: null };
+  const transfers = [
+    { id: 't1', direction: 'download', name: 'workshop-walkthrough.mp4', size: 86.4 * MB, state: 'active', progress: 0.41, route: '3 sources', route_kind: 'direct', route_note: '2 direct, 1 via relay', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 3, status_text: '41% · 6.2 MB/s · 8 s left' },
+    { id: 't2', direction: 'upload', name: 'saturday-photos.zip', size: 62.3 * MB, state: 'active', progress: 0.58, route: 'Direct', route_kind: 'direct', route_note: 'Peer to peer, no server', where: { kind: 'direct', name: 'Maya' }, sources: 1, status_text: '58% · 11.4 MB/s' },
+    { id: 't3', direction: 'download', name: 'shop-inventory.xlsx', size: 1.1 * MB, state: 'waiting', progress: 0, route: 'Waiting', route_kind: 'waiting', route_note: 'No one who has it is online', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 0, status_text: 'Starts when Leila or the seeder is back' },
+    { id: 't4', direction: 'download', name: 'cnc-enclosure-v3.pdf', size: 24.6 * MB, state: 'done', progress: 1, route: 'Direct', route_kind: 'direct', route_note: 'From Maya and the seeder', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 2, status_text: 'Done today 08:13 · verified' },
+    { id: 't5', direction: 'download', name: 'panel-scan-full.tiff', size: 12.4 * 1024 * MB, state: 'failed', progress: 0, route: 'Refused', route_kind: 'refused', route_note: 'Nothing was downloaded', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 0, status_text: 'Over the 10 GB limit', error: 'refused' },
+  ];
+  const guardianState = { threshold: 2, guardians: [GRACE, LINUS, RADIA].map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r), is_contact: true, shared_servers: 2 })) };
+  const devices = [
+    { device_id: id('dev-laptop'), name: 'Sami · laptop', this_device: true, added_ms: at(120, 0), last_seen_ms: Date.now() },
+    { device_id: id('dev-phone'), name: 'Sami · phone', this_device: false, added_ms: at(40, 0), last_seen_ms: at(0, 25) },
+  ];
+  // The demo call is the "workshop" voice channel of Riverside Makers, with the design's six people (Part 6.3).
+  const at2 = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
+  const CALL_PEOPLE = [
+    { root_id: GRACE, display_name: 'Maya', muted: false, video: false, speaking: true },
+    { root_id: LINUS, display_name: 'Jonas', muted: false, video: false, speaking: false, forwarder: 'Forwarding' },
+    { root_id: RADIA, display_name: 'Leila', muted: true, video: false, speaking: false },
+    { root_id: ME, display_name: 'Sami', muted: false, video: false, speaking: false },
+    { root_id: KEN, display_name: 'Omar', muted: true, video: false, speaking: false },
+    { root_id: RANA, display_name: 'Rana', muted: false, video: false, speaking: false },
+  ];
+  const CALL_MESSAGES = [
+    { id: id('cm1'), root_id: GRACE, author_name: 'Maya', ms: at2(10, 2), text: 'Sharing the drawing so we’re all looking at the same thing.', file: { name: 'cnc-enclosure-v3.pdf', kind: 'PDF', meta: 'Saved · from Maya, direct' } },
+    { id: id('cm2'), root_id: LINUS, author_name: 'Jonas', ms: at2(10, 4), text: 'Got it. Page 3 has the new duct size.\nLeila, you’re muted if you’re trying to talk.' },
+    { id: id('cm3'), root_id: KEN, author_name: 'Omar', ms: at2(10, 5), text: 'Mic’s off on purpose, I’m on the train. Reading along here.' },
+  ];
+  servers.c1.voice = [{ id: 'vc1', name: 'workshop', participants: CALL_PEOPLE.map((p) => ({ ...p })) }];
+  const callView = (scope, extra) => ({
+    id: 'call1', scope, muted: false, deafened: false, camera: false, started_ms: Date.now(),
+    channel_name: 'workshop', community_name: 'Riverside Makers',
+    participants: CALL_PEOPLE.map((p) => ({ ...p })),
+    messages: CALL_MESSAGES.map((m) => ({ ...m })),
+    ...extra,
+  });
+  // Groups (Part 6.1): the GroupDM board's three groups. `system` items are membership lines, `creator` is a root id.
+  const ONLINE = new Set([GRACE, LINUS, ME]);
+  const groups = {
+    grp1: {
+      id: 'grp1', name: 'Saturday workshop crew', creator: GRACE, members: [GRACE, LINUS, ME, RADIA, KEN, RANA],
+      // A live voice call the lobby and the sidebar label show (JoinCall board): 3 of 6 are in, forwarded by Jonas.
+      live_call: {
+        started_ms: Date.now() - 12 * 60 * 1000, started_by: 'Jonas', total: 6,
+        route: { kind: 'forwarded', forwarder: 'Jonas', backup: 'Maya' },
+        participants: [
+          { root_id: LINUS, display_name: 'Jonas', muted: false, speaking: true, forwarder: true },
+          { root_id: GRACE, display_name: 'Maya', muted: false, speaking: false },
+          { root_id: KEN, display_name: 'Omar', muted: true, speaking: false },
+        ],
+        not_in: [{ root_id: RADIA, display_name: 'Leila' }, { root_id: RANA, display_name: 'Rana' }],
+      },
+      items: [
+        { id: id('gs1'), system: true, from: GRACE, text: 'created the group with Jonas, Sami and Leila.', ms: at2(8, 40), pending: false },
+        { id: id('g1'), from: GRACE, text: 'Group for Saturday logistics so #general stays quiet.', ms: at2(8, 41), pending: false },
+        { id: id('gs2'), system: true, from: LINUS, text: 'added Omar and Rana.', ms: at2(8, 52), pending: false },
+        { id: id('g2'), from: KEN, text: 'Thanks! I can cover the 3D printers.', ms: at2(8, 55), pending: false },
+        { id: id('g3'), from: RANA, text: 'I’ll bring snacks and the extension leads.', ms: at2(9, 2), pending: false },
+        { id: id('g4'), from: ME, text: 'Soldering kits are packed. Who has the shop key?', ms: at2(9, 21), pending: false },
+      ],
+    },
+    grp2: { id: 'grp2', name: 'Relay operators', creator: NADIA, members: [NADIA, YUSUF, GRACE, LINUS, ME, RADIA, KEN, RANA, KARIM], items: [] },
+    grp3: { id: 'grp3', name: 'Book club organisers', creator: RADIA, members: [RADIA, RANA, NADIA, ME], items: [] },
+  };
+  // The conversation list in the board's order: groups and direct messages interleaved.
+  const BOARD_ORDER = ['group:grp1', LINUS, 'group:grp2', GRACE, 'group:grp3', RADIA, KEN, RANA, YUSUF, NADIA];
+  const groupRow = (g) => ({
+    kind: 'group', id: g.id, name: g.name, creator: g.creator,
+    members: cpeers(g.members).map((m) => ({ ...m, online: ONLINE.has(m.root_id) })),
+    last_text: g.items.at(-1)?.text ?? '', last_ms: g.items.at(-1)?.ms ?? 0, live_call: new URLSearchParams(location.search).has('nolive') ? null : (g.live_call ?? null),
+  });
+  const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r) }));
+  const findTransfer = (transferId) => transfers.find((x) => x.id === transferId);
+
+  servers.c4 = { id: 'c4', hue: 350, name: 'Kinnly', owner: LINUS, channels: [{ id: 'ch9', name: 'general' }], roles: { [LINUS]: 'owner', [ME]: 'member' }, banned: new Set(), msgs: { ch9: [] } };
+
+  Object.assign(handlers, {
+    capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES]),
+    list_conversations: () => {
+      const rows = [
+        ...conversations().map((c) => ({ kind: 'dm', ...c, last_text: c.peer === NADIA ? 'Running a seeder for Book club' : '', online: c.peer !== LINUS })),
+        ...Object.values(groups).map(groupRow),
+      ];
+      const rank = (r) => { const i = BOARD_ORDER.indexOf(r.kind === 'group' ? `group:${r.id}` : r.peer); return i < 0 ? 99 : i; };
+      return rows.sort((x, y) => rank(x) - rank(y));
+    },
+    create_group: ({ name, peers }) => {
+      const gid = `grp${++seq}`;
+      groups[gid] = { id: gid, name, creator: ME, members: [ME, ...peers], items: [] };
+      return groupRow(groups[gid]);
+    },
+    group_messages: ({ groupId }) => groups[groupId].items.map((m) => ({ ...m })),
+    send_group_message: ({ groupId, text }) => {
+      const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false };
+      groups[groupId].items.push(item);
+      return { ...item };
+    },
+    add_group_members: ({ groupId, peers }) => { groups[groupId].members.push(...peers); return null; },
+    leave_group: ({ groupId }) => { delete groups[groupId]; return null; },
+    group_invite_link: ({ groupId }) => `dissent://group/${groupId}`,
+    list_contacts: () => ({
+      incoming: cpeers([...incomingSet]).map((p) => ({ ...p, online: p.root_id === NADIA, shared_servers: [] })),
+      outgoing: cpeers([...outgoingSet]).map((p) => ({ ...p, online: false, shared_servers: [] })),
+      contacts: cpeers([...contactSet]).map((p) => ({ ...p, online: p.root_id !== LINUS, shared_servers: ['Riverside Makers'] })),
+      blocked: [],
+    }),
+    send_contact_request: ({ link }) => {
+      need(link.startsWith('dissent://contact/'), 'Not a contact link');
+      outgoingSet.add(id(`pending-${link.slice(-8)}`));
+      return null;
+    },
+    accept_contact: ({ rootId }) => { incomingSet.delete(rootId); contactSet.add(rootId); return null; },
+    decline_contact: ({ rootId }) => { incomingSet.delete(rootId); return null; },
+    cancel_contact_request: ({ rootId }) => { outgoingSet.delete(rootId); return null; },
+    remove_contact: ({ rootId }) => { contactSet.delete(rootId); return null; },
+    block_user: ({ rootId }) => { contactSet.delete(rootId); return null; },
+    unblock_user: () => null,
+    close_conversation: () => null,
+    ignore_user: ({ user }) => { ignoredSet.add(user); return null; },
+    unignore_user: ({ user }) => { ignoredSet.delete(user); return null; },
+    ignored_users: () => [...ignoredSet],
+    peer_contact_link: ({ rootId }) => `dissent://contact/${suffix(rootId)}`,
+    set_note: () => null,
+    start_call: ({ peer }) => {
+      calls.current = callView('dm', { peer, route: { kind: 'direct', title: `Direct call with ${people[peer]}`, detail: 'Peer to peer, end-to-end encrypted' } });
+      return { ...calls.current };
+    },
+    join_call: () => {
+      calls.current = callView('channel', { route: { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' } });
+      return { ...calls.current };
+    },
+    leave_call: () => { calls.current = null; return null; },
+    call_state: () => (calls.current ? { ...calls.current } : null),
+    // Ringing: the answer and decline commands. A ringing group call is the one the incoming board shows.
+    accept_call: ({ callId }) => { if (callId === 'call-grp1') calls.current = callFor('grp1'); return null; },
+    decline_call: () => null,
+    // Microphone and speaker. Null means the system default. Desktop's audio_devices and set_audio_devices shape.
+    audio_devices: () => ({
+      inputs: [{ name: 'Microphone (USB Audio)', is_default: true }, { name: 'Headset microphone', is_default: false }],
+      outputs: [{ name: 'Speakers (Realtek)', is_default: true }, { name: 'Headphones', is_default: false }],
+      input: window.__mockAudio?.input ?? null, output: window.__mockAudio?.output ?? null,
+    }),
+    set_audio_devices: ({ input, output }) => { window.__mockAudio = { input, output }; return null; },
+    store_stats: () => ({ used_bytes: 1.4 * 1024 ** 3, files: 6, budget_bytes: 10 * 1024 ** 3, shared_bytes: 0.6 * 1024 ** 3, downloaded_bytes: 0.5 * 1024 ** 3, partial_bytes: 0.1 * 1024 ** 3 }),
+    join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
+    join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
+    set_muted: ({ muted }) => { if (calls.current) calls.current.muted = muted; return null; },
+    set_deafened: ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; return null; },
+    set_camera: ({ on }) => { if (calls.current) calls.current.camera = on; return null; },
+    send_call_message: ({ text }) => {
+      if (calls.current) calls.current.messages.push({ id: id(`cm${++seq}`), root_id: ME, author_name: 'Sami', ms: Date.now(), text });
+      return null;
+    },
+    list_transfers: () => transfers.map((t) => ({ ...t })),
+    pause_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'paused'; return null; },
+    resume_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'active'; return null; },
+    cancel_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'failed'; return null; },
+    retry_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'active'; return null; },
+    remove_transfer: ({ transferId }) => { const i = transfers.findIndex((x) => x.id === transferId); if (i >= 0) transfers.splice(i, 1); return null; },
+    transfer_settings: () => ({ max_accept_bytes: 10 * GB, download_dir: 'C:/Users/ada/Downloads/Dissent', auto_accept_bytes: 25 * MB }),
+    set_transfer_settings: ({ settings }) => settings,
+    pick_download_dir: () => 'C:/Users/ada/Downloads/Dissent',
+    list_guardians: () => ({ threshold: guardianState.threshold, guardians: guardianState.guardians.map((g) => ({ ...g })) }),
+    sign_guardians: ({ guardians, threshold }) => {
+      need(threshold >= 1 && threshold <= guardians.length, 'The threshold must be between 1 and the number of guardians');
+      guardianState.guardians = cpeers(guardians).map((p) => ({ ...p, is_contact: contactSet.has(p.root_id), shared_servers: 1 }));
+      guardianState.threshold = threshold;
+      return { threshold, guardians: guardianState.guardians.map((g) => ({ ...g })) };
+    },
+    list_devices: () => devices.map((d) => ({ ...d })),
+    revoke_device: ({ deviceId }) => {
+      const i = devices.findIndex((d) => d.device_id === deviceId);
+      if (i >= 0) devices.splice(i, 1);
+      return devices.map((d) => ({ ...d }));
+    },
+    link_device_code: () => 'dissent://link/mock-device',
+    mark_safety_verified: () => null,
+    approve_device: ({ link }) => { need(link.startsWith('dissent://'), 'Not a device link'); return 'dissent://grant/mock-' + suffix(ME); },
+    finish_device_link: () => null,
+    pinned_conversations: () => [],
+    read_markers: () => ({}),
+    pin_message: () => null,
+    pinned_messages: () => [],
+    pin_conversation: () => null,
+    mark_read: () => null,
+  });
+
+  Object.assign(dms, {
+    [KEN]: [{ id: id(`d${++seq}`), from: KEN, text: 'Thanks!', ms: at(0, 90), pending: false }],
+    [RADIA]: [{ id: id(`d${++seq}`), from: RADIA, text: 'Sent you the invite link', ms: at(0, 200), pending: false }],
+    [RANA]: [{ id: id(`d${++seq}`), from: RANA, text: 'See you there', ms: at(0, 300), pending: false }],
+  });
+  dms[LINUS].push({ id: id(`d${++seq}`), from: LINUS, text: 'Seeder logs look clean now', ms: at(0, 20), pending: false });
+  Object.assign(dms, {
+    [NADIA]: [{ id: id(`d${++seq}`), from: NADIA, text: 'Running a seeder for Book club', ms: at(0, 400), pending: false }],
+    [YUSUF]: [{ id: id(`d${++seq}`), from: YUSUF, text: 'Sent you the invite link', ms: at(0, 500), pending: false }],
+  });
+  if (!PLAIN_DM) dms[GRACE].push({ id: id(`d${++seq}`), from: GRACE, text: 'Peer-forwarded call: failover', ms: at(0, 1), pending: false, embeds: [{ kind: 'card', title: 'Peer-forwarded call: failover', subtitle: '20 participants · 3 speakers · audio', tile: { color: '#e8553a', label: 'Call capacity' } }] });
+
   // Screenshot helpers: post a message into any channel or DM, as if another person sent it.
+  // A call built from a group's members, for the join and accept handlers.
+  const callFor = (groupId) => ({
+    id: `call-${groupId}`, scope: 'dm', peer: groupId, muted: false, deafened: false, camera: false, started_ms: Date.now(),
+    route: { kind: 'direct', title: groups[groupId]?.name ?? 'Call' },
+    participants: (groups[groupId]?.members ?? []).filter((r) => r !== ME).map((r) => ({ root_id: r, display_name: people[r], muted: false, speaking: false, video: false })),
+    messages: [],
+  });
+  // Ringing: emits a ringing call the way the desktop will (dissent://call-ringing).
+  window.__mockRing = (scope = 'group') => {
+    const payload = scope === 'group'
+      ? { call_id: 'call-grp1', scope: 'group', group_id: 'grp1', name: 'Saturday workshop crew', caller: { root_id: LINUS, display_name: 'Jonas' }, verified: false, in_call: 3, total: 6,
+          members_in: [{ root_id: LINUS, display_name: 'Jonas' }, { root_id: GRACE, display_name: 'Maya' }, { root_id: KEN, display_name: 'Omar' }] }
+      : { call_id: 'call-maya', scope: 'dm', peer: GRACE, name: 'Maya', caller: { root_id: GRACE, display_name: 'Maya' }, verified: true, in_call: 1, total: 2, members_in: [] };
+    emitTo('dissent://call-ringing', payload);
+  };
   window.__mockPost = (communityId, channelId, author, text) => {
     const m = { ...msg(0, 0, author, text), ms: Date.now() };
     servers[communityId].msgs[channelId].push(m);

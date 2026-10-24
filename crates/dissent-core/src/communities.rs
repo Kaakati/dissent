@@ -24,6 +24,9 @@ const LEAVE_WAIT: Duration = Duration::from_secs(2);
 /// How long a join waits for the DHT to return a community record.
 /// Resolve can take a DHT warm-up plus retries, so give it room.
 const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(90);
+/// Tries to join the encrypted group this many times, spaced by `JOIN_RETRY_EVERY`, before maintenance takes over.
+const JOIN_ATTEMPTS: usize = 6;
+const JOIN_RETRY_EVERY: Duration = Duration::from_millis(500);
 
 impl Engine {
     /// Creates a community with a `general` channel. Publishes its DHT record in the background.
@@ -38,8 +41,9 @@ impl Engine {
             write_bin(&paths.genesis(&id), &genesis)?;
             write_bytes_atomic(&paths.community_key(&id), &key.0.seed())?;
             let secret = crate::access::random_secret();
-            crate::access::save(&paths, &id, &secret)?;
-            guard.access.insert(id, secret);
+            let keys = crate::access::Keys::from_invite(0, secret);
+            crate::access::save(&paths, &id, &keys)?;
+            guard.access.insert(id, keys);
             guard.communities.insert(id, Community::new(genesis));
         }
         self.inner
@@ -86,7 +90,7 @@ impl Engine {
         // Publishes of one record must not overlap. The DHT keeps only the newest packet, and an
         // older one that lands later is refused.
         let _publishing = self.inner.publish_lock.lock().await;
-        let jobs: Vec<(CommunityKey, CommunityRecord)> = {
+        let jobs: Vec<(CommunityKey, [u8; 32], CommunityRecord)> = {
             let w = self.read();
             let Some(addr) = w.my_addr.clone() else {
                 return;
@@ -103,16 +107,22 @@ impl Engine {
                     let record = CommunityRecord {
                         name: c.name().to_string(),
                         peers: vec![public_addr(&addr).to_string()],
-                        relays: Vec::new(),
+                        relays: c
+                            .state()
+                            .relays
+                            .iter()
+                            .filter_map(|s| url::Url::parse(s).ok())
+                            .collect(),
                     };
-                    Some((CommunityKey::from_seed(*seed), record))
+                    let secret = w.access.get(id)?.secret;
+                    Some((CommunityKey::from_seed(*seed), secret, record))
                 })
                 .collect()
         };
         let mut all_ok = true;
-        for (key, record) in jobs {
+        for (key, secret, record) in jobs {
             // Discovery retries until enough nodes hold the record, so Ok means it is stored.
-            match discovery.publish(&key, &record).await {
+            match discovery.publish(&key, &secret, &record).await {
                 Ok(stored_on) => debug!(stored_on, "published community record"),
                 Err(e) => {
                     all_ok = false;
@@ -135,11 +145,13 @@ impl Engine {
                 .map(|c| c.genesis.clone())
                 .ok_or_else(|| not_found(&community))?
         };
-        let secret = self.access_secret(community).ok_or_else(|| not_found(&community))?;
+        let keys = self.access_keys(community).ok_or_else(|| not_found(&community))?;
         let invite = Invite {
             genesis,
             peers: vec![addr.to_string()],
-            secret,
+            secret: keys.secret,
+            secret_generation: keys.generation,
+            relays: self.community_relays(community),
         };
         Ok(invite.to_url().to_string())
     }
@@ -156,17 +168,25 @@ impl Engine {
         self.join_inner(invite, false).await
     }
 
+    /// Joins as a storage member. The community's history is kept and served here, but this device
+    /// is never added to the encrypted group, so it cannot read messages or attachments.
+    pub async fn join_as_storage(&self, invite: &str) -> Result<CommunitySummary> {
+        self.join_as(invite, false, true).await
+    }
+
     async fn join_inner(&self, invite: &str, with_group: bool) -> Result<CommunitySummary> {
+        self.join_as(invite, with_group, false).await
+    }
+
+    async fn join_as(&self, invite: &str, with_group: bool, storage: bool) -> Result<CommunitySummary> {
         let id = Invite::parse(invite)?.community();
         let Some((_, served)) = self.sync_invite(invite).await? else {
             return self.summary(&id);
         };
-        self.announce_join(id, &served, with_group).await;
+        self.announce_join_as(id, &served, with_group, storage).await;
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
     }
-
-    /// Fetches a community from its invite and subscribes to its topic, without announcing a
     /// Join. Returns the community and the devices that served it, or `None` if this device
     /// already holds the community.
     pub(crate) async fn sync_invite(
@@ -181,9 +201,12 @@ impl Engine {
         {
             let mut guard = self.write();
             let paths = guard.paths.clone();
-            crate::access::save(&paths, &id, &invite.secret)?;
-            guard.access.insert(id, invite.secret);
+            let keys = crate::access::Keys::from_invite(invite.secret_generation, invite.secret);
+            crate::access::save(&paths, &id, &keys)?;
+            guard.access.insert(id, keys);
         }
+        self.adopt_relays(&invite.relays).await;
+        self.await_relay().await;
         let my_addr = self
             .read()
             .my_addr
@@ -202,7 +225,7 @@ impl Engine {
             }
         }
 
-        let (fetched, peers) = self.fetch_for_join(&invite.genesis, &invited, &my_addr).await?;
+        let (fetched, peers) = self.fetch_for_join(&invite.genesis, &invite.secret, &invited, &my_addr).await?;
         {
             let mut guard = self.write();
             write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
@@ -228,9 +251,25 @@ impl Engine {
     /// Announces this device's Join to the devices that served the invite, then joins the
     /// community's encrypted group.
     pub(crate) async fn announce_join(&self, id: CommunityId, served: &[DeviceId], with_group: bool) {
+        self.announce_join_as(id, served, with_group, false).await;
+    }
+
+    /// As `announce_join`. A storage join announces `JoinAsStorage` and never joins the group.
+    pub(crate) async fn announce_join_as(
+        &self,
+        id: CommunityId,
+        served: &[DeviceId],
+        with_group: bool,
+        storage: bool,
+    ) {
         let display_name = self.read().my_name();
+        let payload = if storage {
+            Payload::JoinAsStorage { display_name }
+        } else {
+            Payload::Join { display_name }
+        };
         match self
-            .author_publish(id, ChannelId::CONTROL, Payload::Join { display_name })
+            .author_publish(id, ChannelId::CONTROL, payload)
             .await
         {
             Ok(join) => {
@@ -244,9 +283,20 @@ impl Engine {
             }
             Err(e) => warn!(community = %id, error = %e, "could not announce join"),
         }
-        // Join the encrypted group. The committer adds us as soon as it has our Join.
-        if with_group && !self.mls_join_via(id, served).await {
-            warn!(community = %id, "could not join the encrypted group yet; will retry");
+        // Join the encrypted group. An invite peer refuses until it has replayed our Join, which the
+        // push above usually settles, so retry briefly before leaving it to maintenance.
+        if with_group {
+            let mut joined = false;
+            for _ in 0..JOIN_ATTEMPTS {
+                if self.mls_join_via(id, served).await {
+                    joined = true;
+                    break;
+                }
+                tokio::time::sleep(JOIN_RETRY_EVERY).await;
+            }
+            if !joined {
+                warn!(community = %id, "could not join the encrypted group yet; will retry");
+            }
         }
     }
 
@@ -318,8 +368,12 @@ impl Engine {
 
     /// Stops a community's receive loop, then leaves its topic with the sender and receiver.
     async fn stop_topic(&self, mut c: Community) {
-        let sender = c.sender.take();
-        let Some(task) = c.task.take() else {
+        self.stop_parts(c.sender.take(), c.task.take()).await;
+    }
+
+    /// Stops a receive loop and leaves its topic, given the parts of a community's wiring.
+    pub(crate) async fn stop_parts(&self, sender: Option<Arc<TopicSender>>, task: Option<ReceiverTask>) {
+        let Some(task) = task else {
             return;
         };
         let ReceiverTask { handle, stop } = task;
@@ -340,6 +394,7 @@ impl Engine {
     async fn fetch_for_join(
         &self,
         genesis: &Genesis,
+        secret: &[u8; 32],
         invited: &[PeerAddr],
         from: &PeerAddr,
     ) -> Result<(Fetched, Vec<PeerAddr>)> {
@@ -351,7 +406,7 @@ impl Engine {
                 Err(e) => format!("the invite's peers did not answer: {e}"),
             }
         };
-        let from_record = self.record_peers(&genesis.community).await;
+        let from_record = self.record_peers(&genesis.community, secret).await;
         if from_record.is_empty() {
             return Err(CoreError::NotFound(format!(
                 "could not join: {invite_err}; the DHT has no usable record for this community"
@@ -367,12 +422,12 @@ impl Engine {
 
     /// The peers named in the community's DHT record. They are remembered, so they can be dialled.
     /// Empty when there is no DHT, no record, or the lookup fails.
-    async fn record_peers(&self, id: &CommunityId) -> Vec<PeerAddr> {
+    async fn record_peers(&self, id: &CommunityId, secret: &[u8; 32]) -> Vec<PeerAddr> {
         let Some(discovery) = self.inner.discovery.clone() else {
             return Vec::new();
         };
         // A DHT lookup can stall for a long time. A join should not wait on it indefinitely.
-        let lookup = tokio::time::timeout(DHT_LOOKUP_WAIT, discovery.resolve(id)).await;
+        let lookup = tokio::time::timeout(DHT_LOOKUP_WAIT, discovery.resolve(id, secret)).await;
         let record = match lookup {
             Ok(Ok(Some(record))) => record,
             Ok(Ok(None)) => return Vec::new(),
@@ -385,6 +440,8 @@ impl Engine {
                 return Vec::new();
             }
         };
+        let relay_urls: Vec<String> = record.relays.iter().map(|u| u.to_string()).collect();
+        self.adopt_relays(&relay_urls).await;
         let peers: Vec<PeerAddr> = record
             .peers
             .iter()

@@ -13,12 +13,19 @@ pub fn export(root: &RootKey) -> String {
 
 /// Decode a 24-word phrase back into a root key. The checksum must match.
 pub fn import(phrase: &str) -> Result<RootKey> {
-    let normalized = phrase.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let normalized = phrase
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     let mnemonic = Mnemonic::parse_in_normalized(Language::English, &normalized)
         .map_err(|e| IdentityError::Encoding(e.to_string()))?;
     let entropy = mnemonic.to_entropy();
     let seed: [u8; 32] = entropy.try_into().map_err(|v: Vec<u8>| {
-        IdentityError::Encoding(format!("expected 24 words (32 bytes), got {} bytes", v.len()))
+        IdentityError::Encoding(format!(
+            "expected 24 words (32 bytes), got {} bytes",
+            v.len()
+        ))
     })?;
     Ok(RootKey::from_seed(seed))
 }
@@ -46,7 +53,11 @@ mod tests {
     fn flipped_word_fails_checksum() {
         let phrase = export(&RootKey::from_seed([9; 32]));
         let mut words: Vec<&str> = phrase.split(' ').collect();
-        words[0] = if words[0] == "abandon" { "ability" } else { "abandon" };
+        words[0] = if words[0] == "abandon" {
+            "ability"
+        } else {
+            "abandon"
+        };
         let bad = words.join(" ");
         assert!(matches!(import(&bad), Err(IdentityError::Encoding(_))));
     }
@@ -55,6 +66,9 @@ mod tests {
     fn wrong_length_is_rejected() {
         let phrase = export(&RootKey::from_seed([9; 32]));
         let short: Vec<&str> = phrase.split(' ').take(12).collect();
-        assert!(matches!(import(&short.join(" ")), Err(IdentityError::Encoding(_))));
+        assert!(matches!(
+            import(&short.join(" ")),
+            Err(IdentityError::Encoding(_))
+        ));
     }
 }

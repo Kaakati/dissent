@@ -66,6 +66,10 @@ pub struct MessageItem {
     pub reply_to: Option<ReplyPreview>,
     /// Reactions in the order each emoji first got one. Empty when there are none.
     pub reactions: Vec<ReactionView>,
+    /// Files in the message, with their state on this device.
+    pub attachments: Vec<crate::attachments::AttachmentView>,
+    /// Link previews the sender made.
+    pub embeds: Vec<crate::previews::Embed>,
 }
 
 /// A short view of the message a reply points at.
@@ -110,6 +114,8 @@ pub struct UserView {
     pub note: Option<String>,
     /// A name only this device shows for this person.
     pub nickname: Option<String>,
+    /// True if this device ignores the person. Their messages still arrive, collapsed, and never notify.
+    pub ignored: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -165,10 +171,14 @@ pub struct DmItem {
     pub queued: bool,
     /// Why the recipient refused this message, when `delivery` is `failed`.
     pub reason: Option<String>,
+    /// Files in the message.
+    pub attachments: Vec<crate::attachments::AttachmentView>,
+    /// Link previews the sender made.
+    pub embeds: Vec<crate::previews::Embed>,
 }
 
 /// Change notifications. Serialised as `{"kind": "...", ...}`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EngineEvent {
     CommunitiesChanged,
@@ -177,6 +187,16 @@ pub enum EngineEvent {
     Dm { peer: String },
     /// A conversation changed: a message, a rename, a member added or removed, or a new group.
     ConversationChanged { id: String },
+    /// Someone asked to join a group with an invite link. Approve or decline it.
+    GroupJoinRequest { conversation: String, user: String },
+    /// A download or upload moved. Matches `dissent://transfers`.
+    TransfersChanged,
+    /// A file for an attachment moved. `progress` is `0..1`.
+    AttachmentProgress {
+        message_id: String,
+        attachment_id: String,
+        progress: f64,
+    },
     /// Someone asked to become a contact. Answer with `accept_request` or `decline_request`.
     ContactRequest { user: String },
     /// Contacts or contact requests changed.
@@ -191,9 +211,13 @@ pub enum EngineEvent {
         call_id: String,
         from: String,
         scope: crate::calls::CallScope,
+        /// The group conversation of a group call. `None` for a direct call.
+        conv: Option<String>,
     },
     /// A direct call rang out, or the caller gave up. It counts as missed.
     CallMissed { call_id: String, from: String },
+    /// Another device of the same person answered this call, so this one stopped ringing.
+    CallAnsweredElsewhere { call_id: String },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.

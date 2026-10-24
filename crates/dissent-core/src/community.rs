@@ -124,6 +124,23 @@ impl Community {
             .collect()
     }
 
+    /// Accepted secret rotations, oldest generation first: the generation and the sealed secret.
+    pub fn rotations_in_order(&self) -> Vec<(u64, [u8; 32], Vec<u8>)> {
+        let mut out: Vec<(u64, [u8; 32], Vec<u8>)> = self
+            .signed
+            .values()
+            .filter(|se| !self.is_rejected(&se.event.id))
+            .filter_map(|se| match &se.event.body.payload {
+                Payload::SecretRotation {
+                    generation, sealed, ..
+                } => Some((*generation, se.event.id.0, sealed.clone())),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|(generation, _, _)| *generation);
+        out
+    }
+
     /// Stored sealed events, in causal order.
     pub fn sealed_in_order(&self) -> Vec<SignedEvent> {
         let mut out: Vec<SignedEvent> = self

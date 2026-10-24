@@ -13,7 +13,7 @@ use dissent_mls::{MlsClient, MlsError};
 
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
-use crate::store::{append_records, write_bytes_atomic, write_bytes_unsynced};
+use crate::store::{append_sealed_records, content_vault, write_bytes_atomic, write_bytes_unsynced};
 use crate::world::ContentRecord;
 
 /// Ratchet steps before the MLS state is flushed regardless of time.
@@ -38,7 +38,7 @@ impl Engine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let out = op(&mut mls)?;
-        let bytes = mls.snapshot()?;
+        let bytes = mls.snapshot_sealed(&self.inner.vault)?;
         drop(mls);
         self.write_mls_snapshot(&bytes, true);
         Ok(out)
@@ -84,7 +84,7 @@ impl Engine {
                 .mls
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            mls.snapshot()
+            mls.snapshot_sealed(&self.inner.vault)
         };
         match bytes {
             Ok(bytes) => self.write_mls_snapshot(&bytes, durable),
@@ -161,7 +161,8 @@ impl Engine {
         }
         c.content.insert(key, (hlc, text.clone()));
         let record = ContentRecord { key, hlc, text };
-        if let Err(e) = append_records(&paths.content_log(&community), &[record]) {
+        let key = content_vault(&self.inner.vault, &community);
+        if let Err(e) = append_sealed_records(&paths.content_log(&community), &key, &[record]) {
             tracing::warn!(community = %community, error = %e, "could not persist decrypted text");
         }
     }
@@ -172,6 +173,9 @@ impl Engine {
     /// the commits, and retry once, in the background. Older epochs are not retried: the keys for
     /// them are gone by design.
     pub(crate) fn unseal_pending(&self, community: CommunityId) {
+        if self.secret_behind(community) {
+            self.spawn_secret_refresh(community);
+        }
         self.unseal_pass(community, true);
     }
 
@@ -201,7 +205,11 @@ impl Engine {
             else {
                 continue;
             };
-            let outcome = self.with_mls_ratchet(|mls| mls.decrypt_application(&community.0, ciphertext));
+            let (manifest, mls_ciphertext) = crate::attachments::split_manifest(ciphertext);
+            if !manifest.is_empty() {
+                self.mirror_manifest(se.event.body.device, &manifest);
+            }
+            let outcome = self.with_mls_ratchet(|mls| mls.decrypt_application(&community.0, mls_ciphertext));
             let (bytes, device) = match outcome {
                 Ok((bytes, device)) => (bytes, device),
                 _ => {
@@ -217,8 +225,17 @@ impl Engine {
             let Ok(text) = postcard::from_bytes::<String>(&bytes) else {
                 continue;
             };
+            // The cleartext manifest must describe exactly the files in the sealed text. Otherwise
+            // the sender advertised a different blob, and the message is refused.
+            let (_, files) = crate::attachments::unpack(&text);
+            if !crate::attachments::manifest_matches(&manifest, &files) {
+                tracing::warn!(community = %community, "refused a message whose manifest does not match");
+                continue;
+            }
             if let Some((key, hlc)) = content_key(&se) {
-                self.store_content(community, key, hlc, text);
+                let for_hook = text.clone();
+            self.store_content(community, key, hlc, text);
+            self.auto_download(Some(community), key.to_string(), &for_hook);
             }
         }
     }
@@ -256,6 +273,7 @@ pub(crate) fn content_key(se: &SignedEvent) -> Option<(EventId, Hlc)> {
     match &se.event.body.payload {
         Payload::Sealed { kind, .. } => match kind {
             SealedKind::Message | SealedKind::Reply { .. } => Some((se.event.id, hlc)),
+            SealedKind::React { .. } | SealedKind::Unreact { .. } => Some((se.event.id, hlc)),
             SealedKind::Edit { target } => Some((*target, hlc)),
         },
         _ => None,

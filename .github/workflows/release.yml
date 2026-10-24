@@ -104,6 +104,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (networked tests stay ignored)
         run: cargo test --workspace
+      # Loopback-only suites that are #[ignore]d locally so Windows Firewall doesn't prompt
+      # for every rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt.
+      - name: Loopback networked tests
+        run: cargo test -p dissent-core --test calls --test part6 --test identity_flows -- --ignored
 
   changelog:
     name: Tag, changelog and draft release
@@ -223,6 +227,16 @@ jobs:
           releaseId: ${{ needs.changelog.outputs.release_id }}
           includeUpdaterJson: ${{ steps.bundle.outputs.updater }}
           args: ${{ matrix.args }} --config '${{ steps.bundle.outputs.config }}'
+      # A single-file Windows build people can pass around and run without installing.
+      - name: Upload portable exe
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="Dissent_${{ needs.version.outputs.version }}_x64_portable.exe"
+          cp target/release/dissent-desktop.exe "$name"
+          gh release upload "${{ needs.version.outputs.tag }}" "$name" --clobber
 
   tools:
     name: Tools (${{ matrix.name }})

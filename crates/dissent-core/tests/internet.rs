@@ -17,7 +17,7 @@ const LIMIT: Duration = Duration::from_secs(60);
 async fn start_real(name: &str) -> Peer {
     let identity = Identity::create(now());
     let dir = scratch(name);
-    let (engine, events) = Engine::start(identity.clone(), dir.clone(), NodeConfig::default())
+    let (engine, events) = Engine::start(identity.clone(), dir.clone(), NodeConfig::default(), dissent_core::test_support::vault_for(&dir))
         .await
         .expect("engine starts");
     engine
@@ -51,11 +51,13 @@ async fn join_over_the_dht_then_message_and_dm() {
         .expect("alice creates the community");
     let id: dissent_core::CommunityId = server.id.parse().unwrap();
 
+    let url = alice.engine.create_invite(id).await.expect("invite");
+    let invite = Invite::parse(&url).expect("invite parses");
     // Alice's record must reach the DHT before Bob can find her there.
     let discovery = Discovery::new().expect("dht client");
     let started = Instant::now();
     let record = loop {
-        match tokio::time::timeout(Duration::from_secs(30), discovery.resolve(&id)).await {
+        match tokio::time::timeout(Duration::from_secs(30), discovery.resolve(&id, &invite.secret)).await {
             Ok(Ok(Some(record))) => break record,
             Ok(Ok(None)) => eprintln!("[{:?}] no record yet", started.elapsed()),
             Ok(Err(e)) => eprintln!("resolve failed, retrying: {e}"),

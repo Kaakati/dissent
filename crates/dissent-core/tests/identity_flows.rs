@@ -7,6 +7,7 @@ use dissent_core::{start_device_link, Identity};
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn linked_device_posts_until_its_root_revokes_it() {
     bounded(async {
     let alice = peer("alice").await;
@@ -83,6 +84,7 @@ async fn linked_device_posts_until_its_root_revokes_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn two_of_three_guardians_carry_the_owners_role_to_a_new_root() {
     bounded(async {
     let owner = peer("owner").await;

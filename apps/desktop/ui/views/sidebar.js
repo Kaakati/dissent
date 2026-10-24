@@ -1,23 +1,33 @@
-// Second column. Server: header with its menu, channel list. Home: find box, direct messages.
-// Both end with the user panel: my avatar, name, `you·suffix`, and the settings gear.
+// Second column. Server: header with its menu, quick links, text and voice channels. Home: find box, quick links,
+// direct messages. The user panel (#me) floats over the rail and the sidebar and is rendered here too.
 import { state, subscribe, canManage } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar, skeletonRows } from '../ui.js';
+import { el, avatar, stackAvatar, skeletonRows, icon, copyText, toast, plural, presenceDot } from '../ui.js';
+import { has } from '../features.js';
 import { openSwitcher } from './switcher.js';
 import {
   confirmDialog,
   openAddContactDialog,
   openClaimHandleDialog,
+  openContactDialog,
   openCreateChannelDialog,
   openInviteDialog,
+  openNewGroupDialog,
+  openSafetyDialog,
+  openNoteDialog,
 } from './dialogs.js';
 import { openSettingsPage } from './settings.js';
+import { openProfile } from './profile.js';
+import { openContextMenu } from './contextmenu.js';
 
 let menu = null;
 
 export function initSidebar() {
   subscribe('sidebar', render);
+  subscribe('me', renderMe);
+  subscribe('sidebar', renderMe);
   render();
+  renderMe();
 }
 
 function render() {
@@ -37,7 +47,7 @@ function render() {
     top = el('div', { class: 'sidebar-top' }, el('span', { class: 'skel skel-line tall' }));
     body = skeletonRows('channel', 5);
   }
-  column.replaceChildren(top, el('div', { class: 'sidebar-scroll' }, body), userPanel());
+  column.replaceChildren(top, el('div', { class: 'sidebar-scroll' }, body, el('div', { class: 'sidebar-spacer' })));
 }
 
 // ---- top: find box (Home) or server header (server) ----
@@ -63,12 +73,27 @@ function serverTop(community) {
   return el('div', { class: 'sidebar-top' }, menuBtn);
 }
 
+// ---- quick links above the lists ----
+
+function quickLink(iconName, label, onclick, extra = null, active = false) {
+  return el('button', { class: `row-item link${active ? ' active' : ''}`, 'aria-current': active ? 'page' : null, icon: iconName, onclick },
+    el('span', { class: 'name', text: label }), extra);
+}
+
+function transfersLink() {
+  if (!has('transfers')) return null;
+  const active = state.transfers.filter((t) => ['active', 'paused', 'waiting'].includes(t.state)).length;
+  return quickLink('arrow-up-down', 'Transfers', () => actions.openPage('transfers'),
+    active ? el('span', { class: 'pill accent', text: `${active} active` }) : null,
+    state.ui.page === 'transfers');
+}
+
 // ---- server: channels ----
 
 function serverList(community) {
   const manage = canManage();
   const channels = community.channels.map((ch) => {
-    const active = ch.id === state.channelId;
+    const active = ch.id === state.channelId && !state.voiceChannelId && !state.ui.page;
     const unread = state.unread.has(`ch:${community.id}:${ch.id}`) && !active;
     return el('button', {
       class: `row-item${active ? ' active' : ''}${unread ? ' unread' : ''}`,
@@ -77,52 +102,185 @@ function serverList(community) {
       onclick: () => actions.openChannel(ch.id),
     }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name, title: `#${ch.name}` }));
   });
+  const addChannel = manage
+    ? el('button', { class: 'icon-btn', 'aria-label': 'Create channel', title: 'Create channel', icon: 'plus', onclick: () => openCreateChannelDialog(community.id) })
+    : null;
+  const voice = has('calls') && Array.isArray(community.voice_channels) ? voiceSection(community) : [];
   return [
-    el('div', { class: 'section-head' },
-      el('span', { text: 'Channels' }),
-      manage
-        ? el('button', {
-          class: 'icon-btn',
-          'aria-label': 'Server actions',
-          title: 'Server actions',
-          icon: 'settings',
-          onclick: (e) => toggleMenu(e.currentTarget.closest('.sidebar').querySelector('.sidebar-top'), community),
-        })
-        : null),
+    quickLink('user-plus', 'Invite people', () => openInviteDialog(community.id)),
+    transfersLink(),
+    el('div', { class: 'sidebar-sep', role: 'separator' }),
+    el('div', { class: 'section-head' }, el('span', { text: 'Text channels' }), addChannel),
     ...(channels.length ? channels : [el('p', { class: 'sidebar-empty', text: 'No channels yet.' })]),
+    ...voice,
   ];
+}
+
+// Voice channels (calls feature): a speaker row per channel, and the people in its call under it.
+function voiceSection(community) {
+  const rows = [];
+  for (const ch of community.voice_channels) {
+    const active = state.voiceChannelId === ch.id;
+    rows.push(el('button', {
+      class: `row-item voice${active ? ' active' : ''}`,
+      'aria-current': active ? 'true' : null,
+      icon: 'volume-2',
+      onclick: () => actions.openVoiceChannel(ch.id),
+    }, el('span', { class: 'name', text: ch.name, title: ch.name })));
+    for (const p of ch.participants ?? []) {
+      const a = avatar(p.display_name, p.root_id);
+      if (p.speaking) a.classList.add('speaking');
+      rows.push(el('div', { class: 'voice-member' }, a, el('span', { class: 'name', text: p.display_name })));
+    }
+  }
+  return [el('div', { class: 'section-head spaced' }, el('span', { text: 'Voice channels' })), ...rows];
 }
 
 // ---- home: direct messages ----
 
 function homeList() {
-  const convos = state.conversations.map((conv) => {
-    const active = state.route.kind === 'home' && state.peer === conv.peer;
-    const unread = state.unread.has(`dm:${conv.peer}`) && !active;
-    return el('button', {
-      class: `row-item convo${active ? ' active' : ''}${unread ? ' unread' : ''}`,
-      'aria-current': active ? 'true' : null,
-      title: conv.display_name,
-      onclick: () => actions.openDm(conv.peer, conv.display_name),
-    },
-    unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null,
-    avatar(conv.display_name, conv.peer),
-    el('span', { class: 'convo-text' },
-      el('span', { class: 'name', text: conv.display_name }),
-      el('span', { class: 'convo-last', text: conv.last_text ?? '' })));
-  });
+  const incoming = state.contacts?.incoming?.length ?? 0;
+  const links = [
+    has('contacts')
+      ? quickLink('users', 'Contacts', () => actions.openPage('contacts'),
+        incoming ? el('span', { class: 'count', text: String(incoming), 'aria-label': `${incoming} contact requests` }) : null,
+        state.ui.page === 'contacts')
+      : null,
+    quickLink('link', 'Invite links', () => openContactDialog()),
+    transfersLink(),
+    el('div', { class: 'sidebar-sep', role: 'separator' }),
+  ];
+  const convos = state.conversations.map(conversationRow);
+  const add = has('groups')
+    ? el('button', {
+      class: 'icon-btn',
+      'aria-label': 'New conversation',
+      'aria-haspopup': 'menu',
+      title: 'New conversation',
+      icon: 'plus',
+      onclick: (e) => openContextMenu(e.clientX || e.currentTarget.getBoundingClientRect().left, e.clientY || e.currentTarget.getBoundingClientRect().bottom, [
+        { label: 'Add contact', icon: 'user-plus', onPick: () => openAddContactDialog() },
+        { label: 'Create a group', icon: 'users-round', onPick: () => openNewGroupDialog() },
+      ]),
+    })
+    : el('button', { class: 'icon-btn', 'aria-label': 'Add contact', title: 'Add contact', icon: 'plus', onclick: () => openAddContactDialog() });
   return [
-    el('div', { class: 'section-head' },
-      el('span', { text: 'Direct Messages' }),
-      el('button', {
-        class: 'icon-btn',
-        'aria-label': 'Add contact',
-        title: 'Add contact',
-        icon: 'plus',
-        onclick: () => openAddContactDialog(),
-      })),
+    ...links,
+    el('div', { class: 'section-head' }, el('span', { text: 'Direct messages' }), add),
     ...(convos.length ? convos : [el('p', { class: 'sidebar-empty', text: 'No conversations yet. Add a contact to start one.' })]),
   ];
+}
+
+function conversationRow(conv) {
+  const group = conv.kind === 'group';
+  const key = actions.convKey(conv);
+  const active = state.route.kind === 'home' && !state.ui.page && state.peer === (group ? conv.id : conv.peer);
+  const unread = state.unread.has(key) && !active;
+  const name = group ? conv.name : conv.display_name;
+  // A live call on the row replaces the preview: "Call · 3 in", or "In a call with you" for a direct call.
+  const live = conv.live_call ?? null;
+  const sub = live
+    ? (live.scope === 'dm' ? 'In a call with you' : `Call · ${live.participants?.length ?? 0} in`)
+    : (group ? plural(conv.members?.length ?? 0, 'member') : conv.last_text ?? '');
+  const row = el('button', {
+    class: `row-item convo${active ? ' active' : ''}${unread ? ' unread' : ''}`,
+    'aria-current': active ? 'true' : null,
+    title: name,
+    onclick: () => actions.openConversation(conv),
+    oncontextmenu: (e) => { e.preventDefault(); openConversationMenu(e.clientX, e.clientY, conv); },
+  },
+  unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null,
+  group ? groupAvatar(conv) : avatar(name, conv.peer, '', typeof conv.online === 'boolean' ? conv.online : undefined),
+  el('span', { class: 'convo-text' },
+    el('span', { class: 'name', text: name }),
+    sub ? el('span', { class: `convo-last${live ? ' call-live' : ''}`, text: sub }) : null),
+  conv.pinned ? el('span', { class: 'icon pinned', title: 'Pinned' }, icon('pin')) : null);
+  return row;
+}
+
+function groupAvatar(conv) {
+  const node = stackAvatar(conv.members ?? []);
+  if (typeof conv.online === 'boolean') node.append(presenceDot(conv.online));
+  return node;
+}
+
+// The right-click menu on a conversation. Items the engine does not support are left out, not disabled.
+export function openConversationMenu(x, y, conv) {
+  const group = conv.kind === 'group';
+  const key = actions.convKey(conv);
+  const name = group ? conv.name : conv.display_name;
+  const items = [
+    { label: 'Mark as read', disabled: !state.unread.has(key), onPick: () => actions.markRead(key) },
+    'sep',
+    has('pins') ? { label: conv.pinned ? 'Unpin' : 'Pin', onPick: () => actions.pinConversation(key, !conv.pinned) } : null,
+    has('pins') ? { label: conv.pinned ? 'Remove from favorites' : 'Add to favorites', onPick: () => actions.pinConversation(key, !conv.pinned) } : null,
+    has('pins') ? 'sep' : null,
+  ];
+  if (!group) {
+    items.push(
+      { label: 'Profile', onPick: () => openProfile(conv.peer, x, y) },
+      has('calls') ? { label: 'Start a call', onPick: () => actions.startCall(conv.peer) } : null,
+      { label: 'Compare safety number', onPick: () => openSafetyDialog(conv.peer, name) },
+      has('notes') ? { label: 'Add note', sub: 'Only visible to you', onPick: () => openNoteDialog(conv.peer, name, 'note') } : null,
+      has('notes') ? { label: 'Set nickname', onPick: () => openNoteDialog(conv.peer, name, 'nickname') } : null,
+      has('contacts') ? {
+        label: 'Copy contact link', onPick: async () => {
+          const link = await actions.peerContactLink(conv.peer);
+          if (link && (await copyText(link))) toast(`${name}'s contact link copied`, 'info');
+        },
+      } : null,
+      group ? null : (has('close_dm') ? { label: 'Close DM', onPick: () => actions.closeDm(key) } : null),
+      'sep',
+      state.communities.length ? {
+        label: 'Invite to server',
+        submenu: state.communities.map((c) => ({
+          label: c.name, mini: c, onPick: async () => {
+            const link = await actions.createInvite(c.id);
+            if (!link) return;
+            await actions.openDm(conv.peer, name);
+            if (await actions.sendDm(`Join ${c.name}: ${link}`)) toast(`Invite to ${c.name} sent to ${name}`, 'info');
+          },
+        })),
+      } : null,
+      has('contacts') ? {
+        label: 'Remove contact', onPick: async () => {
+          if (await confirmDialog(`Remove ${name} from your contacts? Your conversation stays on this device.`, 'Remove')) actions.removeContact(conv.peer);
+        },
+      } : null,
+      !group && has('ignore') ? (state.ignored.has(conv.peer)
+        ? { label: 'Unignore', onPick: () => actions.setIgnored(conv.peer, false) }
+        : { label: 'Ignore', sub: 'Hide their messages without telling them', onPick: () => actions.setIgnored(conv.peer, true) }) : null,
+      has('contacts') ? {
+        label: 'Block', danger: true, onPick: async () => {
+          if (await confirmDialog(`Block ${name}? They won't be told, and their messages stop reaching you.`, 'Block')) actions.blockUser(conv.peer);
+        },
+      } : null,
+    );
+  } else {
+    items.push(
+      has('groups') ? {
+        label: 'Copy group invite link', onPick: async () => {
+          const link = await actions.groupInviteLink(conv.id);
+          if (link && (await copyText(link))) toast('Group invite link copied', 'info');
+        },
+      } : null,
+      has('groups') ? {
+        label: 'Leave group', danger: true, onPick: async () => {
+          if (await confirmDialog(`Leave ${name}? You'll stop receiving its messages.`, 'Leave')) actions.leaveGroup(conv.id);
+        },
+      } : null,
+    );
+  }
+  if (has('mute')) {
+    items.push('sep', {
+      label: `Mute ${group ? name : `@${name}`}`,
+      submenu: [15, 60, 480, 0].map((mins) => ({
+        label: mins === 0 ? 'Until I turn it back on' : mins >= 60 ? plural(mins / 60, 'hour') : `${mins} minutes`,
+        onPick: () => actions.muteConversation?.(key, mins),
+      })),
+    });
+  }
+  openContextMenu(x, y, items);
 }
 
 // ---- server menu (existing actions) ----
@@ -158,7 +316,7 @@ function toggleMenu(anchor, community) {
 }
 
 function onMenuOutside(e) {
-  if (menu && !menu.contains(e.target) && !e.target.closest?.('.server-menu-btn, [aria-label="Server actions"]')) closeMenu();
+  if (menu && !menu.contains(e.target) && !e.target.closest?.('.server-menu-btn')) closeMenu();
 }
 
 function closeMenu() {
@@ -167,15 +325,42 @@ function closeMenu() {
   document.removeEventListener('pointerdown', onMenuOutside, true);
 }
 
-// ---- user panel ----
+// ---- user panel: floats over the rail and the sidebar ----
 
-function userPanel() {
+function renderMe() {
+  const host = document.getElementById('me');
   const me = state.me;
-  return el('div', { class: 'me' },
-    avatar(me?.display_name || '?', me?.root_id),
-    el('div', { class: 'me-text' },
-      el('div', { class: 'me-name', text: me?.display_name || 'Set a display name', title: me?.display_name || '' }),
-      el('div', { class: 'me-suffix', text: `you·${me?.suffix ?? ''}` })),
-    el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', icon: 'settings', onclick: () => openSettingsPage() }),
-  );
+  const call = state.call;
+  const name = me?.display_name || 'Set a display name';
+  const status = call ? 'In a call' : 'Online';
+  const self = el('button', {
+    class: 'me-self',
+    'aria-label': `${name}, ${status}. Open settings`,
+    title: me ? `${me.display_name}·${me.suffix}` : '',
+    onclick: () => openSettingsPage('identity'),
+  },
+  avatar(me?.display_name || '?', me?.root_id, '', true),
+  el('span', { class: 'me-text' },
+    el('span', { class: 'me-name', text: name }),
+    el('span', { class: 'me-status', text: status })));
+  const tools = [];
+  if (has('calls')) {
+    const muted = Boolean(call?.muted);
+    const deaf = Boolean(call?.deafened);
+    tools.push(
+      el('button', { class: `icon-btn${muted ? ' on' : ''}`, 'aria-label': muted ? 'Unmute' : 'Mute', 'aria-pressed': muted ? 'true' : 'false', title: muted ? 'Unmute' : 'Mute', icon: muted ? 'mic-off' : 'mic', disabled: !call, onclick: () => actions.toggleMuted() }),
+      el('button', { class: 'icon-btn narrow', 'aria-label': 'Microphone options', title: 'Microphone options', icon: 'chevron-down', disabled: true }),
+      el('button', { class: `icon-btn${deaf ? ' on' : ''}`, 'aria-label': deaf ? 'Undeafen' : 'Deafen', 'aria-pressed': deaf ? 'true' : 'false', title: deaf ? 'Undeafen' : 'Deafen', icon: 'headphones', disabled: !call, onclick: () => actions.toggleDeafened() }),
+      el('button', { class: 'icon-btn narrow', 'aria-label': 'Output options', title: 'Output options', icon: 'chevron-down', disabled: true }),
+    );
+  }
+  tools.push(el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', 'aria-keyshortcuts': 'Control+, Meta+,', icon: 'settings', onclick: () => openSettingsPage() }));
+  const voice = call
+    ? el('div', { class: 'me-voice' },
+      el('div', { class: 'text' },
+        el('div', { class: 'state', text: 'Voice connected' }),
+        el('div', { class: 'where', text: call.where ?? [call.channel_name, call.community_name].filter(Boolean).join(' / ') })),
+      el('button', { class: 'icon-btn', 'aria-label': 'Leave call', title: 'Leave call', icon: 'phone-off', onclick: () => actions.leaveCall() }))
+    : null;
+  host.replaceChildren(...[voice, el('div', { class: 'me-row' }, self, ...tools)].filter(Boolean));
 }

@@ -6,3 +6,6 @@ apps/desktop/src-tauri/gen
 .playwright-mcp/
 /*.png
 *.log
+.cargo/config.toml
+*.o
+.agents/

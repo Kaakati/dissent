@@ -1,6 +1,7 @@
 // File attachments: staged chips above the composer, cards and thumbnails in messages, and the drop overlay.
 // Nothing here renders user-supplied markup. Names go through textContent, and the only image source is the
 // backend's local path converted by Tauri's asset protocol, never a URL taken from a message.
+import { has } from '../features.js';
 import { el, icon } from '../ui.js';
 import * as actions from '../actions.js';
 import { confirmDialog } from './dialogs.js';
@@ -67,6 +68,18 @@ const lockGlyph = () => el('span', { class: 'att-lock', title: 'End-to-end encry
 // ---- in messages ----
 
 // ctx: { messageId }
+// Rates from 1 MB/s up read in MB/s, slower ones in KB/s, as the FilesServer board shows.
+export function formatRate(bps) {
+  return bps >= 1024 ** 2 ? `${(bps / 1024 ** 2).toFixed(1)} MB/s` : `${formatSize(bps)}/s`;
+}
+
+// One cell per piece up to 96 cells, then the verified share of 96. A 1,383-piece file still fits the panel.
+export function pieceCells(total, verified) {
+  const n = Math.min(total, 96);
+  const filled = total ? Math.round((verified / total) * n) : 0;
+  return Array.from({ length: n }, (_, i) => el('span', { class: i < filled ? 'ok' : '' }));
+}
+
 export function attachmentNode(a, ctx) {
   const name = String(a.name ?? 'file');
   const src = isImage(a) && a.state === 'downloaded' ? imageSrc(a) : null;
@@ -82,14 +95,16 @@ export function attachmentNode(a, ctx) {
   }
   const ext = extOf(name);
   const exec = isExecutable(name);
-  return el('div', { class: `att-card${a.state === 'failed' ? ' failed' : ''}`, 'data-att': a.id },
+  return el('div', { class: `att-card${a.state === 'failed' ? ' failed' : ''}${a.state === 'downloading' ? ' downloading' : ''}`, 'data-att': a.id },
     el('span', { class: 'att-icon' }, icon(iconFor(a))),
     el('div', { class: 'att-body' },
       el('div', { class: 'att-name', title: name },
-        el('span', { class: 'att-name-text', text: name }),
+        el('span', { class: 'att-name-text', text: name, ...(a.state === 'downloading' ? { title: 'Transfer details', onclick: () => actions.openFileDetail(a.id) } : {}) }),
         ext ? el('span', { class: `att-ext${exec ? ' danger' : ''}`, text: ext.toUpperCase(), title: exec ? 'This is a program' : `.${ext} file` }) : null),
       el('div', { class: 'att-meta' }, el('span', { class: 'tnum', text: formatSize(a.size) }), lockGlyph(), stateNode(a)),
-      a.state === 'downloading' || a.state === 'paused' ? progressBar(a.progress) : null),
+      a.state === 'downloading' || a.state === 'paused' || a.state === 'sending' ? progressBar(a.progress) : null,
+      a.state === 'waiting' && a.note ? el('div', { class: 'piece-note', text: a.note }) : null,
+      a.state === 'downloading' && Array.isArray(a.sources) && a.sources.length > 1 ? el('div', { class: 'att-sources', text: `From ${a.sources.length} sources` }) : null),
     ...cardActions(a, ctx));
 }
 
@@ -107,6 +122,9 @@ function stateNode(a) {
     case 'failed': return el('span', { class: 'att-state danger', text: 'Download failed' });
     case 'disk_full': return el('span', { class: 'att-state danger tnum', text: `Not enough disk space${a.needed ? ` (needs ${formatSize(a.needed)})` : ''}` });
     case 'too_large': return el('span', { class: 'att-state', text: `Too large to download (over ${MAX_FILE_LABEL})` });
+    case 'waiting': return el('span', { class: 'att-state', text: 'Waiting for a source' });
+    case 'sending': return el('span', { class: 'att-state tnum', text: a.status ?? 'Sending' });
+    case 'downloaded': return a.verified ? el('span', { class: 'att-state', style: 'color: var(--success-text)', text: 'Saved to Downloads · matches the fingerprint' }) : null;
     default: return null;
   }
 }
@@ -122,6 +140,11 @@ function cardActions(a, ctx) {
   const download = () => actions.downloadAttachment(ctx.messageId, a.id);
   switch (a.state) {
     case 'available': return [btn('download', `Download ${a.name}`, download)];
+    case 'downloading':
+    case 'sending': return a.transfer_id ? [
+      btn('pause', `Pause ${a.name}`, () => actions.pauseTransfer(a.transfer_id)),
+      btn('x', `Cancel ${a.name}`, () => actions.cancelTransfer(a.transfer_id)),
+    ] : [];
     case 'paused': return [btn('download', `Resume download of ${a.name}`, download)];
     case 'failed':
     case 'disk_full': return [btn('rotate-ccw', `Retry download of ${a.name}`, download)];

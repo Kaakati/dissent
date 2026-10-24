@@ -70,6 +70,10 @@ pub enum SealedKind {
     Message,
     Reply { target: EventId },
     Edit { target: EventId },
+    /// A reaction. The emoji is in the sealed bytes, so only members see which one.
+    React { target: EventId },
+    /// Removes the author's reaction. The emoji is in the sealed bytes.
+    Unreact { target: EventId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -145,6 +149,21 @@ pub enum Payload {
     Unreact {
         target: EventId,
         emoji: String,
+    },
+    /// Sets the relay servers members use for this community. Admins and the owner only. The
+    /// latest by HLC wins. See `relay::valid_relays` for the limits.
+    SetRelays { relays: Vec<String> },
+    /// Joins as a storage member: it keeps and serves the community's ciphertext, mirrors blobs and
+    /// serves as an inbox. It is never added to the MLS group, so it cannot read messages, and it
+    /// cannot post. Appended, so the encoding of earlier variants is unchanged.
+    JoinAsStorage { display_name: String },
+    /// Rotates the community secret after bans. `generation` is the previous one plus one, and
+    /// `covers` are the banned roots this rotation answers. `sealed` is the new 32-byte secret,
+    /// encrypted under the group after the removal commits, so a removed device cannot open it.
+    SecretRotation {
+        generation: u64,
+        covers: Vec<RootId>,
+        sealed: Vec<u8>,
     },
 }
 

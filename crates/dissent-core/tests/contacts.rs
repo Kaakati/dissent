@@ -296,3 +296,62 @@ async fn blocked_sender_is_dropped_without_a_reply() {
 
     finish(vec![alice, bob]).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refusals_are_rate_limited_per_sender() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let bob_root = bob.identity.root_id();
+    bob.engine
+        .set_dm_policy(DmPolicy::ContactsOnly)
+        .expect("policy set");
+
+    // The first refusal is explicit, so Alice sees it as failed.
+    let first = alice
+        .engine
+        .send_dm(bob_root, "first try".into())
+        .await
+        .expect("alice writes");
+    assert_eq!(first.delivery, "failed");
+
+    // Within the window Bob answers with a silent acknowledgement, so the second send does not
+    // show a refusal. That keeps repeated sends from revealing Bob's policy or presence.
+    let second = alice
+        .engine
+        .send_dm(bob_root, "second try".into())
+        .await
+        .expect("alice writes again");
+    assert_ne!(second.delivery, "failed", "a repeat refusal is silent");
+    assert!(!dm_has(&bob.engine, alice.identity.root_id(), "second try"));
+
+    finish(vec![alice, bob]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contact_who_just_answered_is_online() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let bob_root = bob.identity.root_id();
+    alice
+        .engine
+        .add_contact(&bob.engine.contact_link())
+        .await
+        .expect("alice asks bob");
+    eventually("bob sees the request", || {
+        (!bob.engine.contact_requests().is_empty()).then_some(())
+    })
+    .await;
+    bob.engine.accept_request(alice.identity.root_id()).await.expect("bob accepts");
+    eventually("bob's device is seen", || {
+        alice
+            .engine
+            .list_contacts()
+            .contacts
+            .iter()
+            .any(|e| e.root_id == bob_root.to_string() && e.online)
+            .then_some(())
+    })
+    .await;
+    finish(vec![alice, bob]).await;
+}

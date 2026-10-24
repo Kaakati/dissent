@@ -7,11 +7,12 @@ use common::*;
 use dissent_core::{CallScope, NoteKind};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn capabilities_list_the_implemented_surfaces() {
     bounded(async {
     let alice = peer("alice").await;
     let caps = alice.engine.capabilities();
-    for name in ["calls", "guardians", "devices", "notes", "pins", "safety", "key_change"] {
+    for name in ["calls", "guardians", "devices", "notes", "pins", "safety", "key_change", "close_dm", "ignore"] {
         assert!(caps.contains(&name), "{name} must be reported");
     }
     assert!(!caps.contains(&"groups"), "groups are not built and must not be reported");
@@ -20,6 +21,7 @@ async fn capabilities_list_the_implemented_surfaces() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn notes_and_nicknames_are_private_and_per_user() {
     bounded(async {
     let alice = peer("alice").await;
@@ -54,6 +56,7 @@ async fn notes_and_nicknames_are_private_and_per_user() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn pins_and_read_markers_persist_on_this_device() {
     bounded(async {
     let alice = peer("alice").await;
@@ -99,17 +102,19 @@ async fn pins_and_read_markers_persist_on_this_device() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn first_run_clears_once_the_phrase_is_saved() {
     bounded(async {
     let alice = peer("alice").await;
     assert!(alice.engine.me().first_run);
-    alice.engine.mark_phrase_saved().unwrap();
+    alice.engine.complete_first_run().unwrap();
     assert!(!alice.engine.me().first_run);
     finish(vec![alice]).await;
     }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn marking_a_safety_number_verified_sets_the_time() {
     bounded(async {
     let alice = peer("alice").await;
@@ -125,6 +130,7 @@ async fn marking_a_safety_number_verified_sets_the_time() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn call_controls_and_messages_reach_the_call() {
     bounded(async {
     let alice = peer("alice").await;
@@ -168,6 +174,7 @@ async fn call_controls_and_messages_reach_the_call() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn guardian_entries_name_the_shared_communities() {
     bounded(async {
     let owner = peer("owner").await;
@@ -186,4 +193,27 @@ async fn guardian_entries_name_the_shared_communities() {
     assert_eq!(view.guardians[0].shared_servers, vec![name]);
     finish(vec![owner, bob]).await;
     }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn closing_and_ignoring_stay_on_this_device() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let bob_root = bob.identity.root_id();
+
+    alice.engine.close_conversation("dm:bob".into()).unwrap();
+    assert!(alice.engine.closed_conversations().contains_key("dm:bob"));
+    alice.engine.reopen_conversation("dm:bob".into()).unwrap();
+    assert!(alice.engine.closed_conversations().is_empty());
+
+    assert!(!alice.engine.user_profile(bob_root).ignored);
+    alice.engine.ignore_user(bob_root).unwrap();
+    assert!(alice.engine.user_profile(bob_root).ignored);
+    assert_eq!(alice.engine.ignored_users(), vec![bob_root]);
+    // Ignoring is local: bob's view of alice does not change.
+    assert!(!bob.engine.user_profile(alice.identity.root_id()).ignored);
+    alice.engine.unignore_user(bob_root).unwrap();
+    assert!(alice.engine.ignored_users().is_empty());
+    finish(vec![alice, bob]).await;
 }

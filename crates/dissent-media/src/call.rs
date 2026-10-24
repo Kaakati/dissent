@@ -61,6 +61,10 @@ pub struct CallStats {
     /// Times a sender's frame did not match its signed digest. Each one mutes that sender for
     /// the rest of the epoch.
     pub impersonation_detected: u64,
+    /// The sending bitrate the bandwidth estimate targets, in kbps, within the Opus range. It
+    /// starts at a default, and moves with the measured RTT and loss, see
+    /// [`Call::target_bitrate_kbps`].
+    pub target_kbps: u32,
 }
 
 /// The keys of a call that has them.
@@ -571,7 +575,10 @@ impl<T: PacketTransport> Call<T> {
 
     /// A snapshot of the call's counters.
     pub fn stats(&self) -> CallStats {
-        self.stats
+        CallStats {
+            target_kbps: self.bwe.target_kbps(),
+            ..self.stats
+        }
     }
 
     fn opus_pt(&self) -> Option<Pt> {

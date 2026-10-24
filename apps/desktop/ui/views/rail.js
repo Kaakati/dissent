@@ -1,7 +1,7 @@
-// Far-left column: Home (direct messages) on top, one round-square button per server, "+" at the bottom.
+// Far-left column: Home (direct messages) on top, one round button per server, "+" at the end of the list.
 import { state, subscribe } from '../state.js';
 import * as actions from '../actions.js';
-import { el, initials, setHue } from '../ui.js';
+import { el, initials, setHue, icon } from '../ui.js';
 import { openServerDialog } from './dialogs.js';
 
 export function initRail() {
@@ -11,7 +11,7 @@ export function initRail() {
 
 function render() {
   const onHome = state.route.kind === 'home';
-  const dmUnread = [...state.unread].filter((k) => k.startsWith('dm:')).length;
+  const dmUnread = [...state.unread].filter((k) => k.startsWith('dm:') || k.startsWith('group:')).length;
   const servers = state.communities.map((c) => {
     const active = state.route.kind === 'server' && state.route.communityId === c.id;
     const btn = el('button', {
@@ -23,9 +23,12 @@ function render() {
       'data-tip': c.name,
       onclick: () => actions.openServer(c.id),
     }, initials(c.name));
-    setHue(btn, c.id);
-    const unread = [...state.unread].some((k) => k.startsWith(`ch:${c.id}:`));
-    return el('div', { class: `rail-item${active ? ' active' : ''}${unread ? ' unread' : ''}` }, btn);
+    setHue(btn, c.hue ?? c.id);
+    const unreadKeys = [...state.unread].filter((k) => k.startsWith(`ch:${c.id}:`));
+    const badge = typeof c.mentions === 'number' && c.mentions > 0
+      ? el('span', { class: 'rail-badge', text: String(c.mentions), 'aria-label': `${c.mentions} mentions` })
+      : null;
+    return el('div', { class: `rail-item${active ? ' active' : ''}${unreadKeys.length ? ' unread' : ''}` }, btn, badge);
   });
   const rail = document.getElementById('rail');
   rail.setAttribute('role', 'tablist');
@@ -33,7 +36,6 @@ function render() {
   rail.setAttribute('aria-label', 'Servers and direct messages');
   rail.replaceChildren(
     el('div', { class: `rail-item${onHome ? ' active' : ''}` },
-      dmUnread > 0 ? el('span', { class: 'rail-badge', text: String(dmUnread), 'aria-label': `${dmUnread} unread conversations` }) : null,
       el('button', {
         class: 'rail-btn home',
         role: 'tab',
@@ -42,7 +44,8 @@ function render() {
         'aria-current': onHome ? 'page' : null,
         'data-tip': 'Direct Messages',
         onclick: () => actions.openHome(),
-      }, el('img', { class: 'home-logo', src: 'app-icon-96.png', alt: '' }))),
+      }, icon('dissent-mark')),
+      dmUnread > 0 ? el('span', { class: 'rail-badge', text: String(dmUnread), 'aria-label': `${dmUnread} unread conversations` }) : null),
     el('hr', { class: 'rail-sep' }),
     ...servers,
     el('div', { class: 'rail-item' },

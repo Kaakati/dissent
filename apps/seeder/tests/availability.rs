@@ -1,21 +1,20 @@
 //! Phase-3 exit criterion: history stays available with every member device offline as long as
 //! one seeder is up. Every engine runs on this machine with relays disabled.
 //!
-//! Messages are encrypted with the community's MLS group. A device only reads messages from the
-//! epochs it has keys for. So a device that joins later sees earlier messages as locked. The
-//! guarantee tested here is that every message event reaches the joiner, locked or readable. Text
-//! is only checked where MLS gives a key.
+//! The seeder joins as a storage member. It keeps and serves sealed history, but it is never added
+//! to the community's MLS group, so it cannot read messages. A joiner therefore receives every
+//! message event from the seeder as locked, and reads new messages only once a person who is in
+//! the group admits them.
 //!
 //! Every wait has a bound, so a stalled engine fails the test instead of hanging it.
 
 use dissent_core::{
-    ChannelId, CommunityId, Engine, EngineEvent, Identity, MessageItem, NodeConfig,
-    RelayChoice,
+    ChannelId, CommunityId, Engine, EngineEvent, Identity, MessageItem, NodeConfig, RelayChoice,
 };
 use dissent_discovery::Invite;
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
@@ -28,6 +27,7 @@ const TEST_LIMIT: Duration = Duration::from_secs(240);
 struct Node {
     engine: Engine,
     dir: PathBuf,
+    identity: Identity,
     /// Kept so the notification channel stays open while the test runs.
     _events: broadcast::Receiver<EngineEvent>,
 }
@@ -72,23 +72,26 @@ async fn step<T>(what: &str, fut: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} did not finish within {STEP:?}"))
 }
 
+async fn start_engine(identity: Identity, dir: PathBuf) -> (Engine, broadcast::Receiver<EngineEvent>) {
+    step(
+        "engine start",
+        Engine::start(identity, dir.clone(), offline(), dissent_core::test_support::vault_for(&dir)),
+    )
+    .await
+    .expect("engine starts")
+}
+
 async fn node(name: &str) -> Node {
     let dir = scratch(name);
-    let (engine, events) = step(
-        "engine start",
-        Engine::start(Identity::create(now()), dir.clone(), offline()),
-    )
-    .await
-    .expect("engine starts");
-    step(
-        "set name",
-        engine.set_display_name(name.to_string()),
-    )
-    .await
-    .expect("name set");
+    let identity = Identity::create(now());
+    let (engine, events) = start_engine(identity.clone(), dir.clone()).await;
+    step("set name", engine.set_display_name(name.to_string()))
+        .await
+        .expect("name set");
     Node {
         engine,
         dir,
+        identity,
         _events: events,
     }
 }
@@ -163,16 +166,12 @@ async fn alice_posts_history(alice: &Node) -> (CommunityId, ChannelId, BTreeSet<
     (id, general, ids, invite)
 }
 
-/// A link that names `peers` only, for the community whose genesis is in `invite`.
+/// An invite for the same community that names only `peers`. Every other field, including the
+/// secret and relays, comes from `alice_invite`.
 fn invite_via(alice_invite: &str, peers: Vec<String>) -> String {
-    let original = Invite::parse(alice_invite).expect("alice invite parses");
-    Invite {
-        genesis: original.genesis,
-        peers,
-        secret: original.secret,
-    }
-    .to_url()
-    .to_string()
+    let mut invite = Invite::parse(alice_invite).expect("alice invite parses");
+    invite.peers = peers;
+    invite.to_url().to_string()
 }
 
 /// The address of `node` as an invite gives it, for a joiner that knows only that address.
@@ -183,12 +182,40 @@ async fn address_of(node: &Node, id: CommunityId) -> Vec<String> {
     Invite::parse(&link).expect("parses").peers
 }
 
+/// Asserts that a storage seeder holds no MLS state for the community. It never joins the group,
+/// so it has no commit log for it.
+fn assert_no_mls_state(dir: &Path, id: CommunityId) {
+    let commits = dir
+        .join("communities")
+        .join(id.to_string())
+        .join("mls_commits.log");
+    assert!(
+        !commits.exists(),
+        "storage seeder has an MLS commit log at {}",
+        commits.display()
+    );
+}
+
 async fn shut_down(node: Node) {
     let dir = node.dir.clone();
     step("shutdown", node.engine.shutdown())
         .await
         .expect("clean shutdown");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Shuts an engine down but keeps its data, so it can restart from the same directory.
+async fn stop_keeping_data(node: Node) -> (Identity, PathBuf) {
+    let Node {
+        engine,
+        dir,
+        identity,
+        _events,
+    } = node;
+    step("shutdown", engine.shutdown())
+        .await
+        .expect("clean shutdown");
+    (identity, dir)
 }
 
 /// Runs a whole test body under `TEST_LIMIT`.
@@ -205,20 +232,21 @@ async fn history_survives_every_member_offline() {
         let alice = node("alice").await;
         let (id, _general, history, alice_invite) = alice_posts_history(&alice).await;
 
-        // 2. A seeder joins from Alice's invite and syncs every message event. It cannot decrypt
-        //    the messages, because they predate its MLS epoch, so they show as locked.
+        // 2. A storage seeder joins from Alice's invite. It syncs every message event and holds
+        //    them sealed. It is never added to the MLS group.
         let seeder = node("seeder").await;
         step(
-            "seeder joins",
-            seeder.engine.join_community(&alice_invite),
+            "seeder joins as storage",
+            seeder.engine.join_as_storage(&alice_invite),
         )
         .await
-        .expect("seeder joins");
+        .expect("seeder joins as storage");
         eventually("seeder holds every message event", || {
             let items = general_items(&seeder.engine, id)?;
             (ids_of(&items) == history).then_some(())
         })
         .await;
+        assert_no_mls_state(&seeder.dir, id);
 
         // 3. Alice goes offline. No member device is left.
         shut_down(alice).await;
@@ -231,12 +259,18 @@ async fn history_survives_every_member_offline() {
             .expect("bob joins from the seeder alone");
         assert_eq!(joined.id, id.to_string());
 
-        // 5. Bob receives every message event, locked or readable.
+        // 5. Bob receives every message event from the seeder. He cannot decrypt them, because
+        //    they predate his place in the group, so every one is locked.
         eventually("bob receives every message event", || {
             let items = general_items(&bob.engine, id)?;
             (ids_of(&items) == history).then_some(())
         })
         .await;
+        let bob_items = general_items(&bob.engine, id).expect("general");
+        assert!(
+            bob_items.iter().all(|m| m.locked),
+            "history from before Bob joined must stay locked for him"
+        );
 
         shut_down(bob).await;
         shut_down(seeder).await;
@@ -244,58 +278,76 @@ async fn history_survives_every_member_offline() {
     .await;
 }
 
-/// Stronger than the availability promise. The seeder is a plain member, and Alice is offline.
-/// Core lets any current member commit adds of current members, so the seeder admits Bob to the
-/// MLS group. A message posted after Bob joins must then reach him as plaintext.
+/// The seeder cannot admit Bob. A person in the group does that. Once Alice is back online, she
+/// adds Bob, and Bob then reads messages posted after that.
 #[tokio::test(flavor = "multi_thread")]
-async fn seeder_member_admits_later_joiner_and_post_readable_messages() {
+async fn bob_reads_new_messages_once_alice_returns() {
     bounded(async {
         let alice = node("alice").await;
         let (id, _general, history, alice_invite) = alice_posts_history(&alice).await;
 
         let seeder = node("seeder").await;
-        step("seeder joins", seeder.engine.join_community(&alice_invite))
+        step("seeder joins as storage", seeder.engine.join_as_storage(&alice_invite))
             .await
-            .expect("seeder joins");
+            .expect("seeder joins as storage");
         eventually("seeder holds every message event", || {
             let items = general_items(&seeder.engine, id)?;
             (ids_of(&items) == history).then_some(())
         })
         .await;
 
-        // Alice goes offline. The seeder is a plain member and must admit Bob on its own.
-        shut_down(alice).await;
+        // Alice goes offline, keeping her data so she can come back.
+        let (alice_identity, alice_dir) = stop_keeping_data(alice).await;
 
-        // Bob joins through the seeder alone, and must still receive every history event.
         let bob_invite = invite_via(&alice_invite, address_of(&seeder, id).await);
         let bob = node("bob").await;
         step("bob joins", bob.engine.join_community(&bob_invite))
             .await
-            .expect("bob joins");
+            .expect("bob joins from the seeder alone");
         eventually("bob receives every message event", || {
             let items = general_items(&bob.engine, id)?;
             (ids_of(&items) == history).then_some(())
         })
         .await;
 
-        // A message posted after Bob joined is readable by him, with Alice still offline.
-        let general = general_channel(&seeder.engine, id).expect("general");
-        step(
-            "seeder posts",
-            seeder
-                .engine
-                .send_message(id, general, "after bob joined".into()),
-        )
-        .await
-        .expect("seeder posts");
-        eventually("bob reads the post-join message", || {
-            general_items(&bob.engine, id)?
-                .iter()
-                .any(|m| m.text == "after bob joined" && !m.locked)
-                .then_some(())
-        })
-        .await;
+        // Alice comes back online from her own data.
+        let (engine, events) = start_engine(alice_identity.clone(), alice_dir.clone()).await;
+        let alice = Node {
+            engine,
+            dir: alice_dir,
+            identity: alice_identity,
+            _events: events,
+        };
 
+        // Once Alice has admitted Bob to the group, a new message reaches Bob as plaintext. Alice
+        // retries her post until Bob reads it, which covers the time her maintenance takes.
+        let general = general_channel(&alice.engine, id).expect("alice general");
+        let deadline = Instant::now() + Duration::from_secs(150);
+        let mut n = 0;
+        loop {
+            let text = format!("after alice returned {n}");
+            step("alice posts", alice.engine.send_message(id, general, text.clone()))
+                .await
+                .expect("alice posts");
+            n += 1;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let read = general_items(&bob.engine, id)
+                .unwrap_or_default()
+                .iter()
+                .any(|m| m.text.starts_with("after alice returned") && !m.locked);
+            if read {
+                break;
+            }
+            assert!(Instant::now() < deadline, "bob never read a message from Alice after she returned");
+        }
+
+        // The history stays locked for Bob, and only new messages become readable.
+        let bob_items = general_items(&bob.engine, id).expect("general");
+        let old: Vec<&MessageItem> = bob_items.iter().filter(|m| history.contains(&m.id)).collect();
+        assert_eq!(old.len(), MESSAGES);
+        assert!(old.iter().all(|m| m.locked));
+
+        shut_down(alice).await;
         shut_down(bob).await;
         shut_down(seeder).await;
     })

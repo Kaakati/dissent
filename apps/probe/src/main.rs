@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     // Logs go to stderr, so stdout stays clean for --json.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mainline=error,mainline::rpc=off")),
         )
         .with_writer(std::io::stderr)
         .init();
