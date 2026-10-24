@@ -341,13 +341,21 @@ impl Engine {
                 return;
             }
         };
-        let devices = beacon_devices(&self.read());
+        // Gossip is fire-and-forget and the node closes right after, so also deliver it directly,
+        // acknowledged, to contacts and to the community members we have heard from recently.
+        let devices = offline_devices(&self.read(), now_ms());
         let node = self.node();
+        let mut sends = tokio::task::JoinSet::new();
         for device in devices {
-            if let Err(e) = node.request(device, bytes.clone()).await {
-                debug!(device = %device, error = %e, "offline beacon not delivered directly");
-            }
+            let node = node.clone();
+            let bytes = bytes.clone();
+            sends.spawn(async move {
+                if let Err(e) = node.request(device, bytes).await {
+                    debug!(device = %device, error = %e, "offline beacon not delivered directly");
+                }
+            });
         }
+        while sends.join_next().await.is_some() {}
     }
 
     /// Sends our beacon on one community's topic, when a neighbour joins it.
@@ -413,7 +421,12 @@ impl Engine {
             }
             let allowed = match community {
                 Some(id) => w.communities.get(&id).is_some_and(|c| c.is_member(&root)),
-                None => w.is_contact(&root) && !w.contact_book.blocked.contains(&root),
+                // Sent directly: from a contact, or from someone we share a community with (the
+                // same people who see this beacon on a community topic).
+                None => {
+                    !w.contact_book.blocked.contains(&root)
+                        && (w.is_contact(&root) || w.communities.values().any(|c| c.is_member(&root)))
+                }
             };
             if !allowed {
                 return Err(CoreError::Invalid("sender is neither a member nor a contact".into()));
@@ -466,6 +479,21 @@ fn beacon_devices(w: &World) -> Vec<DeviceId> {
             continue;
         }
         devices.extend(w.directory.devices_of(&root));
+    }
+    devices.remove(&w.device);
+    devices.into_iter().collect()
+}
+
+/// Where the offline beacon goes directly: every contact device, plus the devices of community
+/// members whose beacon we heard within the presence window (so they currently show us online).
+fn offline_devices(w: &World, now: u64) -> Vec<DeviceId> {
+    let mut devices: BTreeSet<DeviceId> = beacon_devices(w).into_iter().collect();
+    for (root, heard) in &w.presence {
+        let fresh = now.saturating_sub(heard.received_ms) < PRESENCE_WINDOW_MS;
+        let shared = w.communities.values().any(|c| c.is_member(root));
+        if fresh && shared && *root != w.me && !w.contact_book.blocked.contains(root) {
+            devices.extend(w.directory.devices_of(root));
+        }
     }
     devices.remove(&w.device);
     devices.into_iter().collect()
