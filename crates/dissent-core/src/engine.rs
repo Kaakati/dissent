@@ -13,6 +13,7 @@ use dissent_net::{Node, NodeConfig, PeerAddr, RelayChoice, TopicReceiver};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -40,6 +41,14 @@ pub(crate) struct Inner {
     /// Mainline DHT client for publishing community records and reading network stats. `None`
     /// when relays are disabled, so tests stay offline.
     pub discovery: Option<Arc<Discovery>>,
+    /// Seeds of the communities we founded. Read from `community.key` at startup, and used to
+    /// sign their DHT records.
+    pub founded: Mutex<BTreeMap<CommunityId, [u8; 32]>>,
+    /// True when the last DHT publish of every founded community succeeded. False until then, so
+    /// maintenance keeps retrying a publish the DHT refused, for example before it bootstrapped.
+    pub records_current: AtomicBool,
+    /// Serializes DHT record publishes.
+    pub publish_lock: tokio::sync::Mutex<()>,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
 }
@@ -60,6 +69,7 @@ impl Engine {
         let me = identity.root_id();
         let world = World::load(Paths::new(data_dir), &identity)?;
         let newest_stored = world.max_hlc();
+        let founded = load_founded(&world);
         let discovery = if matches!(net.relay, RelayChoice::Disabled) {
             None
         } else {
@@ -81,6 +91,9 @@ impl Engine {
             node: OnceLock::new(),
             tasks: Mutex::new(Vec::new()),
             discovery,
+            founded: Mutex::new(founded),
+            records_current: AtomicBool::new(false),
+            publish_lock: tokio::sync::Mutex::new(()),
             neighbours: Mutex::new(BTreeMap::new()),
         });
         let config = NodeConfig {
@@ -340,4 +353,18 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// Seeds of the communities we founded: those whose `community.key` file we hold.
+fn load_founded(w: &World) -> BTreeMap<CommunityId, [u8; 32]> {
+    w.communities
+        .keys()
+        .filter_map(|id| {
+            let seed: [u8; 32] = std::fs::read(w.paths.community_key(id))
+                .ok()?
+                .try_into()
+                .ok()?;
+            Some((*id, seed))
+        })
+        .collect()
 }

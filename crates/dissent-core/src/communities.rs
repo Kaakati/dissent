@@ -2,12 +2,13 @@
 
 use crate::community::Community;
 use crate::engine::{clean_text, not_found, now_ms, Engine};
+use std::sync::atomic::Ordering;
 use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use crate::rpc::{Request, Response};
 use crate::store::{write_bin, write_bytes_atomic};
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
-use dissent_discovery::{CommunityRecord, Discovery, Invite};
+use dissent_discovery::{CommunityRecord, Invite};
 use dissent_events::{ChannelId, Payload, SignedEvent};
 use dissent_identity::{CommunityId, CommunityKey, DeviceId, Genesis};
 use dissent_net::{PeerAddr, TopicId, TopicReceiver, TopicSender};
@@ -19,6 +20,8 @@ use tracing::{debug, warn};
 const JOIN_GOSSIP_WAIT: Duration = Duration::from_secs(5);
 /// How long leaving waits for the receive loop to stop before the loop is aborted.
 const LEAVE_WAIT: Duration = Duration::from_secs(2);
+/// How long a join waits for the DHT to return a community record.
+const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(30);
 
 impl Engine {
     /// Creates a community with a `general` channel. Publishes its DHT record in the background.
@@ -34,6 +37,11 @@ impl Engine {
             write_bytes_atomic(&paths.community_key(&id), &key.0.seed())?;
             guard.communities.insert(id, Community::new(genesis));
         }
+        self.inner
+            .founded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, key.0.seed());
         let topic_rx = self.subscribe_topic(id, Vec::new()).await?;
         self.spawn_receiver(id, topic_rx);
 
@@ -49,17 +57,61 @@ impl Engine {
         )
         .await?;
 
-        if let Some(discovery) = self.inner.discovery.clone() {
-            let peers = self.read().my_addr.iter().map(|a| a.to_string()).collect();
-            let record = CommunityRecord {
-                name,
-                peers,
-                relays: Vec::new(),
-            };
-            self.spawn_task(publish_record(discovery, key, record));
-        }
+        self.spawn_publish_records();
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
+    }
+
+    /// Publishes the DHT records in the background, if we have a DHT client.
+    pub(crate) fn spawn_publish_records(&self) {
+        if self.inner.discovery.is_some() {
+            let engine = self.clone();
+            self.spawn_task(async move { engine.publish_records().await });
+        }
+    }
+
+    /// Publishes the DHT record of every community we founded. Each record names our address
+    /// without direct IPs, so the public DHT never learns where we listen. Devices are dialled by
+    /// id through the Mainline address lookup.
+    pub(crate) async fn publish_records(&self) {
+        let Some(discovery) = self.inner.discovery.clone() else {
+            return;
+        };
+        // Publishes of one record must not overlap. The DHT keeps only the newest packet, and an
+        // older one that lands later is refused.
+        let _publishing = self.inner.publish_lock.lock().await;
+        let jobs: Vec<(CommunityKey, CommunityRecord)> = {
+            let w = self.read();
+            let Some(addr) = w.my_addr.clone() else {
+                return;
+            };
+            let founded = self
+                .inner
+                .founded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            founded
+                .iter()
+                .filter_map(|(id, seed)| {
+                    let c = w.communities.get(id)?;
+                    let record = CommunityRecord {
+                        name: c.name().to_string(),
+                        peers: vec![public_addr(&addr).to_string()],
+                        relays: Vec::new(),
+                    };
+                    Some((CommunityKey::from_seed(*seed), record))
+                })
+                .collect()
+        };
+        let mut all_ok = true;
+        for (key, record) in jobs {
+            let published = discovery.publish(&key, &record).await;
+            if let Err(e) = published {
+                all_ok = false;
+                warn!(error = %e, "could not publish community record to the DHT");
+            }
+        }
+        self.inner.records_current.store(all_ok, Ordering::Relaxed);
     }
 
     /// An invite link for `community`, carrying our current address.
@@ -94,23 +146,20 @@ impl Engine {
             .my_addr
             .clone()
             .ok_or_else(|| CoreError::Invalid("endpoint address is not ready".into()))?;
-        let peers: Vec<PeerAddr> = invite
+        let invited: Vec<PeerAddr> = invite
             .peers
             .iter()
             .filter_map(|p| p.parse::<PeerAddr>().ok())
             .collect();
-        if peers.is_empty() {
-            return Err(CoreError::Invalid("invite lists no usable peer address".into()));
-        }
         {
             let mut guard = self.write();
             let w = &mut *guard;
-            for peer in &peers {
+            for peer in &invited {
                 self.learn_address(w, peer.clone());
             }
         }
 
-        let events = self.fetch_invited(&invite.genesis, &peers, &my_addr).await?;
+        let (events, peers) = self.fetch_for_join(&invite.genesis, &invited, &my_addr).await?;
         {
             let mut guard = self.write();
             write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
@@ -166,6 +215,11 @@ impl Engine {
         }
         self.inner
             .neighbours
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&community);
+        self.inner
+            .founded
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&community);
@@ -228,6 +282,68 @@ impl Engine {
         leave_topic(sender, rx);
     }
 
+    /// Fetches the community from the invite's peers. If none of them answers, it tries the peers
+    /// named in the community's DHT record. Returns the events and the peers that served them.
+    async fn fetch_for_join(
+        &self,
+        genesis: &Genesis,
+        invited: &[PeerAddr],
+        from: &PeerAddr,
+    ) -> Result<(Vec<SignedEvent>, Vec<PeerAddr>)> {
+        let invite_err = if invited.is_empty() {
+            "the invite lists no peer".to_string()
+        } else {
+            match self.fetch_invited(genesis, invited, from).await {
+                Ok(events) => return Ok((events, invited.to_vec())),
+                Err(e) => format!("the invite's peers did not answer: {e}"),
+            }
+        };
+        let from_record = self.record_peers(&genesis.community).await;
+        if from_record.is_empty() {
+            return Err(CoreError::NotFound(format!(
+                "could not join: {invite_err}; the DHT has no usable record for this community"
+            )));
+        }
+        match self.fetch_invited(genesis, &from_record, from).await {
+            Ok(events) => Ok((events, from_record)),
+            Err(e) => Err(CoreError::NotFound(format!(
+                "could not join: {invite_err}; the DHT record's peers did not answer: {e}"
+            ))),
+        }
+    }
+
+    /// The peers named in the community's DHT record. They are remembered, so they can be dialled.
+    /// Empty when there is no DHT, no record, or the lookup fails.
+    async fn record_peers(&self, id: &CommunityId) -> Vec<PeerAddr> {
+        let Some(discovery) = self.inner.discovery.clone() else {
+            return Vec::new();
+        };
+        // A DHT lookup can stall for a long time. A join should not wait on it indefinitely.
+        let lookup = tokio::time::timeout(DHT_LOOKUP_WAIT, discovery.resolve(id)).await;
+        let record = match lookup {
+            Ok(Ok(Some(record))) => record,
+            Ok(Ok(None)) => return Vec::new(),
+            Ok(Err(e)) => {
+                debug!(community = %id, error = %e, "could not resolve community record");
+                return Vec::new();
+            }
+            Err(_) => {
+                debug!(community = %id, "community record lookup timed out");
+                return Vec::new();
+            }
+        };
+        let peers: Vec<PeerAddr> = record
+            .peers
+            .iter()
+            .filter_map(|p| p.parse::<PeerAddr>().ok())
+            .collect();
+        let mut guard = self.write();
+        for peer in &peers {
+            self.learn_address(&mut guard, peer.clone());
+        }
+        peers
+    }
+
     /// Asks the invite's peers for the community, returning every event they hold.
     async fn fetch_invited(
         &self,
@@ -272,10 +388,12 @@ impl Engine {
     }
 }
 
-/// Sends the community's DHT record. Failure is logged, not returned.
-async fn publish_record(discovery: Arc<Discovery>, key: CommunityKey, record: CommunityRecord) {
-    if let Err(e) = discovery.publish(&key, &record).await {
-        warn!(error = %e, "could not publish community record to the DHT");
+/// `addr` without its direct IP addresses: only the device id and relay URL go on the DHT.
+fn public_addr(addr: &PeerAddr) -> PeerAddr {
+    PeerAddr {
+        id: addr.id,
+        relay: addr.relay.clone(),
+        direct: Vec::new(),
     }
 }
 

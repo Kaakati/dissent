@@ -98,6 +98,11 @@ Disk layout under `data_dir`:
 ```
 profile.bin                         postcard { display_name }
 contacts.bin                        postcard Vec<ContactCard>
+addresses.bin                       postcard Vec<StoredAddr { addr: PeerAddr, ts_ms }>, one per device. ts_ms 0 = unsigned
+                                    (invite, contact, DM sender); otherwise the time the device signed the address.
+                                    A signed entry is never replaced by an unsigned one, and only a newer signed one replaces it.
+own_addr.bin                        postcard SignedAddr, our latest announced address. Its ts_ms keeps announcements
+                                    increasing across restarts.
 communities/<id>/genesis.bin
 communities/<id>/community.key      founder only (32-byte seed)
 communities/<id>/events.log         repeated [u32 BE len][SignedEvent postcard]; replayed on start

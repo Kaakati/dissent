@@ -326,6 +326,9 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
     let mut tick = tokio::time::interval(RETRY_EVERY);
     // The first tick fires at once. Skip it so the first pass waits a full period.
     tick.tick().await;
+    // Republish DHT records every 30 minutes, so they never age out of the DHT.
+    const REPUBLISH_EVERY_ROUNDS: u32 = 60;
+    let mut rounds: u32 = 0;
     loop {
         tick.tick().await;
         let Some(inner) = weak.upgrade() else {
@@ -334,5 +337,13 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         let engine = Engine { inner };
         engine.retry_outbox().await;
         engine.anti_entropy().await;
+        rounds += 1;
+        // The first publish can run before the DHT node has bootstrapped. Pkarr then stores the
+        // record on too few nodes, yet still reports success. So publish once more on the first
+        // pass, and retry while a publish fails.
+        let retry = !engine.inner.records_current.load(std::sync::atomic::Ordering::Relaxed);
+        if retry || rounds == 1 || rounds.is_multiple_of(REPUBLISH_EVERY_ROUNDS) {
+            engine.publish_records().await;
+        }
     }
 }

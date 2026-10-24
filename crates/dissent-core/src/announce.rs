@@ -46,6 +46,7 @@ impl Engine {
             signed
         };
         self.announce(&signed).await;
+        self.spawn_publish_records();
     }
 
     /// Sends a signed address to every community topic we are on, and to each device of our
