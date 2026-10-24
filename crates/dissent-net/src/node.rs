@@ -7,12 +7,14 @@ use iroh::{
 };
 use futures_lite::{Stream, StreamExt};
 use iroh::Watcher;
+use iroh::protocol::DynProtocolHandler;
 use iroh_gossip::{ALPN as GOSSIP_ALPN, Gossip};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 use url::Url;
 
 use crate::{
     addr::PeerAddr,
+    extra::{self, Shared},
     media::MEDIA_ALPN,
     error::{NetError, Result},
     media::{MediaHandler, MediaLink, MediaProtocol, dial_media},
@@ -56,6 +58,10 @@ pub struct NodeConfig {
     /// topic must use the same value or a larger one: a peer receiving a bigger frame closes the
     /// connection. `TopicSender::broadcast` rejects payloads that would not fit.
     pub gossip_max_message: usize,
+    /// Extra ALPNs served by the node's router, for example a file-transfer handler. Each ALPN
+    /// must be unique and must not be one the node registers itself. Handlers are shut down by
+    /// `Node::shutdown`, before the endpoint closes.
+    pub extra_protocols: Vec<(Vec<u8>, Arc<dyn DynProtocolHandler>)>,
 }
 
 impl Default for NodeConfig {
@@ -68,6 +74,7 @@ impl Default for NodeConfig {
             loopback_only: false,
             media: None,
             gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
+            extra_protocols: Vec::new(),
         }
     }
 }
@@ -81,6 +88,10 @@ impl fmt::Debug for NodeConfig {
             .field("dht_lookup", &self.dht_lookup)
             .field("media", &self.media.as_ref().map(|_| "MediaHandler"))
             .field("gossip_max_message", &self.gossip_max_message)
+            .field(
+                "extra_protocols",
+                &self.extra_protocols.iter().map(|(alpn, _)| alpn).collect::<Vec<_>>(),
+            )
             .field("loopback_only", &self.loopback_only)
             .finish()
     }
@@ -115,6 +126,7 @@ impl Node {
     /// Key exchange prefers hybrid X25519 + ML-KEM-768 and falls back to classical X25519, P-256
     /// or P-384 for peers that lack it.
     pub async fn spawn(device: &DeviceKey, cfg: NodeConfig) -> Result<Node> {
+        extra::validate(&cfg.extra_protocols)?;
         if cfg.gossip_max_message < iroh_gossip::proto::MIN_MAX_MESSAGE_SIZE {
             return Err(NetError::Config(format!(
                 "gossip_max_message must be at least {} bytes",
@@ -171,10 +183,20 @@ impl Node {
         if let Some(handler) = cfg.media {
             router = router.accept(MEDIA_ALPN, MediaProtocol(handler));
         }
+        for (alpn, handler) in cfg.extra_protocols {
+            router = router.accept(alpn, Shared(handler));
+        }
         let router = router.spawn();
         Ok(Node {
             inner: Arc::new(Inner { id: device.id(), endpoint, router, gossip, lookup, gossip_max }),
         })
+    }
+
+    /// Read-only access to the iroh endpoint, for dialling custom ALPNs or passing to a crate's
+    /// `fetch`. Do not close it directly. Use `Node::shutdown`, which stops the router and its
+    /// extra handlers first.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.inner.endpoint
     }
 
     pub fn id(&self) -> DeviceId {

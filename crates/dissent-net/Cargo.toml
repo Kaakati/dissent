@@ -23,4 +23,5 @@ data-encoding.workspace = true
 blake3.workspace = true
 
 [dev-dependencies]
+dissent-files.workspace = true
 rcgen.workspace = true

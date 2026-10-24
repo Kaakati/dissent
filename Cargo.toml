@@ -8,6 +8,7 @@ members = [
     "crates/dissent-core",
     "crates/dissent-mls",
     "crates/dissent-media",
+    "crates/dissent-files",
     "apps/seeder",
     "apps/relay",
     "apps/probe",
@@ -23,6 +24,7 @@ repository = "https://github.com/dissent-chat/dissent"
 
 [workspace.dependencies]
 dissent-identity = { path = "crates/dissent-identity" }
+dissent-files = { path = "crates/dissent-files" }
 dissent-events = { path = "crates/dissent-events" }
 dissent-net = { path = "crates/dissent-net" }
 dissent-discovery = { path = "crates/dissent-discovery" }
@@ -53,18 +55,22 @@ pkarr = { version = "8", default-features = false, features = ["dht", "signed_pa
 url = { version = "2", features = ["serde"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+mime_guess = "2"
 futures-lite = "2"
+negentropy = "0.5"
 unicode-security = "0.1"
 unicode-normalization = "0.1"
 idna = "1"
 hickory-resolver = { version = "0.25", features = ["tokio"] }
-negentropy = "0.5"
 clap = { version = "4", features = ["derive"] }
 iroh-relay = { version = "1.4.1", features = ["server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 axum = "0.8"
 reqwest = { version = "0.13", features = ["json"] }
 ring = "0.17"
+windows-service = "0.8"
 openmls = { version = "0.9", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_rust_crypto = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
@@ -76,6 +82,10 @@ chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
 keyring = "4"
 zeroize = "1"
+cc = "1"
+cpal = "0.18"
+nnnoiseless = "0.5"
+ringbuf = "0.5"
 
 [profile.dev.package.ed25519-dalek]
 opt-level = 3

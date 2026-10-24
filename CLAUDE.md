@@ -13,6 +13,7 @@ crates/dissent-core       Engine: multi-community state, gossip, sync, DMs, pers
 crates/dissent-mls        OpenMLS group encryption; core seals message text per community (see docs/design/05-encrypted-servers.md)
 crates/dissent-media      voice/video spike: str0m (sans-IO WebRTC) sessions with SFrame end-to-end media encryption
 crates/dissent-files      encrypted file sharing: encrypt-then-chunk, content-addressed transfer via iroh-blobs
+crates/dissent-audio      voice pipeline: mic/speaker (cpal), noise suppression + echo cancellation, Opus with FEC, adaptive jitter buffer
 apps/seeder               headless always-on member: keeps community history available (uses dissent-core)
 apps/relay                open-source iroh relay server binary anyone can run
 apps/probe                connectivity probe: measures direct vs relayed paths, RTT and time-to-direct between two devices
@@ -61,6 +62,7 @@ Time is `u64` milliseconds since Unix epoch everywhere.
 - A channel's id is the id of its `ChannelCreate` event.
 - Known gap: a message concurrent with its channel's `ChannelCreate` can sort before it and be rejected. Set parents to current heads to keep that window small.
 - Keystore and DHT records are plaintext; harden before 1.0.
+- Default log filter is `info,mainline=error`: the Mainline DHT warns on every unresponsive stranger (Windows os error 10060/10054 on its UDP socket), which is normal noise.
 - Tests and local multi-instance checks must set `NodeConfig.loopback_only = true` (desktop: env `DISSENT_LOOPBACK=1`). Binding all interfaces makes Windows Firewall show an admin prompt for every new exe. Run networked `#[ignore]` tests ONLY through `scripts/fwtest.sh <pkg> <test|lib> --ignored ...`, which copies the test exe to the one firewall-allowed path `target/fw/dissent-test.exe`.
 
 ## Releases
