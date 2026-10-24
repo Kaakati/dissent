@@ -15,6 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 mod auth;
 mod call;
+mod cascade;
 mod e2ee;
 mod election;
 mod error;
@@ -28,6 +29,7 @@ mod transport;
 
 pub use auth::Auth;
 pub use call::{Call, CallStats};
+pub use cascade::{assign_forwarders, load, plan, Cascade};
 pub use e2ee::MAX_SENDER_ID;
 pub use election::{capacity, elect, ranked, Candidate, Election, Mode, PeerId};
 pub use error::{MediaError, Result};

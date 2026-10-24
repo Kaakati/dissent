@@ -65,6 +65,7 @@ pub struct Participant<T: PacketTransport> {
     backup: Option<PeerId>,
     last_active_rx: Instant,
     failovers: Vec<Failover>,
+    rotation: usize,
 }
 
 impl<T: PacketTransport> Participant<T> {
@@ -122,6 +123,7 @@ impl<T: PacketTransport> Participant<T> {
             backup: None,
             last_active_rx: Instant::now(),
             failovers: Vec::new(),
+            rotation: 0,
         })
     }
 
@@ -147,12 +149,34 @@ impl<T: PacketTransport> Participant<T> {
             .apply(answer)
     }
 
+    /// Sends through `primary`, with `backup` standing by. Both must already be linked. A cascade
+    /// uses this to give each participant its assigned child forwarder.
+    pub fn assign_forwarders(&mut self, primary: PeerId, backup: Option<PeerId>) -> Result<()> {
+        if !self.links.contains_key(&primary) {
+            return Err(MediaError::BadState("no link to the primary forwarder"));
+        }
+        self.active = Some(primary);
+        self.backup = backup.filter(|standby| self.links.contains_key(standby));
+        self.sync_listening();
+        Ok(())
+    }
+
+    /// Only the active link's media is consumed. The others stay connected, so a failover needs
+    /// no handshake, and their copies of the same frames are not counted twice.
+    fn sync_listening(&mut self) {
+        let active = self.active;
+        for (peer, call) in self.links.iter_mut() {
+            call.set_listening(Some(*peer) == active);
+        }
+    }
+
     /// Chooses the active forwarder and the backup from the pool of linked candidates.
     pub fn elect(&mut self) -> Result<()> {
         let alive = self.alive_candidates();
         let next = elect(&alive, self.participants, self.mode).ok_or(MediaError::NoSfu)?;
         self.active = Some(next.primary);
         self.backup = next.backup;
+        self.sync_listening();
         Ok(())
     }
 
@@ -278,14 +302,19 @@ impl<T: PacketTransport> Participant<T> {
         }
     }
 
+    /// Polls every link from a rotating position, so a busy link cannot starve a standby.
     async fn poll_links(&mut self) -> (PeerId, FrameOut) {
         let mut futs: Vec<(PeerId, Boxed<'_, FrameOut>)> = self
             .links
             .iter_mut()
             .map(|(peer, call)| (*peer, Box::pin(call.next_frame()) as Boxed<'_, FrameOut>))
             .collect();
+        let count = futs.len();
+        let start = self.rotation % count.max(1);
+        self.rotation = self.rotation.wrapping_add(1);
         poll_fn(|cx| {
-            for (peer, fut) in futs.iter_mut() {
+            for step in 0..count {
+                let (peer, fut) = &mut futs[(start + step) % count];
                 if let Poll::Ready(out) = fut.as_mut().poll(cx) {
                     return Poll::Ready((*peer, out));
                 }
@@ -321,6 +350,7 @@ impl<T: PacketTransport> Participant<T> {
         self.active = to;
         self.backup = order.get(1).copied();
         self.last_active_rx = Instant::now();
+        self.sync_listening();
     }
 
     /// Picks the backup again after a standby link closed, keeping the active forwarder.

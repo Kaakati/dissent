@@ -18,7 +18,7 @@
 //! A frame more than [`AHEAD_SLACK`] counters past the last verified counter is held until a
 //! digest covers it, so a far-ahead forgery never plays.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -99,6 +99,14 @@ pub(crate) fn frame_hash(wire: &[u8]) -> [u8; HASH_LEN] {
     let mut out = [0u8; HASH_LEN];
     out.copy_from_slice(&digest.as_bytes()[..HASH_LEN]);
     out
+}
+
+/// The sender a digest names, read without any key.
+pub(crate) fn digest_sender(wire: &[u8]) -> Option<u64> {
+    if !is_digest(wire) {
+        return None;
+    }
+    Some(u64::from_le_bytes(wire.get(1..9)?.try_into().ok()?))
 }
 
 /// Whether a wire packet is a digest rather than a frame.
@@ -313,6 +321,8 @@ pub(crate) struct Step {
 pub(crate) struct RxState {
     certs: Option<Arc<HashMap<u64, DeviceCert>>>,
     senders: BTreeMap<(u64, u64), SenderRx>,
+    /// Epoch bits this link accepts, the current one and the previous one during its grace period.
+    epochs: BTreeSet<u64>,
 }
 
 impl RxState {
@@ -320,6 +330,7 @@ impl RxState {
         Self {
             certs,
             senders: BTreeMap::new(),
+            epochs: BTreeSet::new(),
         }
     }
 
@@ -388,6 +399,10 @@ impl RxState {
         let Some(cert) = certs.get(&parsed.sender) else {
             return step;
         };
+        if !self.epochs.contains(&(parsed.epoch as u64)) {
+            // A digest for an epoch this link does not accept, current or in grace, is ignored.
+            return step;
+        }
 
         let state = self
             .senders
@@ -449,8 +464,14 @@ impl RxState {
         step
     }
 
+    /// Starts accepting digests of the epoch with these key id bits.
+    pub(crate) fn accept_epoch(&mut self, lsb: u64) {
+        self.epochs.insert(lsb);
+    }
+
     /// Forgets a sender's state for an epoch whose grace period has ended.
     pub(crate) fn drop_epoch(&mut self, lsb: u64) {
+        self.epochs.remove(&lsb);
         self.senders.retain(|(_, epoch), _| *epoch != lsb);
     }
 
@@ -520,17 +541,21 @@ mod tests {
 
     impl Receiver {
         fn new(certs: HashMap<u64, DeviceCert>) -> Self {
+            let mut state = RxState::new(Some(Arc::new(certs)));
+            state.accept_epoch(0);
             Self {
                 rx: SframeReceiver::new(media_key(), 0),
-                state: RxState::new(Some(Arc::new(certs))),
+                state,
                 now: Instant::now(),
             }
         }
 
         fn plain() -> Self {
+            let mut state = RxState::new(None);
+            state.accept_epoch(0);
             Self {
                 rx: SframeReceiver::new(media_key(), 0),
-                state: RxState::new(None),
+                state,
                 now: Instant::now(),
             }
         }
@@ -864,5 +889,23 @@ mod tests {
         }
         let step = receiver.digest(&digest);
         assert_eq!(step, Step::default());
+    }
+
+    #[test]
+    fn a_digest_for_an_epoch_the_link_does_not_accept_is_ignored() {
+        let (device, cert) = member();
+        let mut sender = Sender::new(device.clone());
+        let mut receiver = Receiver::new(certs_for(SENDER, cert));
+        let (w, _) = sender.frame(0);
+        receiver.frame(&w);
+        // A correctly signed digest for epoch bits 5, which this link never accepted.
+        let digest = encode_digest(&device, SENDER, 5, 0, &[frame_hash(&w)]);
+        let step = receiver.digest(&digest);
+        assert_eq!(
+            step,
+            Step::default(),
+            "an unknown epoch's digest is ignored"
+        );
+        assert!(!receiver.muted(SENDER));
     }
 }

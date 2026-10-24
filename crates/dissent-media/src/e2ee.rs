@@ -57,6 +57,13 @@ pub(crate) fn audio_level(wire: &[u8]) -> Option<u8> {
     wire.first().copied()
 }
 
+/// The sender a wire frame names in its key id, read without any key. A forwarder routes by it.
+pub(crate) fn peek_sender(wire: &[u8]) -> Option<u64> {
+    let rest = wire.get(1..)?;
+    let view = EncryptedFrameView::try_with_meta_data(rest, &wire[..1]).ok()?;
+    Some(MlsKeyId::from_key_id(view.header().key_id(), bit_range()).member_index())
+}
+
 /// The SFrame counter of a wire frame, read without any key.
 pub(crate) fn peek_counter(wire: &[u8]) -> Option<u64> {
     let rest = wire.get(1..)?;

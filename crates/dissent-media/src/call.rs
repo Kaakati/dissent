@@ -16,7 +16,7 @@ use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
-use crate::auth::{frame_hash, is_digest, FrameSigner, LinkConfig, RxState, Step};
+use crate::auth::{frame_hash, is_digest, Auth, FrameSigner, LinkConfig, RxState, Step};
 use crate::e2ee::{
     epoch_lsb, peek_counter, SframeReceiver, SframeSender, DEFAULT_LEVEL, EPOCH_GRACE,
 };
@@ -82,6 +82,8 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     timeout: Instant,
     inbox: VecDeque<(u64, Vec<u8>)>,
     raw_inbox: VecDeque<Vec<u8>>,
+    /// Whether media on this link is consumed. A standby link stays connected but does not listen.
+    listening: bool,
     stats: CallStats,
 }
 
@@ -173,23 +175,12 @@ impl<T: PacketTransport> Call<T> {
             tx: SframeSender::new(&key, sender_id, epoch)?,
             rx: SframeReceiver::new(key, epoch),
         });
-        let signer = link
-            .auth
-            .as_ref()
-            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8));
-        let mut rtc = new_rtc(Instant::now(), transport.max_datagram_size())?;
-        add_host_candidate(&mut rtc, transport.local_addr())?;
-
-        let mut changes = rtc.sdp_api();
-        let mid = changes.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-        let (offer, pending) = changes
-            .apply()
-            .ok_or(MediaError::BadState("nothing to offer"))?;
-
-        let mut call = Self::from_parts(rtc, transport, keys, signer, link.state);
-        call.pending_offer = Some(pending);
-        call.audio_mid = Some(mid);
-        Ok((call, Signal::Offer(offer.to_sdp_string())))
+        let signer = Self::signer_for(&link, sender_id, epoch);
+        link.state
+            .lock()
+            .expect("receiver state")
+            .accept_epoch(epoch_lsb(epoch));
+        Self::offer_with(transport, keys, signer, link.state).await
     }
 
     /// Like [`Call::accept_over`], with the frames keyed to `epoch` and the given link
@@ -206,11 +197,69 @@ impl<T: PacketTransport> Call<T> {
             tx: SframeSender::new(&key, sender_id, epoch)?,
             rx: SframeReceiver::new(key, epoch),
         });
-        let signer = link
-            .auth
-            .as_ref()
-            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8));
+        let signer = Self::signer_for(&link, sender_id, epoch);
+        link.state
+            .lock()
+            .expect("receiver state")
+            .accept_epoch(epoch_lsb(epoch));
         Self::answer(transport, keys, signer, link.state, offer).await
+    }
+
+    /// Offers as a keyless call. A forwarder uses it for its upstream link.
+    pub(crate) async fn offer_blind(transport: T) -> Result<(Self, Signal)> {
+        let state = Arc::new(Mutex::new(RxState::new(None)));
+        Self::offer_with(transport, None, None, state).await
+    }
+
+    /// Offers a call whose frames are signed and whose members' digests are checked, at key
+    /// epoch 0. This is the 1:1 call with sender authentication.
+    pub async fn offer_authenticated(
+        transport: T,
+        key: MediaKey,
+        sender_id: u64,
+        auth: Auth,
+    ) -> Result<(Self, Signal)> {
+        let link = LinkConfig::authenticated(auth.clone(), LinkConfig::shared_state(&auth));
+        Self::offer_at(transport, key, sender_id, 0, link).await
+    }
+
+    /// Answers an offer as an authenticated 1:1 call, at key epoch 0.
+    pub async fn accept_authenticated(
+        transport: T,
+        key: MediaKey,
+        sender_id: u64,
+        auth: Auth,
+        offer: Signal,
+    ) -> Result<(Self, Signal)> {
+        let link = LinkConfig::authenticated(auth.clone(), LinkConfig::shared_state(&auth));
+        Self::accept_at(transport, key, sender_id, 0, offer, link).await
+    }
+
+    fn signer_for(link: &LinkConfig, sender_id: u64, epoch: u64) -> Option<FrameSigner> {
+        link.auth
+            .as_ref()
+            .map(|auth| FrameSigner::new(auth.device.clone(), sender_id, epoch_lsb(epoch) as u8))
+    }
+
+    async fn offer_with(
+        transport: T,
+        keys: Option<Keys>,
+        signer: Option<FrameSigner>,
+        state: Arc<Mutex<RxState>>,
+    ) -> Result<(Self, Signal)> {
+        let mut rtc = new_rtc(Instant::now(), transport.max_datagram_size())?;
+        add_host_candidate(&mut rtc, transport.local_addr())?;
+
+        let mut changes = rtc.sdp_api();
+        let mid = changes.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        let (offer, pending) = changes
+            .apply()
+            .ok_or(MediaError::BadState("nothing to offer"))?;
+
+        let mut call = Self::from_parts(rtc, transport, keys, signer, state);
+        call.pending_offer = Some(pending);
+        call.audio_mid = Some(mid);
+        Ok((call, Signal::Offer(offer.to_sdp_string())))
     }
 
     /// Answers an offer with a keyless call. It forwards encrypted frames and cannot read them.
@@ -261,6 +310,7 @@ impl<T: PacketTransport> Call<T> {
             timeout: now,
             inbox: VecDeque::new(),
             raw_inbox: VecDeque::new(),
+            listening: true,
             stats: CallStats::default(),
         }
     }
@@ -347,6 +397,11 @@ impl<T: PacketTransport> Call<T> {
             .as_mut()
             .ok_or(MediaError::BadState("a keyless call cannot rotate keys"))?;
         keys.rx.rotate(key, epoch, now, EPOCH_GRACE)?;
+        // Digests of the new epoch are accepted from now on. The old one keeps its grace period.
+        self.state
+            .lock()
+            .expect("receiver state")
+            .accept_epoch(epoch_lsb(epoch));
         if let Some(signer) = self.signer.as_mut() {
             signer.set_epoch(epoch_lsb(epoch) as u8);
         }
@@ -517,7 +572,17 @@ impl<T: PacketTransport> Call<T> {
         }
     }
 
+    /// Turns media consumption on or off for this link. A standby link keeps its handshake and
+    /// timers, but its media is dropped before any state sees it, so the copy it carries cannot
+    /// stand in for the active link's copy.
+    pub(crate) fn set_listening(&mut self, listening: bool) {
+        self.listening = listening;
+    }
+
     fn on_media(&mut self, wire: &[u8]) {
+        if !self.listening {
+            return;
+        }
         let now = Instant::now();
         if self.keys.is_none() {
             // A keyless call hands the encrypted frame on untouched, digests included.

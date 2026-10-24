@@ -137,7 +137,42 @@ Across runs, the kill case stayed between 30 and 37 ms. The freeze case stayed b
 
 A two-participant call through one forwarder also ran over real iroh links on loopback. Each participant heard all 75 frames the other sent.
 
-**Cascaded forwarders (100+)** are not built. Forwarders relaying to forwarders would reuse the same encrypted frames and the same election.
+
+## Stages: cascaded forwarders (100+, implemented)
+
+Calls of 100 participants and more use a forwarding tree. The code is in `cascade.rs`, `sfu.rs` and `participant.rs`.
+
+**Shape.** The tree has two levels of forwarders: a root, and child forwarders under it. A frame from a speaker crosses at most three forwarders: the speaker's child, the root, and the listener's child. That is the hop count the spec's depth-3 limit allows.
+
+**Election.** `plan` ranks the candidates with the same `elect` and `capacity` as a single forwarder. The best two become the root and its standby. The next `child_count` become children, and each child must carry its own share of listeners plus a sibling's share, because it takes over a failed sibling's listeners. Each listener gets a primary child and a standby child, round robin in id order, so a failed child's listeners fall to a sibling that already holds a share.
+
+**Routing.** Each forwarder routes by the sender named in the unencrypted key id.
+
+- A frame from a downlink (a listener or a child) whose sender is a top speaker at that forwarder goes to the other downlinks and to the active parent. The sender's own link never gets it back.
+- A frame from the active parent goes to every downlink. The parent already chose it, and the sender's own link is skipped.
+- Digests follow the same rules as frames, so every listener still verifies every speaker.
+- A standby parent stays connected and sends nothing until it is promoted, so failover needs no handshake.
+
+Speakers send to their own child. Listeners receive from their child only. Each listener also stays connected to its standby child, but only the active child's media is consumed. The standby's copy of a frame is dropped before any state sees it, so it cannot stand in for the active copy.
+
+**Top speakers at each level.** Each forwarder picks its top three speakers from its own downlinks. The root picks the global top three from what the children send up. A listener can hear up to three local speakers and three remote ones when speakers are split across children, so in the worst split a listener hears six. With all three speakers under one child, or any split that leaves one child with fewer than three local speakers, it hears three.
+
+**Failover.** A child's listeners move to their standby child, using the same failover as a flat forwarder. When the root fails, every child's active parent moves to the standby root, which is already connected, and the children re-parent without a handshake.
+
+**Scheduling.** Forwarders poll their links from a rotating start, so a busy downlink cannot starve the upstream link. Without this, the upstream link never runs its handshake or timers, and its frames are dropped.
+
+**Measured.** Release build, 150 participants, three speakers, five children, each with a standby, plus a root and standby root. Speakers talk for five seconds, and the fault comes two seconds in. Recovery is measured for the affected listeners, as in the flat failover test.
+
+| Fault | Affected listeners | Recovery, max | Recovery, median |
+| --- | --- | --- | --- |
+| Child forwarder killed | 30 | 31 ms | 20 ms |
+| Root killed | 150 | 33 ms | 17 ms |
+
+Every listener heard all three speakers, and no listener heard a non-speaker, including the sender itself. The hop count is three by construction, and the test checks the topology before the call starts. Per-forwarder load was between 8,700 and 9,100 packets seen at each child, with about 800 at the root, and 13,600 at the child that absorbed a failed sibling's listeners. Authentication held end to end: no impersonation, no undecryptable frame, and no plaintext seen by any forwarder. In the honest run no frame went unauthenticated. The fault runs left about one batch unauthenticated per listener, which is the batch in flight when the forwarder died. Its digest was lost, so it counts as tolerated and mutes no one.
+
+**Debug builds.** In a debug build the 150-participant run saturates the CPU. Digests then arrive after the 500 ms verification window, and honest frames are counted as unauthenticated. The same scenario in release has none. For that reason the 150-participant tests are marked ignored, and they run with `cargo test --release -p dissent-media --test cascade -- --ignored`. A 20-participant version runs in every debug pass.
+
+**Not measured here.** The forwarders are dedicated peers in the test, not participants that also speak, and the test runs in memory, so latency over real networks is not measured. A child that is also a speaker needs a local path, which the spike does not build.
 
 ## Replay and sender authentication
 
@@ -159,7 +194,7 @@ A digest whose signature does not verify is also treated as a forgery in the sen
 
 **Cost.** One digest is 243 bytes, and a speaker sends five a second. That is about 9.7 kbps, not the 2.5 kbps first estimated, because the estimate counted only the 64-byte signatures. Cutting the hash to 8 bytes would bring it to about 6.5 kbps. Batching more frames per digest would bring it lower, at the cost of more delay before a forgery is flagged.
 
-**Tests.** The unit tests in `auth.rs` cover honest traffic, batch closing, a replayed frame before and after verification, out-of-order frames, too-old frames, a mismatch that mutes and still plays the real frame, a muted sender that plays only verified frames, a far-ahead frame, a lost digest, the 500 ms deadline, a forged digest signature, and plain links. The integration tests cover an honest authenticated mesh and an honest forwarded call, both with zero unauthenticated frames and zero flags. The forgery test runs a member under another member's sender id and a device key of its own. It is flagged 228 ms after the forged traffic starts, all 50 real frames play, and 10 forged frames played in the window before the flag.
+**Tests.** The unit tests in `auth.rs` cover honest traffic, batch closing, a replayed frame before and after verification, out-of-order frames, too-old frames, a mismatch that mutes and still plays the real frame, a muted sender that plays only verified frames, a far-ahead frame, a lost digest, the 500 ms deadline, a forged digest signature, and plain links. The integration tests cover an honest authenticated mesh, an honest forwarded call, and an authenticated 1:1 call (`Call::offer_authenticated`), both with zero unauthenticated frames and zero flags. The forgery test runs a member under another member's sender id and a device key of its own. It is flagged 228 ms after the forged traffic starts, all 50 real frames play, and 10 forged frames played in the window before the flag.
 
 **Limit of the cipher layer.** The cipher layer alone still lets any member send under another member's id. The `auth` layer is what detects it. A member with a device key can sign only its own digests, so it cannot forge another member's digest.
 
@@ -180,4 +215,4 @@ A digest whose signature does not verify is also treated as a forgery in the sen
 3. Wire the MLS exporter from `dissent-mls` in place of the raw `MediaKey`, using the RFC label.
 4. Add the Opus codec and an audio device path, then measure latency and loss on real networks.
 5. Add epoch changes to the key ID and rekeying when membership changes.
-6. Cascaded forwarders for 100+ participants, and a forwarder that is also a speaker over a real link.
+6. A forwarder that is also a speaker, with its own participant link, and cascades over real links.
