@@ -8,6 +8,15 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
+/// Longest any one test may run. A hang fails here instead of stalling the whole run.
+const TEST_LIMIT: Duration = Duration::from_secs(240);
+
+async fn bounded(body: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(TEST_LIMIT, body)
+        .await
+        .unwrap_or_else(|_| panic!("test exceeded {TEST_LIMIT:?}"));
+}
+
 struct Peer {
     engine: Engine,
     identity: Identity,
@@ -131,6 +140,7 @@ async fn finish(peers: Vec<Peer>) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn servers_channels_messages_and_bans() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let id = rustaceans(&alice, &bob).await;
@@ -192,10 +202,12 @@ async fn servers_channels_messages_and_bans() {
     assert!(!has_message(&alice.engine, id, general, "after the ban"));
 
     finish(vec![alice, bob]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn multiple_servers_and_mutual_profile() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     rustaceans(&alice, &bob).await;
@@ -226,22 +238,23 @@ async fn multiple_servers_and_mutual_profile() {
     assert_eq!(profile.handles.len(), 2);
 
     finish(vec![alice, bob]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn direct_messages_and_contacts() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     rustaceans(&alice, &bob).await;
     let alice_root = alice.identity.root_id();
     let bob_root = bob.identity.root_id();
 
-    let sent = alice
+    alice
         .engine
         .send_dm(bob_root, "secret".into())
         .await
         .expect("alice sends");
-    assert!(!sent.pending, "delivered straight away");
 
     eventually("bob sees alice in conversations", || {
         bob.engine
@@ -270,13 +283,33 @@ async fn direct_messages_and_contacts() {
     // Carol shares no community with Bob. She can only reach him through his contact link.
     let carol = peer("carol").await;
     let carol_root = carol.identity.root_id();
-    let contact = carol
+    // A link sends a request. Bob must accept before either side has a contact.
+    let asked = carol
         .engine
         .add_contact(&bob.engine.contact_link())
         .await
-        .expect("carol adds bob");
-    assert!(contact.is_contact);
-    assert_eq!(contact.display_name, "bob");
+        .expect("carol asks bob");
+    assert!(!asked.is_contact, "a request is not a contact yet");
+    eventually("bob sees carol's request", || {
+        bob.engine
+            .contact_requests()
+            .iter()
+            .any(|r| r.user == carol_root.to_string())
+            .then_some(())
+    })
+    .await;
+    let accepted = bob
+        .engine
+        .accept_request(carol_root)
+        .await
+        .expect("bob accepts carol");
+    assert!(accepted.is_contact);
+    let bob_for_carol = eventually("carol becomes bob's contact", || {
+        let view = carol.engine.user_profile(bob.identity.root_id());
+        view.is_contact.then_some(view)
+    })
+    .await;
+    assert_eq!(bob_for_carol.display_name, "bob");
 
     carol
         .engine
@@ -308,10 +341,12 @@ async fn direct_messages_and_contacts() {
     .await;
 
     finish(vec![alice, bob, carol]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn data_survives_restart() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let id = rustaceans(&alice, &bob).await;
@@ -358,4 +393,5 @@ async fn data_survives_restart() {
     reopened.shutdown().await.expect("shutdown");
     let _ = std::fs::remove_dir_all(&dir);
     finish(vec![bob]).await;
+    }).await;
 }

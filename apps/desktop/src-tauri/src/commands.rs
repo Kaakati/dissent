@@ -102,6 +102,12 @@ pub async fn identity_status(state: State<'_, AppState>) -> Result<IdentityView,
 
 #[tauri::command]
 pub fn identity_export_phrase(state: State<'_, AppState>) -> Result<String, String> {
+    // Showing the phrase ends first run. The engine may be restarting, so only a ready one is told.
+    if let Ok(guard) = state.engine.try_read() {
+        if let Some(engine) = guard.as_ref() {
+            let _ = engine.mark_phrase_saved();
+        }
+    }
     let id = state.identity.lock().map_err(err)?;
     let root = id.root.as_ref().ok_or("this device holds no root key, so it cannot export a phrase")?;
     Ok(mnemonic::export(root))
@@ -315,6 +321,48 @@ pub async fn delete_message(
     let channel: ChannelId = parse("channel id", &channel_id)?;
     let message: EventId = parse("message id", &message_id)?;
     engine(&state).await?.delete_message(community, channel, message).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn send_reply(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+    message_id: String,
+    text: String,
+) -> Result<MessageItem, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    let target: EventId = parse("message id", &message_id)?;
+    engine(&state).await?.send_reply(community, channel, target, text).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn react(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+    message_id: String,
+    emoji: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    let target: EventId = parse("message id", &message_id)?;
+    engine(&state).await?.react(community, channel, target, emoji).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn unreact(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+    message_id: String,
+    emoji: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    let target: EventId = parse("message id", &message_id)?;
+    engine(&state).await?.unreact(community, channel, target, emoji).await.map_err(err)
 }
 
 // ---- direct messages ----

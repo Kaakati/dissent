@@ -46,6 +46,9 @@ pub(crate) struct Community {
     waiting: BTreeMap<EventId, SignedEvent>,
     /// HLC of each user's latest accepted Join. Picks the freshest display name.
     pub join_hlc: BTreeMap<RootId, Hlc>,
+    /// Decrypted text by content key: a message or reply id, or the target of an edit. The newest
+    /// hlc wins. Local to this device, so it is not part of `CommunityState`.
+    pub content: BTreeMap<EventId, (Hlc, String)>,
     pub sender: Option<Arc<TopicSender>>,
     pub task: Option<ReceiverTask>,
 }
@@ -62,6 +65,7 @@ impl Community {
             signed: BTreeMap::new(),
             waiting: BTreeMap::new(),
             join_hlc: BTreeMap::new(),
+            content: BTreeMap::new(),
             sender: None,
             task: None,
         }
@@ -84,8 +88,9 @@ impl Community {
         &self.genesis.name
     }
 
+    /// The canonical owner. After a key rotation this is the new root, not the genesis owner.
     pub fn owner(&self) -> RootId {
-        self.genesis.owner
+        self.state().owner
     }
 
     /// The replayed state of the community.
@@ -117,6 +122,18 @@ impl Community {
             .values()
             .map(|se| (se.event.body.hlc.wall_ms, se.event.id))
             .collect()
+    }
+
+    /// Stored sealed events, in causal order.
+    pub fn sealed_in_order(&self) -> Vec<SignedEvent> {
+        let mut out: Vec<SignedEvent> = self
+            .signed
+            .values()
+            .filter(|se| matches!(se.event.body.payload, Payload::Sealed { .. }))
+            .cloned()
+            .collect();
+        out.sort_by_key(|se| (se.event.body.hlc, se.event.id));
+        out
     }
 
     /// The stored events with these ids, in causal order. Unknown ids are skipped.

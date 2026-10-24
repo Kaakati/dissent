@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restarted_peer_is_reachable_on_new_port() {
+    bounded(async {
     let alice = peer("alice").await;
     let first_port = free_port();
     let bob = start_on(Identity::create(now()), scratch("bob-addr"), first_port).await;
@@ -59,4 +60,5 @@ async fn restarted_peer_is_reachable_on_new_port() {
     .await;
 
     finish(vec![alice, bob]).await;
+    }).await;
 }

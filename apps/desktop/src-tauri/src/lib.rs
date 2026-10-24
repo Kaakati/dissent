@@ -5,6 +5,7 @@ mod storage;
 mod tray;
 mod updates;
 mod attachments;
+mod part6;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -87,6 +88,7 @@ pub fn run() {
                 node_config(&settings),
             ))?;
 
+            app.manage(part6::PendingLink::default());
             app.manage(AppState {
                 data_dir,
                 vault,
@@ -122,6 +124,9 @@ pub fn run() {
             commands::send_message,
             commands::edit_message,
             commands::delete_message,
+            commands::send_reply,
+            commands::react,
+            commands::unreact,
             commands::list_conversations,
             commands::dm_messages,
             commands::send_dm,
@@ -134,6 +139,30 @@ pub fn run() {
             attachments::reveal_attachment,
             attachments::open_attachment,
             commands::set_network_settings,
+            part6::capabilities,
+            part6::set_note,
+            part6::pin_conversation,
+            part6::mark_read,
+            part6::pinned_messages,
+            part6::pin_message,
+            part6::mark_safety_verified,
+            part6::start_call,
+            part6::join_call,
+            part6::leave_call,
+            part6::call_state,
+            part6::set_muted,
+            part6::set_deafened,
+            part6::set_camera,
+            part6::send_call_message,
+            part6::accept_call,
+            part6::decline_call,
+            part6::list_guardians,
+            part6::sign_guardians,
+            part6::list_devices,
+            part6::revoke_device,
+            part6::link_device_code,
+            part6::approve_device,
+            part6::finish_device_link,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Dissent");

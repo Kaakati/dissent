@@ -40,6 +40,8 @@ pub struct CommunityState {
     /// TR39 skeleton of each held handle to its holder. Keeps look-alike claims out.
     pub handle_skeletons: BTreeMap<String, RootId>,
     pub channels: BTreeMap<ChannelId, String>,
+    /// Channels made with `VoiceChannelCreate`. Each is also in `channels`.
+    pub voice_channels: BTreeSet<ChannelId>,
     pub messages: BTreeMap<ChannelId, Vec<MessageView>>,
     /// Owner is not implicitly a member. The creator emits a Join like everyone else.
     pub members: BTreeMap<RootId, Member>,
@@ -78,6 +80,8 @@ pub struct MessageView {
     pub reply_to: Option<EventId>,
     /// Emoji to the canonical roots that reacted with it. Cleared on delete.
     pub reactions: BTreeMap<String, BTreeSet<RootId>>,
+    /// Emoji in the order they first gained a reaction. Keeps views stable across peers.
+    pub reaction_order: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +142,7 @@ impl CommunityState {
             handles: BTreeMap::new(),
             handle_skeletons: BTreeMap::new(),
             channels: BTreeMap::new(),
+            voice_channels: BTreeSet::new(),
             messages: BTreeMap::new(),
             members: BTreeMap::new(),
             aliases: BTreeMap::new(),
@@ -203,7 +208,7 @@ impl CommunityState {
         let rank = self.rank(&actor);
         let chan = ev.body.channel;
         match &ev.body.payload {
-            Payload::ChannelCreate { name } => {
+            Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 require_control(chan)?;
                 if rank < Rank::Admin {
                     return Err(Rejection::NoPermission);
@@ -321,10 +326,13 @@ impl CommunityState {
         let actor = ev.body.author;
         let chan = ev.body.channel;
         match &ev.body.payload {
-            Payload::ChannelCreate { name } => {
+            Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());
                 self.messages.entry(id).or_default();
+                if matches!(ev.body.payload, Payload::VoiceChannelCreate { .. }) {
+                    self.voice_channels.insert(id);
+                }
             }
             Payload::Sealed { kind, .. } => match kind {
                 SealedKind::Message => {
@@ -338,6 +346,7 @@ impl CommunityState {
                         deleted: false,
                         reply_to: None,
                         reactions: BTreeMap::new(),
+                        reaction_order: Vec::new(),
                     });
                 }
                 SealedKind::Reply { target } => {
@@ -351,6 +360,7 @@ impl CommunityState {
                         deleted: false,
                         reply_to: Some(*target),
                         reactions: BTreeMap::new(),
+                        reaction_order: Vec::new(),
                     });
                 }
                 SealedKind::Edit { target } => {
@@ -372,6 +382,7 @@ impl CommunityState {
                     deleted: false,
                     reply_to: None,
                     reactions: BTreeMap::new(),
+                    reaction_order: Vec::new(),
                 });
             }
             Payload::Edit { target, text } => {
@@ -386,6 +397,7 @@ impl CommunityState {
                     m.deleted = true;
                     m.text.clear();
                     m.reactions.clear();
+                    m.reaction_order.clear();
                 }
             }
             Payload::Join { display_name } => {
@@ -446,6 +458,7 @@ impl CommunityState {
                     deleted: false,
                     reply_to: Some(*target),
                     reactions: BTreeMap::new(),
+                    reaction_order: Vec::new(),
                 });
             }
             Payload::React { target, emoji } => {
@@ -453,6 +466,9 @@ impl CommunityState {
                     return;
                 };
                 if let Some(m) = self.live_message_mut(chan, target) {
+                    if !m.reactions.contains_key(&emoji) {
+                        m.reaction_order.push(emoji.clone());
+                    }
                     m.reactions.entry(emoji).or_default().insert(actor);
                 }
             }
@@ -465,6 +481,7 @@ impl CommunityState {
                         set.remove(&actor);
                         if set.is_empty() {
                             m.reactions.remove(&emoji);
+                            m.reaction_order.retain(|e| e != &emoji);
                         }
                     }
                 }

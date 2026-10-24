@@ -15,12 +15,13 @@ use crate::auth::{Auth, LinkConfig, RxState};
 use crate::call::{Call, CallStats};
 use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender, DEFAULT_LEVEL};
 use crate::error::{MediaError, Result};
+use crate::frame::ReceivedFrame;
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
-type FrameOut = Result<Option<(u64, Vec<u8>)>>;
+type FrameOut = Result<Option<ReceivedFrame>>;
 
 /// The audio mesh of one participant.
 ///
@@ -138,7 +139,7 @@ impl<T: PacketTransport> Mesh<T> {
                 "the new epoch must differ from the current one in its key id bits",
             ));
         }
-        let tx = SframeSender::new(&new_key, self.my_id, new_epoch)?;
+        let tx = self.tx.rekeyed(&new_key, self.my_id, new_epoch)?;
         let now = Instant::now();
         for call in self.calls.values_mut() {
             call.rotate_keys(new_key.clone(), new_epoch, now)?;
@@ -182,6 +183,16 @@ impl<T: PacketTransport> Mesh<T> {
     /// misses the start of the stream. Does nothing when the mesh has no peers. A peer whose
     /// link fails is dropped from the mesh, and the frame still goes to the others.
     pub async fn send_audio_frame(&mut self, frame: &[u8]) -> Result<()> {
+        self.send_frame(frame, None).await
+    }
+
+    /// Like [`Mesh::send_audio_frame`], but stamps the frame with `timestamp`, the sender's
+    /// sample clock at 48 kHz.
+    pub async fn send_audio_frame_at(&mut self, frame: &[u8], timestamp: u32) -> Result<()> {
+        self.send_frame(frame, Some(timestamp)).await
+    }
+
+    async fn send_frame(&mut self, frame: &[u8], timestamp: Option<u32>) -> Result<()> {
         if self.calls.is_empty() {
             return Ok(());
         }
@@ -194,7 +205,7 @@ impl<T: PacketTransport> Mesh<T> {
             .map(Call::loss_fraction)
             .fold(0.0_f32, f32::max);
         self.tx.set_red(redundancy_for(loss, self.tx.red()));
-        let encrypted = self.tx.encrypt(frame, DEFAULT_LEVEL)?;
+        let encrypted = self.tx.encrypt(frame, timestamp, DEFAULT_LEVEL)?;
         let mut failed = Vec::new();
         for (peer, call) in self.calls.iter_mut() {
             if let Err(e) = call.send_encrypted(&encrypted).await {
@@ -213,6 +224,16 @@ impl<T: PacketTransport> Mesh<T> {
     /// Returns `Ok(None)` when no peers are left. A peer whose call closes or fails is dropped
     /// from the mesh, and the others keep delivering. This method is cancel-safe.
     pub async fn next_frame(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
+        Ok(self
+            .next_received_frame()
+            .await?
+            .map(|frame| (frame.sender, frame.payload)))
+    }
+
+    /// Waits for the next frame from any peer, with its sequence number, timestamp and level.
+    ///
+    /// Returns `Ok(None)` when no peers are left. Cancel-safe, like [`Mesh::next_frame`].
+    pub async fn next_received_frame(&mut self) -> Result<Option<ReceivedFrame>> {
         loop {
             if self.calls.is_empty() {
                 return Ok(None);
@@ -221,7 +242,7 @@ impl<T: PacketTransport> Mesh<T> {
                 let mut futs: Vec<(u64, Boxed<'_, FrameOut>)> = self
                     .calls
                     .iter_mut()
-                    .map(|(peer, call)| (*peer, Box::pin(call.next_frame()) as Boxed<'_, FrameOut>))
+                    .map(|(peer, call)| (*peer, Box::pin(call.next_received_frame()) as Boxed<'_, FrameOut>))
                     .collect();
                 poll_fn(|cx| {
                     for (peer, fut) in futs.iter_mut() {

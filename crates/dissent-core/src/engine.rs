@@ -7,9 +7,10 @@ use crate::store::Paths;
 use crate::views::{CommunitySummary, EngineEvent, MeView, NetStatusView, UserView};
 use crate::world::World;
 use dissent_discovery::{ContactCard, Discovery};
+use dissent_mls::MlsClient;
 use dissent_events::{Hlc, HlcClock};
 use dissent_identity::{CommunityId, DeviceId, Identity, RootId};
-use dissent_net::{Node, NodeConfig, PeerAddr, RelayChoice, TopicReceiver};
+use dissent_net::{Node, NodeConfig, RelayChoice, TopicReceiver};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
@@ -34,6 +35,20 @@ pub(crate) struct Inner {
     pub identity: Identity,
     pub me: RootId,
     pub world: RwLock<World>,
+    /// This device's MLS state. Every change goes through `Engine::with_mls`, which saves it.
+    pub mls: Mutex<MlsClient>,
+    /// Where the MLS snapshot is written.
+    pub mls_path: PathBuf,
+    /// Ratchet steps since the last MLS flush. A flush writes the whole state.
+    pub mls_dirty: std::sync::atomic::AtomicU64,
+    pub mls_flushed_at: Mutex<std::time::Instant>,
+    /// Commit catch-ups in flight, so one missing epoch triggers one request per device.
+    pub mls_catching_up: Mutex<std::collections::BTreeSet<(CommunityId, DeviceId)>>,
+    /// MLS commits that were refused for now, most often because the ban behind them has not
+    /// reached this device yet. Retried whenever new events arrive.
+    pub deferred_commits: Mutex<BTreeMap<CommunityId, Vec<Vec<u8>>>>,
+    /// When each community was last warmed, to rate-limit `Engine::warm`.
+    pub warmed: Mutex<BTreeMap<CommunityId, std::time::Instant>>,
     pub clock: Mutex<HlcClock>,
     pub events: broadcast::Sender<EngineEvent>,
     pub node: OnceLock<Node>,
@@ -55,6 +70,8 @@ pub(crate) struct Inner {
     pub sync_backoff: Mutex<BTreeMap<DeviceId, std::time::Instant>>,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
+    /// The voice call on this device, and the media links waiting for it.
+    pub calls: crate::calls::CallHub,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -74,6 +91,8 @@ impl Engine {
         let world = World::load(Paths::new(data_dir), &identity)?;
         let newest_stored = world.max_hlc();
         let founded = load_founded(&world);
+        let mls = open_mls(&identity, &world);
+        let mls_path = world.paths.mls_state();
         let discovery = if matches!(net.relay, RelayChoice::Disabled) {
             None
         } else {
@@ -96,14 +115,24 @@ impl Engine {
             tasks: Mutex::new(Vec::new()),
             discovery,
             founded: Mutex::new(founded),
+            mls: Mutex::new(mls),
+            mls_path,
+            mls_dirty: std::sync::atomic::AtomicU64::new(0),
+            mls_flushed_at: Mutex::new(std::time::Instant::now()),
+            mls_catching_up: Mutex::new(std::collections::BTreeSet::new()),
+            deferred_commits: Mutex::new(BTreeMap::new()),
+            warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
+            calls: Default::default(),
         });
+        let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let config = NodeConfig {
             rpc: Some(handler_for(&inner)),
+            media: Some(media),
             ..net
         };
         let node = Node::spawn(&inner.identity.device, config).await?;
@@ -137,6 +166,7 @@ impl Engine {
 
     /// Stops background tasks and the network node. Stored data stays on disk.
     pub async fn shutdown(self) -> Result<()> {
+        self.flush_mls(true);
         {
             let mut guard = self.write();
             for c in guard.communities.values_mut() {
@@ -166,6 +196,7 @@ impl Engine {
             device_id: self.inner.identity.device_id().to_string(),
             suffix: self.inner.me.suffix(),
             display_name: w.my_name(),
+            first_run: crate::local::first_run(&w),
         }
     }
 
@@ -177,27 +208,6 @@ impl Engine {
         let card = ContactCard::new(cert.clone(), &w.my_name(), peers.clone())
             .or_else(|_| ContactCard::new(cert, &w.anon_name(), peers));
         card.map(|c| c.to_url().to_string()).unwrap_or_default()
-    }
-
-    /// Adds (or replaces) a contact from a contact link, and learns its address.
-    pub async fn add_contact(&self, link: &str) -> Result<UserView> {
-        let card = ContactCard::parse(link)?;
-        let user = card.cert.root;
-        if user == self.inner.me {
-            return Err(CoreError::Invalid("that is your own contact link".into()));
-        }
-        {
-            let mut guard = self.write();
-            let w = &mut *guard;
-            w.directory.learn(&card.cert);
-            for peer in card.peers.iter().filter_map(|p| p.parse::<PeerAddr>().ok()) {
-                self.learn_address(w, peer);
-            }
-            w.contacts.retain(|c| c.cert.root != user);
-            w.contacts.push(card);
-            w.save_contacts()?;
-        }
-        Ok(self.read().user_view(&user))
     }
 
     /// Every community we belong to, sorted by name.
@@ -350,6 +360,18 @@ pub(crate) fn clean_text(value: &str, what: &str) -> Result<String> {
     }
 }
 
+/// Longest message text, in characters. Keeps every sealed event well under the gossip frame limit.
+pub(crate) const MAX_MESSAGE_CHARS: usize = 8_000;
+
+/// Message text, trimmed and capped at `MAX_MESSAGE_CHARS`.
+pub(crate) fn clean_message(value: &str) -> Result<String> {
+    let text = clean_text(value, "message")?;
+    if text.chars().count() > MAX_MESSAGE_CHARS {
+        return Err(CoreError::Invalid(format!("message is longer than {MAX_MESSAGE_CHARS} characters")));
+    }
+    Ok(text)
+}
+
 pub(crate) fn not_found(id: &CommunityId) -> CoreError {
     CoreError::NotFound(format!("community {id}"))
 }
@@ -373,4 +395,27 @@ fn load_founded(w: &World) -> BTreeMap<CommunityId, [u8; 32]> {
             Some((*id, seed))
         })
         .collect()
+}
+
+/// Restores this device's MLS state from `mls.bin` and loads the groups of every community we
+/// hold. A missing or unreadable snapshot starts an empty client, so the device must rejoin.
+fn open_mls(identity: &Identity, w: &World) -> MlsClient {
+    let groups: Vec<[u8; 32]> = w
+        .communities
+        .keys()
+        .map(|id| id.0)
+        .chain(w.conv_book.convs.values().filter(|m| m.ready && !m.left).map(|m| m.id.0))
+        .collect();
+    let snapshot = std::fs::read(w.paths.mls_state()).ok();
+    let restored = match snapshot {
+        Some(bytes) => MlsClient::restore(&identity.device, &identity.cert, &bytes, &groups),
+        None => MlsClient::new(&identity.device, &identity.cert),
+    };
+    match restored {
+        Ok(client) => client,
+        Err(e) => {
+            warn!(error = %e, "MLS state could not be restored; starting empty");
+            MlsClient::new(&identity.device, &identity.cert).expect("fresh MLS client")
+        }
+    }
 }

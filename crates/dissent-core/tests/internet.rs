@@ -35,6 +35,7 @@ async fn start_real(name: &str) -> Peer {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn join_over_the_dht_then_message_and_dm() {
+    bounded(async {
     let t0 = Instant::now();
     let alice = start_real("alice-net").await;
     eprintln!("[{:?}] alice started", t0.elapsed());
@@ -135,4 +136,5 @@ async fn join_over_the_dht_then_message_and_dm() {
     }
 
     finish(vec![alice, bob]).await;
+    }).await;
 }

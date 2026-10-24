@@ -1,12 +1,12 @@
 //! Authoring. Each local change becomes a signed event. Replay checks it before it is stored or sent.
 
-use crate::engine::{clean_name, clean_text, not_found, Engine};
+use crate::engine::{clean_message, clean_name, clean_text, not_found, Engine};
 use crate::error::Result;
 use crate::store::append_records;
 use crate::views::{ChannelInfo, EngineEvent, MessageItem, ModAction};
 use crate::wire::{encode_gossip, GossipMsg};
 use crate::world::World;
-use dissent_events::{ChannelId, Event, EventBody, EventId, Hlc, Payload, Role, SignedEvent};
+use dissent_events::{ChannelId, Event, EventBody, EventId, Hlc, Payload, Role, SealedKind, SignedEvent};
 use dissent_identity::{CommunityId, RootId};
 use tracing::{debug, warn};
 
@@ -46,6 +46,7 @@ impl Engine {
         Ok(ChannelInfo {
             id: ChannelId(se.event.id.0).to_string(),
             name,
+            voice: false,
         })
     }
 
@@ -55,9 +56,15 @@ impl Engine {
         channel: ChannelId,
         text: String,
     ) -> Result<MessageItem> {
-        let text = clean_text(&text, "message")?;
-        let payload = Payload::Message { text: text.clone() };
+        let text = clean_message(&text)?;
+        let (epoch, ciphertext) = self.seal(community, &text)?;
+        let payload = Payload::Sealed {
+            epoch,
+            kind: SealedKind::Message,
+            ciphertext,
+        };
         let se = self.author_publish(community, channel, payload).await?;
+        self.store_content(community, se.event.id, se.event.body.hlc, text.clone());
         let me = self.inner.me;
         Ok(MessageItem {
             id: se.event.id.to_string(),
@@ -67,6 +74,9 @@ impl Engine {
             ms: se.event.body.hlc.wall_ms,
             edited: false,
             deleted: false,
+            locked: false,
+            reply_to: None,
+            reactions: Vec::new(),
         })
     }
 
@@ -77,12 +87,15 @@ impl Engine {
         message: EventId,
         text: String,
     ) -> Result<()> {
-        let text = clean_text(&text, "message")?;
-        let payload = Payload::Edit {
-            target: message,
-            text,
+        let text = clean_message(&text)?;
+        let (epoch, ciphertext) = self.seal(community, &text)?;
+        let payload = Payload::Sealed {
+            epoch,
+            kind: SealedKind::Edit { target: message },
+            ciphertext,
         };
-        self.author_publish(community, channel, payload).await?;
+        let se = self.author_publish(community, channel, payload).await?;
+        self.store_content(community, message, se.event.body.hlc, text);
         Ok(())
     }
 
@@ -125,6 +138,8 @@ impl Engine {
         };
         self.author_publish(community, ChannelId::CONTROL, payload)
             .await?;
+        // A ban takes effect in the group at once, if this device is the committer.
+        self.mls_reconcile(community).await;
         Ok(())
     }
 
@@ -213,7 +228,7 @@ impl Engine {
             match encode_gossip(&GossipMsg::Event(Box::new(se.clone()))) {
                 Ok(bytes) => {
                     if let Err(e) = sender.broadcast(bytes).await {
-                        warn!(community = %community, error = %e, "gossip broadcast failed");
+                        warn!(community = %community, error = %e, "event not sent on gossip; peers fetch it on their next sync");
                     }
                 }
                 Err(e) => warn!(community = %community, error = %e, "could not encode event"),
@@ -226,7 +241,11 @@ impl Engine {
 pub(crate) fn event_for(community: &CommunityId, ev: &Event) -> EngineEvent {
     let community_id = community.to_string();
     match ev.body.payload {
-        Payload::Message { .. } | Payload::Edit { .. } | Payload::Delete { .. } => {
+        Payload::Message { .. }
+        | Payload::Edit { .. }
+        | Payload::Delete { .. }
+        | Payload::Reply { .. }
+        | Payload::Sealed { .. } => {
             EngineEvent::Message {
                 community_id,
                 channel_id: ev.body.channel.to_string(),

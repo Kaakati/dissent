@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -204,13 +204,43 @@ pub fn sentinel_frame(seq: u64, sender: u64) -> Vec<u8> {
     out
 }
 
-/// One frame a participant received.
+/// One frame a participant received, and whether it checks out.
 #[derive(Debug, Clone, Copy)]
 pub struct Arrival {
     pub at: std::time::Instant,
     pub sender: u64,
     /// Whether the payload matches the sender's frame byte for byte.
     pub intact: bool,
+    /// The sequence number and timestamp the frame carried, and its audio level.
+    pub seq: u32,
+    pub timestamp: u32,
+    pub audio_level: u8,
+    /// Whether the stamp matches the payload: the sequence number is the frame's index, and the
+    /// timestamp is one frame of samples per sequence number. True for frames sent without an
+    /// explicit timestamp.
+    pub stamp_ok: bool,
+}
+
+fn arrival(frame: &dissent_media::ReceivedFrame) -> Arrival {
+    let index = seq_of(&frame.payload);
+    Arrival {
+        at: std::time::Instant::now(),
+        sender: frame.sender,
+        intact: frame.payload == sentinel_frame(index, frame.sender),
+        seq: frame.seq,
+        timestamp: frame.timestamp,
+        audio_level: frame.audio_level,
+        stamp_ok: u64::from(frame.seq) == index
+            && frame.timestamp == frame.seq.wrapping_mul(dissent_media::FRAME_SAMPLES),
+    }
+}
+
+/// Whether no sender's sequence number arrived twice. Arrival order may differ from sequence
+/// order: frames held for a late digest are released after frames sent later, so a jitter
+/// buffer reorders by sequence number.
+pub fn seq_unique(arrivals: &[Arrival]) -> bool {
+    let mut seen: BTreeSet<(u64, u32)> = BTreeSet::new();
+    arrivals.iter().all(|a| seen.insert((a.sender, a.seq)))
 }
 
 /// Runs one forwarded participant. It sends a sentinel frame every 20 ms at `level` for
@@ -235,24 +265,16 @@ pub async fn run_participant<T: PacketTransport>(
                 participant.send_audio_frame(&sentinel_frame(seq, id), level).await.unwrap();
                 seq += 1;
             }
-            next = participant.next_frame() => match next.unwrap() {
-                Some((sender, payload)) => arrivals.push(Arrival {
-                    at: std::time::Instant::now(),
-                    sender,
-                    intact: payload == sentinel_frame(seq_of(&payload), sender),
-                }),
+            next = participant.next_received_frame() => match next.unwrap() {
+                Some(frame) => arrivals.push(arrival(&frame)),
                 None => break,
             },
         }
     }
     // Keep driving for a moment, so the digest that closes the last batch goes out.
     let _ = timeout(Duration::from_millis(250), async {
-        while let Ok(Some((sender, payload))) = participant.next_frame().await {
-            arrivals.push(Arrival {
-                at: std::time::Instant::now(),
-                sender,
-                intact: payload == sentinel_frame(seq_of(&payload), sender),
-            });
+        while let Ok(Some(frame)) = participant.next_received_frame().await {
+            arrivals.push(arrival(&frame));
         }
     })
     .await;

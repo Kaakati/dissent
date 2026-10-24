@@ -2086,13 +2086,19 @@ dependencies = [
 name = "dissent-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "data-encoding",
+ "dissent-audio",
  "dissent-discovery",
  "dissent-events",
  "dissent-identity",
+ "dissent-media",
+ "dissent-mls",
  "dissent-net",
  "futures-lite",
  "negentropy",
  "postcard",
+ "rand 0.10.3",
  "serde",
  "thiserror 2.0.21",
  "tokio",
@@ -2240,6 +2246,7 @@ dependencies = [
  "iroh",
  "iroh-gossip",
  "iroh-mainline-address-lookup",
+ "iroh-relay",
  "noq-proto",
  "postcard",
  "rcgen",

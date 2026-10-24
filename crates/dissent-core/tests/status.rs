@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn net_status_counts_gossip_neighbours_without_relays() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
 
@@ -32,4 +33,5 @@ async fn net_status_counts_gossip_neighbours_without_relays() {
     }
 
     finish(vec![alice, bob]).await;
+    }).await;
 }

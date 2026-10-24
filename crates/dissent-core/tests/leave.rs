@@ -7,6 +7,7 @@ use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn left_community_gets_no_more_gossip() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let id = rustaceans(&alice, &bob).await;
@@ -43,4 +44,5 @@ async fn left_community_gets_no_more_gossip() {
     assert!(!bob_dir.exists(), "gossip did not recreate the community directory");
 
     finish(vec![alice, bob]).await;
+    }).await;
 }

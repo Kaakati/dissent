@@ -82,6 +82,16 @@ impl GuardianSet {
         check_policy(&self.owner, &self.guardians, self.threshold)?;
         self.owner.verify(&self.signing_bytes(), &self.sig)
     }
+
+    /// `dissent://guardians/...`. Shared with the recovering device, which needs it to prove the
+    /// threshold. The list is public and signed, so the link carries no secret.
+    pub fn to_link(&self) -> Result<String> {
+        link::encode("guardians", self)
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        link::decode("guardians", s)
+    }
 }
 
 /// A request to move from `old_root` to `new_root`. Unsigned: the new device

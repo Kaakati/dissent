@@ -92,6 +92,17 @@ pub struct LinkGrant {
     pub root_seed_wrapped: Option<Vec<u8>>,
 }
 
+impl LinkGrant {
+    /// `dissent://grant/...`, shown on the root device and pasted back on the new one.
+    pub fn to_link(&self) -> Result<String> {
+        link::encode("grant", self)
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        link::decode("grant", s)
+    }
+}
+
 /// Root-signed statement that `device` must no longer be trusted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRevocation {

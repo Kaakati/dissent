@@ -2,16 +2,22 @@
 //! `Engine` guards one `World` with a lock. Nothing here touches the network.
 
 use crate::community::Community;
+
+/// Characters of a replied-to message shown in its preview.
+const REPLY_SNIPPET_CHARS: usize = 120;
+/// Reactors named in a reaction tooltip.
+const REACTION_NAMES: usize = 3;
+use crate::identity_watch::IdentityChange;
 use crate::directory::{AddressBook, Directory, StoredAddr};
 use crate::error::{CoreError, Result};
 use crate::store::{read_bin, read_records, write_bin, Paths};
 use crate::views::{
     ChannelInfo, CommunityRef, CommunitySummary, CommunityView, HandleView, MemberInfo,
-    MessageItem, UserView,
+    MessageItem, ReactionView, ReplyPreview, UserView,
 };
 use crate::wire::SignedAddr;
 use dissent_discovery::ContactCard;
-use dissent_events::{ChannelId, Hlc, SignedDm, SignedEvent};
+use dissent_events::{ChannelId, EventId, Hlc, MessageView, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, Genesis, Identity, RootId};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
@@ -35,14 +41,28 @@ pub(crate) struct World {
     pub communities: BTreeMap<CommunityId, Community>,
     /// Direct messages keyed by the other party, in either direction.
     pub dms: BTreeMap<RootId, Vec<SignedDm>>,
+    /// Changes of identity seen for the people we talk to.
+    pub identity_changes: Vec<IdentityChange>,
+    /// Community secrets, from creating a community or from an invite.
+    pub access: BTreeMap<CommunityId, [u8; 32]>,
     /// Outgoing direct messages not yet acknowledged.
     pub outbox: Vec<SignedDm>,
+    /// Contact requests and accepts, the DM privacy policy.
+    pub contact_book: crate::contacts::ContactBook,
+    /// Conversations and their packet queues.
+    pub conv_book: crate::groups::ConvBook,
+    /// Stored text messages, by conversation.
+    pub conv_msgs: BTreeMap<crate::groups::ConvId, Vec<crate::groups::ConvMsg>>,
+    /// Inbox service state: envelopes and key packages held for our root.
+    pub inbox: crate::inbox::InboxBook,
     pub directory: Directory,
     pub addresses: AddressBook,
-    /// Our own dialable address. Set once the endpoint is up.
+    /// Our dialable address. Set once the endpoint is up.
     pub my_addr: Option<PeerAddr>,
     /// Timestamp of our latest signed address. Each new one is larger.
     pub my_addr_ts: u64,
+    /// Our latest signed address, passed on to others and re-broadcast on the community topics.
+    pub my_signed: Option<SignedAddr>,
 }
 
 impl World {
@@ -51,9 +71,8 @@ impl World {
         let profile: Profile = read_bin(&paths.profile())?.unwrap_or_default();
         let contacts: Vec<ContactCard> = read_bin(&paths.contacts())?.unwrap_or_default();
         let addrs: Vec<StoredAddr> = read_bin(&paths.addresses())?.unwrap_or_default();
-        let my_addr_ts = read_bin::<SignedAddr>(&paths.own_addr())?
-            .map(|own| own.ts_ms)
-            .unwrap_or(0);
+        let my_signed: Option<SignedAddr> = read_bin(&paths.own_addr())?;
+        let my_addr_ts = my_signed.as_ref().map_or(0, |own| own.ts_ms);
         let mut directory = Directory::default();
         directory.learn(&identity.cert);
         for card in &contacts {
@@ -69,6 +88,13 @@ impl World {
         for dm in &outbox {
             directory.learn(&dm.cert);
         }
+        let contact_book = crate::contacts::ContactBook::load(&paths)?;
+        let conv_book = crate::groups::ConvBook::load(&paths)?;
+        let conv_msgs = crate::groups::load_messages(&paths, &conv_book);
+        let inbox = crate::inbox::InboxBook::load(&paths)?;
+        let access = crate::access::load(&paths, communities.keys().copied())?;
+        let identity_changes: Vec<IdentityChange> =
+            crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
         Ok(World {
             me: identity.root_id(),
             device: identity.device_id(),
@@ -77,11 +103,18 @@ impl World {
             contacts,
             communities,
             dms,
+            identity_changes,
+            access,
             outbox,
+            contact_book,
+            conv_book,
+            conv_msgs,
+            inbox,
             directory,
             addresses: AddressBook::from_list(addrs),
             my_addr: None,
             my_addr_ts,
+            my_signed,
         })
     }
 
@@ -178,6 +211,7 @@ impl World {
             .channels
             .iter()
             .map(|(id, name)| ChannelInfo {
+                voice: c.state().voice_channels.contains(id),
                 id: id.to_string(),
                 name: name.clone(),
             })
@@ -208,11 +242,17 @@ impl World {
 
     pub fn user_view(&self, user: &RootId) -> UserView {
         let shared = self.shared_with(user);
+        let fields = crate::local::user_fields(self, user);
         UserView {
             root_id: user.to_string(),
             suffix: user.suffix(),
             display_name: self.display_name(user),
             is_contact: self.is_contact(user),
+            identity_changed_ms: crate::identity_watch::last_change(&self.identity_changes, user),
+            key_changed_ms: fields.key_changed_ms,
+            verified_ms: fields.verified_ms,
+            note: fields.note,
+            nickname: fields.nickname,
             handles: shared
                 .iter()
                 .map(|c| HandleView {
@@ -238,24 +278,88 @@ impl World {
         channel: &ChannelId,
         limit: usize,
     ) -> Vec<MessageItem> {
-        let Some(msgs) = self
-            .communities
-            .get(community)
-            .and_then(|c| c.state().messages.get(channel))
-        else {
+        let Some(c) = self.communities.get(community) else {
+            return Vec::new();
+        };
+        let Some(msgs) = c.state().messages.get(channel) else {
             return Vec::new();
         };
         let start = msgs.len().saturating_sub(limit);
+        let by_id: BTreeMap<EventId, &MessageView> = msgs.iter().map(|m| (m.id, m)).collect();
         msgs[start..]
             .iter()
-            .map(|m| MessageItem {
-                id: m.id.to_string(),
-                author: m.author.to_string(),
-                author_name: self.display_name(&m.author),
-                text: m.text.clone(),
-                ms: m.hlc.wall_ms,
-                edited: m.edited,
-                deleted: m.deleted,
+            .map(|m| {
+                // Sealed text is not in state. It comes from this device's content view.
+                let decrypted = c.content.get(&m.id).map(|(_, text)| text.clone());
+                let locked = m.sealed && !m.deleted && decrypted.is_none();
+                let text = if m.sealed {
+                    decrypted.unwrap_or_default()
+                } else {
+                    m.text.clone()
+                };
+                MessageItem {
+                    id: m.id.to_string(),
+                    author: m.author.to_string(),
+                    author_name: self.display_name(&m.author),
+                    text,
+                    ms: m.hlc.wall_ms,
+                    edited: m.edited,
+                    deleted: m.deleted,
+                    locked,
+                    reply_to: m
+                        .reply_to
+                        .and_then(|target| self.reply_preview(c, &by_id, target)),
+                    reactions: self.reaction_views(m),
+                }
+            })
+            .collect()
+    }
+
+    /// A short view of the message `target`, as this device can read it. `None` when that message
+    /// is not in the channel.
+    fn reply_preview(
+        &self,
+        c: &Community,
+        by_id: &BTreeMap<EventId, &MessageView>,
+        target: EventId,
+    ) -> Option<ReplyPreview> {
+        let original = by_id.get(&target)?;
+        let plain: Option<String> = if original.sealed {
+            c.content.get(&target).map(|(_, text)| text.clone())
+        } else {
+            Some(original.text.clone())
+        };
+        let locked = original.sealed && !original.deleted && plain.is_none();
+        let text = if original.deleted {
+            None
+        } else {
+            plain.map(|t| t.chars().take(REPLY_SNIPPET_CHARS).collect())
+        };
+        Some(ReplyPreview {
+            id: target.to_string(),
+            author: original.author.to_string(),
+            author_name: self.display_name(&original.author),
+            text,
+            locked,
+        })
+    }
+
+    /// The reactions on a message, in the order each emoji first got one.
+    fn reaction_views(&self, m: &MessageView) -> Vec<ReactionView> {
+        m.reaction_order
+            .iter()
+            .filter_map(|emoji| {
+                let reactors = m.reactions.get(emoji)?;
+                Some(ReactionView {
+                    emoji: emoji.clone(),
+                    count: reactors.len(),
+                    me: reactors.contains(&self.me),
+                    names: reactors
+                        .iter()
+                        .take(REACTION_NAMES)
+                        .map(|root| self.display_name(root))
+                        .collect(),
+                })
             })
             .collect()
     }
@@ -315,7 +419,9 @@ fn load_community(
     for se in &valid {
         directory.learn(&se.cert);
     }
-    Ok(Community::load(genesis, valid))
+    let mut community = Community::load(genesis, valid);
+    community.content = load_content(paths, id);
+    Ok(community)
 }
 
 fn load_dms(paths: &Paths, directory: &mut Directory) -> BTreeMap<RootId, Vec<SignedDm>> {
@@ -349,4 +455,25 @@ fn load_dms(paths: &Paths, directory: &mut Directory) -> BTreeMap<RootId, Vec<Si
         }
     }
     out
+}
+
+/// Decrypted content records. Each key keeps the record with the newest hlc.
+fn load_content(paths: &Paths, id: &CommunityId) -> BTreeMap<EventId, (Hlc, String)> {
+    let records: Vec<ContentRecord> = read_records(&paths.content_log(id)).unwrap_or_default();
+    let mut out: BTreeMap<EventId, (Hlc, String)> = BTreeMap::new();
+    for rec in records {
+        let newer = out.get(&rec.key).is_none_or(|(hlc, _)| rec.hlc > *hlc);
+        if newer {
+            out.insert(rec.key, (rec.hlc, rec.text));
+        }
+    }
+    out
+}
+
+/// One line of `content.log`: decrypted text for a content key.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ContentRecord {
+    pub key: EventId,
+    pub hlc: Hlc,
+    pub text: String,
 }

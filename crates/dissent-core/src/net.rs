@@ -1,15 +1,17 @@
 //! Network side: inbound gossip and requests, direct message delivery, and background work.
 //! No lock is held across a network await.
 
-use crate::engine::{now_ms, not_found, Engine, Inner, MAX_CLOCK_SKEW_MS, RETRY_EVERY};
+use crate::access::InEnvelope;
+use crate::engine::{Engine, Inner, MAX_CLOCK_SKEW_MS, RETRY_EVERY, not_found, now_ms};
 use crate::error::Result;
+use crate::identity_watch;
 use crate::messages::event_for;
-use crate::rpc::{decode, encode, Request, Response};
+use crate::rpc::{Request, Response, decode};
 use crate::store::append_records;
 use crate::views::EngineEvent;
-use crate::wire::{decode_gossip, GossipMsg};
+use crate::wire::{GossipMsg, decode_gossip};
 use crate::world::World;
-use dissent_events::{SignedDm, SignedEvent};
+use dissent_events::{Payload, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicReceiver};
 use std::collections::BTreeSet;
@@ -27,7 +29,7 @@ pub(crate) struct ReceiverTask {
 
 impl Engine {
     pub(crate) async fn call(&self, peer: DeviceId, req: &Request) -> Result<Response> {
-        let reply = self.node().request(peer, encode(req)?).await?;
+        let reply = self.node().request(peer, self.request_bytes(req)?).await?;
         decode(&reply)
     }
 
@@ -41,8 +43,12 @@ impl Engine {
             paths,
             communities,
             directory,
+            dms,
+            conv_book,
+            identity_changes,
             ..
         } = &mut *guard;
+        let mut emitted: Vec<EngineEvent> = Vec::new();
         let mut valid = Vec::with_capacity(items.len());
         for se in items {
             let hlc = se.event.body.hlc;
@@ -60,7 +66,18 @@ impl Engine {
                 debug!(community = %community, "dropping event stamped too far ahead of our clock");
                 continue;
             }
-            directory.learn(&se.cert);
+            let path = paths.identity_changes();
+            if let Some(ev) = identity_watch::learn_device(
+                directory,
+                dms,
+                conv_book,
+                identity_changes,
+                &path,
+                &se.cert,
+                now,
+            ) {
+                emitted.push(ev);
+            }
             self.observe(hlc);
             valid.push(se);
         }
@@ -71,10 +88,26 @@ impl Engine {
         if let Err(e) = append_records(&paths.events_log(&community), &batch.stored) {
             warn!(community = %community, error = %e, "could not persist events");
         }
-        let mut emitted: Vec<EngineEvent> = Vec::new();
         for se in &batch.stored {
             if c.is_rejected(&se.event.id) {
                 continue;
+            }
+            if let Payload::KeyRotation(rot) = &se.event.body.payload {
+                let (old, new) = (rot.request.old_root, rot.request.new_root);
+                if c.is_member(&new)
+                    || c.is_member(&old)
+                    || identity_watch::messaged(dms, conv_book, &new)
+                    || identity_watch::messaged(dms, conv_book, &old)
+                {
+                    let key = format!("rot:{:?}", se.event.id);
+                    let path = paths.identity_changes();
+                    let reason = identity_watch::ROTATED;
+                    if let Some(ev) =
+                        identity_watch::record(identity_changes, &path, new, key, reason, now)
+                    {
+                        emitted.push(ev);
+                    }
+                }
             }
             let ev = event_for(&community, &se.event);
             if !emitted.contains(&ev) {
@@ -82,6 +115,8 @@ impl Engine {
             }
         }
         drop(guard);
+        self.retry_deferred_commits(community);
+        self.unseal_pending(community);
         for ev in emitted {
             self.emit(ev);
         }
@@ -89,7 +124,12 @@ impl Engine {
     }
 
     /// Handles one gossip message. The sender is the neighbour that relayed it, not the author.
-    pub(crate) async fn on_gossip(&self, community: CommunityId, neighbour: DeviceId, bytes: &[u8]) {
+    pub(crate) async fn on_gossip(
+        &self,
+        community: CommunityId,
+        neighbour: DeviceId,
+        bytes: &[u8],
+    ) {
         match decode_gossip(bytes) {
             Ok(GossipMsg::Event(se)) => match self.ingest(community, vec![*se]) {
                 Ok(true) => {
@@ -98,8 +138,13 @@ impl Engine {
                     }
                 }
                 Ok(false) => {}
-                Err(e) => debug!(community = %community, error = %e, "could not store gossip event"),
+                Err(e) => {
+                    debug!(community = %community, error = %e, "could not store gossip event")
+                }
             },
+            Ok(GossipMsg::Commit(announce)) => {
+                self.receive_commit(community, neighbour, *announce).await
+            }
             Ok(GossipMsg::Addr(sa)) => {
                 if let Err(e) = self.accept_addr(*sa) {
                     debug!(error = %e, "rejected gossiped address");
@@ -110,16 +155,29 @@ impl Engine {
     }
 
     /// Serves one request from `conn_from`. Runs under the RPC handler.
-    pub(crate) fn handle_request(&self, conn_from: DeviceId, bytes: &[u8]) -> Response {
-        let req: Request = match decode(bytes) {
-            Ok(req) => req,
+    pub(crate) async fn handle_request(&self, conn_from: DeviceId, bytes: &[u8]) -> Response {
+        let env: InEnvelope = match decode(bytes) {
+            Ok(env) => env,
             Err(e) => return Response::Error(format!("bad request: {e}")),
         };
-        match req {
-            Request::Genesis { community } => match self.read().communities.get(&community) {
-                Some(c) => Response::Genesis(c.genesis.clone()),
-                None => Response::Error("unknown community".into()),
-            },
+        if let Err(e) = self.check_request(&env) {
+            return Response::Error(e.to_string());
+        }
+        match env.req {
+            Request::Genesis { community } => {
+                let genesis = self
+                    .read()
+                    .communities
+                    .get(&community)
+                    .map(|c| c.genesis.clone());
+                match genesis {
+                    Some(genesis) => Response::Genesis {
+                        genesis,
+                        addrs: self.member_addrs(community),
+                    },
+                    None => Response::Error("unknown community".into()),
+                }
+            }
             Request::Reconcile {
                 community,
                 msg,
@@ -127,11 +185,27 @@ impl Engine {
             } => {
                 self.learn_peer(conn_from, from);
                 match self.reconcile_reply(community, &msg) {
-                    Ok(reply) => Response::Reconcile { msg: Some(reply) },
+                    Ok(reply) => Response::Reconcile {
+                        msg: Some(reply),
+                        addrs: self.member_addrs(community),
+                    },
                     Err(e) => Response::Error(e.to_string()),
                 }
             }
             Request::Fetch { community, ids } => Response::Events(self.events_for(community, &ids)),
+            Request::MlsJoin { community, from } => {
+                self.handle_mls_join(conn_from, community, from).await
+            }
+            Request::KeyPackages { .. } | Request::DmKeyPackage => match self.with_mls(|mls| mls.take_key_packages(1)) {
+                Ok(packages) => Response::KeyPackages(packages),
+                Err(e) => Response::Error(format!("no key packages: {e}")),
+            },
+            Request::MlsCommits { community, after } => {
+                Response::MlsCommits(self.commits_after(community, after))
+            }
+            Request::MlsCommit { community, epoch } => {
+                Response::MlsCommit(self.commit_at(community, epoch))
+            }
             Request::Push { community, events } => match self.ingest(community, events) {
                 Ok(_) => Response::Ack,
                 Err(e) => Response::Error(format!("could not store events: {e}")),
@@ -141,10 +215,19 @@ impl Engine {
                 Err(e) => Response::Error(format!("invalid address: {e}")),
             },
             Request::Dm { dm, from } => self.receive_dm(conn_from, *dm, from),
+            Request::Contact(signed) => self.receive_contact(*signed).await,
+            Request::Conv(packet) => self.receive_conv(*packet).await,
+            Request::Deposit(env) => self.receive_deposit(*env),
+            Request::Collect(req) => self.receive_collect(*req),
+            Request::AckEnvelopes(ack) => self.receive_ack(*ack),
+            Request::DepositKeyPackages(body) => self.receive_key_packages(*body),
+            Request::TakeKeyPackage { root } => self.take_key_package(root),
+            Request::Call(msg) => Response::Call(self.handle_call(conn_from, *msg).await),
+            Request::Guardians(set) => self.accept_guardians(*set),
         }
     }
 
-    fn learn_peer(&self, conn_from: DeviceId, from: PeerAddr) {
+    pub(crate) fn learn_peer(&self, conn_from: DeviceId, from: PeerAddr) {
         if from.id == conn_from {
             let mut guard = self.write();
             self.learn_address(&mut guard, from);
@@ -170,13 +253,28 @@ impl Engine {
             return Response::Error("invalid direct message".into());
         }
         let peer: RootId = sd.dm.body.from;
+        let device_notice: Option<EngineEvent>;
         let is_new = {
             let mut guard = self.write();
             let w = &mut *guard;
             if sd.dm.body.to != w.me {
                 return Response::Error("message is not addressed to this user".into());
             }
-            w.directory.learn(&sd.cert);
+            if w.contact_book.blocked.contains(&peer) {
+                return Response::Ack;
+            }
+            if !crate::contacts::dm_allowed(w, &peer) {
+                return Response::Refused("this user does not accept direct messages from you".into());
+            }
+            device_notice = identity_watch::learn_device(
+                &mut w.directory,
+                &w.dms,
+                &w.conv_book,
+                &mut w.identity_changes,
+                &w.paths.identity_changes(),
+                &sd.cert,
+                now_ms(),
+            );
             if from.id == conn_from {
                 self.learn_address(w, from);
             }
@@ -195,6 +293,9 @@ impl Engine {
                 true
             }
         };
+        if let Some(ev) = device_notice {
+            self.emit(ev);
+        }
         if is_new {
             self.emit(EngineEvent::Dm {
                 peer: peer.to_string(),
@@ -212,7 +313,7 @@ impl Engine {
         let Some(from) = from else {
             return false;
         };
-        let bytes = match encode(&Request::Dm {
+        let bytes = match self.request_bytes(&Request::Dm {
             dm: Box::new(sd.clone()),
             from,
         }) {
@@ -341,6 +442,8 @@ impl Engine {
 
 /// How often a receive loop refreshes its neighbour list while the topic is quiet.
 const NEIGHBOUR_TICK: Duration = Duration::from_secs(2);
+/// How often a community asks a neighbour for MLS commits it may have missed.
+const COMMIT_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// Members tried in one anti-entropy round.
 const ANTI_ENTROPY_ATTEMPTS: usize = 3;
 /// How long a device that failed a sync is skipped.
@@ -356,11 +459,26 @@ pub(crate) async fn receive_loop(
     mut stop: oneshot::Receiver<()>,
 ) -> TopicReceiver {
     let mut tick = tokio::time::interval(NEIGHBOUR_TICK);
-    publish_neighbours(&weak, community, &rx);
+    let mut known: BTreeSet<DeviceId> = BTreeSet::new();
+    let mut last_commit_check = Instant::now();
     loop {
         tokio::select! {
             _ = &mut stop => break,
-            _ = tick.tick() => publish_neighbours(&weak, community, &rx),
+            _ = tick.tick() => {
+                // A commit announcement lost in transit would otherwise wait for the next message.
+                // So ask one neighbour for commits we lack, every few seconds.
+                let neighbour = known.iter().next().copied();
+                if let (Some(neighbour), true) = (neighbour, last_commit_check.elapsed() >= COMMIT_CHECK_EVERY) {
+                    last_commit_check = Instant::now();
+                    if let Some(inner) = weak.upgrade() {
+                        let engine = Engine { inner };
+                        let task = engine.clone();
+                        engine.spawn_task(async move {
+                            task.mls_commit_check(community, neighbour).await;
+                        });
+                    }
+                }
+            }
             msg = rx.next() => {
                 let Some(msg) = msg else {
                     break;
@@ -371,23 +489,46 @@ pub(crate) async fn receive_loop(
                 Engine { inner }
                     .on_gossip(community, msg.from, &msg.bytes)
                     .await;
-                publish_neighbours(&weak, community, &rx);
+            }
+        }
+        // A neighbour that just appeared has not seen our address yet. Send it.
+        let fresh = note_neighbours(&weak, community, &rx, &mut known);
+        if !fresh.is_empty() {
+            if let Some(inner) = weak.upgrade() {
+                let engine = Engine { inner };
+                engine.broadcast_own_addr(community).await;
+                // Gossip sent just before a neighbour joined does not reach it. Sync with it now.
+                for device in fresh {
+                    let task = engine.clone();
+                    engine.spawn_task(async move {
+                        let _ = task.sync_with(community, device).await;
+                    });
+                }
             }
         }
     }
     rx
 }
 
-/// Copies the topic's current direct neighbours into the engine's cache.
-fn publish_neighbours(weak: &Weak<Inner>, community: CommunityId, rx: &TopicReceiver) {
+/// Copies the topic's current direct neighbours into the engine's cache. Returns the ones that
+/// were not there last time.
+fn note_neighbours(
+    weak: &Weak<Inner>,
+    community: CommunityId,
+    rx: &TopicReceiver,
+    known: &mut BTreeSet<DeviceId>,
+) -> Vec<DeviceId> {
+    let now: BTreeSet<DeviceId> = rx.neighbors().into_iter().collect();
+    let fresh: Vec<DeviceId> = now.difference(known).copied().collect();
+    *known = now.clone();
     if let Some(inner) = weak.upgrade() {
-        let devices: BTreeSet<DeviceId> = rx.neighbors().into_iter().collect();
         inner
             .neighbours
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(community, devices);
+            .insert(community, now);
     }
+    fresh
 }
 
 /// Periodic work: retry the outbox and anti-entropy sync.
@@ -397,6 +538,8 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
     tick.tick().await;
     // Republish DHT records every 30 minutes, so they never age out of the DHT.
     const REPUBLISH_EVERY_ROUNDS: u32 = 60;
+    // Ten minutes at one pass per 30 s.
+    const ADDR_REBROADCAST_ROUNDS: u32 = 20;
     let mut rounds: u32 = 0;
     loop {
         tick.tick().await;
@@ -405,12 +548,32 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         };
         let engine = Engine { inner };
         engine.retry_outbox().await;
+        engine.retry_contact_outbox().await;
+        engine.flush_conv_queues().await;
+        if let Err(e) = engine.collect_inboxes().await {
+            warn!(error = %e, "could not collect from inboxes");
+        }
+        if rounds.is_multiple_of(20) {
+            if let Err(e) = engine.deposit_key_packages().await {
+                warn!(error = %e, "could not deposit key packages");
+            }
+        }
         engine.anti_entropy().await;
+        engine.mls_maintenance().await;
+        engine.flush_mls(false);
         rounds += 1;
+        // Re-announce our address on every community topic every 10 minutes, so late joiners
+        // learn it from gossip too.
+        if rounds.is_multiple_of(ADDR_REBROADCAST_ROUNDS) {
+            engine.rebroadcast_own_addr().await;
+        }
         // The first publish can run before the DHT node has bootstrapped. Pkarr then stores the
         // record on too few nodes, yet still reports success. So publish once more on the first
         // pass, and retry while a publish fails.
-        let retry = !engine.inner.records_current.load(std::sync::atomic::Ordering::Relaxed);
+        let retry = !engine
+            .inner
+            .records_current
+            .load(std::sync::atomic::Ordering::Relaxed);
         if retry || rounds == 1 || rounds.is_multiple_of(REPUBLISH_EVERY_ROUNDS) {
             engine.publish_records().await;
         }

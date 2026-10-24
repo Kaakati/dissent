@@ -9,12 +9,18 @@ dissent-identity.workspace = true
 dissent-events.workspace = true
 dissent-net.workspace = true
 dissent-discovery.workspace = true
+dissent-mls.workspace = true
+dissent-media.workspace = true
+dissent-audio.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 postcard.workspace = true
+blake3.workspace = true
+rand.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures-lite.workspace = true
 negentropy.workspace = true
+data-encoding.workspace = true
 
 [dev-dependencies]

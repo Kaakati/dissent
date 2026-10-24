@@ -21,6 +21,9 @@ use sframe::{
 
 use crate::auth::{frame_hash, HASH_LEN};
 use crate::error::{MediaError, Result};
+use crate::frame::{stamp, FRAME_SAMPLES, STAMP_LEN};
+#[cfg(test)]
+use crate::frame::payload_of_stamp;
 use crate::key::MediaKey;
 
 /// The RFC 9605 cipher suite used for every media frame.
@@ -176,6 +179,8 @@ pub(crate) struct SframeSender {
     counter: MonotonicCounter,
     red: bool,
     prev: Option<Prev>,
+    /// The next frame's sequence number. It keeps counting across rekeys.
+    seq: u32,
 }
 
 impl SframeSender {
@@ -191,11 +196,21 @@ impl SframeSender {
             counter: MonotonicCounter::default(),
             red: false,
             prev: None,
+            seq: 0,
         })
     }
 
+    /// Derives the sending key for a new epoch, carrying over the sequence counter and the
+    /// redundancy setting, so sequence numbers keep counting across a rekey.
+    pub(crate) fn rekeyed(&self, media_key: &MediaKey, sender_id: u64, epoch: u64) -> Result<Self> {
+        let mut next = Self::new(media_key, sender_id, epoch)?;
+        next.seq = self.seq;
+        next.red = self.red;
+        Ok(next)
+    }
+
     /// Turns redundancy on or off. With it on, each frame carries the one before it.
-    pub(crate) fn set_red(&mut self, on: bool) {
+        pub(crate) fn set_red(&mut self, on: bool) {
         self.red = on;
     }
 
@@ -204,13 +219,28 @@ impl SframeSender {
         self.red
     }
 
-    /// Encrypts one plaintext frame. The output is the audio-level byte, then the SFrame header,
-    /// then the ciphertext. The level byte is authenticated but not encrypted.
+    /// Encrypts one frame. The output is the audio-level byte, then the SFrame header, then the
+    /// ciphertext. The level byte is authenticated but not encrypted.
+    ///
+    /// The plaintext is prefixed with a frame stamp: the sequence number, the timestamp and the
+    /// level. `timestamp` is the sample clock at 48 kHz. `None` derives it from the sequence
+    /// number, [`FRAME_SAMPLES`] per frame. Each call uses the next sequence number.
     ///
     /// The encrypted payload starts with a redundancy flag. With redundancy on, the flag is
-    /// followed by the previous frame's counter, hash and plaintext.
-    pub(crate) fn encrypt(&mut self, plaintext: &[u8], level: u8) -> Result<Vec<u8>> {
-        let mut payload = Vec::with_capacity(plaintext.len() + 32);
+    /// followed by the previous frame's counter, hash and stamped plaintext.
+    pub(crate) fn encrypt(
+        &mut self,
+        plaintext: &[u8],
+        timestamp: Option<u32>,
+        level: u8,
+    ) -> Result<Vec<u8>> {
+        let seq = self.seq;
+        let timestamp = timestamp.unwrap_or(seq.wrapping_mul(FRAME_SAMPLES));
+        let mut stamped = Vec::with_capacity(STAMP_LEN + plaintext.len());
+        stamped.extend_from_slice(&stamp(seq, timestamp, level));
+        stamped.extend_from_slice(plaintext);
+
+        let mut payload = Vec::with_capacity(stamped.len() + 32);
         match self.prev.as_ref() {
             Some(prev) if self.red => {
                 payload.push(RED_FLAG);
@@ -221,16 +251,17 @@ impl SframeSender {
             }
             _ => payload.push(PLAIN_FLAG),
         }
-        payload.extend_from_slice(plaintext);
+        payload.extend_from_slice(&stamped);
 
         let frame = MediaFrame::try_with_meta_data(&mut self.counter, &payload, [level])?;
         let encrypted = frame.encrypt(&self.key)?;
         let wire = encrypted.as_ref().to_vec();
+        self.seq = seq.wrapping_add(1);
         if let Some(counter) = peek_counter(&wire) {
             self.prev = Some(Prev {
                 counter,
                 hash: frame_hash(&wire),
-                plain: plaintext.to_vec(),
+                plain: stamped,
             });
         }
         Ok(wire)
@@ -244,6 +275,7 @@ struct EpochKey {
 }
 
 /// A frame that decrypted. Its sender, epoch and counter come from the authenticated header.
+/// `plaintext` is the frame stamp followed by the payload, see [`crate::frame`].
 pub(crate) struct Opened {
     pub(crate) sender: u64,
     pub(crate) lsb: u64,
@@ -376,7 +408,7 @@ impl SframeReceiver {
     #[cfg(test)]
     pub(crate) fn decrypt(&self, wire: &[u8], now: Instant) -> Result<(u64, Vec<u8>)> {
         let opened = self.open(wire, now)?;
-        Ok((opened.sender, opened.plaintext))
+        Ok((opened.sender, payload_of_stamp(&opened.plaintext)?.to_vec()))
     }
 
     fn key_for(&self, lsb: u64, now: Instant) -> Result<&MediaKey> {
@@ -408,7 +440,7 @@ mod tests {
     fn round_trips_and_names_the_sender() {
         let plaintext: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let mut sender = SframeSender::new(&key(7), 3, 0).unwrap();
-        let encrypted = sender.encrypt(&plaintext, DEFAULT_LEVEL).unwrap();
+        let encrypted = sender.encrypt(&plaintext, None, DEFAULT_LEVEL).unwrap();
 
         let receiver = SframeReceiver::new(key(7), 0);
         let (from, decrypted) = receiver.decrypt(&encrypted, Instant::now()).unwrap();
@@ -419,8 +451,8 @@ mod tests {
     #[test]
     fn audio_level_and_counter_are_visible_without_a_key() {
         let mut sender = SframeSender::new(&key(7), 3, 0).unwrap();
-        let first = sender.encrypt(&[1u8; 160], 42).unwrap();
-        let second = sender.encrypt(&[1u8; 160], 42).unwrap();
+        let first = sender.encrypt(&[1u8; 160], None, 42).unwrap();
+        let second = sender.encrypt(&[1u8; 160], None, 42).unwrap();
         assert_eq!(audio_level(&first), Some(42));
         assert_eq!(peek_counter(&first), Some(0));
         assert_eq!(peek_counter(&second), Some(1));
@@ -429,7 +461,7 @@ mod tests {
     #[test]
     fn altering_the_audio_level_breaks_decryption() {
         let mut sender = SframeSender::new(&key(7), 3, 0).unwrap();
-        let mut encrypted = sender.encrypt(&[1u8; 160], 42).unwrap();
+        let mut encrypted = sender.encrypt(&[1u8; 160], None, 42).unwrap();
         encrypted[0] = 0;
         let receiver = SframeReceiver::new(key(7), 0);
         assert!(receiver.decrypt(&encrypted, Instant::now()).is_err());
@@ -439,7 +471,7 @@ mod tests {
     fn ciphertext_differs_from_plaintext() {
         let plaintext = vec![0x41u8; 160];
         let mut sender = SframeSender::new(&key(9), 1, 0).unwrap();
-        let encrypted = sender.encrypt(&plaintext, DEFAULT_LEVEL).unwrap();
+        let encrypted = sender.encrypt(&plaintext, None, DEFAULT_LEVEL).unwrap();
 
         // The payload is not visible in the wire bytes.
         assert!(encrypted
@@ -453,15 +485,15 @@ mod tests {
     fn same_plaintext_gives_distinct_ciphertexts() {
         let plaintext = vec![5u8; 160];
         let mut sender = SframeSender::new(&key(9), 1, 0).unwrap();
-        let a = sender.encrypt(&plaintext, DEFAULT_LEVEL).unwrap();
-        let b = sender.encrypt(&plaintext, DEFAULT_LEVEL).unwrap();
+        let a = sender.encrypt(&plaintext, None, DEFAULT_LEVEL).unwrap();
+        let b = sender.encrypt(&plaintext, None, DEFAULT_LEVEL).unwrap();
         assert_ne!(a, b, "the frame counter must make each encryption unique");
     }
 
     #[test]
     fn wrong_key_is_rejected() {
         let mut sender = SframeSender::new(&key(1), 2, 0).unwrap();
-        let encrypted = sender.encrypt(&[0u8; 160], DEFAULT_LEVEL).unwrap();
+        let encrypted = sender.encrypt(&[0u8; 160], None, DEFAULT_LEVEL).unwrap();
         let receiver = SframeReceiver::new(key(2), 0);
         assert!(receiver.decrypt(&encrypted, Instant::now()).is_err());
     }
@@ -469,7 +501,7 @@ mod tests {
     #[test]
     fn tampered_frame_is_rejected() {
         let mut sender = SframeSender::new(&key(1), 2, 0).unwrap();
-        let mut encrypted = sender.encrypt(&[0u8; 160], DEFAULT_LEVEL).unwrap();
+        let mut encrypted = sender.encrypt(&[0u8; 160], None, DEFAULT_LEVEL).unwrap();
         let last = encrypted.len() - 1;
         encrypted[last] ^= 0x01;
         let receiver = SframeReceiver::new(key(1), 0);
@@ -488,9 +520,9 @@ mod tests {
     #[test]
     fn old_epoch_decrypts_only_within_the_grace_window() {
         let mut old_tx = SframeSender::new(&key(1), 3, 0).unwrap();
-        let old_frame = old_tx.encrypt(&[7u8; 160], DEFAULT_LEVEL).unwrap();
+        let old_frame = old_tx.encrypt(&[7u8; 160], None, DEFAULT_LEVEL).unwrap();
         let mut new_tx = SframeSender::new(&key(2), 3, 1).unwrap();
-        let new_frame = new_tx.encrypt(&[8u8; 160], DEFAULT_LEVEL).unwrap();
+        let new_frame = new_tx.encrypt(&[8u8; 160], None, DEFAULT_LEVEL).unwrap();
 
         let mut rx = SframeReceiver::new(key(1), 0);
         let now = Instant::now();
@@ -536,7 +568,7 @@ mod tests {
         // build a frame that claims another member's id. Sender authentication in `auth` is
         // what detects this.
         let mut member = SframeSender::new(&key(1), 2, 0).unwrap();
-        let wire = member.encrypt(b"I am Bob", DEFAULT_LEVEL).unwrap();
+        let wire = member.encrypt(b"I am Bob", None, DEFAULT_LEVEL).unwrap();
 
         let receiver = SframeReceiver::new(key(1), 0);
         let (sender, plaintext) = receiver.decrypt(&wire, Instant::now()).unwrap();
@@ -550,7 +582,7 @@ mod tests {
     #[test]
     fn an_outsider_without_the_media_key_cannot_forge_any_sender() {
         let mut outsider = SframeSender::new(&key(99), 2, 0).unwrap();
-        let wire = outsider.encrypt(b"I am Bob", DEFAULT_LEVEL).unwrap();
+        let wire = outsider.encrypt(b"I am Bob", None, DEFAULT_LEVEL).unwrap();
         let receiver = SframeReceiver::new(key(1), 0);
         assert!(receiver.decrypt(&wire, Instant::now()).is_err());
     }
@@ -597,33 +629,50 @@ mod red_tests {
     #[test]
     fn a_redundant_frame_carries_the_one_before_it() {
         let mut tx = SframeSender::new(&key(3), 5, 0).unwrap();
-        let first = tx.encrypt(&[1u8; 40], DEFAULT_LEVEL).unwrap();
+        let first = tx.encrypt(&[1u8; 40], None, DEFAULT_LEVEL).unwrap();
         tx.set_red(true);
-        let second = tx.encrypt(&[2u8; 40], DEFAULT_LEVEL).unwrap();
+        let second = tx.encrypt(&[2u8; 40], None, DEFAULT_LEVEL).unwrap();
 
         let rx = SframeReceiver::new(key(3), 0);
         let now = Instant::now();
         let opened = rx.open(&second, now).unwrap();
         assert_eq!(
-            opened.plaintext,
+            payload_of_stamp(&opened.plaintext).unwrap(),
             vec![2u8; 40],
             "the body is the current frame"
         );
         let recovered = opened.recovered.expect("the previous frame rides along");
         assert_eq!(recovered.counter, 0);
         assert_eq!(recovered.hash, frame_hash(&first));
-        assert_eq!(recovered.plaintext, vec![1u8; 40]);
+        assert_eq!(payload_of_stamp(&recovered.plaintext).unwrap(), vec![1u8; 40]);
+    }
+
+    #[test]
+    fn a_recovered_frame_keeps_its_sequence_number_timestamp_and_level() {
+        let mut tx = SframeSender::new(&key(3), 5, 0).unwrap();
+        let _first = tx.encrypt(&[1u8; 40], Some(1234), 33).unwrap();
+        tx.set_red(true);
+        let second = tx.encrypt(&[2u8; 40], None, 44).unwrap();
+
+        let opened = SframeReceiver::new(key(3), 0)
+            .open(&second, Instant::now())
+            .unwrap();
+        let recovered = opened.recovered.expect("the previous frame rides along");
+        let lost = crate::frame::received(5, &recovered.plaintext).unwrap();
+        assert_eq!((lost.seq, lost.timestamp, lost.audio_level), (0, 1234, 33));
+        let current = crate::frame::received(5, &opened.plaintext).unwrap();
+        assert_eq!((current.seq, current.timestamp, current.audio_level), (1, 960, 44));
     }
 
     #[test]
     fn a_plain_frame_recovers_nothing() {
         let mut tx = SframeSender::new(&key(3), 5, 0).unwrap();
-        let wire = tx.encrypt(&[9u8; 40], DEFAULT_LEVEL).unwrap();
+        let wire = tx.encrypt(&[9u8; 40], None, DEFAULT_LEVEL).unwrap();
         let opened = SframeReceiver::new(key(3), 0)
             .open(&wire, Instant::now())
             .unwrap();
         assert!(opened.recovered.is_none());
-        assert_eq!(opened.plaintext, vec![9u8; 40]);
+        assert_eq!(payload_of_stamp(&opened.plaintext).unwrap(), vec![9u8; 40]);
     }
 
     #[test]

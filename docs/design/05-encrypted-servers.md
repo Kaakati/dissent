@@ -65,6 +65,8 @@ Writes are split by kind of change:
 - Group changes (commits, joins, removals, key package pool refills) and our own sends are written at once and synced to disk. A lost commit would strand a device. A lost sender ratchet could make us reuse a key for the next message, which breaks AES-GCM for both messages, so sends cannot be debounced.
 - Decrypting a received message only marks the state dirty. The state is written at most once a second, or after 100 steps, and on maintenance and shutdown.
 
+Because sends are written at once, a crash never loses a sender ratchet step. So no key generation can be reused after a restart, and no self-update is needed to recover. Sends cost one synced write each, about 3.8 ms, which is invisible to people.
+
 A crash can lose the receive-side ratchet steps taken since the last write. The plaintext those steps produced is already in `content.log`, so decrypted history stays readable. The lost steps only mean that a later restart may decrypt the same ciphertexts again, which is harmless because the text is already stored.
 
 ## History for new members

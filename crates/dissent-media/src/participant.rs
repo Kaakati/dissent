@@ -5,7 +5,7 @@
 //! or stays silent for [`SILENCE_TIMEOUT`], the participant switches to the backup and elects a
 //! new backup from the rest of the pool.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -17,12 +17,16 @@ use crate::call::{Call, CallStats};
 use crate::e2ee::{redundancy_for, SframeSender};
 use crate::election::{elect, ranked, Candidate, Election, Mode, PeerId};
 use crate::error::{MediaError, Result};
+use crate::frame::ReceivedFrame;
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
 
 /// How long the active forwarder may stay silent before the participant fails over.
 pub const SILENCE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Frames remembered per sender for dropping duplicates, about 5 s at 20 ms per frame.
+const DEDUP_WINDOW: usize = 256;
 
 /// Why the participant left a forwarder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +53,7 @@ pub struct Failover {
 }
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
-type FrameOut = Result<Option<(u64, Vec<u8>)>>;
+type FrameOut = Result<Option<ReceivedFrame>>;
 
 /// One participant of a forwarded call.
 pub struct Participant<T: PacketTransport> {
@@ -64,6 +68,9 @@ pub struct Participant<T: PacketTransport> {
     active: Option<PeerId>,
     backup: Option<PeerId>,
     last_active_rx: Instant,
+    /// Sequence numbers already delivered, per sender. A frame can arrive over both forwarders while
+    /// a failover switches them, and it must play once.
+    delivered: BTreeMap<u64, BTreeSet<u32>>,
     failovers: Vec<Failover>,
     rotation: usize,
 }
@@ -122,6 +129,7 @@ impl<T: PacketTransport> Participant<T> {
             active: None,
             backup: None,
             last_active_rx: Instant::now(),
+            delivered: BTreeMap::new(),
             failovers: Vec::new(),
             rotation: 0,
         })
@@ -243,12 +251,27 @@ impl<T: PacketTransport> Participant<T> {
     /// A frame sent while that forwarder is still connecting is dropped, and the call reports
     /// success for it. Fails with [`MediaError::NoSfu`] when no forwarder is left.
     pub async fn send_audio_frame(&mut self, frame: &[u8], level: u8) -> Result<()> {
+        self.send_frame(frame, None, level).await
+    }
+
+    /// Like [`Participant::send_audio_frame`], but stamps the frame with `timestamp`, the
+    /// sender's sample clock at 48 kHz.
+    pub async fn send_audio_frame_at(
+        &mut self,
+        frame: &[u8],
+        timestamp: u32,
+        level: u8,
+    ) -> Result<()> {
+        self.send_frame(frame, Some(timestamp), level).await
+    }
+
+    async fn send_frame(&mut self, frame: &[u8], timestamp: Option<u32>, level: u8) -> Result<()> {
         let loss = self
             .active
             .and_then(|active| self.links.get(&active))
             .map_or(0.0, Call::loss_fraction);
         self.tx.set_red(redundancy_for(loss, self.tx.red()));
-        let wire = self.tx.encrypt(frame, level)?;
+        let wire = self.tx.encrypt(frame, timestamp, level)?;
         loop {
             let active = self.active.ok_or(MediaError::NoSfu)?;
             if !self.links.contains_key(&active) {
@@ -275,6 +298,17 @@ impl<T: PacketTransport> Participant<T> {
     /// Returns `Ok(None)` once no forwarder link is left. Failover runs here, because this is
     /// where link errors and silence are noticed. This method is cancel-safe.
     pub async fn next_frame(&mut self) -> Result<Option<(PeerId, Vec<u8>)>> {
+        Ok(self
+            .next_received_frame()
+            .await?
+            .map(|frame| (frame.sender, frame.payload)))
+    }
+
+    /// Waits for the next frame from the call, with its sequence number, timestamp and level.
+    ///
+    /// Returns `Ok(None)` once no forwarder link is left. Failover runs here, because this is
+    /// where link errors and silence are noticed. Cancel-safe, like [`Participant::next_frame`].
+    pub async fn next_received_frame(&mut self) -> Result<Option<ReceivedFrame>> {
         loop {
             if self.links.is_empty() {
                 return Ok(None);
@@ -295,12 +329,21 @@ impl<T: PacketTransport> Participant<T> {
                     if Some(sfu) == self.active {
                         self.last_active_rx = Instant::now();
                     }
+                    if !self.first_delivery(frame.sender, frame.seq) {
+                        continue;
+                    }
                     return Ok(Some(frame));
                 }
                 Some((sfu, Ok(None) | Err(_))) => self.drop_link(sfu),
                 None => {
+                    // Silence with no other forwarder to move to keeps the link. Dropping it
+                    // would end the call, and a slow forwarder can recover on its own.
                     if let Some(active) = self.active {
-                        self.fail_over(active, FailoverReason::Silence);
+                        if self.links.len() > 1 {
+                            self.fail_over(active, FailoverReason::Silence);
+                        } else {
+                            self.last_active_rx = Instant::now();
+                        }
                     }
                 }
             }
@@ -312,7 +355,7 @@ impl<T: PacketTransport> Participant<T> {
         let mut futs: Vec<(PeerId, Boxed<'_, FrameOut>)> = self
             .links
             .iter_mut()
-            .map(|(peer, call)| (*peer, Box::pin(call.next_frame()) as Boxed<'_, FrameOut>))
+            .map(|(peer, call)| (*peer, Box::pin(call.next_received_frame()) as Boxed<'_, FrameOut>))
             .collect();
         let count = futs.len();
         let start = self.rotation % count.max(1);
@@ -330,6 +373,17 @@ impl<T: PacketTransport> Participant<T> {
     }
 
     /// Removes a link that closed. If it was the active forwarder, the participant fails over.
+    /// Records a delivered frame and reports whether it is the first copy of it. Keeps the last
+    /// `DEDUP_WINDOW` sequence numbers per sender.
+    fn first_delivery(&mut self, sender: u64, seq: u32) -> bool {
+        let seen = self.delivered.entry(sender).or_default();
+        let fresh = seen.insert(seq);
+        while seen.len() > DEDUP_WINDOW {
+            seen.pop_first();
+        }
+        fresh
+    }
+
     fn drop_link(&mut self, sfu: PeerId) {
         if Some(sfu) == self.active {
             self.fail_over(sfu, FailoverReason::LinkError);

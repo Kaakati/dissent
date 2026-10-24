@@ -83,6 +83,10 @@ pub enum Payload {
     ChannelCreate {
         name: String,
     },
+    /// A channel for voice calls. Checked and stored like `ChannelCreate`, and listed as voice.
+    VoiceChannelCreate {
+        name: String,
+    },
     Message {
         text: String,
     },

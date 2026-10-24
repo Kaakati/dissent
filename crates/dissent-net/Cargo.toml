@@ -25,4 +25,5 @@ blake3.workspace = true
 [dev-dependencies]
 dissent-files.workspace = true
 tracing-subscriber.workspace = true
+iroh-relay = { workspace = true, features = ["test-utils"] }
 rcgen.workspace = true

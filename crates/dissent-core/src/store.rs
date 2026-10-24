@@ -5,7 +5,7 @@
 
 use crate::error::{CoreError, Result};
 use dissent_identity::{CommunityId, RootId};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -26,6 +26,26 @@ impl Paths {
     pub fn contacts(&self) -> PathBuf {
         self.root.join("contacts.bin")
     }
+    /// Inbox service state.
+    pub fn inbox(&self) -> PathBuf {
+        self.root.join("inbox.bin")
+    }
+    /// Conversations: kinds, members, queued packets and pending text.
+    pub fn conv_book(&self) -> PathBuf {
+        self.root.join("conversations.bin")
+    }
+    /// Stored text messages of one conversation.
+    pub fn conv_log(&self, id: &crate::groups::ConvId) -> PathBuf {
+        self.root.join("conversations").join(format!("{id}.log"))
+    }
+    /// Contact requests, accepts we owe, declines and the DM policy.
+    pub fn contact_book(&self) -> PathBuf {
+        self.root.join("contact_book.bin")
+    }
+    /// Identity changes seen for the people we talk to, so the notice survives a restart.
+    pub fn identity_changes(&self) -> PathBuf {
+        self.root.join("identity_changes.log")
+    }
     /// Peer addresses learned from invites, contacts and requests, so a restart can still dial.
     pub fn addresses(&self) -> PathBuf {
         self.root.join("addresses.bin")
@@ -43,11 +63,27 @@ impl Paths {
     pub fn genesis(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("genesis.bin")
     }
+    /// The community secret, shared in its invites.
+    pub fn access(&self, id: &CommunityId) -> PathBuf {
+        self.community_dir(id).join("access.bin")
+    }
     pub fn community_key(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("community.key")
     }
     pub fn events_log(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("events.log")
+    }
+    /// Plaintext message content we have decrypted, so it survives MLS state loss.
+    pub fn content_log(&self, id: &CommunityId) -> PathBuf {
+        self.community_dir(id).join("content.log")
+    }
+    /// Every MLS commit this device applied, in epoch order, for catch-up.
+    pub fn commit_log(&self, id: &CommunityId) -> PathBuf {
+        self.community_dir(id).join("mls_commits.log")
+    }
+    /// Snapshot of the MLS client: storage values and the key package pool.
+    pub fn mls_state(&self) -> PathBuf {
+        self.root.join("mls.bin")
     }
     pub fn dms_dir(&self) -> PathBuf {
         self.root.join("dms")
@@ -58,6 +94,18 @@ impl Paths {
     }
     pub fn outbox(&self) -> PathBuf {
         self.dms_dir().join("outbox.bin")
+    }
+    /// The root's guardian list, signed by the root key.
+    pub fn guardians(&self) -> PathBuf {
+        self.root.join("guardians.bin")
+    }
+    /// Devices of our root, as signed certs with their names.
+    pub fn devices(&self) -> PathBuf {
+        self.root.join("devices.bin")
+    }
+    /// Notes, nicknames, pins and read markers. Never sent to a peer.
+    pub fn local_state(&self) -> PathBuf {
+        self.root.join("local.bin")
     }
 }
 
@@ -147,6 +195,18 @@ pub(crate) fn read_bin<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     }
 }
 
+/// Replaces the file at `path` with `bytes`, through a temp file and a rename, without syncing.
+/// A crash can lose the write, so only use this where losing the newest state is acceptable.
+pub(crate) fn write_bytes_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +284,10 @@ mod tests {
         assert_eq!(read_bin::<String>(&path).unwrap(), None);
         write_bin(&path, &"first".to_string()).unwrap();
         write_bin(&path, &"second".to_string()).unwrap();
-        assert_eq!(read_bin::<String>(&path).unwrap().as_deref(), Some("second"));
+        assert_eq!(
+            read_bin::<String>(&path).unwrap().as_deref(),
+            Some("second")
+        );
         assert!(!dir.join("profile.tmp").exists());
         fs::remove_dir_all(&dir).unwrap();
     }

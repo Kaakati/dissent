@@ -1,9 +1,16 @@
-use std::{fmt, net::SocketAddr, sync::Arc};
+use std::{
+    fmt,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use dissent_identity::{DeviceId, DeviceKey};
 use iroh::{
-    Endpoint, EndpointId, RelayMode, RelayUrl, SecretKey, address_lookup::MemoryLookup,
-    endpoint::presets, protocol::Router,
+    Endpoint, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
+    address_lookup::MemoryLookup,
+    endpoint::{default_relay_mode, presets},
+    protocol::Router,
+    tls::CaTlsConfig,
 };
 use futures_lite::{Stream, StreamExt};
 use iroh::Watcher;
@@ -62,6 +69,9 @@ pub struct NodeConfig {
     /// must be unique and must not be one the node registers itself. Handlers are shut down by
     /// `Node::shutdown`, before the endpoint closes.
     pub extra_protocols: Vec<(Vec<u8>, Arc<dyn DynProtocolHandler>)>,
+    /// Trust roots for relay TLS. `None` uses iroh's built-in roots. Set it for a relay with a
+    /// private CA, for example `CaTlsConfig::custom_roots` with that relay's certificate.
+    pub relay_ca: Option<CaTlsConfig>,
 }
 
 impl Default for NodeConfig {
@@ -75,6 +85,7 @@ impl Default for NodeConfig {
             media: None,
             gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
             extra_protocols: Vec::new(),
+            relay_ca: None,
         }
     }
 }
@@ -105,6 +116,8 @@ pub struct Node {
 
 struct Inner {
     id: DeviceId,
+    /// Relays this node knows: the configured ones plus any added at runtime.
+    relays: Mutex<Vec<Url>>,
     endpoint: Endpoint,
     router: Router,
     gossip: Gossip,
@@ -146,6 +159,16 @@ impl Node {
             groups = ?provider.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>(),
             "tls policy"
         );
+        let initial_relays: Vec<Url> = match &cfg.relay {
+            RelayChoice::Default => default_relay_mode()
+                .relay_map()
+                .urls::<Vec<RelayUrl>>()
+                .into_iter()
+                .map(Url::from)
+                .collect(),
+            RelayChoice::Custom(urls) => urls.clone(),
+            RelayChoice::Disabled => Vec::new(),
+        };
         let mut builder = preset
             .secret_key(SecretKey::from_bytes(&device.0.seed()))
             .address_lookup(lookup.clone())
@@ -160,6 +183,9 @@ impl Node {
                 builder.relay_mode(RelayMode::custom(urls.into_iter().map(RelayUrl::from)))
             }
         };
+        if let Some(ca) = cfg.relay_ca {
+            builder = builder.ca_tls_config(ca);
+        }
         if cfg.loopback_only {
             let addr = SocketAddr::from(([127, 0, 0, 1], cfg.bind_port));
             builder = builder
@@ -188,7 +214,15 @@ impl Node {
         }
         let router = router.spawn();
         Ok(Node {
-            inner: Arc::new(Inner { id: device.id(), endpoint, router, gossip, lookup, gossip_max }),
+            inner: Arc::new(Inner {
+                id: device.id(),
+                relays: Mutex::new(initial_relays),
+                endpoint,
+                router,
+                gossip,
+                lookup,
+                gossip_max,
+            }),
         })
     }
 
@@ -197,6 +231,37 @@ impl Node {
     /// extra handlers first.
     pub fn endpoint(&self) -> &Endpoint {
         &self.inner.endpoint
+    }
+
+    /// Relay servers this node knows: the configured ones plus any added with `add_relays`.
+    pub fn relays(&self) -> Vec<Url> {
+        self.inner.relays.lock().expect("relay list lock").clone()
+    }
+
+    /// Adds relay servers at runtime. Each one is used for dialling and for relaying, and this
+    /// node advertises it in its address. Relays already known are skipped.
+    pub async fn add_relays(&self, urls: Vec<Url>) {
+        for url in urls {
+            if self.relays().contains(&url) {
+                continue;
+            }
+            let relay = RelayUrl::from(url.clone());
+            let config = RelayConfig::new(relay.clone(), None);
+            self.inner.endpoint.insert_relay(relay, Arc::new(config)).await;
+            let mut known = self.inner.relays.lock().expect("relay list lock");
+            if !known.contains(&url) {
+                known.push(url);
+            }
+        }
+    }
+
+    /// Resolves once this node is connected to a relay. Returns at once if no relay is known,
+    /// since waiting then would never finish.
+    pub async fn online(&self) {
+        if self.relays().is_empty() {
+            return;
+        }
+        self.inner.endpoint.online().await;
     }
 
     pub fn id(&self) -> DeviceId {

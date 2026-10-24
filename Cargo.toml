@@ -32,6 +32,7 @@ dissent-discovery = { path = "crates/dissent-discovery" }
 dissent-core = { path = "crates/dissent-core" }
 dissent-mls = { path = "crates/dissent-mls" }
 dissent-media = { path = "crates/dissent-media" }
+dissent-audio = { path = "crates/dissent-audio" }
 
 anyhow = "1"
 thiserror = "2"

@@ -23,6 +23,7 @@ use crate::e2ee::{
     EPOCH_GRACE,
 };
 use crate::error::{MediaError, Result};
+use crate::frame::{received, ReceivedFrame};
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::{PacketTransport, UdpTransport};
@@ -82,7 +83,7 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     audio_mid: Option<Mid>,
     started: Instant,
     timeout: Instant,
-    inbox: VecDeque<(u64, Vec<u8>)>,
+    inbox: VecDeque<ReceivedFrame>,
     raw_inbox: VecDeque<Vec<u8>>,
     /// Whether media on this link is consumed. A standby link stays connected but does not listen.
     listening: bool,
@@ -388,6 +389,16 @@ impl<T: PacketTransport> Call<T> {
     /// Fails with [`MediaError::NotConnected`] before ICE and DTLS complete, because str0m drops
     /// media written earlier. Fails with [`MediaError::BadState`] on a keyless call.
     pub async fn send_audio_frame(&mut self, frame: &[u8]) -> Result<()> {
+        self.send_frame(frame, None).await
+    }
+
+    /// Like [`Call::send_audio_frame`], but stamps the frame with `timestamp`, the sender's
+    /// sample clock at 48 kHz. Use it when the capture clock is not the frame count.
+    pub async fn send_audio_frame_at(&mut self, frame: &[u8], timestamp: u32) -> Result<()> {
+        self.send_frame(frame, Some(timestamp)).await
+    }
+
+    async fn send_frame(&mut self, frame: &[u8], timestamp: Option<u32>) -> Result<()> {
         self.check_sendable()?;
         let keys = self
             .keys
@@ -397,7 +408,7 @@ impl<T: PacketTransport> Call<T> {
             .red_override
             .unwrap_or_else(|| redundancy_for(self.loss, keys.tx.red()));
         keys.tx.set_red(on);
-        let encrypted = keys.tx.encrypt(frame, DEFAULT_LEVEL)?;
+        let encrypted = keys.tx.encrypt(frame, timestamp, DEFAULT_LEVEL)?;
         self.write_encrypted(encrypted).await
     }
 
@@ -468,6 +479,18 @@ impl<T: PacketTransport> Call<T> {
     ///
     /// This method is cancel-safe. Dropping its future between awaits loses no received frame.
     pub async fn next_frame(&mut self) -> Result<Option<(u64, Vec<u8>)>> {
+        Ok(self
+            .next_received_frame()
+            .await?
+            .map(|frame| (frame.sender, frame.payload)))
+    }
+
+    /// Waits for the next decrypted frame, with its sequence number, timestamp and audio level.
+    ///
+    /// Returns `Ok(None)` once the call has closed. Frames that fail decryption are counted in
+    /// [`CallStats::frames_undecryptable`] and are not returned. Cancel-safe, like
+    /// [`Call::next_frame`].
+    pub async fn next_received_frame(&mut self) -> Result<Option<ReceivedFrame>> {
         loop {
             if let Some(frame) = self.inbox.pop_front() {
                 return Ok(Some(frame));
@@ -701,8 +724,11 @@ impl<T: PacketTransport> Call<T> {
         self.stats.frames_unauthenticated += step.unauthenticated;
         self.stats.impersonation_detected += step.impersonations;
         self.stats.frames_received += step.deliver.len() as u64;
-        for frame in step.deliver {
-            self.inbox.push_back(frame);
+        for (sender, stamped) in step.deliver {
+            match received(sender, &stamped) {
+                Ok(frame) => self.inbox.push_back(frame),
+                Err(e) => tracing::debug!(error = %e, "dropped a malformed frame"),
+            }
         }
     }
 }

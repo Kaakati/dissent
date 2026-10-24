@@ -6,6 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::rpc::{Request, Response};
 use dissent_events::{EventId, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId};
+use crate::wire::SignedAddr;
 use dissent_net::PeerAddr;
 use negentropy::{Id, Negentropy, NegentropyStorageVector};
 use std::collections::HashSet;
@@ -25,6 +26,13 @@ fn neg_err(e: negentropy::Error) -> CoreError {
 
 fn unexpected(resp: &Response) -> CoreError {
     CoreError::Invalid(format!("unexpected reply: {resp:?}"))
+}
+
+/// The outcome of a reconciliation: what each side lacks, and the members' signed addresses the peer passed on.
+pub(crate) struct Reconciled {
+    pub need: Vec<EventId>,
+    pub have: Vec<EventId>,
+    pub addrs: Vec<SignedAddr>,
 }
 
 /// Sealed negentropy storage over `(wall time, event id)` pairs.
@@ -63,11 +71,12 @@ impl Engine {
     /// Brings `community` up to date with `peer` in both directions.
     pub(crate) async fn sync_with(&self, community: CommunityId, peer: DeviceId) -> Result<()> {
         let (items, from) = self.sync_inputs(community)?;
-        let (need, have) = self.reconcile(community, peer, items, from).await?;
+        let Reconciled { need, have, addrs } = self.reconcile(community, peer, items, from).await?;
         self.fetch_into(community, peer, need, |events| {
             self.ingest(community, events).map(|_| ())
         })
         .await?;
+        self.learn_member_addrs(community, addrs);
         for chunk in have.chunks(PAGE_ITEMS) {
             let events = self
                 .read()
@@ -79,6 +88,7 @@ impl Engine {
                 self.push(community, peer, page).await?;
             }
         }
+        self.mls_catch_up(community, peer).await;
         Ok(())
     }
 
@@ -103,11 +113,12 @@ impl Engine {
         peer: DeviceId,
         items: Vec<(u64, EventId)>,
         from: PeerAddr,
-    ) -> Result<(Vec<EventId>, Vec<EventId>)> {
+    ) -> Result<Reconciled> {
         let mut neg = Negentropy::owned(index(&items)?, FRAME_LIMIT).map_err(neg_err)?;
         let mut msg = neg.initiate().map_err(neg_err)?;
         let mut have_ids: Vec<Id> = Vec::new();
         let mut need_ids: Vec<Id> = Vec::new();
+        let mut addrs: Vec<SignedAddr> = Vec::new();
         for _ in 0..MAX_ROUNDS {
             let req = Request::Reconcile {
                 community,
@@ -115,8 +126,14 @@ impl Engine {
                 from: from.clone(),
             };
             let reply = match self.call(peer, &req).await? {
-                Response::Reconcile { msg: Some(reply) } => reply,
-                Response::Reconcile { msg: None } => {
+                Response::Reconcile {
+                    msg: Some(reply),
+                    addrs: more,
+                } => {
+                    addrs.extend(more);
+                    reply
+                }
+                Response::Reconcile { msg: None, .. } => {
                     return Err(CoreError::Invalid("peer sent no reconciliation reply".into()))
                 }
                 Response::Error(reason) => {
@@ -129,7 +146,13 @@ impl Engine {
                 .map_err(neg_err)?
             {
                 Some(next) => msg = next,
-                None => return Ok((to_event_ids(need_ids), to_event_ids(have_ids))),
+                None => {
+                    return Ok(Reconciled {
+                        need: to_event_ids(need_ids),
+                        have: to_event_ids(have_ids),
+                        addrs,
+                    })
+                }
             }
         }
         Err(CoreError::Invalid("reconciliation did not converge".into()))

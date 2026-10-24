@@ -13,8 +13,12 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    let call_changed = matches!(event, EngineEvent::CallUpdated);
                     if let Err(e) = app.emit(EVENT, event) {
                         warn!(error = %e, "could not emit engine event");
+                    }
+                    if call_changed {
+                        crate::part6::emit_call_state(&app).await;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {

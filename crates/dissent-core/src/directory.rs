@@ -1,6 +1,7 @@
 //! What we know about other devices: their certs, and the addresses we can dial them at.
 
 use dissent_identity::{DeviceCert, DeviceId, RootId};
+use crate::wire::SignedAddr;
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,16 @@ impl Directory {
         self.certs.get(&cert.device) == Some(cert)
     }
 
+    /// The root a device certificate names. Known only for devices we hold a cert for.
+    pub fn root_of(&self, device: &DeviceId) -> Option<RootId> {
+        self.certs.get(device).map(|cert| cert.root)
+    }
+
+    /// The verified cert of a device, if we hold one.
+    pub fn cert_of(&self, device: &DeviceId) -> Option<DeviceCert> {
+        self.certs.get(device).cloned()
+    }
+
     pub fn devices_of(&self, root: &RootId) -> Vec<DeviceId> {
         self.by_root
             .get(root)
@@ -40,6 +51,8 @@ impl Directory {
 pub(crate) struct StoredAddr {
     pub addr: PeerAddr,
     pub ts_ms: u64,
+    /// The device's own signed announcement of `addr`. Kept so it can be passed on to others.
+    pub signed: Option<SignedAddr>,
 }
 
 /// Last known dialable address per device. A signed announcement wins over anything unsigned.
@@ -62,20 +75,54 @@ impl AddressBook {
         match self.by_device.get(&addr.id) {
             Some(old) if old.ts_ms > 0 || old.addr == addr => false,
             _ => {
-                self.by_device.insert(addr.id, StoredAddr { addr, ts_ms: 0 });
+                self.by_device.insert(
+                    addr.id,
+                    StoredAddr {
+                        addr,
+                        ts_ms: 0,
+                        signed: None,
+                    },
+                );
                 true
             }
         }
     }
 
-    /// Stores an address the device signed at `ts_ms`. Only a newer announcement replaces the
-    /// stored one. Returns true when this changed what was stored.
-    pub fn learn_signed(&mut self, addr: PeerAddr, ts_ms: u64) -> bool {
-        if self.by_device.get(&addr.id).is_some_and(|old| old.ts_ms >= ts_ms) {
+    /// Stores an address the device signed. Only a newer announcement replaces the stored one.
+    /// Returns true when this changed what was stored.
+    pub fn learn_signed(&mut self, sa: SignedAddr) -> bool {
+        if self
+            .by_device
+            .get(&sa.addr.id)
+            .is_some_and(|old| old.ts_ms >= sa.ts_ms)
+        {
             return false;
         }
-        self.by_device.insert(addr.id, StoredAddr { addr, ts_ms });
+        self.by_device.insert(
+            sa.addr.id,
+            StoredAddr {
+                addr: sa.addr.clone(),
+                ts_ms: sa.ts_ms,
+                signed: Some(sa),
+            },
+        );
         true
+    }
+
+    /// The signed announcements of these devices. Devices with only unsigned addresses are skipped.
+    pub fn signed_for(&self, devices: &[DeviceId]) -> Vec<SignedAddr> {
+        devices
+            .iter()
+            .filter_map(|d| self.by_device.get(d)?.signed.clone())
+            .collect()
+    }
+
+    /// Whether this device has announced its address. Tests use it to wait for gossip.
+    #[cfg(test)]
+    pub fn has_signed(&self, device: &DeviceId) -> bool {
+        self.by_device
+            .get(device)
+            .is_some_and(|s| s.signed.is_some())
     }
 
     pub fn all(&self) -> Vec<StoredAddr> {

@@ -8,6 +8,7 @@ use crate::net::ReceiverTask;
 use crate::rpc::{Request, Response};
 use crate::store::{write_bin, write_bytes_atomic};
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
+use crate::wire::SignedAddr;
 use dissent_discovery::{CommunityRecord, Invite};
 use dissent_events::{ChannelId, Payload, SignedEvent};
 use dissent_identity::{CommunityId, CommunityKey, DeviceId, Genesis};
@@ -36,6 +37,9 @@ impl Engine {
             let paths = guard.paths.clone();
             write_bin(&paths.genesis(&id), &genesis)?;
             write_bytes_atomic(&paths.community_key(&id), &key.0.seed())?;
+            let secret = crate::access::random_secret();
+            crate::access::save(&paths, &id, &secret)?;
+            guard.access.insert(id, secret);
             guard.communities.insert(id, Community::new(genesis));
         }
         self.inner
@@ -43,6 +47,7 @@ impl Engine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, key.0.seed());
+        self.with_mls(|mls| mls.create_group(id.0)).map_err(crate::sealed::mls_err)?;
         let topic_rx = self.subscribe_topic(id, Vec::new()).await?;
         self.spawn_receiver(id, topic_rx);
 
@@ -130,20 +135,54 @@ impl Engine {
                 .map(|c| c.genesis.clone())
                 .ok_or_else(|| not_found(&community))?
         };
+        let secret = self.access_secret(community).ok_or_else(|| not_found(&community))?;
         let invite = Invite {
             genesis,
             peers: vec![addr.to_string()],
-            secret: None,
+            secret,
         };
         Ok(invite.to_url().to_string())
     }
 
     /// Joins from an invite link. Joining a community we already have just returns its summary.
     pub async fn join_community(&self, invite: &str) -> Result<CommunitySummary> {
+        self.join_inner(invite, true).await
+    }
+
+    /// Joins the community's DAG without its encrypted group. A device that is not in the group
+    /// cannot read content, so tests use this to model an outside observer.
+    #[cfg(test)]
+    pub(crate) async fn join_without_group(&self, invite: &str) -> Result<CommunitySummary> {
+        self.join_inner(invite, false).await
+    }
+
+    async fn join_inner(&self, invite: &str, with_group: bool) -> Result<CommunitySummary> {
+        let id = Invite::parse(invite)?.community();
+        let Some((_, served)) = self.sync_invite(invite).await? else {
+            return self.summary(&id);
+        };
+        self.announce_join(id, &served, with_group).await;
+        self.emit(EngineEvent::CommunitiesChanged);
+        self.summary(&id)
+    }
+
+    /// Fetches a community from its invite and subscribes to its topic, without announcing a
+    /// Join. Returns the community and the devices that served it, or `None` if this device
+    /// already holds the community.
+    pub(crate) async fn sync_invite(
+        &self,
+        invite: &str,
+    ) -> Result<Option<(CommunityId, Vec<DeviceId>)>> {
         let invite = Invite::parse(invite)?;
         let id = invite.community();
         if self.read().communities.contains_key(&id) {
-            return self.summary(&id);
+            return Ok(None);
+        }
+        {
+            let mut guard = self.write();
+            let paths = guard.paths.clone();
+            crate::access::save(&paths, &id, &invite.secret)?;
+            guard.access.insert(id, invite.secret);
         }
         let my_addr = self
             .read()
@@ -163,7 +202,7 @@ impl Engine {
             }
         }
 
-        let (events, peers) = self.fetch_for_join(&invite.genesis, &invited, &my_addr).await?;
+        let (fetched, peers) = self.fetch_for_join(&invite.genesis, &invited, &my_addr).await?;
         {
             let mut guard = self.write();
             write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
@@ -171,9 +210,11 @@ impl Engine {
                 .communities
                 .insert(id, Community::new(invite.genesis.clone()));
         }
-        self.ingest(id, events)?;
+        self.ingest(id, fetched.events)?;
+        self.learn_member_addrs(id, fetched.addrs);
 
-        let mut bootstrap: Vec<DeviceId> = peers.iter().map(|p| p.id).collect();
+        let served: Vec<DeviceId> = peers.iter().map(|p| p.id).collect();
+        let mut bootstrap: Vec<DeviceId> = served.clone();
         bootstrap.extend(self.bootstrap_for(&id));
         bootstrap.sort();
         bootstrap.dedup();
@@ -181,7 +222,12 @@ impl Engine {
         // Announce only once a neighbour is up. Otherwise the Join would reach nobody.
         let _ = tokio::time::timeout(JOIN_GOSSIP_WAIT, topic_rx.joined()).await;
         self.spawn_receiver(id, topic_rx);
+        Ok(Some((id, served)))
+    }
 
+    /// Announces this device's Join to the devices that served the invite, then joins the
+    /// community's encrypted group.
+    pub(crate) async fn announce_join(&self, id: CommunityId, served: &[DeviceId], with_group: bool) {
         let display_name = self.read().my_name();
         match self
             .author_publish(id, ChannelId::CONTROL, Payload::Join { display_name })
@@ -190,16 +236,18 @@ impl Engine {
             Ok(join) => {
                 // Hand the Join straight to the peers that served the invite. Gossip may reach
                 // them later, and until it does they cannot address us.
-                for peer in &peers {
-                    if let Err(e) = self.push(id, peer.id, vec![join.clone()]).await {
-                        debug!(community = %id, peer = %peer.id, error = %e, "join not pushed to invite peer");
+                for peer in served {
+                    if let Err(e) = self.push(id, *peer, vec![join.clone()]).await {
+                        debug!(community = %id, peer = %peer, error = %e, "join not pushed to invite peer");
                     }
                 }
             }
             Err(e) => warn!(community = %id, error = %e, "could not announce join"),
         }
-        self.emit(EngineEvent::CommunitiesChanged);
-        self.summary(&id)
+        // Join the encrypted group. The committer adds us as soon as it has our Join.
+        if with_group && !self.mls_join_via(id, served).await {
+            warn!(community = %id, "could not join the encrypted group yet; will retry");
+        }
     }
 
     /// Announces leaving, leaves the gossip topic, then forgets the community and deletes its
@@ -256,7 +304,8 @@ impl Engine {
         id: CommunityId,
         bootstrap: Vec<DeviceId>,
     ) -> Result<TopicReceiver> {
-        let topic = TopicId::for_channel(&id, &ChannelId::CONTROL.0);
+        let secret = self.access_secret(id).ok_or_else(|| not_found(&id))?;
+        let topic = TopicId::for_channel(&id, &crate::access::topic_salt(&secret));
         let (sender, receiver) = self.node().subscribe(topic, bootstrap).await?;
         let mut guard = self.write();
         let c = guard
@@ -293,12 +342,12 @@ impl Engine {
         genesis: &Genesis,
         invited: &[PeerAddr],
         from: &PeerAddr,
-    ) -> Result<(Vec<SignedEvent>, Vec<PeerAddr>)> {
+    ) -> Result<(Fetched, Vec<PeerAddr>)> {
         let invite_err = if invited.is_empty() {
             "the invite lists no peer".to_string()
         } else {
             match self.fetch_invited(genesis, invited, from).await {
-                Ok(events) => return Ok((events, invited.to_vec())),
+                Ok(fetched) => return Ok((fetched, invited.to_vec())),
                 Err(e) => format!("the invite's peers did not answer: {e}"),
             }
         };
@@ -309,7 +358,7 @@ impl Engine {
             )));
         }
         match self.fetch_invited(genesis, &from_record, from).await {
-            Ok(events) => Ok((events, from_record)),
+            Ok(fetched) => Ok((fetched, from_record)),
             Err(e) => Err(CoreError::NotFound(format!(
                 "could not join: {invite_err}; the DHT record's peers did not answer: {e}"
             ))),
@@ -354,10 +403,10 @@ impl Engine {
         genesis: &Genesis,
         peers: &[PeerAddr],
         from: &PeerAddr,
-    ) -> Result<Vec<SignedEvent>> {
+    ) -> Result<Fetched> {
         for peer in peers {
             match self.fetch_community_from(genesis, peer.id, from).await {
-                Ok(events) => return Ok(events),
+                Ok(fetched) => return Ok(fetched),
                 Err(e) => debug!(peer = %peer.id, error = %e, "invite peer could not serve the community"),
             }
         }
@@ -371,25 +420,36 @@ impl Engine {
         genesis: &Genesis,
         peer: DeviceId,
         from: &PeerAddr,
-    ) -> Result<Vec<SignedEvent>> {
+    ) -> Result<Fetched> {
         let id = genesis.community;
-        match self.call(peer, &Request::Genesis { community: id }).await? {
-            Response::Genesis(got) if got == *genesis => {}
+        let mut addrs = match self.call(peer, &Request::Genesis { community: id }).await? {
+            Response::Genesis {
+                genesis: got,
+                addrs,
+            } if got == *genesis => addrs,
             _ => {
                 return Err(CoreError::Invalid(
                     "peer does not serve the invited community".into(),
                 ))
             }
-        }
-        let (need, _) = self.reconcile(id, peer, Vec::new(), from.clone()).await?;
+        };
+        let reconciled = self.reconcile(id, peer, Vec::new(), from.clone()).await?;
+        addrs.extend(reconciled.addrs);
         let mut events = Vec::new();
-        self.fetch_into(id, peer, need, |batch| {
+        self.fetch_into(id, peer, reconciled.need, |batch| {
             events.extend(batch);
             Ok(())
         })
         .await?;
-        Ok(events)
+        Ok(Fetched { events, addrs })
     }
+}
+
+/// What a join fetches from a peer: the community's events, and the signed addresses of its
+/// members. The addresses are kept only once the events have made their membership known.
+pub(crate) struct Fetched {
+    events: Vec<SignedEvent>,
+    addrs: Vec<SignedAddr>,
 }
 
 /// `addr` without its direct IP addresses: only the device id and relay URL go on the DHT.

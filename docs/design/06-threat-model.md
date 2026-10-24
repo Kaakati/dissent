@@ -25,17 +25,18 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 
 ## Findings
 
-1. **Fixed: unauthorized MLS commits are refused.** `apply_commit` merges any valid commit from
-   any group member. A malicious or compromised member can add an outsider's device. Honest
-   devices would then encrypt to it. **Fix:** before merging, check the commit against the event
-   DAG:
+1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
+   malicious or compromised member could have added an outsider's device and honest devices would
+   have encrypted to it. Now every peer checks each commit against the event DAG before merging,
+   and refused commits are logged and never applied. Commits travel as signed announcements, and
+   peers fetch the bytes and verify their hash. The checks:
    - the author must be a current member, and the add, removal and welcome rules in `docs/design/05-encrypted-servers.md` must hold
    - every added device must belong to a current, non-banned member
    - removals must target only banned or departed members, or the committer's own stale devices
 
    Joiners apply the same check to a welcome, so they're never welcomed into a group containing
    non-members.
-2. **Open: community metadata is readable without an invite.** Anyone who knows a community id
+2. **Phase 1 fixed, phases 2 and 3 open: community metadata is readable without an invite.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Responders refuse a community request without a valid token. Anyone who knows a community id
    can join its gossip topic or sync it, and read control events: display names, handles, roles,
    bans, membership timing and reaction emoji. DHT nodes learn the community id and the plaintext
    name in the community record. **Fix:**
@@ -43,9 +44,14 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
    - Require proof of that secret, or known membership, for sync RPCs.
    - Encrypt control payloads and the record's name under the access key.
    - Seal reaction emoji under MLS.
-3. **Open: no key-change warning.** When a contact's root rotates via recovery, nothing tells the
-   user to re-verify the safety number. **Fix:** an engine event and a UI notice on accepted
-   rotations, and on new devices for people you've DMed.
+
+   Decided and phased: old invites stop working; phase 1 gates the gossip topic and sync RPCs
+   behind the invite secret; phase 2 rotates the secret on every ban; phase 3 encrypts control
+   payloads, the DHT record name and reaction emoji.
+3. **Fixed: key-change warnings.** The engine raises `IdentityChanged` when someone you share a
+   server with or have messaged rotates their key through recovery, or when a person you've
+   messaged gains a new device. The change is recorded on their profile, and the app shows a
+   notice to re-verify the safety number.
 4. **Fixed: SFrame replay.** Each receiver keeps a 1024-frame sliding window per sender and
    epoch. The window is checked before decryption, and it advances only after a frame
    authenticates. Replays and frames older than the window are dropped.

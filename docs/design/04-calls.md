@@ -68,6 +68,23 @@ Sender side, for each frame:
 
 Receiver side: SRTP and DTLS are removed by str0m, then SFrame decrypts the payload. A frame that fails decryption is counted and dropped, and never reaches the app.
 
+## Frame stamp: sequence number and timestamp
+
+Every frame's encrypted plaintext starts with a 9-byte stamp:
+
+- **Sequence number** (u32): the sender's frame count, from 0. It keeps counting across a rekey and across a forwarder failover, so a jitter buffer sees consecutive numbers.
+- **Timestamp** (u32): the sender's sample clock at 48 kHz. Frames sent without an explicit timestamp use 960 samples per sequence number, which is 20 ms.
+- **Audio level** (u8): the RFC 6464 level, also in the clear as the first byte of the wire frame. The stamp copy is authenticated, and it is what a receiver reports.
+
+The stamp is inside SFrame encryption, so a forwarder cannot change it, and a forged stamp fails the tag. Forwarders pass the bytes on unchanged, so failover needs no re-stamping. A frame recovered by redundancy carries its own stamp.
+
+The cost is 9 bytes per frame, about 3.6 kbps at 50 frames a second, before SFrame's own header and tag.
+
+API:
+
+- Send: `send_audio_frame(frame)` derives the timestamp. `send_audio_frame_at(frame, timestamp)` takes the sender's clock. Participants take the level as well.
+- Receive: `next_received_frame()` returns `ReceivedFrame { sender, seq, timestamp, audio_level, payload }`. The older `next_frame()` returns `(sender, payload)` and is a thin wrapper, kept for one release.
+
 ## What a forwarder sees
 
 A forwarder is any peer that relays media for others, such as a peer-SFU. In the spec this is a member with good upload.

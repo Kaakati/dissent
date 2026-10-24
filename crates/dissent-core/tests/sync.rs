@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn joiner_receives_six_thousand_messages() {
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let server = alice
@@ -41,13 +42,17 @@ async fn joiner_receives_six_thousand_messages() {
         (bob.engine.channel_messages(id, general, 100_000).len() == 6000).then_some(())
     })
     .await;
-    assert_eq!(count_prefixed(&bob.engine, id, general, "m"), 6000);
+    // Bob joined after these were sent, so the group could not decrypt them. They are locked.
+    let items = bob.engine.channel_messages(id, general, 100_000);
+    assert_eq!(items.iter().filter(|m| m.locked).count(), 6000, "all locked for a late joiner");
 
     finish(vec![alice, bob]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_diverged_histories_converge() {
+    bounded(async {
     let (port_a, port_b) = (free_port(), free_port());
     let alice = start_on(Identity::create(now()), scratch("alice-sync"), port_a).await;
     alice
@@ -109,4 +114,5 @@ async fn two_diverged_histories_converge() {
     }
 
     finish(vec![alice, bob]).await;
+    }).await;
 }

@@ -1,8 +1,9 @@
 //! Anti-entropy rotation: one offline member must not stop a round from reaching a live one.
 //! Loopback only. Gossip cannot deliver the missed message, so anti-entropy has to.
 
-use crate::{ChannelId, CommunityId, DeviceId, Engine, EngineEvent, Identity, NodeConfig, RelayChoice};
-use std::net::UdpSocket;
+use crate::{
+    ChannelId, CommunityId, DeviceId, Engine, EngineEvent, Identity, NodeConfig, RelayChoice,
+};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -61,12 +62,14 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// A port no other test in this process hands out. Binding and releasing a port races with other
+/// tests, so ports come from a counter seeded per process instead.
+const OFFSET: u16 = 0;
 fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 30_000 + OFFSET + (std::process::id() % 20_000) as u16;
+    base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 fn now() -> u64 {
@@ -94,18 +97,36 @@ fn general_channel(engine: &Engine, id: CommunityId) -> ChannelId {
         .expect("general channel")
 }
 
+/// Waits until the engine holds a device's signed address. Addresses arrive by gossip and replies,
+/// so the test must not read them before they have landed.
+async fn wait_signed(engine: &Engine, device: DeviceId) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !engine.read().addresses.has_signed(&device) {
+        assert!(Instant::now() < deadline, "no signed address for {device}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn wait_for_members(engine: &Engine, id: CommunityId, count: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while engine.community_view(id).map(|v| v.members.len()).ok() != Some(count) {
-        assert!(Instant::now() < deadline, "membership never reached {count}");
+        assert!(
+            Instant::now() < deadline,
+            "membership never reached {count}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_first_member_does_not_block_anti_entropy() {
+    crate::testutil::bounded(async {
     let alice = Node::boot(Identity::create(now()), scratch("alice"), free_port()).await;
-    alice.engine.set_display_name("alice".into()).await.expect("name");
+    alice
+        .engine
+        .set_display_name("alice".into())
+        .await
+        .expect("name");
     let id: CommunityId = alice
         .engine
         .create_community("Rota".into())
@@ -117,27 +138,30 @@ async fn offline_first_member_does_not_block_anti_entropy() {
     let invite = alice.engine.create_invite(id).await.expect("invite");
 
     let bob = Node::boot(Identity::create(now()), scratch("bob"), free_port()).await;
-    bob.engine.set_display_name("bob".into()).await.expect("name");
+    bob.engine
+        .set_display_name("bob".into())
+        .await
+        .expect("name");
     bob.engine.join_community(&invite).await.expect("bob joins");
+    // The founder must know Bob's address before a later joiner asks for it.
+    wait_signed(&alice.engine, bob.identity.device_id()).await;
     let carol = Node::boot(Identity::create(now()), scratch("carol"), free_port()).await;
-    carol.engine.set_display_name("carol".into()).await.expect("name");
-    carol.engine.join_community(&invite).await.expect("carol joins");
+    carol
+        .engine
+        .set_display_name("carol".into())
+        .await
+        .expect("name");
+    carol
+        .engine
+        .join_community(&invite)
+        .await
+        .expect("carol joins");
     for node in [&alice, &bob, &carol] {
         wait_for_members(&node.engine, id, 3).await;
     }
-    // Carol must be able to dial both other members. Joins teach her only the founder's address,
-    // and the rest of the addresses depend on connections that happened to be made. Contact cards
-    // carry each member's address, so add both as contacts.
-    carol
-        .engine
-        .add_contact(&alice.engine.contact_link())
-        .await
-        .expect("carol adds alice");
-    carol
-        .engine
-        .add_contact(&bob.engine.contact_link())
-        .await
-        .expect("carol adds bob");
+    // Carol learns each member's signed address from the replies she gets while joining.
+    wait_signed(&carol.engine, alice.identity.device_id()).await;
+    wait_signed(&carol.engine, bob.identity.device_id()).await;
 
     // Carol is the observer. From her side, the first member in rotation is X and the second is Y.
     let order = member_devices(&carol.engine, id);
@@ -150,6 +174,11 @@ async fn offline_first_member_does_not_block_anti_entropy() {
     };
     assert_eq!(x.identity.device_id(), x_device);
     assert_eq!(y.identity.device_id(), y_device);
+
+    // Y must hold the current epoch before it writes. Commits reach members by gossip, which can
+    // miss a member, so Y pulls the missed commits from X while X is still up.
+    y.engine.mls_catch_up(id, x_device).await;
+    wait_epoch(&y.engine, id, carol.engine.mls_epoch(id)).await;
 
     // X and Carol go offline. Y posts a message that neither of them can receive by gossip.
     let (_x_identity, x_dir, _x_port) = x.stop().await;
@@ -189,6 +218,95 @@ async fn offline_first_member_does_not_block_anti_entropy() {
     for dir in [c_dir, x_dir, y_dir] {
         let _ = std::fs::remove_dir_all(dir);
     }
+    }).await;
+}
+
+/// Carol joins from an invite that names only Alice. Alice then goes offline. Carol must still
+/// reach Bob, using the signed addresses that Alice and Bob passed on. No contacts are exchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn joiner_reaches_members_it_was_not_introduced_to() {
+    crate::testutil::bounded(async {
+    let alice = Node::boot(Identity::create(now()), scratch("alice2"), free_port()).await;
+    alice
+        .engine
+        .set_display_name("alice".into())
+        .await
+        .expect("name");
+    let id: CommunityId = alice
+        .engine
+        .create_community("Introductions".into())
+        .await
+        .expect("create")
+        .id
+        .parse()
+        .unwrap();
+    let invite = alice.engine.create_invite(id).await.expect("invite");
+
+    let bob = Node::boot(Identity::create(now()), scratch("bob2"), free_port()).await;
+    bob.engine
+        .set_display_name("bob".into())
+        .await
+        .expect("name");
+    bob.engine.join_community(&invite).await.expect("bob joins");
+    wait_signed(&alice.engine, bob.identity.device_id()).await;
+
+    let carol = Node::boot(Identity::create(now()), scratch("carol2"), free_port()).await;
+    carol
+        .engine
+        .set_display_name("carol".into())
+        .await
+        .expect("name");
+    carol
+        .engine
+        .join_community(&invite)
+        .await
+        .expect("carol joins");
+    wait_for_members(&carol.engine, id, 3).await;
+    wait_signed(&carol.engine, bob.identity.device_id()).await;
+
+    // Alice goes offline. Carol's only route to Bob is the address she was passed.
+    let (_, alice_dir, _) = alice.stop().await;
+    let bob_root = bob.identity.root_id();
+    let carol_root = carol.identity.root_id();
+    carol
+        .engine
+        .send_dm(bob_root, "hi bob".into())
+        .await
+        .expect("carol DMs bob");
+    let acked = Instant::now() + Duration::from_secs(10);
+    while !carol
+        .engine
+        .dm_messages(bob_root, 10)
+        .iter()
+        .any(|m| m.text == "hi bob" && !m.pending)
+    {
+        assert!(Instant::now() < acked, "carol's first DM was never acknowledged");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !bob
+        .engine
+        .dm_messages(carol_root, 100)
+        .iter()
+        .any(|m| m.text == "hi bob")
+    {
+        assert!(Instant::now() < deadline, "bob never received carol's DM");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    carol
+        .engine
+        .sync_with(id, bob.identity.device_id())
+        .await
+        .expect("carol syncs with bob's device");
+
+    let (_, carol_dir, _) = carol.stop().await;
+    let (_, bob_dir, _) = bob.stop().await;
+    for dir in [alice_dir, carol_dir, bob_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    }).await;
 }
 
 fn has_message(engine: &Engine, id: CommunityId, channel: ChannelId, text: &str) -> bool {
@@ -196,4 +314,13 @@ fn has_message(engine: &Engine, id: CommunityId, channel: ChannelId, text: &str)
         .channel_messages(id, channel, 100_000)
         .iter()
         .any(|m| m.text == text)
+}
+
+/// Waits until `engine` reaches the given MLS epoch.
+async fn wait_epoch(engine: &Engine, id: CommunityId, want: Option<u64>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while engine.mls_epoch(id) != want {
+        assert!(Instant::now() < deadline, "epoch never reached {want:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

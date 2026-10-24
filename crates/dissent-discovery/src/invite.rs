@@ -16,7 +16,8 @@ pub struct Invite {
     pub genesis: Genesis,
     /// Opaque peer addresses. At most [`MAX_PEERS`].
     pub peers: Vec<String>,
-    pub secret: Option<[u8; 16]>,
+    /// Random per community. Proves the holder may join its gossip topic and sync with its members.
+    pub secret: [u8; 32],
 }
 
 impl Invite {
@@ -63,7 +64,7 @@ mod tests {
         Invite {
             genesis,
             peers: vec!["a".repeat(90), "b".repeat(90)],
-            secret: Some([7; 16]),
+            secret: [7; 32],
         }
     }
 

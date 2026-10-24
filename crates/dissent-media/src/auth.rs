@@ -602,7 +602,7 @@ mod tests {
 
         /// Encrypts one frame. Returns the wire bytes and any digests that closed.
         fn frame(&mut self, byte: u8) -> (Vec<u8>, Vec<Vec<u8>>) {
-            let wire = self.tx.encrypt(&[byte; 160], DEFAULT_LEVEL).unwrap();
+            let wire = self.tx.encrypt(&[byte; 160], None, DEFAULT_LEVEL).unwrap();
             let counter = peek_counter(&wire).unwrap();
             self.now += Duration::from_millis(20);
             let digests = self.signer.record(counter, &wire, self.now);
@@ -666,7 +666,10 @@ mod tests {
     }
 
     fn payloads(step: &Step) -> Vec<Vec<u8>> {
-        step.deliver.iter().map(|(_, p)| p.clone()).collect()
+        step.deliver
+            .iter()
+            .map(|(_, p)| crate::frame::payload_of_stamp(p).unwrap().to_vec())
+            .collect()
     }
 
     #[test]
@@ -719,9 +722,9 @@ mod tests {
         let mut slow = FrameSigner::new(device, SENDER, 0, 10);
         let mut tx = SframeSender::new(&media_key(), SENDER, 0).unwrap();
         let start = Instant::now();
-        let wire0 = tx.encrypt(&[0u8; 160], DEFAULT_LEVEL).unwrap();
+        let wire0 = tx.encrypt(&[0u8; 160], None, DEFAULT_LEVEL).unwrap();
         assert!(slow.record(0, &wire0, start).is_empty());
-        let wire1 = tx.encrypt(&[1u8; 160], DEFAULT_LEVEL).unwrap();
+        let wire1 = tx.encrypt(&[1u8; 160], None, DEFAULT_LEVEL).unwrap();
         let digests = slow.record(1, &wire1, start + batch_span(10));
         assert_eq!(digests.len(), 1, "a batch older than 200 ms closes");
     }
@@ -802,7 +805,7 @@ mod tests {
 
         // A forger shares the media key, and sends under the victim's sender id from counter 0.
         let mut forger = SframeSender::new(&media_key(), SENDER, 0).unwrap();
-        let forged = forger.encrypt(b"forged voice", DEFAULT_LEVEL).unwrap();
+        let forged = forger.encrypt(b"forged voice", None, DEFAULT_LEVEL).unwrap();
 
         receiver.frame(&forged);
         let (real0, _) = sender.frame(7);
@@ -831,7 +834,7 @@ mod tests {
         let mut sender = Sender::new(device);
         let mut receiver = Receiver::new(certs_for(SENDER, cert));
         let mut forger = SframeSender::new(&media_key(), SENDER, 0).unwrap();
-        let forged = forger.encrypt(b"forged", DEFAULT_LEVEL).unwrap();
+        let forged = forger.encrypt(b"forged", None, DEFAULT_LEVEL).unwrap();
 
         // First batch: the forged frame collides with the real frame 0, and the digest exposes it.
         receiver.frame(&forged);
@@ -881,9 +884,9 @@ mod tests {
         // A frame 60 counters beyond the last verified one, which nobody has sent yet.
         let mut ahead = SframeSender::new(&media_key(), SENDER, 0).unwrap();
         for _ in 0..70 {
-            ahead.encrypt(&[0u8; 160], DEFAULT_LEVEL).unwrap();
+            ahead.encrypt(&[0u8; 160], None, DEFAULT_LEVEL).unwrap();
         }
-        let far = ahead.encrypt(b"far ahead", DEFAULT_LEVEL).unwrap();
+        let far = ahead.encrypt(b"far ahead", None, DEFAULT_LEVEL).unwrap();
         let step = receiver.frame(&far);
         assert!(step.deliver.is_empty(), "a far-ahead frame does not play");
         assert!(
@@ -946,7 +949,7 @@ mod tests {
     #[test]
     fn plain_links_check_replays_without_digests() {
         let mut sender = SframeSender::new(&media_key(), SENDER, 0).unwrap();
-        let wire = sender.encrypt(&[9u8; 160], DEFAULT_LEVEL).unwrap();
+        let wire = sender.encrypt(&[9u8; 160], None, DEFAULT_LEVEL).unwrap();
         let mut receiver = Receiver::plain();
         assert_eq!(receiver.frame(&wire).deliver.len(), 1);
         assert_eq!(receiver.frame(&wire).replayed, 1);
@@ -1010,7 +1013,7 @@ mod cost_tests {
         let mut digest_bytes = 0usize;
         let mut frame_bytes = 0usize;
         for index in 0..frames {
-            let wire = tx.encrypt(&[7u8; 160], DEFAULT_LEVEL).unwrap();
+            let wire = tx.encrypt(&[7u8; 160], None, DEFAULT_LEVEL).unwrap();
             frame_bytes += wire.len();
             let now = start + Duration::from_millis(20 * index);
             let counter = crate::e2ee::peek_counter(&wire).unwrap();

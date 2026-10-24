@@ -20,6 +20,7 @@ mod cascade;
 mod e2ee;
 mod election;
 mod error;
+mod frame;
 mod key;
 mod link;
 mod mesh;
@@ -37,6 +38,7 @@ pub use election::{
     apply_centrality, capacity, centrality, elect, ranked, Candidate, Election, Mode, PeerId,
 };
 pub use error::{MediaError, Result};
+pub use frame::{ReceivedFrame, FRAME_SAMPLES};
 pub use key::MediaKey;
 pub use link::{LinkTransport, Side};
 pub use mesh::Mesh;

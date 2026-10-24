@@ -1,10 +1,12 @@
 //! Helpers shared by the networked tests. Every engine runs on this machine with relays disabled.
 #![allow(dead_code)]
 
+pub mod bounded;
+pub use bounded::*;
+
 use dissent_core::{
     ChannelId, CommunityId, Engine, EngineEvent, Identity, NodeConfig, RelayChoice, RootId,
 };
-use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -35,12 +37,14 @@ pub fn scratch(name: &str) -> PathBuf {
 }
 
 /// A UDP port that is free right now.
+/// A port no other test in this process hands out. Binding and releasing a port races with other
+/// tests, so ports come from a counter seeded per process instead.
+const OFFSET: u16 = 16_000;
 pub fn free_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = 30_000 + OFFSET + (std::process::id() % 20_000) as u16;
+    base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Relays off, bound to `port`. `0` picks any free port.
@@ -118,7 +122,12 @@ pub async fn eventually_within<T>(
     }
 }
 
-pub fn has_message(engine: &Engine, community: CommunityId, channel: ChannelId, text: &str) -> bool {
+pub fn has_message(
+    engine: &Engine,
+    community: CommunityId,
+    channel: ChannelId,
+    text: &str,
+) -> bool {
     engine
         .channel_messages(community, channel, 100_000)
         .iter()
@@ -126,7 +135,12 @@ pub fn has_message(engine: &Engine, community: CommunityId, channel: ChannelId, 
 }
 
 /// How many messages in the channel start with `prefix`.
-pub fn count_prefixed(engine: &Engine, community: CommunityId, channel: ChannelId, prefix: &str) -> usize {
+pub fn count_prefixed(
+    engine: &Engine,
+    community: CommunityId,
+    channel: ChannelId,
+    prefix: &str,
+) -> usize {
     engine
         .channel_messages(community, channel, 100_000)
         .iter()
@@ -159,11 +173,7 @@ pub async fn rustaceans(alice: &Peer, bob: &Peer) -> CommunityId {
         .await
         .expect("create community");
     let id: CommunityId = server.id.parse().unwrap();
-    let invite = alice
-        .engine
-        .create_invite(id)
-        .await
-        .expect("create invite");
+    let invite = alice.engine.create_invite(id).await.expect("create invite");
     let joined = bob
         .engine
         .join_community(&invite)
@@ -180,4 +190,26 @@ pub async fn finish(peers: Vec<Peer>) {
         p.engine.shutdown().await.expect("clean shutdown");
         let _ = std::fs::remove_dir_all(&p.dir);
     }
+}
+
+/// Waits for the next incoming direct call on `rx`. Returns its call id.
+pub async fn next_incoming(rx: &mut broadcast::Receiver<EngineEvent>) -> String {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match rx.recv().await {
+                Ok(EngineEvent::IncomingCall { call_id, .. }) => return call_id,
+                Ok(_) => {}
+                Err(e) => panic!("engine events closed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("an incoming call arrives")
+}
+
+/// Waits for the next incoming direct call on `rx`, then accepts it. Returns its call id.
+pub async fn accept_incoming(engine: &Engine, rx: &mut broadcast::Receiver<EngineEvent>) -> String {
+    let id = next_incoming(rx).await;
+    engine.accept_call(id.clone()).await.expect("call accepted");
+    id
 }

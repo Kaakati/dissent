@@ -334,3 +334,139 @@ Kept outside the repo, in `C:/Users/Kaaka/AppData/Local/Temp/claude/H--Rust-Proj
 - `before-1600/` and `after-1600/`: 47 surfaces each (`home-empty`, `dm`, `dm-top`, `dm-hover`, `dm-unread`, `dm-no-panel`, `server`, `server-top`, `server-hover-cont`, `server-hover-start`, `rail-hover`, `row-hover`, `section-head-hover`, `server-unread`, `new-messages`, `search-filter`, `composer-typing`, `composer-menu`, `server-menu`, `member-hover`, `profile-card`, `profile-card-author`, `msg-actions-own`, `msg-edit`, `dialog-confirm`, `server-no-members`, `channel-empty`, `switcher`, `switcher-filtered`, `dialog-server`, `dialog-server-join`, `dialog-invite`, `dialog-handle`, `dialog-safety`, `dialog-update`, `dialog-update-progress`, `dialog-add-contact`, `toasts`, `focus-ring`, `skeleton-server`, `server-compact`, `dm-compact`, `settings-account`, `settings-profile`, `settings-network`, `settings-appearance`, `settings-about`), each with a `.json` of measurements.
 - `before-900/`, `after-900/`, `before-1280/`, `after-1280/`, `before-2560/`, `after-2560/`: `home-empty`, `dm`, `dm-top`, `server`, `server-top`, `settings-account`.
 - `tauri-*.png`: the real app in loopback mode.
+
+## Part 6. Feature contracts for the engine (new surfaces)
+
+These surfaces come from the design boards in `scratchpad/newdesign/project` and have no engine support yet. The UI builds each one with mock data (`ui/mock.js`) and renders nothing for a feature the backend does not report. The command names and argument names below are the ones `ui/api.js` calls. Tauri maps the camelCase arguments to the snake_case parameters. Ids are base32 strings, times are `u64` milliseconds since the Unix epoch, and user text reaches the UI only through `textContent`.
+
+### 6.0 Capabilities
+
+`capabilities()` returns either a list of feature names or an object of booleans, for example `["calls", "contacts"]` or `{ "calls": true }`. The UI reads it once at boot (`ui/features.js`). A feature not reported hides its surface entirely, and a missing command or an error means no new feature is supported. Reactions, replies, attachments and presence are detected on message and member fields instead.
+
+Names the UI checks: `groups`, `contacts`, `calls`, `guardians`, `transfers`, `multi_source`, `offline_delivery`, `embeds`, `key_change`, `safety`, `devices`, `pins`, `notes`, `mute`, `onboarding`.
+
+### 6.1 Group conversations (`groups`)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `list_conversations` | none | Direct messages `{ kind: "dm", peer, display_name, last_text, last_ms, online? }`, plus groups `{ kind: "group", id, name, members: [{ root_id, display_name, suffix }], last_text, last_ms }`. |
+| `create_group` | `name`, `peers` (root ids, at least 3) | The group entry above. |
+| `group_messages` | `groupId`, `limit` | Message items, the same shape as `dm_messages`. |
+| `send_group_message` | `groupId`, `text` | The created item. |
+| `add_group_members` | `groupId`, `peers` | `null`. |
+| `leave_group` | `groupId` | `null`. |
+| `group_invite_link` | `groupId` | A link string. |
+
+Event: `{ kind: "group", group_id }` on a new message or a membership change.
+
+GroupDM board additions (all optional, the UI hides what is missing):
+- A group entry may carry `creator: root_id`. The members panel shows a "Creator" badge on that person.
+- Each group member may carry `online: boolean`. The members panel shows a presence dot.
+- A group message item may carry `system: true`. Its `text` is the words after the actor's name, for example `"added Omar and Rana."`, and `from` is the actor. The UI draws the line as "{Name} {text} {time}" with no bubble.
+- The members panel footer uses `group_invite_link` and `leave_group`, and shows nothing when `groups` is missing.
+- The header shows the member count and a "Members only" pill. The intro lists every member's avatar, then "{creator} started this group. Only its current members can read it, and anyone removed loses access to new messages."
+
+### 6.2 Contacts (`contacts`)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `list_contacts` | none | `{ incoming, outgoing, contacts, blocked }`, each an array of `{ root_id, display_name, suffix, online, shared_servers: string[] }`. |
+| `send_contact_request` | `link` | `null`. A request is outgoing until the other person accepts. |
+| `accept_contact`, `decline_contact` | `rootId` | `null`. Accept moves the person into `contacts`. |
+| `cancel_contact_request` | `rootId` | `null`. |
+| `remove_contact`, `block_user`, `unblock_user` | `rootId` | `null`. |
+| `peer_contact_link` | `rootId` | A contact link string for that person. |
+
+Event: `{ kind: "contacts_changed" }`.
+
+### 6.3 Calls (`calls`)
+
+Media stays in `dissent-media` and `dissent-audio` (see `04-calls.md`). The UI needs state and commands only.
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `call_state` | none | `null`, or `{ id, scope: "channel" \| "dm", peer?, channel_name?, community_name?, muted, deafened, camera, started_ms, messages: [{ id, root_id, author_name, ms, text?, file?: { name, kind, meta } }], route: { kind, title, detail }, participants: [{ root_id, display_name, muted, video, speaking, forwarder? }] }`. `route.title` and `route.detail` are short sentences the engine writes, shown verbatim. |
+| `start_call` | `peer` | The call state. |
+| `join_call` | `communityId`, `channelId` | The call state. |
+| `leave_call` | none | `null`. |
+| `set_muted`, `set_deafened`, `set_camera` | `muted`, `deafened`, `on` | `null`. |
+| `send_call_message` | `text` | `null`. |
+
+Event: `dissent://call-state` carries the call state or `null`.
+
+### 6.4 Transfers (`transfers`)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `list_transfers` | none | An array of `{ id, direction: "download" \| "upload", name, size, state, progress, route, route_kind, route_note?, where: { kind: "server" \| "direct", name }, sources, status_text?, error?, local_path? }`, or `{ transfers, rates }`. `state` is `active`, `paused`, `waiting`, `done` or `failed`. `route_kind` is `direct`, `relay`, `server`, `seeder`, `waiting` or `refused`. `progress` is `0..1`. |
+| `pause_transfer`, `resume_transfer`, `cancel_transfer`, `retry_transfer`, `remove_transfer` | `transferId` | `null`. Remove drops a row from the list only. |
+| `transfer_settings` | none | `{ max_accept_bytes, download_dir }`. |
+| `set_transfer_settings` | `settings` | The saved settings. |
+| `pick_download_dir` | none | A path, or `null` on cancel. |
+
+Events: `dissent://transfers` carries the full list or `{ transfers, rates }`. The file limit is 10 GB (`MAX_FILE_BYTES`). No message says "100 MB".
+
+### 6.5 Guardians (`guardians`)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `list_guardians` | none | `{ threshold, guardians: [{ root_id, display_name, suffix, is_contact, shared_servers }] }`. |
+| `sign_guardians` | `guardians` (root ids, up to 16), `threshold` (1 to the number of guardians) | The same view. Signs the list with the root key and publishes it to my devices. |
+
+### 6.6 Devices (`devices`)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `list_devices` | none | `[{ device_id, name, this_device, added_ms, last_seen_ms }]`. |
+| `revoke_device` | `deviceId` | The new list. |
+| `link_device_code` | none | A string the new device scans or pastes. |
+
+### 6.7 Multi-source downloads (`multi_source`)
+
+`send_files(communityId, channelId, paths, text, { seed })` takes an optional `seed` flag, default `true` for servers: when true, the community seeder keeps an encrypted copy that members can download while the sender is offline. The seeder never holds the key. DMs take no seed flag (`send_dm_files(peer, paths, text)`). The UI sends the flag only from the Share a file dialog.
+
+Attachments gain `sources: [{ root_id, display_name, route, progress?, rate_bps? }]` and `pieces: { total, verified }`. While an attachment downloads from two or more sources, its card shows "Downloading from N sources" with one row per source and the verified pieces as a grid. Without the feature the card keeps one progress bar.
+
+### 6.8 Offline delivery (`offline_delivery`)
+
+`DmItem` gains `queued: boolean`, true when the peer is offline and the message waits on this device. `pending` still means "sending". A queued message renders at 55 % opacity with "{Name} is offline. Dissent will deliver this when they're back."
+
+### 6.9 Link embeds (`embeds`)
+
+Messages gain `embeds: [{ url, site, title, description?, image?, image_w?, image_h? }]`, at most three. The sender builds the preview and seals it with the message. The UI never fetches `url`. An `image` is a local path the backend wrote, shown through `convertFileSrc`. Only `https:` urls become links.
+
+### 6.10 Safety and key change (`key_change`, `safety`)
+
+`user_profile` gains `key_changed_ms` (when the peer's key last changed and was not verified) and `verified_ms` (when the safety number was last compared). `mark_safety_verified` takes `user` and sets `verified_ms` to now, which clears `key_changed_ms`. It is the "They match" action.
+
+### 6.11 Notes and pins (`notes`, `pins`)
+
+`set_note({ user, kind: "note" | "nickname", text })` saves a private note or a nickname on this device. `pinned_messages({ communityId, channelId })` returns message items, and `pin_conversation({ key, pinned })` pins a conversation in the sidebar. `mark_read({ key })` clears a conversation's unread marker.
+
+### 6.13 Channel topics (`topics`)
+
+`community_view.channels[]` may carry `topic: string`. The chat header shows it after the channel name, separated by a 1 px divider, in 14/18 muted text. Without the feature, or without a topic, the header shows the name only.
+
+### 6.14 Voice channels (`calls`)
+
+`community_view` gains `voice_channels: [{ id, name, participants: [{ root_id, display_name, speaking }] }]`. The sidebar lists them under "Voice channels" with the people in each call underneath. Opening one calls `join_call({ communityId, channelId })`.
+
+### 6.8a Waiting messages in channels (`offline_delivery`)
+
+Channel messages may carry `queued: boolean`, true when no other member is online to receive the message. The UI shows "Waiting for a member to come online" under the body, as in the Main board.
+
+### 6.15 Additional commands (core4)
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `pin_message` | `communityId`, `channelId`, `messageId`, `pinned` | `null`. |
+| `pinned_conversations` | none | The pinned conversation keys, as an array of strings. |
+| `read_markers` | none | `{ [key]: last_seen_ms }`. |
+| `approve_device` | `link` | The grant link to send back to the new device (runs on the root device). |
+| `finish_device_link` | `grant` | `null`. Stores the identity on the new device and restarts the engine. |
+
+`set_camera` is not supported yet. The UI shows no camera control until it works.
+
+### 6.12 First run (`onboarding`)
+
+`me` gains `first_run: boolean`. While it is true the window shows the identity screen with the recovery phrase from `identity_export_phrase()`. Showing the phrase does not clear the flag. `complete_first_run()` does, and the UI calls it only when the user ticks "I wrote these words down somewhere safe" and presses Continue. Returns `null`.

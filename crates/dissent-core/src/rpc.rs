@@ -33,18 +33,84 @@ pub(crate) enum Request {
     },
     /// A device's signed address, sent when it starts or changes address.
     Addr(Box<SignedAddr>),
+    /// The device asks to join the community's MLS group. Answered by the preferred committer.
+    /// `from` is the joiner's own address, so the committer can fetch its key package.
+    MlsJoin { community: CommunityId, from: PeerAddr },
+    /// Asks a joining device for key packages from its pool. Each one is used once.
+    KeyPackages { community: CommunityId },
+    /// Commits applied after epoch `after`, in order, for a device that fell behind.
+    MlsCommits { community: CommunityId, after: u64 },
+    /// The commit that entered `epoch`, fetched after its announcement on gossip.
+    MlsCommit { community: CommunityId, epoch: u64 },
     /// A direct message. `from` is the sender's address, for replies.
     Dm { dm: Box<SignedDm>, from: PeerAddr },
+    /// A contact request or an accept, signed by the sender's device.
+    Contact(Box<crate::contacts::SignedContact>),
+    /// A conversation packet: an invitation, a commit or a sealed message.
+    Conv(Box<crate::groups::ConvPacket>),
+    /// Envelopes for this device, deposited by a sender while it was offline.
+    Deposit(Box<crate::inbox::Envelope>),
+    /// The device asks its inbox for envelopes.
+    Collect(Box<crate::inbox::Collect>),
+    /// The device has processed these envelopes, so the inbox may delete them.
+    AckEnvelopes(Box<crate::inbox::AckIds>),
+    /// Key packages from one of the owner's devices, for the inbox to hand out.
+    DepositKeyPackages(Box<crate::inbox::DepositKeys>),
+    /// One key package for `root`, removed as it is handed out.
+    TakeKeyPackage { root: dissent_identity::RootId },
+    /// One key package from this device, for a direct conversation. Not scoped to a community.
+    DmKeyPackage,
+    /// One voice call signalling step, for a DM or a voice channel. See `calls`.
+    Call(Box<crate::calls::CallMsg>),
+    /// The root's guardian list, sent to another device of the same root.
+    Guardians(Box<dissent_identity::GuardianSet>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum Response {
-    Genesis(Genesis),
-    /// The responder's next message. `None` means it has nothing further to send.
-    Reconcile { msg: Option<Vec<u8>> },
+    /// `addrs` are signed addresses of the community's members, for the requester to dial.
+    Genesis {
+        genesis: Genesis,
+        addrs: Vec<SignedAddr>,
+    },
+    /// The responder's next message. `None` means it has nothing further to send. `addrs` as above.
+    Reconcile {
+        msg: Option<Vec<u8>>,
+        addrs: Vec<SignedAddr>,
+    },
     Events(Vec<SignedEvent>),
+    /// The welcome that lets the joiner enter the MLS group.
+    Welcome(Vec<u8>),
+    KeyPackages(Vec<Vec<u8>>),
+    /// The envelopes an inbox holds for the collecting device.
+    Envelopes(Vec<crate::inbox::Envelope>),
+    MlsCommits(Vec<Vec<u8>>),
+    /// The commit for the requested epoch, if this device has it.
+    MlsCommit(Option<Vec<u8>>),
     Ack,
+    /// Answer to a voice call step. See `calls`.
+    Call(crate::calls::CallReply),
+    /// Policy refused the request. The reason is for the sender to show.
+    Refused(String),
     Error(String),
+}
+
+impl Request {
+    /// The community a request concerns, if it concerns one. Such requests carry a token, and the
+    /// responder refuses them unless the token proves knowledge of the community secret.
+    pub(crate) fn community(&self) -> Option<CommunityId> {
+        match self {
+            Request::Genesis { community }
+            | Request::Reconcile { community, .. }
+            | Request::Fetch { community, .. }
+            | Request::Push { community, .. }
+            | Request::MlsJoin { community, .. }
+
+            | Request::MlsCommits { community, .. }
+            | Request::MlsCommit { community, .. } => Some(*community),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -64,7 +130,7 @@ impl RpcHandler for Handler {
         let weak = self.0.clone();
         Box::pin(async move {
             let resp = match weak.upgrade() {
-                Some(inner) => crate::engine::Engine { inner }.handle_request(from, &req),
+                Some(inner) => crate::engine::Engine { inner }.handle_request(from, &req).await,
                 None => Response::Error("node is shutting down".into()),
             };
             encode(&resp).unwrap_or_default()
