@@ -40,6 +40,9 @@ async fn replies_show_a_preview_and_reactions_count_per_emoji() {
         .expect("alice posts");
     let target: EventId = original.id.parse().expect("event id");
 
+    // Bob can only reply to a message he has: wait until it reaches him.
+    wait_for("bob sees the original", || item(&bob.engine, id, channel, "the original")).await;
+
     // Bob replies. His reply shows a preview of the original.
     let reply = bob
         .engine
