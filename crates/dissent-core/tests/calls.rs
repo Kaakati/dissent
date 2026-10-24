@@ -15,6 +15,14 @@ async fn make_contacts(a: &Peer, b: &Peer) {
     let b_link = b.engine.contact_link();
     a.engine.add_contact(&b_link).await.expect("a adds b");
     b.engine.add_contact(&a_link).await.expect("b adds a");
+    // Adding is asynchronous on the far side: wait until each sees the other as a contact, or a
+    // call can arrive before the callee will accept it.
+    let (a_root, b_root) = (a.identity.root_id().to_string(), b.identity.root_id().to_string());
+    eventually("both are contacts", || {
+        let has = |p: &Peer, root: &str| p.engine.list_contacts().contacts.iter().any(|c| c.root_id == root);
+        (has(a, &b_root) && has(b, &a_root)).then_some(())
+    })
+    .await;
 }
 
 /// Creates a community with a voice channel and joins every peer to it. Returns the community,
