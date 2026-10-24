@@ -100,6 +100,11 @@ async fn welcome_listing_a_non_member_is_refused_and_a_real_join_still_works() {
     })
     .await;
 
+    // Bob must have replayed Dave's Join before he will add Dave. Dave seeing the members is not enough.
+    eventually("bob knows dave", || {
+        bob.engine.community_view(id).map(|v| v.members.len()).ok() == Some(4)
+    })
+    .await;
     // An honest join through Bob is accepted, so the rule does not block real joiners.
     let device = bob.identity.device_id();
     assert!(
