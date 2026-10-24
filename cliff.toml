@@ -1,0 +1,42 @@
+# git-cliff configuration: turns commit history into release notes.
+# Commits use plain imperative subjects ("Add ...", "Fix ..."), grouped by their first word.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to Dissent are listed here, newest first.\n
+"""
+body = """
+{% if version %}\
+## {{ version | trim_start_matches(pat="v") }} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9]*"
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^Merge", skip = true },
+  { message = "^Release v", skip = true },
+  { message = "^(Add|Introduce|Implement|Support|Create)", group = "<!-- 0 -->Added" },
+  { message = "^(Fix|Repair|Correct|Prevent)", group = "<!-- 1 -->Fixed" },
+  { message = "^(Harden|Secure|Protect|Encrypt)", group = "<!-- 2 -->Security" },
+  { message = "^(Remove|Drop|Delete)", group = "<!-- 4 -->Removed" },
+  { message = "^(Doc|Docs|Document|Rewrite the README|Update the README)", group = "<!-- 5 -->Documentation" },
+  { message = ".*", group = "<!-- 3 -->Changed" },
+]

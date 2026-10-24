@@ -1,0 +1,224 @@
+# Builds Dissent for Windows, macOS and Linux and publishes a GitHub release
+# with notes generated from the commits since the previous tag.
+#
+# To release: bump `version` in the root Cargo.toml, commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+# The tag must match the Cargo version (checked below).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches Cargo version
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$cargo_version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match Cargo version v$cargo_version"
+            exit 1
+          fi
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (networked tests stay ignored)
+        run: cargo test --workspace
+
+  changelog:
+    name: Changelog and draft release
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - name: Release notes for this tag
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+      - name: Full changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+        env:
+          OUTPUT: CHANGELOG.md
+      - name: Create draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --draft=true --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" --draft --title "Dissent $TAG" --notes-file RELEASE_NOTES.md --verify-tag
+          fi
+          gh release upload "$TAG" CHANGELOG.md --clobber
+          id=$(gh api "repos/${{ github.repository }}/releases" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    needs: changelog
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: ""
+          - name: macOS Apple Silicon
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_targets: aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust_targets: x86_64-apple-darwin
+          - name: Linux x64
+            os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      # Bundling is off for local development; enable it only for releases. Signed
+      # updater artifacts (and latest.json for in-app updates) are produced only
+      # when the TAURI_SIGNING_PRIVATE_KEY secret is set.
+      - name: Bundle config
+        id: bundle
+        shell: bash
+        env:
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" = "true" ]; then
+            echo 'config={"bundle":{"active":true,"targets":"all","createUpdaterArtifacts":true}}' >> "$GITHUB_OUTPUT"
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; building without in-app update artifacts"
+            echo 'config={"bundle":{"active":true,"targets":"all"}}' >> "$GITHUB_OUTPUT"
+            echo "updater=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and upload installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop/src-tauri
+          tauriScript: cargo tauri
+          releaseId: ${{ needs.changelog.outputs.release_id }}
+          includeUpdaterJson: ${{ steps.bundle.outputs.updater }}
+          args: ${{ matrix.args }} --config '${{ steps.bundle.outputs.config }}'
+
+  tools:
+    name: Tools (${{ matrix.name }})
+    needs: changelog
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            ext: ".exe"
+          - name: macos-arm64
+            os: macos-latest
+            ext: ""
+          - name: linux-x64
+            os: ubuntu-22.04
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tools-${{ matrix.name }}
+      - name: Build seeder, relay, probe and push relay
+        run: cargo build --release -p dissent-seeder -p dissent-relay -p dissent-probe -p dissent-push-relay
+      - name: Package
+        shell: bash
+        run: |
+          dir="dissent-tools-$TAG-${{ matrix.name }}"
+          mkdir "$dir"
+          for bin in dissent-seeder dissent-relay dissent-probe dissent-push-relay; do
+            cp "target/release/$bin${{ matrix.ext }}" "$dir/"
+          done
+          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          cp apps/relay/README.md "$dir/RELAY.md"
+          cp apps/probe/README.md "$dir/PROBE.md"
+          cp apps/push-relay/README.md "$dir/PUSH-RELAY.md"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$dir.zip" "$dir" >/dev/null
+            echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+            echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" --clobber
+
+  publish:
+    name: Publish release
+    needs: [desktop, tools]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Undraft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false --latest
