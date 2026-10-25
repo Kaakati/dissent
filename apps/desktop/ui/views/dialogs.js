@@ -105,10 +105,20 @@ function openLinkDialog(title, description, loadLink, extra = null) {
 }
 
 export function openInviteDialog(communityId) {
+  // Versions before short invites cannot open the short link. This copies the long one, which they can.
+  const fullLink = el('button', {
+    class: 'ghost',
+    text: 'Copy full link (older versions)',
+    onclick: async () => {
+      const link = await actions.createFullInvite(communityId);
+      if (link && (await copyText(link))) toast('Full invite link copied', 'info');
+    },
+  });
   openLinkDialog(
     'Invite people',
     'Anyone with this link can join the server. Share it out of band.',
     () => actions.createInvite(communityId),
+    fullLink,
   );
 }
 

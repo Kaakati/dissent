@@ -86,8 +86,8 @@ pub fn asset_url(path: &str) -> String {
 }
 
 /// Lets the webview load the decrypted pictures under the data dir. Called once at startup.
-pub fn allow_avatars(app: &tauri::AppHandle, data_dir: &Path) -> tauri::Result<()> {
-    let dir = data_dir.join("avatars");
+pub fn allow_avatars(app: &tauri::AppHandle, profile_dir: &Path) -> tauri::Result<()> {
+    let dir = profile_dir.join("avatars");
     std::fs::create_dir_all(&dir)?;
     app.asset_protocol_scope().allow_directory(&dir, true)?;
     Ok(())

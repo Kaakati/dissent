@@ -510,7 +510,8 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
     tracing::info!(dir = %profile.display(), "engine data dir");
     attachments::allow_downloads(app, &data_dir).map_err(|e| e.to_string())?;
-    avatar_cmds::allow_avatars(app, &data_dir).map_err(|e| e.to_string())?;
+    // The engine keeps pictures under the profile folder (`Store::avatars_dir`), not the data dir.
+    avatar_cmds::allow_avatars(app, &profile).map_err(|e| e.to_string())?;
 
     let settings = network::load(&data_dir);
     let voice = voice::Voice::new(data_dir.clone());

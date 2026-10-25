@@ -331,8 +331,10 @@ impl Engine {
     ) -> std::result::Result<bool, MlsError> {
         let group = community.0;
         let rules = self.commit_rules(community);
+        let mut added = Vec::new();
         let processed = self.with_mls(|mls| {
             mls.process_commit_with_policy(&group, bytes, |info| {
+                added = info.adds.iter().map(|d| d.device).collect();
                 let ok = rules.allows_commit(info);
                 if !ok {
                     tracing::warn!(
@@ -350,6 +352,7 @@ impl Engine {
         match self.mls_epoch(community) {
             Some(epoch) => {
                 self.log_commit(community, epoch, bytes.to_vec());
+                self.note_epoch(community, &added);
                 Ok(true)
             }
             // The commit removed this device, so there is no group left to follow.

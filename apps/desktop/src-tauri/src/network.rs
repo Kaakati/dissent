@@ -33,11 +33,14 @@ pub struct NetworkSettings {
     pub use_public_relays: bool,
     /// Custom relay URLs. Each must be https.
     pub relays: Vec<String>,
+    /// Find people on the same local network: a multicast beacon with rotating tokens, and a
+    /// challenge handshake before any device id is shared. Off by default. Ignored in loopback mode.
+    pub lan_discovery: bool,
 }
 
 impl Default for NetworkSettings {
     fn default() -> Self {
-        Self { use_public_relays: true, relays: Vec::new() }
+        Self { use_public_relays: true, relays: Vec::new(), lan_discovery: false }
     }
 }
 
@@ -74,7 +77,7 @@ pub fn check(settings: &NetworkSettings) -> Result<NetworkSettings, String> {
     if !settings.use_public_relays && relays.is_empty() {
         return Err(EMPTY_OFF_MESSAGE.to_string());
     }
-    Ok(NetworkSettings { use_public_relays: settings.use_public_relays, relays })
+    Ok(NetworkSettings { use_public_relays: settings.use_public_relays, relays, lan_discovery: settings.lan_discovery })
 }
 
 /// Parses and checks a settings document. Missing fields take their defaults.
@@ -126,7 +129,7 @@ pub fn relay_choice(settings: &NetworkSettings) -> RelayChoice {
 
 /// Node config for these settings.
 pub fn node_config(settings: &NetworkSettings) -> NodeConfig {
-    NodeConfig { relay: relay_choice(settings), ..Default::default() }
+    NodeConfig { relay: relay_choice(settings), lan_discovery: settings.lan_discovery, ..Default::default() }
 }
 
 #[cfg(test)]
@@ -171,13 +174,21 @@ mod tests {
     }
 
     #[test]
+    fn lan_discovery_is_off_by_default_and_reaches_the_node() {
+        assert!(!NetworkSettings::default().lan_discovery);
+        assert!(!node_config(&NetworkSettings::default()).lan_discovery);
+        let on = NetworkSettings { lan_discovery: true, ..NetworkSettings::default() };
+        assert!(node_config(&on).lan_discovery);
+    }
+
+    #[test]
     fn public_on_without_custom_relays_uses_the_default_mode() {
         assert!(matches!(relay_choice(&NetworkSettings::default()), RelayChoice::Default));
     }
 
     #[test]
     fn public_on_with_custom_relays_adds_them_to_the_n0_set() {
-        let s = NetworkSettings { use_public_relays: true, relays: vec!["https://relay.example.org".into()] };
+        let s = NetworkSettings { use_public_relays: true, relays: vec!["https://relay.example.org".into()], lan_discovery: false };
         let urls = custom_urls(relay_choice(&s));
         assert_eq!(urls.len(), N0_RELAYS.len() + 1);
         assert!(urls.iter().any(|u| u.host_str() == Some("relay.example.org")));
@@ -186,7 +197,7 @@ mod tests {
 
     #[test]
     fn public_off_uses_only_the_custom_relays() {
-        let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org".into()] };
+        let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org".into()], lan_discovery: false };
         let urls = custom_urls(relay_choice(&s));
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0].host_str(), Some("relay.example.org"));
@@ -194,7 +205,7 @@ mod tests {
 
     #[test]
     fn public_off_with_no_relays_is_rejected_not_disabled() {
-        let s = NetworkSettings { use_public_relays: false, relays: vec![] };
+        let s = NetworkSettings { use_public_relays: false, relays: vec![], lan_discovery: false };
         assert_eq!(check(&s).unwrap_err(), EMPTY_OFF_MESSAGE);
         assert!(parse_settings(r#"{"use_public_relays": false, "relays": []}"#).is_err());
         assert!(!matches!(relay_choice(&s), RelayChoice::Disabled));
@@ -204,10 +215,10 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = std::env::temp_dir().join(format!("dissent-network-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org/".into()] };
+        let s = NetworkSettings { use_public_relays: false, relays: vec!["https://relay.example.org/".into()], lan_discovery: false };
         let saved = save(&dir, &s).unwrap();
         assert_eq!(load(&dir), saved);
-        assert!(save(&dir, &NetworkSettings { use_public_relays: false, relays: vec![] }).is_err());
+        assert!(save(&dir, &NetworkSettings { use_public_relays: false, relays: vec![], lan_discovery: false }).is_err());
         std::fs::write(dir.join(FILE), "{ broken").unwrap();
         assert_eq!(load(&dir), NetworkSettings::default());
         let _ = std::fs::remove_dir_all(&dir);

@@ -3,7 +3,16 @@
   "productName": "Dissent",
   "identifier": "chat.dissent.desktop",
   "build": {
-    "frontendDist": "../ui",
+    "frontendDist": "../ui-next/dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "../ui-next"
+    },
+    "beforeBuildCommand": {
+      "script": "npm ci && npm run build",
+      "cwd": "../ui-next"
+    },
     "features": [
       "custom-protocol"
     ]
@@ -22,7 +31,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost",
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' blob: asset: http://asset.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": []

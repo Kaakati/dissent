@@ -38,6 +38,7 @@ impl Engine {
             Ok(commit) => commit,
             Err(e) => return Response::Error(format!("could not add: {e}")),
         };
+        self.note_epoch(community, &[conn_from]);
         self.publish_commit(community, commit.commit).await;
         Response::Welcome(commit.welcome)
     }
@@ -82,7 +83,9 @@ impl Engine {
             })
         })
         .map(|_| ())
-        .map_err(mls_err)
+        .map_err(mls_err)?;
+        self.note_epoch(community, &[]);
+        Ok(())
     }
 
     /// Asks `peer` to add this device to the community's group, then joins from the welcome.
@@ -115,6 +118,12 @@ impl Engine {
             {
                 Ok(()) => {
                     self.unseal_pending(community);
+                    // Keys and the name arrive in the background, so the join does not wait on members.
+                    let engine = self.clone();
+                    self.spawn_task(async move {
+                        engine.fetch_epoch_history_until_answered(community).await;
+                        engine.restore_join_name(community).await;
+                    });
                     return true;
                 }
                 Err(e) => {
@@ -161,7 +170,10 @@ impl Engine {
             return;
         }
         match self.with_mls(|mls| mls.remove_members(&community.0, &departed)) {
-            Ok(commit) => self.publish_commit(community, commit).await,
+            Ok(commit) => {
+                self.note_epoch(community, &[]);
+                self.publish_commit(community, commit).await
+            }
             Err(e) => {
                 tracing::warn!(community = %community, error = %e, "could not remove departed devices")
             }

@@ -23,7 +23,7 @@ use url::Url;
 
 pub use contact::{short_url, ContactCard, ContactLink};
 pub use dns::{dns_record_value, normalize_domain, verify_dns_handle};
-pub use invite::Invite;
+pub use invite::{Invite, InviteLink, ShortInvite};
 pub use record::{CommunityRecord, MAX_PEERS};
 pub use user_record::{UserRecord, MAX_DEVICES, MAX_USER_PEERS};
 
@@ -264,7 +264,12 @@ impl Discovery {
     async fn resolve_packet(&self, public_key: &PublicKey) -> Result<Option<SignedPacket>> {
         self.wait_warm().await;
         for attempt in 1..=RESOLVE_ATTEMPTS {
-            let outcome = self.dht().resolve(public_key, None).await.complete().await;
+            // The first valid packet is enough. Finishing the lookup can take several more seconds.
+            let response = self.dht().resolve(public_key, None).await;
+            if let Some(packet) = response.first().cloned() {
+                return Ok(Some(packet));
+            }
+            let outcome = response.complete().await;
             match outcome.most_recent {
                 Ok(packet) => return Ok(Some(packet)),
                 Err(ResolveError::NotFound) if attempt < RESOLVE_ATTEMPTS => {

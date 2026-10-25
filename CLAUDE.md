@@ -14,6 +14,7 @@ crates/dissent-mls        OpenMLS group encryption; core seals message text per 
 crates/dissent-media      voice/video spike: str0m (sans-IO WebRTC) sessions with SFrame end-to-end media encryption
 crates/dissent-files      encrypted file sharing: encrypt-then-chunk, content-addressed transfer via iroh-blobs
 crates/dissent-audio      voice pipeline: mic/speaker (cpal), noise suppression + echo cancellation, Opus with FEC, adaptive jitter buffer
+crates/dissent-video      call video: capture, AV1 (SVT-AV1 encode behind the `svt-av1` feature, off by default; rav1d decode) and H.264 (OpenH264), bitrate ladder
 apps/seeder               headless always-on member: keeps community history available (uses dissent-core)
 apps/relay                open-source iroh relay server binary anyone can run
 apps/probe                connectivity probe: measures direct vs relayed paths, RTT and time-to-direct between two devices

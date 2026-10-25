@@ -14,9 +14,6 @@
 @font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('fonts/poppins-700-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
 ; }
 @font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('fonts/poppins-700-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
-/* Poppins has a taller x-height than the system UI fonts. Normalising it to 0.49 of the font size (as the
-   design canvas does) keeps every nominal size while rendering text at the size the layout was drawn for. */
-* { font-size-adjust: 0.49 !important; }
 ; }
 
 /* Dissent desktop UI. The visual system is described in docs/design/07-visual-system.md and follows the
@@ -69,6 +66,7 @@
   --danger: #d33639; --danger-hover: #c43035; --danger-text: #fa7679; --danger-tint: rgb(211 54 57 / .15);
   --warn: #f0b232; --warn-tint: rgb(240 178 50 / .15);
   --success: #23a55a; --success-text: #7fdba6; --success-tint: rgb(35 165 90 / .15);
+  --success-button: #1a7f43; --joined-button: #4f545c;
   --link: #7cb7ff; --link-hover: #a9cfff;
   --role-owner: #f0b232; --role-admin: #ff8a72; --role-mod: #7cb7ff;
   --focus: var(--accent-text);
@@ -731,7 +729,7 @@ button.link-btn:hover:not(:disabled) { background: var(--hover); }
 .safety-status.warn { color: var(--warn); }
 .safety-status .icon { width: var(--icon-sm); height: var(--icon-sm); }
 .progress { height: 8px; background: var(--rail); border-radius: 4px; overflow: hidden; }
-.progress-fill { height: 100%; width: 100%; background: var(--accent); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform 200ms ease-out; }
+.progress-fill { display: block; height: 100%; width: 100%; background: var(--accent); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform 200ms ease-out; }
 .progress.thin { height: 6px; border-radius: 3px; }
 .notes-list { margin: 0; padding-left: 20px; }
 .notes-list li + li { margin-top: 2px; }
@@ -1509,6 +1507,23 @@ html[data-density="compact"] .skel-lines { padding-top: 0; gap: var(--s-1); }
 .rich-title { color: var(--text-strong); font: 600 var(--fs-body) / var(--lh-body) var(--font); }
 .rich-chip { justify-self: start; height: 24px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: var(--r-1); background: #f2f3f5; color: #4e5058; font: 500 var(--fs-ui) / var(--lh-ui) var(--font); }
 .rich-tile { height: 96px; border-radius: var(--r-1); display: grid; place-items: center; color: #fff; font: 700 17px / 22px var(--font); }
+/* Invite card (under a message with a dissent:// invite link): the server's banner in its hue, name, counts, Join. */
+.invite-card { width: 100%; max-width: 400px; display: grid; overflow: hidden; background: var(--sidebar); border-radius: var(--r-1); box-shadow: inset 0 0 0 1px var(--border); }
+.invite-banner { height: 64px; display: flex; align-items: center; padding: 0 var(--s-4); background: oklch(45% 0.14 var(--hue, 220)); }
+.invite-icon { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; object-fit: cover; background: oklch(30% 0.1 var(--hue, 220)); color: var(--text-strong); font: 700 var(--fs-head) / var(--lh-head) var(--font); box-shadow: 0 0 0 3px var(--sidebar); }
+.invite-body { display: grid; gap: var(--s-1); padding: var(--s-3) var(--s-4) var(--s-4); min-width: 0; }
+.invite-name { color: var(--text-strong); font: 600 var(--fs-head) / var(--lh-head) var(--font); overflow-wrap: anywhere; }
+.invite-stats { margin: 0; display: flex; align-items: center; flex-wrap: wrap; color: var(--muted); font: var(--fs-sm) / var(--lh-sm) var(--font); }
+.invite-sep { margin: 0 var(--s-2); }
+.invite-dot { width: 8px; height: 8px; margin-right: var(--s-1); border-radius: 50%; background: var(--offline); display: inline-block; }
+.invite-dot.online { background: var(--success); }
+.invite-meta { margin: 0; font: var(--fs-meta) / var(--lh-meta) var(--font); }
+.invite-note { margin: 0; color: var(--muted); font: var(--fs-sm) / var(--lh-sm) var(--font); }
+.invite-join { width: 100%; margin-top: var(--s-2); justify-content: center; }
+.invite-join:not(:disabled) { background: var(--success-button); color: #fff; font-weight: 600; }
+.invite-join:not(:disabled):hover { filter: brightness(.92); }
+.invite-join:disabled { background: var(--offline); color: var(--text-strong); }
+.invite-join.joined { background: var(--joined-button); color: var(--text-strong); }
 
 /* ---- Incoming call (IncomingCall board) ---- */
 dialog.incoming { width: 540px; max-width: calc(100vw - 32px); padding: 0; border: 0; border-radius: 12px; background: var(--chat); color: var(--text); box-shadow: 0 24px 64px rgb(0 0 0 / .45); }

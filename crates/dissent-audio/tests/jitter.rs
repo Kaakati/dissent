@@ -28,6 +28,8 @@ fn schedule(packets: &[Vec<u8>], max_jitter_ms: u64, loss: f64, rng: &mut Rng) -
             timestamp: i as u32 * FRAME_SAMPLES as u32,
             payload: payload.clone(),
             arrival_ms: FRAME_MS * i as u64 + jitter,
+            // Opus DTX packets are one or two bytes. Speech packets are much larger.
+            silent: payload.len() <= 2,
         });
     }
     arrivals.sort_by_key(|p| p.arrival_ms);
@@ -86,6 +88,7 @@ fn in_order_packets_play_out_unchanged() {
             timestamp: i as u32 * FRAME_SAMPLES as u32,
             payload: p.clone(),
             arrival_ms: FRAME_MS * i as u64,
+            silent: false,
         })
         .collect();
     let r = run(PcmDecoder, &arrivals, 200);
@@ -196,6 +199,7 @@ fn delay_grows_fast_and_shrinks_slowly() {
                 timestamp: seq * FRAME_SAMPLES as u32,
                 payload: vec![0u8; 1920],
                 arrival_ms: t_send + jitter,
+                silent: false,
             });
             seq += 1;
             t_send += FRAME_MS;

@@ -318,6 +318,7 @@ async fn caller_outside_the_dm_policy_is_refused() {
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn banned_member_loses_the_call_key_on_rekey() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -364,6 +365,7 @@ async fn banned_member_loses_the_call_key_on_rekey() {
     let bob_after = bob.engine.call_state().expect("in call").frames_received;
     assert!(bob_after > bob_before, "the remaining members keep talking");
     finish(vec![alice, bob, carol]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -423,6 +425,7 @@ async fn voice_pipeline_carries_audio_between_peers() {
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn ten_engines_in_a_voice_channel_go_forwarded() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..10 {
@@ -462,6 +465,7 @@ async fn ten_engines_in_a_voice_channel_go_forwarded() {
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -533,6 +537,7 @@ async fn direct_call_rings_every_device_and_the_first_to_accept_wins() {
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn banned_member_of_a_forwarded_call_loses_audio_after_the_rekey() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..7 {
@@ -606,12 +611,14 @@ async fn banned_member_of_a_forwarded_call_loses_audio_after_the_rekey() {
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_late_joiner_is_verified_without_being_flagged() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -668,12 +675,14 @@ async fn a_late_joiner_is_verified_without_being_flagged() {
         assert_eq!(view.quality.flagged, 0, "no sender is flagged as an impersonator");
     }
     finish(vec![alice, bob, carol]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_call_grows_from_three_to_eight_and_back_to_four_without_dropping_audio() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..8 {
@@ -731,12 +740,14 @@ async fn a_call_grows_from_three_to_eight_and_back_to_four_without_dropping_audi
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_call_above_the_cascade_threshold_relays_through_a_tree() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..9 {
@@ -767,12 +778,14 @@ async fn a_call_above_the_cascade_threshold_relays_through_a_tree() {
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn losing_the_cascade_root_keeps_everyone_hearing() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..9 {
@@ -829,6 +842,7 @@ async fn losing_the_cascade_root_keeps_everyone_hearing() {
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 /// The root id of the forwarder as a call sees it, if the call is forwarded.
@@ -845,6 +859,7 @@ fn forwarder_root(engine: &dissent_core::Engine) -> Option<String> {
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_forwarder_that_slows_down_is_replaced_by_a_clearly_better_device() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..7 {
@@ -892,6 +907,7 @@ async fn a_forwarder_that_slows_down_is_replaced_by_a_clearly_better_device() {
     let mut all = vec![owner];
     all.extend(others);
     finish(all).await;
+    }).await;
 }
 
 /// The id of the group named `name`, as this engine sees it once it has joined.
@@ -907,6 +923,7 @@ fn group_id_named(p: &Peer, name: &str) -> Option<dissent_core::ConvId> {
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_group_call_rings_every_member_and_late_joiners_join_quietly() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -969,12 +986,14 @@ async fn a_group_call_rings_every_member_and_late_joiners_join_quietly() {
     assert!(quiet.is_err(), "the caller is not rung for a late join");
 
     finish(vec![alice, bob, carol, dave]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn an_outsider_cannot_join_a_group_call() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -998,6 +1017,7 @@ async fn an_outsider_cannot_join_a_group_call() {
     );
     assert!(outsider.engine.call_state().is_none());
     finish(vec![alice, bob, carol, dave, outsider]).await;
+    }).await;
 }
 
 /// The live call a DM with `peer` shows on `engine`, if any.
@@ -1022,6 +1042,7 @@ fn live_group(engine: &dissent_core::Engine, conv: dissent_core::ConvId) -> Opti
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_group_call_shows_as_live_to_a_member_outside_it_who_joins_and_hears_it() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -1085,12 +1106,14 @@ async fn a_group_call_shows_as_live_to_a_member_outside_it_who_joins_and_hears_i
     .await;
 
     finish(vec![alice, bob, carol, dave]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_dm_call_stays_live_after_one_side_steps_away_and_rejoins() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     make_contacts_ready(&alice, &bob).await;
@@ -1152,12 +1175,14 @@ async fn a_dm_call_stays_live_after_one_side_steps_away_and_rejoins() {
     .await;
 
     finish(vec![alice, bob]).await;
+    }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn an_outsider_sees_no_live_call() {
     let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -1194,4 +1219,5 @@ async fn an_outsider_sees_no_live_call() {
     assert!(live_group(&outsider.engine, conv).is_none());
     assert!(outsider.engine.conversations().iter().all(|c| c.live_call.is_none()));
     finish(vec![alice, bob, carol, dave, outsider]).await;
+    }).await;
 }

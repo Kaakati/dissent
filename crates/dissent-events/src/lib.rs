@@ -26,17 +26,23 @@ pub mod state;
 pub(crate) mod testutil;
 pub mod wire;
 
-pub use control::{is_sealable, open_event, seal, OpenError, SealKey};
+pub use control::{
+    is_member_sealable, is_sealable, open_event, open_event_keyed, open_member, seal, seal_member, verify_member_tag,
+    EpochKey, EpochKeys, OpenError, SealKey, EXPORT_LABEL,
+};
 pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
 pub use emoji::{normalize_emoji, EmojiError};
-pub use event::{ChannelId, ChannelVisibility, Event, EventBody, EventId, Payload, Role, SealedKind};
+pub use event::{
+    ChannelId, ChannelVisibility, Event, EventBody, EventId, HistorySetting, Payload, Role,
+    SealedKind,
+};
 pub use hlc::{Hlc, HlcClock};
 pub use names::{confusable, normalize_handle, skeleton, NameError};
 pub use picture::{Picture, MAX_PICTURE_BYTES};
 pub use relay::{valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
 pub use replayer::{ReplayStats, Replayer};
-pub use state::{replay, replay_with, CommunityState, Member, MessageView, Rejection};
+pub use state::{replay, replay_keyed, replay_with, CommunityState, Member, MessageView, Rejection};
 pub use wire::SignedEvent;
 
 #[derive(Debug, thiserror::Error)]

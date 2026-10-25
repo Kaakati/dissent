@@ -7,7 +7,7 @@ use std::{
 use dissent_identity::{DeviceId, DeviceKey};
 use iroh::{
     Endpoint, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
-    address_lookup::MemoryLookup,
+    address_lookup::{AddressLookup, MemoryLookup},
     endpoint::{default_relay_mode, presets},
     protocol::Router,
     tls::CaTlsConfig,
@@ -17,16 +17,21 @@ use iroh::Watcher;
 use iroh::protocol::DynProtocolHandler;
 use iroh_gossip::{ALPN as GOSSIP_ALPN, Gossip};
 use iroh_mainline_address_lookup::DhtAddressLookup;
+use std::time::Instant;
+use tokio::task::JoinHandle;
+use tracing::warn;
 use url::Url;
 
 use crate::{
     addr::PeerAddr,
     extra::{self, Shared},
+    lan,
     media::MEDIA_ALPN,
     error::{NetError, Result},
     media::{MediaHandler, MediaLink, MediaProtocol, dial_media},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
     rpc::{RPC_ALPN, RpcHandler, RpcProtocol, run_request},
+    source::{self, DialLog, DialStats, Recorded},
     tls::pq_preferred_provider,
     topic::{TopicId, TopicReceiver, TopicSender},
 };
@@ -72,6 +77,12 @@ pub struct NodeConfig {
     /// Trust roots for relay TLS. `None` uses iroh's built-in roots. Set it for a relay with a
     /// private CA, for example `CaTlsConfig::custom_roots` with that relay's certificate.
     pub relay_ca: Option<CaTlsConfig>,
+    /// Find community members on the same local network, by multicast with rotating tokens and a
+    /// challenge handshake. Off by default. Ignored when `loopback_only` is set, since it binds a
+    /// multicast socket.
+    pub lan_discovery: bool,
+    /// This device answers address lookups as a seeder, so peers label those answers `seeder`.
+    pub serves_lookups: bool,
 }
 
 impl Default for NodeConfig {
@@ -86,6 +97,8 @@ impl Default for NodeConfig {
             gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
             extra_protocols: Vec::new(),
             relay_ca: None,
+            lan_discovery: false,
+            serves_lookups: false,
         }
     }
 }
@@ -104,6 +117,8 @@ impl fmt::Debug for NodeConfig {
                 &self.extra_protocols.iter().map(|(alpn, _)| alpn).collect::<Vec<_>>(),
             )
             .field("loopback_only", &self.loopback_only)
+            .field("lan_discovery", &self.lan_discovery)
+            .field("serves_lookups", &self.serves_lookups)
             .finish()
     }
 }
@@ -121,8 +136,14 @@ struct Inner {
     endpoint: Endpoint,
     router: Router,
     gossip: Gossip,
+    /// The address cache: addresses remembered with `remember`.
     lookup: MemoryLookup,
     gossip_max: usize,
+    dials: Arc<DialLog>,
+    /// Community keys the LAN handshake answers for. Set by `set_lan_keys`.
+    lan_keys: Arc<Mutex<Vec<[u8; 32]>>>,
+    serves_lookups: bool,
+    lan_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Node {
@@ -147,7 +168,9 @@ impl Node {
             )));
         }
         let gossip_max = cfg.gossip_max_message;
-        let lookup = MemoryLookup::new();
+        let lookup = MemoryLookup::with_provenance(source::CACHE);
+        let lan_lookup = MemoryLookup::with_provenance(source::LAN);
+        let dials = Arc::new(DialLog::default());
         let use_dht = cfg.dht_lookup && !matches!(cfg.relay, RelayChoice::Disabled);
         let preset = match cfg.relay {
             RelayChoice::Default => Endpoint::builder(presets::N0),
@@ -171,11 +194,8 @@ impl Node {
         };
         let mut builder = preset
             .secret_key(SecretKey::from_bytes(&device.0.seed()))
-            .address_lookup(lookup.clone())
+            .address_lookup(Recorded::new(source::CACHE, lookup.clone(), dials.clone()))
             .crypto_provider(provider);
-        if use_dht {
-            builder = builder.address_lookup(DhtAddressLookup::builder());
-        }
         builder = match cfg.relay {
             RelayChoice::Default => builder.relay_mode(RelayMode::Default),
             RelayChoice::Disabled => builder.relay_mode(RelayMode::Disabled),
@@ -197,6 +217,35 @@ impl Node {
             builder = builder.bind_addr(addr).map_err(|e| NetError::Config(e.to_string()))?;
         }
         let endpoint = builder.bind().await?;
+        // Added after bind, so each service can be wrapped to record which one resolves a dial. The
+        // DHT uses the endpoint's key to publish our address, as it did when it was a builder.
+        let services = endpoint
+            .address_lookup()
+            .map_err(|e| NetError::Config(e.to_string()))?;
+        services.add(Recorded::new(source::LAN, lan_lookup.clone(), dials.clone()));
+        if use_dht {
+            let dht = DhtAddressLookup::builder()
+                .secret_key(endpoint.secret_key().clone())
+                .build()
+                .map_err(|e| NetError::Config(e.to_string()))?;
+            services.add(Recorded::new(source::DHT, dht, dials.clone()));
+        }
+        let lan_keys = Arc::new(Mutex::new(Vec::new()));
+        let lan_task = if cfg.lan_discovery && !cfg.loopback_only {
+            match lan::bind() {
+                Ok(socket) => {
+                    let port = endpoint.bound_sockets().first().map_or(0, |a| a.port());
+                    let state = lan::Lan::new(device.id(), port);
+                    Some(tokio::spawn(lan::run(socket, state, lan_keys.clone(), lan_lookup.clone())))
+                }
+                Err(e) => {
+                    warn!(error = %e, "LAN discovery could not bind, continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let gossip = Gossip::builder()
             .max_message_size(gossip_max)
             .spawn(endpoint.clone());
@@ -222,6 +271,10 @@ impl Node {
                 gossip,
                 lookup,
                 gossip_max,
+                dials,
+                lan_keys,
+                serves_lookups: cfg.serves_lookups,
+                lan_task: Mutex::new(lan_task),
             }),
         })
     }
@@ -286,13 +339,54 @@ impl Node {
     }
 
     pub async fn ping(&self, peer: &PeerAddr) -> Result<PingReport> {
-        run_ping(&self.inner.endpoint, peer.to_iroh()?).await
+        let target = peer.to_iroh()?;
+        self.inner.dials.begin(peer.id.0);
+        let started = Instant::now();
+        let report = run_ping(&self.inner.endpoint, target).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.inner.dials.finish(peer.id.0, elapsed_ms, report.is_ok());
+        report
     }
 
     /// Sends `req` to `peer` and returns its reply. Dials by id, so addresses must be
     /// remembered or discoverable. Fails with `Timeout` after 15 s.
     pub async fn request(&self, peer: DeviceId, req: Vec<u8>) -> Result<Vec<u8>> {
-        run_request(&self.inner.endpoint, peer, req).await
+        self.inner.dials.begin(peer.0);
+        let started = Instant::now();
+        let reply = run_request(&self.inner.endpoint, peer, req).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.inner.dials.finish(peer.0, elapsed_ms, reply.is_ok());
+        reply
+    }
+
+    /// Counts of dials by the address source that resolved them, and the most recent dial. A
+    /// source of `dht` means the Mainline DHT was the one that answered.
+    pub fn dial_stats(&self) -> DialStats {
+        self.inner.dials.snapshot()
+    }
+
+    /// Replaces the community keys used for LAN tokens and handshakes. Call it whenever the
+    /// communities or their secrets change.
+    pub fn set_lan_keys(&self, keys: Vec<[u8; 32]>) {
+        *self.inner.lan_keys.lock().expect("LAN keys lock") = keys;
+    }
+
+    /// Whether this node answers address lookups as a seeder.
+    pub fn serves_lookups(&self) -> bool {
+        self.inner.serves_lookups
+    }
+
+    /// Adds an address lookup service, such as the peer lookup. Dials consult every service at
+    /// once, and the first address any of them yields wins. Its dials are recorded under `label`
+    /// unless the item names a known source of its own.
+    pub fn add_lookup(&self, label: &'static str, service: impl AddressLookup + 'static) -> Result<()> {
+        let services = self
+            .inner
+            .endpoint
+            .address_lookup()
+            .map_err(|e| NetError::Config(e.to_string()))?;
+        services.add(Recorded::new(label, service, self.inner.dials.clone()));
+        Ok(())
     }
 
     /// Dials `peer` and opens an unreliable datagram link for call media. The peer sees it via
@@ -321,6 +415,9 @@ impl Node {
     }
 
     pub async fn shutdown(self) -> Result<()> {
+        if let Some(task) = self.inner.lan_task.lock().expect("LAN task lock").take() {
+            task.abort();
+        }
         // The router shuts each protocol handler down, gossip included, and then closes the endpoint.
         // Gossip must not be shut down twice, since the second call warns that its actor is gone.
         self.inner.router.shutdown().await.map_err(|e| NetError::Shutdown(e.to_string()))

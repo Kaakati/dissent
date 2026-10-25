@@ -1,0 +1,255 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Poppins, bundled (SIL OFL 1.1, public/fonts/OFL.txt). Served locally: no request ever leaves the app for fonts. */
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/poppins-400-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/poppins-400-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/poppins-500-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/poppins-500-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/poppins-600-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/poppins-600-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/poppins-700-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
+; }
+@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/poppins-700-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD }
+
+/* Dissent theme. The values are the ones in apps/desktop/ui/style.css, mapped onto shadcn/ui's variable names.
+   Dissent is dark only, so there is one palette and no light theme. Components read the colours through the
+   @theme block below. Raw tokens keep the names used by the current UI, so the two stay comparable. */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- shadcn/ui variables ---- */
+  --background: #1a1a1e; /* --chat */
+  --foreground: #dbdee1; /* --text */
+  --card: #202024; /* --panel */
+  --card-foreground: #f2f3f5; /* --text-strong */
+  --popover: #111214; /* --ink: menus and tooltips */
+  --popover-foreground: #dbdee1;
+  --primary: #d2452f; /* --accent */
+  --primary-foreground: #ffffff;
+  --secondary: #2a2b30; /* --elevated */
+  --secondary-foreground: #f2f3f5;
+  --muted: rgb(255 255 255 / 0.05); /* --hover */
+  --muted-foreground: #a0a6b0; /* --muted in style.css */
+  --accent: #d2452f; /* menu highlight, as .menu-item in style.css */
+  --accent-foreground: #ffffff;
+  --destructive: #d33639; /* --danger */
+  --destructive-foreground: #ffffff;
+  --border: #252529;
+  --input: #222327; /* the field background; --input-border is the field edge */
+  --ring: #ff8266; /* --focus */
+  --radius: 8px; /* --r-2; radius-sm and radius-md are 4 px and 6 px, as --r-1 and --r-3 */
+
+  --sidebar: #121214;
+  --sidebar-foreground: #dbdee1;
+  --sidebar-primary: #d2452f;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgb(255 255 255 / 0.05);
+  --sidebar-accent-foreground: #f2f3f5;
+  --sidebar-border: #222225; /* --divider */
+  --sidebar-ring: #ff8266;
+
+  /* ---- Dissent surfaces, text and states ---- */
+  --rail: #121214;
+  --chat: #1a1a1e;
+  --panel: #202024;
+  --elevated: #2a2b30;
+  --elevated-hover: #33343a;
+  --input-border: #27282b;
+  --divider: #222225;
+  --ink: #111214;
+  --hover: rgb(255 255 255 / 0.05);
+  --selected: rgb(255 255 255 / 0.09);
+  --hover-msg: rgb(0 0 0 / 0.06);
+  --border-strong: rgb(255 255 255 / 0.12);
+  --border-menu: rgb(255 255 255 / 0.08);
+  --text: #dbdee1;
+  --text-strong: #f2f3f5;
+  --faint: #6b6f78;
+  --offline: #80848e;
+  --accent-hover: #c23f2a;
+  --accent-text: #ff8266;
+  --accent-tint: rgb(210 69 47 / 0.18);
+  --accent-tint-soft: rgb(210 69 47 / 0.14);
+  --brand: #e8553a;
+  --danger: #d33639;
+  --danger-hover: #c43035;
+  --danger-text: #fa7679;
+  --danger-tint: rgb(211 54 57 / 0.15);
+  --warn: #f0b232;
+  --warn-tint: rgb(240 178 50 / 0.15);
+  --success: #23a55a;
+  --success-text: #7fdba6;
+  --success-tint: rgb(35 165 90 / 0.15);
+  --success-button: #1a7f43; --joined-button: #4f545c;
+  --link: #7cb7ff;
+  --link-hover: #a9cfff;
+  --role-owner: #f0b232;
+  --role-admin: #ff8a72;
+  --role-mod: #7cb7ff;
+  --focus: #ff8266;
+  --motion: 150ms ease-out;
+
+  /* ---- spacing, 4 px grid ---- */
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px;
+
+  /* ---- type scale: size / line height ---- */
+  --fs-body: 15px; --lh-body: 22px;
+  --fs-ui: 14px; --lh-ui: 20px;
+  --fs-row: var(--fs-ui); --lh-row: var(--lh-ui);
+  --fs-sm: 13px; --lh-sm: 18px;
+  --fs-meta: 11px; --lh-meta: 16px;
+  --fs-tiny: 10px; --lh-tiny: 16px;
+  --fs-head: 19px; --lh-head: 24px;
+  --fs-title: 23px; --lh-title: 30px;
+  --font: "Poppins", ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  --emoji: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif;
+
+  /* ---- fixed heights and sizes ---- */
+  --titlebar-h: 30px; --header-h: 56px; --card-head-h: 48px; --panel-h: 58px; --hit: 32px; --btn-h: 40px; --btn-sm-h: 36px; --input-h: 40px;
+  --row-channel: 36px; --row-link: 40px; --row-dm: 42px; --row-member: 44px; --row-menu: 32px;
+  --rail-w: 72px; --rail-item: 48px; --rail-gap: 8px; --sidebar-w: 250px; --right-w: 300px; --right-wide-w: 340px;
+  --icon-sm: 16px; --icon: 20px; --icon-lg: 24px;
+  --avatar-xs: 16px; --avatar-sm: 24px; --avatar: 32px; --avatar-msg: 40px; --avatar-card: 88px; --avatar-xl: 80px;
+  --msg-gutter: 72px; --msg-group-gap: 17px; --msg-pad: 2px; --msg-right: 48px;
+
+  /* ---- radius and elevation ---- */
+  --r-1: 4px; --r-2: 8px; --r-3: 6px; --r-pill: 999px; --r-row: 8px;
+  --shadow-1: 0 2px 8px rgb(0 0 0 / 0.3);
+  --shadow-2: 0 8px 24px rgb(0 0 0 / 0.4);
+  --shadow-3: 0 16px 48px rgb(0 0 0 / 0.5);
+}
+
+/* Tailwind utilities for the tokens above: bg-chat, text-faint, gap-s-2, text-body, rounded-r-2 and so on. */
+@theme inline {
+  --font-sans: var(--font);
+  --font-mono: var(--mono);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-rail: var(--rail);
+  --color-chat: var(--chat);
+  --color-panel: var(--panel);
+  --color-elevated: var(--elevated);
+  --color-elevated-hover: var(--elevated-hover);
+  --color-input-border: var(--input-border);
+  --color-divider: var(--divider);
+  --color-ink: var(--ink);
+  --color-hover: var(--hover);
+  --color-selected: var(--selected);
+  --color-border-strong: var(--border-strong);
+  --color-border-menu: var(--border-menu);
+  --color-text: var(--text);
+  --color-text-strong: var(--text-strong);
+  --color-faint: var(--faint);
+  --color-offline: var(--offline);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-text: var(--accent-text);
+  --color-accent-tint: var(--accent-tint);
+  --color-brand: var(--brand);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-text: var(--danger-text);
+  --color-danger-tint: var(--danger-tint);
+  --color-warn: var(--warn);
+  --color-warn-tint: var(--warn-tint);
+  --color-success: var(--success);
+  --color-success-text: var(--success-text);
+  --color-success-tint: var(--success-tint);
+  --color-link: var(--link);
+  --color-link-hover: var(--link-hover);
+
+  --text-body: var(--fs-body);
+  --text-body--line-height: var(--lh-body);
+  --text-ui: var(--fs-ui);
+  --text-ui--line-height: var(--lh-ui);
+  --text-sm: var(--fs-sm);
+  --text-sm--line-height: var(--lh-sm);
+  --text-meta: var(--fs-meta);
+  --text-meta--line-height: var(--lh-meta);
+  --text-tiny: var(--fs-tiny);
+  --text-tiny--line-height: var(--lh-tiny);
+  --text-head: var(--fs-head);
+  --text-head--line-height: var(--lh-head);
+  --text-title: var(--fs-title);
+  --text-title--line-height: var(--lh-title);
+
+  --spacing-s-1: var(--s-1);
+  --spacing-s-2: var(--s-2);
+  --spacing-s-3: var(--s-3);
+  --spacing-s-4: var(--s-4);
+  --spacing-s-5: var(--s-5);
+  --spacing-s-6: var(--s-6);
+  --spacing-s-8: var(--s-8);
+  --spacing-s-10: var(--s-10);
+  --spacing-s-12: var(--s-12);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-pill: var(--r-pill);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    background: var(--chat);
+  }
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+    font: var(--fs-body) / var(--lh-body) var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+/* No font-size-adjust: the shipped UI renders Poppins at its nominal sizes (already 1px smaller than the design). */
+
+/* Scrollbars match the current UI: thin, rail-coloured thumbs. */
+.dissent-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rail) transparent;
+}

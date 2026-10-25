@@ -24,8 +24,8 @@
 
 use crate::emoji::normalize_emoji;
 use crate::names::{normalize_handle, skeleton};
-use crate::control::{open_event, OpenError, SealKey};
-use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, Hlc, Payload, Role, SealedKind};
+use crate::control::{open_event_keyed, EpochKey, OpenError, SealKey};
+use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, HistorySetting, Hlc, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +56,14 @@ pub struct CommunityState {
     /// Relay servers members use, from the latest accepted `SetRelays`, and its HLC.
     pub relays: Vec<String>,
     pub relays_hlc: Hlc,
+    /// Whether control events are member-sealed, from the latest accepted `MemberOnlyControl`, and
+    /// its HLC. Off until an owner turns it on.
+    pub member_only: bool,
+    pub member_only_hlc: Hlc,
+    /// Which history a new member gets keys for, from the latest accepted `HistoryVisibility`, and
+    /// its HLC. `All` until set.
+    pub history: HistorySetting,
+    pub history_hlc: Hlc,
     /// Generation of the community secret after the latest accepted rotation. Starts at 0.
     pub secret_generation: u64,
     /// Banned roots that some accepted rotation already answers.
@@ -224,19 +232,35 @@ pub fn replay(owner: RootId, dag: &Dag) -> CommunityState {
 
 /// Replay the DAG's causal order, opening sealed control events with the keys in `ring`.
 pub fn replay_with(owner: RootId, dag: &Dag, ring: &[SealKey]) -> CommunityState {
+    replay_keyed(owner, dag, ring, &[])
+}
+
+/// Replay the DAG's causal order, opening both kinds of sealed control event. `ring` holds the
+/// community secret generations, and `epochs` the encryption key of each MLS epoch.
+pub fn replay_keyed(
+    owner: RootId,
+    dag: &Dag,
+    ring: &[SealKey],
+    epochs: &[EpochKey],
+) -> CommunityState {
     let mut st = CommunityState::new(owner);
     for ev in dag.causal_order() {
-        apply_event(&mut st, ev, ring);
+        apply_event(&mut st, ev, ring, epochs);
     }
     st
 }
 
 /// Apply one event at its causal position, recording a rejection if it has one.
-pub(crate) fn apply_event(st: &mut CommunityState, ev: &Event, ring: &[SealKey]) {
+pub(crate) fn apply_event(
+    st: &mut CommunityState,
+    ev: &Event,
+    ring: &[SealKey],
+    epochs: &[EpochKey],
+) {
     st.device_roots
         .entry(ev.body.device)
         .or_insert(ev.body.author);
-    let plain = match open_event(ev, ring) {
+    let plain = match open_event_keyed(ev, ring, epochs) {
         Ok(plain) => plain,
         Err(why) => return st.rejected.push((ev.id, why.into())),
     };
@@ -264,6 +288,10 @@ impl CommunityState {
             rejected: Vec::new(),
             relays: Vec::new(),
             relays_hlc: Hlc::default(),
+            member_only: false,
+            member_only_hlc: Hlc::default(),
+            history: HistorySetting::All,
+            history_hlc: Hlc::default(),
             secret_generation: 0,
             secret_covered: BTreeSet::new(),
             secret_winner: None,
@@ -348,7 +376,9 @@ impl CommunityState {
         }
         match &ev.body.payload {
             // Opened by `apply_event` before it gets here. A sealed payload left is not a control event.
-            Payload::SealedControl { .. } => return Err(Rejection::Forged),
+            Payload::SealedControl { .. } | Payload::MemberSealedControl { .. } => {
+                return Err(Rejection::Forged)
+            }
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 require_control(chan)?;
                 if rank < Rank::Admin {
@@ -392,9 +422,12 @@ impl CommunityState {
                     return Err(Rejection::NoPermission);
                 }
             }
+            // Under member-only control a joiner's Join may go without a name, since that Join is sealed
+            // to the community secret storage members hold. The joiner sends its name again once it is in
+            // the group. Anywhere else a blank name is refused.
             Payload::Join { display_name } => {
                 require_control(chan)?;
-                if display_name.trim().is_empty() {
+                if display_name.trim().is_empty() && !self.member_only {
                     return Err(Rejection::Malformed);
                 }
             }
@@ -403,7 +436,7 @@ impl CommunityState {
                 invite_id,
             } => {
                 require_control(chan)?;
-                if display_name.trim().is_empty() {
+                if display_name.trim().is_empty() && !self.member_only {
                     return Err(Rejection::Malformed);
                 }
                 let invite = self.invites.get(invite_id).ok_or(Rejection::UnknownInvite)?;
@@ -516,6 +549,18 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::MemberOnlyControl { .. } => {
+                require_control(chan)?;
+                if rank < Rank::Owner {
+                    return Err(Rejection::NoPermission);
+                }
+            }
+            Payload::HistoryVisibility { .. } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+            }
             Payload::RoleGrant { role, .. } | Payload::RoleRevoke { role, .. } => {
                 require_control(chan)?;
                 check_role_change(rank, *role)?;
@@ -606,7 +651,7 @@ impl CommunityState {
             *last = (*last).max(ev.body.hlc.wall_ms);
         }
         match &ev.body.payload {
-            Payload::SealedControl { .. } => {}
+            Payload::SealedControl { .. } | Payload::MemberSealedControl { .. } => {}
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());
@@ -785,6 +830,18 @@ impl CommunityState {
                 if ev.body.hlc > self.relays_hlc {
                     self.relays = relays.clone();
                     self.relays_hlc = ev.body.hlc;
+                }
+            }
+            Payload::MemberOnlyControl { on } => {
+                if ev.body.hlc > self.member_only_hlc {
+                    self.member_only = *on;
+                    self.member_only_hlc = ev.body.hlc;
+                }
+            }
+            Payload::HistoryVisibility { setting } => {
+                if ev.body.hlc > self.history_hlc {
+                    self.history = *setting;
+                    self.history_hlc = ev.body.hlc;
                 }
             }
             Payload::RoleGrant { user, role } => {

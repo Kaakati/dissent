@@ -5,7 +5,7 @@ use crate::net::{maintenance, receive_loop, ReceiverTask};
 use crate::rpc::handler_for;
 use crate::store::{read_community_key, write_bytes_atomic, Paths};
 use crate::timings::Timings;
-use crate::views::{CommunitySummary, EngineEvent, MeView, NetStatusView, UserView};
+use crate::views::{CommunitySummary, DialsView, EngineEvent, MeView, NetStatusView, UserView};
 use crate::world::World;
 use dissent_discovery::{ContactCard, Discovery};
 use dissent_mls::MlsClient;
@@ -73,8 +73,13 @@ pub(crate) struct Inner {
     pub sync_cursor: Mutex<BTreeMap<CommunityId, usize>>,
     /// Devices whose last anti-entropy attempt failed, until the given instant.
     pub sync_backoff: Mutex<BTreeMap<DeviceId, std::time::Instant>>,
+    /// Woken when a community member's presence beacon is accepted. A joiner still waiting for its
+    /// epoch keys retries at once, instead of waiting out its backoff. See `epoch_keys`.
+    pub member_seen: tokio::sync::Notify,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
+    /// Devices with a live peer lookup running. See `peer_lookup`.
+    pub asking: Mutex<BTreeSet<DeviceId>>,
     /// The voice call on this device, and the media links waiting for it.
     pub calls: crate::calls::CallHub,
     /// The real-time intervals this engine runs on. Production values unless a test changed them.
@@ -83,6 +88,8 @@ pub(crate) struct Inner {
     pub typing: Mutex<crate::typing::Typing>,
     /// Encrypted file storage for attachments. Mounted on the node, so it shares its lifetime.
     pub files: std::sync::Arc<dissent_files::Files>,
+    /// Invite previews this device fetched, and how often each requester asked it for one.
+    pub previews: crate::invite_preview::PreviewState,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -155,11 +162,14 @@ impl Engine {
             flush_lock: tokio::sync::Mutex::new(()),
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
+            member_seen: tokio::sync::Notify::new(),
             neighbours: Mutex::new(BTreeMap::new()),
+            asking: Mutex::new(BTreeSet::new()),
             calls: crate::calls::CallHub::new(&timings),
             typing: Mutex::new(crate::typing::Typing::new(&timings)),
             timings,
             files,
+            previews: Default::default(),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;
@@ -176,6 +186,8 @@ impl Engine {
         let addr = node.addr().await;
         let engine = Engine { inner };
         let _ = engine.inner.node.set(node.clone());
+        node.add_lookup(dissent_net::PEER, crate::peer_lookup::PeerLookup::new(&engine.inner))?;
+        engine.refresh_lan_keys();
         engine.adopt_all_relays().await;
         engine.refetch_pictures();
         // Local stamps must sort after every stored event, so the clock starts past the newest.
@@ -193,6 +205,7 @@ impl Engine {
             }
             guard.communities.keys().copied().collect()
         };
+        engine.derive_current_epoch_keys(&ids);
         for id in ids {
             let bootstrap = engine.bootstrap_for(&id);
             let topic_rx = engine.subscribe_topic(id, bootstrap).await?;
@@ -282,6 +295,17 @@ impl Engine {
             Some(discovery) => discovery.stats().await.ok(),
             None => None,
         };
+        let dials = self.inner.node.get().map(|node| node.dial_stats()).unwrap_or_default();
+        let dials = DialsView {
+            by_source: dials
+                .by_source
+                .into_iter()
+                .map(|(source, count)| (source.to_string(), count))
+                .collect(),
+            failed: dials.failed,
+            last_via: dials.last.map(|sample| sample.via.to_string()),
+            last_connect_ms: dials.last.map(|sample| sample.connect_ms),
+        };
         let peers = self
             .inner
             .neighbours
@@ -297,7 +321,7 @@ impl Engine {
             .as_ref()
             .and_then(|a| a.relay.as_ref())
             .and_then(|url| url.host_str().map(str::to_string));
-        NetStatusView { dht, peers, relay }
+        NetStatusView { dht, peers, relay, dials }
     }
 
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, World> {

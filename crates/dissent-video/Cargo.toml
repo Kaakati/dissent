@@ -1,0 +1,25 @@
+[package]
+name = "dissent-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# AV1 encoding through SVT-AV1 builds from source and needs cmake, NASM and libclang. Off by default.
+svt-av1 = ["dep:shiguredo_svt_av1"]
+
+[dependencies]
+shiguredo_svt_av1 = { workspace = true, optional = true }
+openh264.workspace = true
+rav1d.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+image.workspace = true
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+# Linux gets no camera or screen capture yet: nokhwa's V4L2 backend (v4l2-sys-mit) runs bindgen,
+# which needs libclang, and xcap's Linux backend needs PipeWire and Wayland headers.
+nokhwa.workspace = true
+xcap.workspace = true
+
+[dev-dependencies]

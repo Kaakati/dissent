@@ -303,6 +303,13 @@ fn run(
             pending.clear();
             info!("microphone released");
         }
+        engine.pull_playout(&mut play);
+        apply_gain(&mut play, out_gain);
+        // The echo canceller needs the audio as it leaves the speaker, pushed before the mic frames
+        // that hear it. It is fed only while the mic runs, so its reference stays in step with them.
+        if mic.is_some() {
+            chain.push_far(&play);
+        }
         if let Some(cap) = mic.as_mut() {
             read.clear();
             cap.read_48k(&mut read);
@@ -316,14 +323,6 @@ fn run(
                     sent += 1;
                 }
             }
-        }
-
-        engine.pull_playout(&mut play);
-        apply_gain(&mut play, out_gain);
-        // The echo canceller needs the audio as it leaves the speaker. It is fed only while the
-        // mic runs, so its reference stays in step with the mic frames.
-        if mic.is_some() {
-            chain.push_far(&play);
         }
         playout.write_48k(&play);
         played += 1;

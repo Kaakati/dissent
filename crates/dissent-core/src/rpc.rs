@@ -75,6 +75,32 @@ pub(crate) enum Request {
     SecretHistory { community: CommunityId },
     /// A profile picture, sent directly to a contact's device. Appended, see `avatars`.
     Profile(Box<crate::avatars::SignedProfile>),
+    /// The device's digest of the address records it may share with the responder, as (device,
+    /// seq). The responder replies with its own digest and the records the requester lacks. Appended,
+    /// see `peer_exchange`.
+    AddrSync { digest: Vec<(DeviceId, u64)> },
+    /// Signed address records pushed by a scoped peer. Accepted at most once per `PUSH_GAP_MS`.
+    /// Appended, see `peer_exchange`.
+    AddrPush { records: Vec<crate::addr_record::AddrRecord> },
+    /// The current address record of `device`, for a dial that has no address yet. Answered only to
+    /// scoped peers. Appended, see `peer_exchange`.
+    AddrLookup { device: DeviceId },
+    /// The epoch keys the responder holds, for an active member's device. Under `SinceJoin` only
+    /// the epochs from the requester's join. Appended, see `epoch_keys`.
+    EpochHistory { community: CommunityId },
+    /// The write keys the responder holds, for an active storage member. Appended, see `epoch_keys`.
+    WriteKeys { community: CommunityId },
+    /// Whether the device supports member-sealed control. Appended, see `epoch_keys`.
+    MemberSealedSupport { community: CommunityId },
+    /// The invite preview of a community, for a holder of its invite secret. `token` is the token of
+    /// that secret, which the responder checks itself, since the requester is not yet a member.
+    /// `invite_id` names the invite used, so the answer can say whether it is live. Appended, see
+    /// `invite_preview`. Not in `community()`, so the envelope carries no token for it.
+    InvitePreview {
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,6 +134,25 @@ pub(crate) enum Response {
     Error(String),
     /// The `(generation, secret)` pairs the responder holds. See `Request::SecretHistory`.
     SecretHistory(Vec<(u64, [u8; 32])>),
+    /// The responder's digest and the records the requester lacks. See `Request::AddrSync`. Appended.
+    AddrSync {
+        digest: Vec<(DeviceId, u64)>,
+        records: Vec<crate::addr_record::AddrRecord>,
+    },
+    /// The record for `Request::AddrLookup`, if the responder holds one it may share. `seeder` is set
+    /// when the responder runs as a seeder, so the requester can label the answer. Appended.
+    AddrLookup {
+        record: Option<crate::addr_record::AddrRecord>,
+        seeder: bool,
+    },
+    /// `(epoch, enc, write)` for each epoch the responder holds. See `Request::EpochHistory`. Appended.
+    EpochHistory(Vec<(u64, [u8; 32], [u8; 32])>),
+    /// `(epoch, write)` for each epoch the responder holds. See `Request::WriteKeys`. Appended.
+    WriteKeys(Vec<(u64, [u8; 32])>),
+    /// Whether the responder supports member-sealed control. See `Request::MemberSealedSupport`. Appended.
+    MemberSealedSupport(bool),
+    /// The signed preview for `Request::InvitePreview`. Appended, see `invite_preview`.
+    InvitePreview(Box<crate::invite_preview::SignedPreview>),
 }
 
 impl Request {
@@ -124,7 +169,10 @@ impl Request {
             | Request::MlsCommits { community, .. }
             | Request::MlsCommit { community, .. }
             | Request::Secret { community }
-            | Request::SecretHistory { community } => Some(*community),
+            | Request::SecretHistory { community }
+            | Request::EpochHistory { community }
+            | Request::WriteKeys { community }
+            | Request::MemberSealedSupport { community } => Some(*community),
             _ => None,
         }
     }

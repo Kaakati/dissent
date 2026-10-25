@@ -14,7 +14,11 @@ async fn capabilities_list_the_implemented_surfaces() {
     for name in ["calls", "guardians", "devices", "notes", "pins", "safety", "key_change", "close_dm", "ignore"] {
         assert!(caps.contains(&name), "{name} must be reported");
     }
-    assert!(!caps.contains(&"groups"), "groups are not built and must not be reported");
+    for name in ["contacts", "groups", "transfers", "embeds"] {
+        assert!(caps.contains(&name), "{name} must be reported");
+    }
+    assert!(!caps.contains(&"topics"), "channel topics are not built and must not be reported");
+    assert!(!caps.contains(&"multi_source"), "per-source progress is not reported, so multi_source stays off");
     finish(vec![alice]).await;
     }).await;
 }

@@ -1,0 +1,22 @@
+/* The calls' motion, which utilities cannot express: the ringing pulse (views/incoming.js, style.css .ring-stage) and the
+   lobby's meter bars. Reduced motion holds the rings still at a faint opacity, as the current UI does. */
+@keyframes ring-pulse {
+  0% { transform: scale(0.6); opacity: 0.55; }
+  100% { transform: scale(1.25); opacity: 0; }
+}
+
+.ring-pulse {
+  opacity: 0;
+  animation: ring-pulse 2.4s ease-out infinite;
+}
+
+.ring-pulse-2 { animation-delay: 0.8s; }
+.ring-pulse-3 { animation-delay: 1.6s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ring-pulse {
+    animation: none;
+    opacity: 0.18;
+    transform: scale(1);
+  }
+}

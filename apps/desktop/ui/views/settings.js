@@ -8,6 +8,7 @@ import { addressCard } from './address-card.js';
 import { confirmDialog } from './dialogs.js';
 import { cardContent } from './profile.js';
 import { avatarSection } from './avatar.js';
+import { formatDials } from './status.js';
 import { getAppearance, setAppearance } from '../appearance.js';
 import { getSoundSettings, setSoundSettings } from '../sounds.js';
 import { openUpdateDialog } from './updater.js';
@@ -250,12 +251,14 @@ function network() {
   const hint = el('p', { class: 'warning', role: 'status' });
   const saveBtn = el('button', { class: 'primary', text: 'Save network settings' });
   const table = el('dl', { class: 'net-table', 'aria-label': 'Network status' }, el('dd', { text: 'Loading…' }));
+  const lan = el('input', { type: 'checkbox', 'aria-label': 'Find people on the same network' });
 
   const render = () => {
     const empty = !settings.use_public_relays && settings.relays.length === 0;
     hint.textContent = empty ? 'Add at least one relay, or turn public relays back on.' : '';
     saveBtn.disabled = empty;
     toggle.checked = settings.use_public_relays;
+    lan.checked = Boolean(settings.lan_discovery);
     list.replaceChildren(...settings.relays.map((url, i) => el('li', { class: 'relay-item' },
       el('span', { class: 'mono', text: url }),
       el('button', {
@@ -272,6 +275,10 @@ function network() {
   };
   toggle.addEventListener('change', () => {
     settings.use_public_relays = toggle.checked;
+    render();
+  });
+  lan.addEventListener('change', () => {
+    settings.lan_discovery = lan.checked;
     render();
   });
   const addBtn = el('button', {
@@ -325,6 +332,7 @@ function network() {
         ...netRow('Reachability', s.dht ? (s.dht.firewalled ? 'firewalled' : 'reachable') : '—'),
         ...netRow('Peers', String(s.peers)),
         ...netRow('Relay', s.relay ?? 'none'),
+        ...netRow('Resolved via', formatDials(s.dials) ?? 'no dials yet'),
       );
     } catch {
       table.replaceChildren(el('dd', { text: 'Status unavailable' }));
@@ -345,7 +353,11 @@ function network() {
       el('div', { class: 'row' }, input, addBtn),
       status,
       hint,
-      el('div', { class: 'row end' }, saveBtn)));
+      el('div', { class: 'row end' }, saveBtn)),
+    el('section', { class: 'settings-block' },
+      el('h2', { text: 'Local network' }),
+      el('label', { class: 'toggle-row' }, lan, el('span', { text: 'Find people on the same network' })),
+      el('p', { class: 'muted', text: 'Off by default. While it is on, your device announces a token that changes every ten minutes, so others on the network cannot tell which community or device it belongs to. Devices exchange identities only after both prove they share a community. Saving restarts the connection.' })));
 }
 
 function netRow(label, value) {

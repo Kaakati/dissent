@@ -17,10 +17,12 @@ noq-proto.workspace = true
 iroh-gossip.workspace = true
 iroh-mainline-address-lookup.workspace = true
 futures-lite.workspace = true
+n0-future.workspace = true
 ed25519-dalek.workspace = true
 url = { workspace = true, features = ["serde"] }
 data-encoding.workspace = true
 blake3.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 dissent-files.workspace = true

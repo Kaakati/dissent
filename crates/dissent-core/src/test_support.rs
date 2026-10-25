@@ -26,6 +26,7 @@ pub fn vault_for(dir: &Path) -> Arc<Vault> {
 pub fn fast_timings() -> crate::Timings {
     use std::time::Duration;
     crate::Timings {
+        history_first_retry: Duration::from_secs(3),
         presence_window: Duration::from_secs(8),
         beacon_every: Duration::from_secs(1),
         presence_sweep: Duration::from_secs(1),

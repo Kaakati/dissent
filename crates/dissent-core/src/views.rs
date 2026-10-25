@@ -40,6 +40,12 @@ pub struct CommunityView {
     pub members: Vec<MemberInfo>,
     /// Relays the community asks members to use, from its latest `SetRelays`.
     pub relays: Vec<String>,
+    /// Whether control events are member-sealed, so storage members cannot read them. See
+    /// `Engine::set_member_only`.
+    pub member_only: bool,
+    /// Whether some events stay unreadable here until a member sends the key for their epoch. The
+    /// UI shows "Waiting for a member to unlock history" while it is set.
+    pub history_locked: bool,
     /// Each voice channel with the people in its call, as far as this device has heard. Includes
     /// people who are not in the call themselves.
     pub voice_channels: Vec<VoiceChannelView>,
@@ -358,4 +364,19 @@ pub struct NetStatusView {
     pub peers: usize,
     /// Host of our home relay, when we have one.
     pub relay: Option<String>,
+    /// How dials were resolved since start. See `DialsView`.
+    pub dials: DialsView,
+}
+
+/// How dials were resolved: successful dials per address source, failed dials, and the latest dial.
+/// A source of `dht` means the Mainline DHT answered. The sources are `cache`, `peer`, `seeder`,
+/// `lan`, `dht` and `open` (a connection that was already up).
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct DialsView {
+    pub by_source: std::collections::BTreeMap<String, u64>,
+    pub failed: u64,
+    /// The source of the most recent successful dial.
+    pub last_via: Option<String>,
+    /// Milliseconds from the start of the most recent successful dial to its reply.
+    pub last_connect_ms: Option<u64>,
 }

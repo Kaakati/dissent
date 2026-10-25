@@ -99,3 +99,89 @@ async fn storage_seeder_serves_history_and_is_never_in_the_group() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seeder_refuses_member_sealed_events_without_a_valid_tag() {
+    use dissent_events::{ChannelId, Event, EventBody, Hlc, Payload, SignedEvent};
+
+    crate::testutil::bounded(async {
+        let alice = Node::named("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Tagged".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        alice
+            .engine
+            .set_member_only(id, true)
+            .await
+            .expect("member-only control on");
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let seeder = Node::named("seeder").await;
+        seeder
+            .engine
+            .join_as_storage(&invite)
+            .await
+            .expect("seeder joins as storage");
+        eventually("the seeder sees member-only control", || {
+            seeder
+                .engine
+                .community_view(id)
+                .ok()
+                .is_some_and(|v| v.member_only)
+        })
+        .await;
+
+        // A channel made under the switch carries a valid tag, so the seeder keeps it.
+        let channel = alice
+            .engine
+            .create_channel(id, "tagged".into())
+            .await
+            .expect("channel");
+        let channel_id: ChannelId = channel.id.parse().unwrap();
+        eventually("the seeder keeps the event with a valid tag", || {
+            let c = seeder.engine.read();
+            c.communities
+                .get(&id)
+                .is_some_and(|c| !c.signed_for(&[dissent_events::EventId(channel_id.0)]).is_empty())
+        })
+        .await;
+
+        // A forgery: alice's device signs a member-sealed event whose tag is junk. The seeder holds
+        // the write key, but cannot make the tag match this ciphertext, so it must not keep the event.
+        let heads = alice.engine.read().communities[&id].heads();
+        let body = EventBody {
+            community: id,
+            channel: ChannelId::CONTROL,
+            author: alice.identity.root_id(),
+            device: alice.identity.device_id(),
+            parents: heads,
+            hlc: Hlc {
+                wall_ms: crate::engine::now_ms(),
+                counter: 0,
+            },
+            payload: Payload::MemberSealedControl {
+                epoch: 0,
+                ciphertext: vec![7; 64],
+                tag: [0; 32],
+            },
+        };
+        let forged = Event::sign(body, &alice.identity.device);
+        let forged_id = forged.id;
+        let se = SignedEvent {
+            event: forged,
+            cert: alice.identity.cert.clone(),
+        };
+        seeder
+            .engine
+            .ingest(id, vec![se])
+            .expect("the batch is handled, junk is dropped");
+        let kept = seeder.engine.read().communities[&id].signed_for(&[forged_id]);
+        assert!(kept.is_empty(), "the seeder refuses an event with a bad tag");
+        assert!(seeder.engine.mls_epoch(id).is_none(), "the seeder is never in the group");
+    })
+    .await;
+}

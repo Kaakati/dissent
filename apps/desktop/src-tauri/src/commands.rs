@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dissent_core::{
-    ChannelId, ChannelInfo, CommunityId, CommunitySummary,
+    ChannelId, ChannelInfo, CommunityId, CommunitySummary, InvitePreviewView,
     Engine, EventId, Identity, MessageItem, MeView, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
@@ -222,9 +222,24 @@ pub async fn create_invite(state: State<'_, AppState>, community_id: String) -> 
     engine(&state).await?.create_invite(community).await.map_err(err)
 }
 
+/// The long form of a community's invite, which versions before short invites can open.
+#[tauri::command]
+pub async fn create_full_invite(state: State<'_, AppState>, community_id: String) -> Result<String, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.create_full_invite(community).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn join_community(state: State<'_, AppState>, invite: String) -> Result<CommunitySummary, String> {
     engine(&state).await?.join_community(&invite).await.map_err(err)
+}
+
+/// The card for an invite link, before joining. Takes either the long or the short form. The JSON
+/// has `community`, `name`, `icon`, `member_count`, `online_count`, `created_ms`, `invite`
+/// (`live`, `revoked`, `expired` or `unknown`) and `already_member`.
+#[tauri::command]
+pub async fn invite_preview(state: State<'_, AppState>, link: String) -> Result<InvitePreviewView, String> {
+    engine(&state).await?.invite_preview(&link).await.map_err(err)
 }
 
 #[tauri::command]
@@ -260,6 +275,43 @@ pub async fn moderate(
     let action = parse_action(&action)?;
     let user: RootId = parse("user id", &user)?;
     engine(&state).await?.moderate(community, action, user).await.map_err(err)
+}
+
+/// Whether member-only control is on, and whether the owner may turn it on yet. See `MemberOnlyStatus`.
+#[tauri::command]
+pub async fn member_only_status(
+    state: State<'_, AppState>,
+    community_id: String,
+) -> Result<dissent_core::MemberOnlyStatus, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.member_only_status(community).await.map_err(err)
+}
+
+/// Turns member-only control on or off. Owner only, and on only once every member device supports it.
+#[tauri::command]
+pub async fn set_member_only(
+    state: State<'_, AppState>,
+    community_id: String,
+    on: bool,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_member_only(community, on).await.map_err(err)
+}
+
+/// Sets which past control content a new member is given keys for: `all` or `since_join`.
+#[tauri::command]
+pub async fn set_history_visibility(
+    state: State<'_, AppState>,
+    community_id: String,
+    setting: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let setting = match setting.as_str() {
+        "all" => dissent_core::HistorySetting::All,
+        "since_join" => dissent_core::HistorySetting::SinceJoin,
+        other => return Err(format!("unknown history setting: {other}")),
+    };
+    engine(&state).await?.set_history_visibility(community, setting).await.map_err(err)
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 // Main pane: header, message list and composer. The same markup serves channels and DMs.
 import { state, subscribe, notify, canModerate, inServer } from '../state.js';
 import * as actions from '../actions.js';
-import { el, avatar, stackAvatar, icon, linkify, dayKey, dayLabel, clockLabel, whenLabel, stampLabel, setHue, toast, copyText, skeletonRows } from '../ui.js';
+import { el, avatar, stackAvatar, icon, initials, linkify, dayKey, dayLabel, clockLabel, whenLabel, stampLabel, setHue, toast, copyText, skeletonRows } from '../ui.js';
 import { addressOf, shortOf } from '../address.js';
 import { confirmDialog, openInviteDialog, openSafetyDialog, openFileSendDialog, openNewGroupDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
@@ -337,7 +337,8 @@ function render() {
   const keyNotice = view.dm && !view.group && has('key_change') && state.peerProfile?.key_changed_ms
     ? [keyChangeBanner(view)]
     : [];
-  list.replaceChildren(...head, ...keyNotice, ...rows);
+  const historyNotice = !view.dm && has('member_only') && state.community?.history_locked ? [historyLockedBanner()] : [];
+  list.replaceChildren(...head, ...keyNotice, ...historyNotice, ...rows);
   if (switched || wasAtBottom) list.scrollTop = list.scrollHeight;
   listKey = view.key;
 
@@ -442,7 +443,9 @@ function toolNodes(view) {
     const who = view.title;
     const suffix = state.peerProfile?.suffix ?? '';
     return [
-      has('calls') ? iconButton('phone', `Start voice call with ${who}`, () => actions.startCall(peer)) : null,
+      has('calls') ? (state.group
+        ? iconButton('phone', `Start a voice call in ${who}`, () => actions.joinGroupCall(state.group.id))
+        : iconButton('phone', `Start voice call with ${who}`, () => actions.startCall(peer))) : null,
       has('groups') ? iconButton('users-round', 'Add friends to group', () => openNewGroupDialog({ preselect: [{ root_id: peer, display_name: who, suffix }] })) : null,
       iconButton('panel-right', open ? 'Hide profile panel' : 'Show profile panel', () => actions.toggleProfile(), open),
     ];
@@ -532,13 +535,16 @@ function messageRow(item, view, start) {
   const cards = has('embeds') && !item.deleted && item.embeds?.length
     ? spoilerGuard(item, el('div', { class: 'embeds' }, item.embeds.slice(0, 3).map(embedCard).filter(Boolean)))
     : null;
+  const invites = !item.deleted && inviteLinks(item.text).length
+    ? spoilerGuard(item, el('div', { class: 'embeds' }, inviteLinks(item.text).map(inviteCard)))
+    : null;
   const content = start
     ? el('div', { class: 'msg-content' },
       el('div', { class: 'msg-head' },
         authorButton(item),
         el('time', { title: stampLabel(item.ms), text: whenLabel(item.ms) })),
-      bodyOrNull, cards, files, pending, reactions)
-    : el('div', { class: 'msg-content' }, bodyOrNull, cards, files, pending, reactions);
+      bodyOrNull, cards, invites, files, pending, reactions)
+    : el('div', { class: 'msg-content' }, bodyOrNull, cards, invites, files, pending, reactions);
   const row = el('article', { class: classes, 'data-id': item.id, tabindex: '-1' },
     item.replyTo ? replyRef(item.replyTo) : null,
     gutter, content, editing ? null : rowActions(item, view));
@@ -676,9 +682,11 @@ const revealed = new Set();
 
 function bodyNode(item) {
   if (item.deleted) return el('p', { class: 'body deleted', text: 'message deleted' });
+  const shown = bodyText(item.text);
+  if (!shown && item.text) return null;
   const hidden = channelVisibility() === 'spoiler' && !revealed.has(item.id);
   const body = el('p', { class: `body${hidden ? ' spoiler-hidden' : ''}` },
-    highlight(linkify(item.text), state.ui.filter),
+    highlight(linkify(shown), state.ui.filter),
     item.edited ? el('span', { class: 'edited', text: ' (edited)' }) : null);
   if (hidden) {
     const reveal = () => { revealed.add(item.id); notify('main'); };
@@ -814,6 +822,9 @@ function openMessageMenu(item, view, x, y, anchor) {
     view.social && !item.deleted ? { label: 'Add reaction', icon: 'smile-plus', onPick: () => pickReaction(item, anchor) } : null,
     view.social && !item.deleted ? { label: 'Reply', icon: 'reply', onPick: () => startReply(item) } : null,
     !item.deleted && item.text ? { label: 'Copy text', icon: 'copy', onPick: () => copyMessage(item.text, 'Text copied') } : null,
+    !item.deleted && inviteLinks(item.text).length === 1
+      ? { label: 'Copy invite link', icon: 'link', onPick: () => copyMessage(inviteLinks(item.text)[0], 'Invite link copied') }
+      : null,
     item.own && !item.deleted ? { label: 'Edit message', icon: 'pencil', onPick: () => beginEdit(item.id) } : null,
     canDelete(item, view) && !item.deleted
       ? { label: 'Delete message', icon: 'trash-2', danger: true, onPick: (e) => removeMessage(item.id, e?.shiftKey) }
@@ -1036,6 +1047,13 @@ function keyChangeBanner(view) {
     el('button', { class: 'ghost', text: 'Compare', onclick: () => openSafetyDialog(view.peer) }));
 }
 
+// Notice at the top of a server whose older control events wait for a member to send their epoch key.
+function historyLockedBanner() {
+  return el('div', { class: 'key-banner inline', role: 'status' },
+    icon('lock'),
+    el('span', { text: 'Waiting for a member to unlock history' }));
+}
+
 // A link preview from the sender's sealed message. The client never fetches the url: the card only shows the fields
 // the sender included, and an image only when it is a local path the backend wrote (through convertFileSrc).
 function embedCard(e) {
@@ -1056,4 +1074,84 @@ function richCard(e) {
     el('div', { class: 'rich-title', text: e.title ?? '' }),
     e.subtitle ? el('span', { class: 'rich-chip', text: e.subtitle }) : null,
     tile);
+}
+
+// ---- invite links: a card under the message, from the backend's preview ----
+
+const INVITE_RE = /dissent:\/\/invite\/[^\s<>"']+/g;
+
+// The invite links in a message, without the punctuation a sentence puts after one.
+function inviteLinks(text) {
+  return [...String(text ?? '').matchAll(INVITE_RE)].map((m) => m[0].replace(/[.,;:!?)\]}]+$/, ''));
+}
+
+// With exactly one invite link and only a short label beside it ("Join X: <link>"), the body keeps the label and the card
+// carries the link. Any other text is shown as written.
+function bodyText(text) {
+  if (inviteLinks(text).length !== 1) return text;
+  const label = String(text).replace(INVITE_RE, '').replace(/^[\s:\u2013\u2014-]+|[\s:\u2013\u2014-]+$/g, '');
+  return label.length <= 60 && !label.includes('\n') ? label : text;
+}
+
+// Previews by link for this session, so a re-render shows the same card without asking the backend again.
+const invitePreviews = new Map();
+
+function previewOf(link) {
+  if (!invitePreviews.has(link)) {
+    const pending = actions.invitePreview(link);
+    invitePreviews.set(link, pending);
+    pending.catch(() => invitePreviews.delete(link));
+  }
+  return invitePreviews.get(link);
+}
+
+// The card under a message: a loading line, then the server's preview, or why the preview failed.
+function inviteCard(link) {
+  const card = el('article', { class: 'invite-card' }, el('div', { class: 'invite-body' }, el('p', { class: 'invite-note', text: 'Loading invite...' })));
+  previewOf(link).then(
+    (preview) => card.replaceChildren(...invitePreviewParts(link, preview)),
+    (err) => card.replaceChildren(el('div', { class: 'invite-body' },
+      el('div', { class: 'invite-name', text: 'Could not load this invite' }),
+      el('p', { class: 'invite-note', text: typeof err === 'string' ? err : (err?.message ?? String(err)) }))),
+  );
+  return card;
+}
+
+function invitePreviewParts(link, p) {
+  const dead = p.invite === 'revoked' || p.invite === 'expired';
+  const join = p.already_member
+    ? el('button', { class: 'invite-join joined', text: 'Joined', title: 'Go to server', onclick: () => actions.openServer(p.community) })
+    : el('button', { class: 'primary invite-join', text: dead ? 'Invite expired or revoked' : 'Join', disabled: dead, onclick: (e) => joinInvite(link, p, e.currentTarget) });
+  return [
+    setHue(el('div', { class: 'invite-banner' }, inviteIcon(p)), p.community),
+    el('div', { class: 'invite-body' },
+      el('div', { class: 'invite-name', text: p.name }),
+      el('p', { class: 'invite-stats' },
+        el('span', { class: 'invite-dot online', 'aria-hidden': 'true' }), `${p.online_count} Online`,
+        el('span', { class: 'invite-sep', text: '·' }),
+        el('span', { class: 'invite-dot', 'aria-hidden': 'true' }), `${p.member_count} ${p.member_count === 1 ? 'Member' : 'Members'}`),
+      el('p', { class: 'invite-meta muted', text: `Created ${dayLabel(p.created_ms)}` }),
+      join),
+  ];
+}
+
+// The server's picture from the backend's local path, or its initials when it has none.
+function inviteIcon(p) {
+  const convert = window.__TAURI__?.core?.convertFileSrc;
+  const src = p.icon && typeof convert === 'function' ? convert(p.icon) : null;
+  return src
+    ? el('img', { class: 'invite-icon', src, alt: '' })
+    : el('span', { class: 'invite-icon', 'aria-hidden': 'true', text: initials(p.name) });
+}
+
+async function joinInvite(link, preview, button) {
+  button.disabled = true;
+  button.textContent = 'Joining...';
+  const joined = await actions.joinCommunity(link);
+  if (joined) {
+    invitePreviews.set(link, Promise.resolve({ ...preview, already_member: true }));
+  } else {
+    button.disabled = false;
+    button.textContent = 'Join';
+  }
 }

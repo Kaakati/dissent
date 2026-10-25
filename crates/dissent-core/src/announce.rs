@@ -24,6 +24,7 @@ impl Engine {
 
     /// Signs and stores a new address of ours, then announces it.
     async fn on_own_addr(&self, addr: PeerAddr) {
+        let record_addr = addr.clone();
         let signed = {
             let mut guard = self.write();
             // Timestamps only move forward, even across restarts and clock steps.
@@ -49,6 +50,7 @@ impl Engine {
             signed
         };
         self.announce(&signed).await;
+        self.refresh_own_record(record_addr).await;
         self.spawn_publish_records();
     }
 

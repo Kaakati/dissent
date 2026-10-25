@@ -1,0 +1,105 @@
+/* The shell parts that utilities cannot express cleanly: the app grid (its columns follow the right column), the
+   presence glyphs (each state has its own shape, so colour is never the only cue) and the rail's navigation pill.
+   Everything else in the shell is a utility class. Values are the ones in apps/desktop/ui/style.css. */
+
+/* In a layer below the utilities, so a utility class (a size, an offset) can still change these. */
+@layer components {
+  .app-shell {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) 0;
+  }
+  .app-shell[data-right="members"],
+  .app-shell[data-right="profile"],
+  .app-shell[data-right="call"] {
+    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) var(--right-w);
+  }
+  .app-shell[data-right="wide"] {
+    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) var(--right-wide-w);
+  }
+
+  /* Presence dot. --presence-ring is the surface it sits on: the sidebar by default, the user panel where it is set. */
+  .presence {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--presence-ring, var(--sidebar));
+    overflow: hidden;
+  }
+  .presence.idle {
+    background: var(--warn);
+  }
+  .presence.idle::after {
+    content: "";
+    position: absolute;
+    top: -30%;
+    right: -40%;
+    width: 90%;
+    height: 90%;
+    border-radius: 50%;
+    background: var(--presence-ring, var(--sidebar));
+  }
+  .presence.dnd {
+    background: var(--danger);
+  }
+  .presence.dnd::after {
+    content: "";
+    position: absolute;
+    left: 22%;
+    right: 22%;
+    top: 50%;
+    height: 20%;
+    margin-top: -10%;
+    border-radius: 1px;
+    background: #fff;
+  }
+  .presence.offline {
+    background: var(--presence-ring, var(--sidebar));
+    box-shadow: inset 0 0 0 2px var(--offline), 0 0 0 3px var(--presence-ring, var(--sidebar));
+  }
+
+  /* The rail's navigation pill: 8 px when unread, 20 px on hover, 40 px when active. Only transform animates. */
+  .rail-item::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 4px;
+    height: 40px;
+    border-radius: 0 4px 4px 0;
+    background: var(--text-strong);
+    transform: translateY(-50%) scaleY(0);
+    transition: transform var(--motion);
+  }
+  .rail-item.unread::before {
+    transform: translateY(-50%) scaleY(0.2);
+  }
+  .rail-item:hover::before {
+    transform: translateY(-50%) scaleY(0.5);
+  }
+  .rail-item.active::before {
+    transform: translateY(-50%) scaleY(1);
+  }
+}
+
+/* Font scale (lib/appearance.ts): zoom on the body scales every size, px included. The height is divided back so the
+   window still fills exactly. The app root takes the same height (App.tsx). */
+body {
+  zoom: var(--ui-zoom, 1);
+  height: calc(100vh / var(--ui-zoom, 1));
+}
+
+/* Compact density only changes tokens. Cozy is the default and needs no rule. */
+html[data-density='compact'] {
+  --row-channel: 32px;
+  --msg-group-gap: 10px;
+  --msg-pad: 1px;
+  --avatar-msg: 28px;
+  --msg-gutter: 56px;
+}

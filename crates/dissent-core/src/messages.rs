@@ -191,6 +191,12 @@ impl Engine {
         channel: ChannelId,
         payload: Payload,
     ) -> Result<SignedEvent> {
+        // Read before the lock: the MLS group is never touched while the world is locked.
+        let member = if dissent_events::is_member_sealable(&payload) {
+            self.member_seal(community)?
+        } else {
+            None
+        };
         let mut guard = self.write();
         let World {
             paths,
@@ -220,10 +226,16 @@ impl Engine {
             hlc,
             payload,
         };
-        // Control payloads are sealed under the current secret. Without one, nothing is sent.
+        // Control payloads are sealed under the epoch key while member-only control is on, and under
+        // the current secret otherwise. Without a key, nothing is sent.
         if dissent_events::is_sealable(&body.payload) {
-            let keys = access.get(&community).ok_or_else(|| not_found(&community))?;
-            body.payload = dissent_events::seal(&keys.secret, keys.generation, &body)?;
+            body.payload = match &member {
+                Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,
+                None => {
+                    let keys = access.get(&community).ok_or_else(|| not_found(&community))?;
+                    dissent_events::seal(&keys.secret, keys.generation, &body)?
+                }
+            };
         }
         let event = Event::sign(body, &self.inner.identity.device);
         let se = SignedEvent {

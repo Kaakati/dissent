@@ -79,6 +79,12 @@ pub(crate) struct World {
     pub my_addr_ts: u64,
     /// Our latest signed address, passed on to others and re-broadcast on the community topics.
     pub my_signed: Option<SignedAddr>,
+    /// Our address record for peer exchange. Re-signed every ten minutes. Not stored.
+    pub own_record: Option<crate::addr_record::AddrRecord>,
+    /// Verified address records of other devices that we may share. Not stored; see `addr_record`.
+    pub addr_cache: crate::addr_record::RecordCache,
+    /// Limits how often each peer may push records to us.
+    pub push_limiter: crate::addr_record::PushLimiter,
     /// This device's own profile picture, if it has one.
     pub own_avatar: Option<Picture>,
     /// Pictures from contacts' direct profiles, by root, with the HLC of each.
@@ -119,6 +125,13 @@ impl World {
         for (id, c) in communities.iter_mut() {
             if let Some(keys) = access.get(id) {
                 c.set_ring(keys.history.clone());
+                match crate::epoch_keys::load(&paths, vault, id) {
+                    Ok(epochs) => {
+                        c.set_epoch_ring(epochs.enc_ring());
+                        c.epochs = epochs;
+                    }
+                    Err(e) => warn!(community = %id, error = %e, "could not read the epoch keys"),
+                }
                 // Startup runs no side effects. Events that were stored before are already applied.
                 let _ = c.take_unhandled(&[]);
             }
@@ -157,6 +170,9 @@ impl World {
             my_addr: None,
             my_addr_ts,
             my_signed,
+            own_record: None,
+            addr_cache: Default::default(),
+            push_limiter: Default::default(),
             own_avatar,
             peer_avatars,
         })
@@ -286,6 +302,14 @@ impl World {
             channels,
             members,
             relays: c.state().relays.clone(),
+            member_only: c.state().member_only,
+            // Some control events are waiting for a key this device lacks, so the history is not all
+            // readable yet. A member that holds the key sends it when asked.
+            history_locked: c
+                .state()
+                .rejected
+                .iter()
+                .any(|(_, why)| *why == dissent_events::Rejection::Locked),
             // The engine fills in the people in each voice channel, which it hears on the calls side.
             voice_channels: Vec::new(),
         }

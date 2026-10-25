@@ -10,6 +10,7 @@ members = [
     "crates/dissent-media",
     "crates/dissent-files",
     "crates/dissent-audio",
+    "crates/dissent-video",
     "apps/seeder",
     "apps/relay",
     "apps/probe",
@@ -33,6 +34,7 @@ dissent-core = { path = "crates/dissent-core" }
 dissent-mls = { path = "crates/dissent-mls" }
 dissent-media = { path = "crates/dissent-media" }
 dissent-audio = { path = "crates/dissent-audio" }
+dissent-video = { path = "crates/dissent-video" }
 
 anyhow = "1"
 thiserror = "2"
@@ -44,6 +46,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ed25519-dalek = { version = "3", features = ["rand_core", "serde"] }
 rand = "0.10"
+proptest = "1"
 blake3 = "1"
 bip39 = "3"
 hex = "0.4"
@@ -69,6 +72,7 @@ rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
 mime_guess = "2"
 futures-lite = "2"
+n0-future = "0.3"
 negentropy = "0.5"
 unicode-security = "0.1"
 unicode-normalization = "0.1"
@@ -98,6 +102,14 @@ nnnoiseless = "0.5"
 ringbuf = "0.5"
 bytes = "1"
 fs4 = "1"
+# AV1 encoder: SVT-AV1 built from source. Needs git, a C compiler and nasm (see docs/design/04-calls.md).
+shiguredo_svt_av1 = { version = "2026.2", features = ["source-build"] }
+# H.264 fallback. The crate bundles OpenH264 source and compiles it with cc.
+openh264 = "0.9"
+rav1d = { version = "1", default-features = false, features = ["bitdepth_8"] }
+nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
+xcap = "0.9"
+image = { version = "0.25", default-features = false }
 
 [profile.dev]
 # Line tables are enough for backtraces and stepping, and they link much faster than full debuginfo.
@@ -119,4 +131,8 @@ lto = "thin"
 codegen-units = 1
 
 [profile.dev.package.dissent-audio]
+opt-level = 2
+
+# Codec wrappers are generic code instantiated in this crate, so its tests need the optimised build.
+[profile.dev.package.dissent-video]
 opt-level = 2

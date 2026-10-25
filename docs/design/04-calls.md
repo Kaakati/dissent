@@ -236,6 +236,238 @@ Each frame's payload starts with a flag. When redundancy is on, the flag is foll
 
 Redundancy turns on above 10% reported loss, and off again below 5%, so it does not flap. A test drops every fifth packet on a 1:1 call: without redundancy 238 of 250 frames arrived, and with it all 250 did. The cost is that each frame carries the previous one, so the payload roughly doubles.
 
+## Video
+
+Status: **phase 1 built**, in `crates/dissent-video`. The crate holds the capture sources, the AV1 codec pair, the bitrate policy and the send queue, each behind a trait. It is not wired into `dissent-media`, the desktop app or the UI. Phase 2 does that wiring.
+
+### Codecs
+
+- **AV1 encoder: SVT-AV1 v4.2.0**, through `shiguredo_svt_av1` built with its `source-build` feature. The crate clones SVT-AV1 at build time with `git clone --depth 1 --branch v4.2.0` from gitlab.com. The tag is not checked against a commit or hash, so the source is pinned only as far as that tag is trusted. It builds with CMake, which the crate downloads from Kitware's GitHub releases and checks against a SHA-256 pinned in `shiguredo_cmake` 4.4.0. SVT needs NASM for its x86 assembly. The encoder sits behind the `svt-av1` cargo feature, which is off by default, so a plain build needs no NASM, libclang or CMake download. Without the feature a call offers H.264 only. Real-time coding at preset 12 is the measured choice for calls. rav1e is removed. It was 10 to 20 times slower and had no non-real-time use here.
+- **AV1 decoder: rav1d 1.1.** A pure Rust port of dav1d, built for 8-bit with no assembly. dav1d's C library needs meson and NASM, so the Rust port is used instead. One thread and no frame delay, so a chunk yields its frame on the same call. The only `unsafe` in the crate is in `decode/av1.rs`, which wraps rav1d's dav1d-shaped API.
+- **H.264 encoder and decoder: OpenH264** through the `openh264` crate. Its `openh264-sys2` build compiles the bundled OpenH264 source with `cc`. The build is pure C here: `OPENH264_NO_ASM=1`. Its NASM path compiles the assembly, but the objects never reach the static library. The link then fails with unresolved SSE symbols on MSVC. Pure C is slower, so H.264 is kept to the lowest rung, 360p.
+- **VP8: not built.** H.264 is the fallback instead.
+- **Negotiation.** `codec::negotiate(ours, theirs)` returns the codecs both sides support, in preference order. AV1 comes first whenever both sides have it. H.264 is picked when a peer lacks AV1. An empty result means no call. `VideoAdapter::with_codecs` keeps only the rungs for the negotiated codecs.
+
+**Build requirements.** Only with `--features svt-av1`. SVT-AV1 is built from source on every platform, so each one needs these:
+
+| OS | Needs at build time |
+| --- | --- |
+| Windows (MSVC) | NASM, LLVM's libclang (bindgen), git with `core.longpaths` on, and the Visual Studio C++ toolchain. CMake is downloaded by the crate. |
+| macOS (arm64, x64) | NASM (Homebrew), git, and the Xcode command-line tools (Apple's clang and libclang). CMake is downloaded by the crate. |
+| Linux | NASM and libclang-dev, plus git and a C compiler. CMake is downloaded by the crate. |
+
+Build time: a cold SVT-AV1 source build takes about ten minutes on this Windows machine and runs once per target directory. Later builds reuse it.
+
+The release workflow's `codecs` job installs these per OS in a marked block. It builds and tests `dissent-video` on Windows, macOS arm64 and Linux. macOS Intel is not built. There is no pinned Intel runner.
+
+**Hardware encoders are next, not now.** NVENC, Media Foundation, VideoToolbox and VAAPI would each need their own binding and a runtime probe. `VideoEncoder` is the seam they plug into. They are out of scope for this phase.
+
+**CPU cost.** Release build through the integrated path (`encode::open`, the same call the app will make), 1280x720, 1000 kbps, 30 frames of the noisy test pattern, mean encode time per frame including the final flush:
+
+| Codec | Encoder | ms per frame at 720p | Share of the 33 ms budget |
+| --- | --- | --- | --- |
+| AV1 | SVT-AV1 v4.2.0, preset 12, real-time, CBR | 9.9 | 30% |
+| H.264 | OpenH264, pure C build | 12.4 | 38% |
+
+This 24-thread Windows machine was shared with other builds, so the figures are rough. The test pattern has more detail than screen content, so real AV1 cost is likely lower.
+
+Reference numbers for SVT-AV1 and the old encoder, measured on the same host:
+
+- rav1e (removed) took 83 to 106 ms at 720p and 118 ms at 360p with its defaults. Eight tile columns and look-ahead 1 brought 720p to 73 ms. It never reached the budget, even with tuning.
+- ffmpeg's `libsvtav1` at preset 12 on the easier `testsrc2` content took 2.9 ms at 720p, 300 frames. The gap to 9.9 ms is the content, plus the wrapper overhead.
+- Linux Docker, 14 cores: `libsvtav1` took 2 ms at 360p and 5 ms at 720p. Its numbers are not from the integrated path.
+
+**Quality and rate.** At 160x90 and 30 fps, the default test drops from 65 kbps to 17 kbps within a second of a `set_bitrate(40)` call. The encoder spends well under a low target at this size, so the test checks the relative drop instead of the absolute rate. rate control is fixed when SVT-AV1 is created, so `set_bitrate` finishes the old encoder, keeps its chunks, and builds a new one. The new encoder starts on a keyframe. OpenH264 is rebuilt the same way.
+
+### Capture
+
+- **Camera:** nokhwa 0.10. Media Foundation on Windows, AVFoundation on macOS. V4L2 on Linux is compiled out for now (see Linux below). It asks for the closest mode to the requested size and fps. The source scales what the device delivers to the requested size.
+- **Screen and window:** xcap 0.9, which wraps the platform capture APIs on Windows, macOS and Linux. It lists displays and visible titled windows, and paces capture to the frame rate. A target is looked up on every frame, because xcap's monitor handle is not `Send` on Windows.
+- **Cursor:** xcap draws no cursor. `Cursor::Excluded` is the only supported mode, and `Cursor::Included` returns `VideoError::Unsupported`. The option is kept so it can light up when a backend can draw the cursor.
+- **Test source:** `PatternSource`, which is deterministic and needs no hardware. It drives the tests and CI.
+
+On Linux, screen capture is compiled out and every call returns `VideoError::Unsupported`. xcap's Linux backend needs the pipewire, wayland, EGL and xcb development packages at build time, and the release workflow does not install them. Camera capture is compiled out on Linux as well. nokhwa's V4L2 backend runs bindgen, which needs libclang, and a plain Linux build must not need it. Linux camera capture is the next step, after libclang is added to the build or the V4L2 binding is replaced.
+
+### Rate control
+
+Audio always keeps its reserve, and video gets what is left:
+
+```text
+audio_reserve = audio_target * 1.25 + 16 kbps
+budget        = max(0, available - audio_reserve)
+```
+
+`VideoAdapter::update` takes one sample per call and returns a `VideoPlan` with the rung, size, fps and encoder bitrate.
+
+| Content | Ladder, best first (size, fps, bitrate range) |
+| --- | --- |
+| Camera | AV1 720p 30 fps, 1000-2500 kbps; AV1 720p 15 fps, 600-1000 kbps; AV1 360p 15 fps, 250-600 kbps; H.264 360p 15 fps, 150-400 kbps |
+| Screen | AV1 1080p 15 fps, 1500-3000; AV1 1080p 10 fps, 1000-1500; AV1 1080p 5 fps, 700-1000; AV1 720p 10 fps, 400-700; AV1 720p 5 fps, 250-400; H.264 360p 10 fps, 150-250 kbps |
+
+- **Order of steps.** Bitrate moves first within a rung. Then frame rate drops. Then resolution drops. Screen content drops frame rate before resolution, so text stays sharp.
+- **Pause.** Below the lowest rung's minimum, which is 150 kbps for both camera and screen, video pauses at once. It does not wait for a streak, so audio is protected immediately.
+- **Hysteresis.** A step down needs three samples below the rung's minimum. A step up needs five samples above the minimum plus 20%. A bitrate increase needs a 10% change, while decreases apply on the same sample. A budget that hovers at a threshold therefore does not flap. The unit tests cover this.
+- **Invariant.** A non-paused plan never sends more than `budget`, so video plus the audio reserve never exceeds the available bandwidth.
+
+### Runtime downgrade
+
+`CpuGovernor` decides from measured encode time whether the encoder keeps up at the current rung. It keeps an exponential average of encode time per frame. A run of ten frames with the average above 80% of the frame period moves the floor one rung down. A run of 60 frames where the next rung up would fit under 50% of its period moves it back up. Pixels times frame rate predicts the cost of the rung above. After each verdict the averages restart, since the encoder is rebuilt. `VideoAdapter::apply_cpu` raises or lowers the quality floor, and bandwidth still applies on top. The audio reserve is not changed.
+
+The lowest rung of each ladder is H.264 at 360p. A slow AV1 encoder therefore falls back in three steps: frame rate, then resolution, then codec. Each step is one `CpuVerdict::Downgrade`. The floor only moves down the ladder, and an upgrade moves it back one rung at a time.
+
+### Priority and pause
+
+`SendQueue` is a pure component, with time passed in. Phase 2 puts it in front of the link.
+
+- Audio is always sent before video and is never dropped for age.
+- A video packet older than 200 ms is dropped, along with the frames before the next fresh keyframe. If no fresh keyframe exists, all queued video is dropped.
+- After a drop, delta frames are refused until a keyframe arrives, since they depend on lost data.
+
+### Bandwidth and SFrame
+
+Video frames use the same SFrame media key and per-sender key IDs as audio (the sections above on keys and frame path). The frame header stays in the clear, so forwarders can still route by sender without decrypting. Video joins the sender-authentication digests: a digest batch covers ten frames or 200 ms, whichever is first. A keyframe can span many packets. A forwarder must forward a keyframe whole or not at all, which is the same rule as the queue's drop.
+
+### Not built in this phase
+
+- **Hardware encoders:** NVENC, Media Foundation, VideoToolbox and VAAPI. They are the next step. Each needs a binding and a runtime probe, and `VideoEncoder` is the seam.
+- **VP8.** H.264 is the fallback instead.
+- **Cursor capture.** xcap draws no cursor, so `Cursor::Included` returns `Unsupported`.
+- **Linux camera capture.** `camera.rs` is compiled out on Linux. nokhwa's V4L2 backend runs bindgen and needs libclang, which a plain build must not need. On Linux `CameraSource::open` is absent, so the media layer cannot open a camera there until this lands.
+- **Linux screen capture.** xcap's Linux backend needs pipewire, wayland, EGL and xcb development packages, which the release workflow does not install. Camera capture on Linux waits on libclang for nokhwa's V4L2 backend.
+- **Wiring into `dissent-media`, the app and the UI.**
+- **SVT log noise.** SVT-AV1 writes `Svt[info]` and `SvtMalloc[info]` lines to stderr. Set the `SVT_LOG` environment variable to a level above info (see `Lib/Codec/svt_log.c` in SVT-AV1) before the app ships.
+
+
+## Video phase 2 plan
+
+Status: **planned, not started.** Phase 2 wires `dissent-video` into `dissent-media`, `dissent-core` and the desktop app. Spike results are recorded below, and the build waits for core and media to be free.
+
+### What the sources show
+
+1. **str0m packetizes AV1 and H.264 itself.** `Writer::write` runs the codec packetizer for the payload type (`str0m/src/packet/h264.rs`, `av1.rs`). Those packetizers parse NAL units or OBUs, so an SFrame ciphertext handed to them would come out mangled. Opus is the only pass-through: `OpusPacketizer` only splits at the MTU. Audio frames are one Opus packet and never fragment, which is why audio works today.
+2. **The call negotiates Opus only.** `new_rtc` (`dissent-media/src/call.rs:115`) calls `clear_codecs()` and `enable_opus(true, false)`. The only media line is audio (`call.rs:273`). `MediaAdded` handling covers audio only (`call.rs:654`).
+3. **Keyframe requests are not handled.** `on_event` (`call.rs:652`) ignores `Event::KeyframeRequest`. str0m emits it when a receiver sends PLI or FIR.
+4. **str0m's congestion estimate is not used, and not enabled.** str0m emits `Event::EgressBitrateEstimate(BweKind)` (`str0m/src/lib.rs:1014`), and `on_event` drops it. The audio target comes from the RTT and loss estimator in `dissent-media/src/bwe.rs`. str0m's own estimate fires only when `enable_bwe` is set in the config, which `new_rtc` does not do.
+5. **The forwarder treats every datagram as audio.** `forward` (`sfu.rs:271`) takes the sender from the key ID and reads an audio level for `Link::Down`. A video chunk cannot pass through that code unchanged.
+6. **The desktop camera path stops at a stub.** `toggleCamera` (`ui/actions.js:749`) calls `set_camera` (`apps/desktop/src-tauri/src/part6.rs:267`), which calls `Engine::set_camera` (`dissent-core/src/calls.rs:2269`). That returns "video is not built yet" when the camera turns on. The lobby and incoming views leave video out (`ui/views/lobby.js:4`, `ui/views/incoming.js:3`). No screen-share control exists in the UI.
+7. **macOS has no camera usage string.** `tauri.conf.json` has no `NSCameraUsageDescription`, and macOS refuses camera access without one.
+
+### Decision: option E, an H.264 carrier on the writer path
+
+Each encrypted video frame is one NAL unit on the video m-line, escaped so no start code can appear inside it. str0m fragments it into FU-A packets and reassembles it on the receiver. Audio stays on the writer path, unchanged.
+
+The options that were rejected:
+
+| Option | What it does | Verdict |
+| --- | --- | --- |
+| A. RTP mode | `set_rtp_mode(true)` makes the whole `Rtc` RTP-only, and `Writer::write` panics (`str0m/src/lib.rs:1466`). The mode is per `Rtc`, not per media line (`session.rs:216`), so audio would move too. | Rejected. Audio was just tuned and works today, and RTP mode would change its packetization. |
+| B. Opus pass-through for video | Write video chunks through the Opus packetizer. | Rejected. The SDP would name the wrong codec. |
+| C. Fork str0m | Add a pass-through video packetizer. | Fallback only. It costs a fork. |
+| D. SCTP unreliable channel | Send video over a data channel with no retransmits. | Rejected. It loses RTP feedback, the pacer and PLI. |
+| E. H.264 carrier | Escaped SFrame ciphertext as one H.264 NAL unit on the writer path. | **Chosen.** |
+
+**Why the SDP says H.264.** The SDP label is only the carrier. str0m needs a codec with a packetizer that accepts an arbitrary NAL, and H.264 is the one that does. The real codec, AV1 or H.264, is chosen in our own signalling, after the connection is up, and rides in the clear chunk header. Nothing outside dissent reads these bytes as H.264. Interoperability with real H.264 or AV1 endpoints is not a goal for calls.
+
+**The guard against str0m changes.** A str0m upgrade that starts parsing NAL contents would break option E silently. The spike's carrier tests (`escape`/`unescape` round trip, FU-A reassembly of a 50 KB NAL, 5% loss) move into `dissent-media` as regression tests, so CI fails on such an upgrade.
+
+### Spike results
+
+Measured in an in-memory harness on str0m 0.24.1, the same version as v0.1.4 and HEAD. Scratch crate outside the workspace.
+
+- **Audio, writer path versus RTP mode.** Both deliver 50 of 50 Opus frames unchanged. RTP mode keeps 960-tick RTP timestamps and carries transport-cc sequence numbers. Neither mode emitted a bandwidth estimate in the audio-only run.
+- **PLI through RTP-mode streams.** Works, and so does PLI on the writer path.
+- **50 KB frames with 5% loss, RTP mode with NACK and RTX.** 3,744 of 3,750 packets were recovered. 57 of 60 frames were complete. The residual is why RTX is required and why PLI stays in the design.
+- **H.264 carrier, writer path, 5% loss.** 60 of 60 frames match exactly after unescaping.
+- **Bandwidth estimate.** `EgressBitrateEstimate` fired 17 times in 12 s of 1.36 Mbps video, with `enable_bwe(Some(1000 kbps))`. TWCC estimates rose from 1,000 to 1,555 kbps. With BWE off, zero events. TWCC was already negotiated on the video m-line by default. So `enable_bwe` goes in `new_rtc`, with an initial estimate.
+- **Loss matrix, option E, 600 frames at 30 fps, 5 KB deltas and 25 KB keyframes every 30 frames.**
+
+| Loss | With NACK and RTX: frames complete | Without RTX: frames complete | Without RTX: PLI sent | Without RTX: recovery p50 / p95 / max |
+| --- | --- | --- | --- | --- |
+| None | 600/600 | 600/600 | 0 | n/a |
+| Random 1% | 600/600 | 248/600 | 39 | 0 / 0.92 / 1.08 s |
+| Random 5% | 600/600 | 101/600 | 81 | 0.31 / 1.88 / 2.55 s |
+| Random 10% | 600/600 | 15/600 | 98 | 4.07 / 5.04 / 5.04 s |
+| Burst about 5% | 600/600 | 277/600 | 35 | 0.13 / 0.80 / 1.00 s |
+
+Single runs with one seed each. Recovery was measured on the simulated clock.
+
+**Conclusions from the spike:**
+- **RTX on the carrier payload type is required.** Without it, PLI alone is too slow above 1% loss, because each recovery depends on one intact keyframe of about 21 packets.
+- **`enable_bwe` goes in `new_rtc`, with an initial estimate.** Without it the estimate never fires.
+- **str0m forces NACK on for every video payload type** (`add_config` sets `fb_nack` true). It cannot be turned off through the public API. With RTX absent, NACKs are sent but never answered.
+- **Keyframes are capped at about 2× a delta frame.** Keyframes are the recovery bottleneck, so their size is limited. The encoder work must check the controls it has:
+  - **SVT-AV1** (`shiguredo_svt_av1`): `intra_refresh_type` (`KfRefresh` for closed-GOP; `FwdkfRefresh` is incompatible with CBR), `startup_qp_offset` (QP offset for the startup GOP only, not general keyframes), `max_qp_allowed`, and `intra_period_length`. A per-keyframe QP cap is not exposed, so the cap is enforced by `max_qp_allowed` on all frames or by a keyframe interval shorter than the current one.
+  - **OpenH264** (`openh264` 0.9.9): `qp(QpRange)` applies to all frames, `intra_frame_period`, and `force_intra_frame`. There is no intra-refresh mode and no keyframe-specific QP. Keyframe size control needs a frame-size budget check and a re-encode with a higher QP, which is a later step.
+  - Until the encoder work confirms otherwise, the keyframe cap is a target, not a guarantee.
+
+### Wire format for option E
+
+Each video frame is one NAL unit: a one-byte NAL header, then the escaped body. The body is:
+
+- `frame_id` (u32): the sender's video frame counter.
+- `flags` (1 byte): keyframe, plus the rest reserved.
+- `codec` (1 byte): AV1 or H.264, the real codec, so the receiver knows what it is decoding. This is negotiated in our own signalling, not SDP.
+- the SFrame ciphertext.
+
+The SFrame header stays in the clear, so the forwarder still routes by key ID. Audio's wire format does not change. Since str0m fragments the NAL, there is no chunk index in our header. The forwarder can read the keyframe flag without decrypting, because it sits in the clear part of the body.
+
+### Negotiation
+
+- `new_rtc`: enable H.264 with `enable_h264(true)` and enable `enable_bwe(Some(initial estimate))`. Keep Opus. The payload type must have an RTX resend payload type, so `add_h264` or `add_config` is used for the video payload with `resend` set.
+- Put the video m-line in the first offer with `Direction::SendRecv`, even when the camera is off. Turning the camera on then needs no renegotiation.
+- **`m=video 0` means no video, not failure.** Spike 1 showed a str0m 0.24.1 answerer that lacks video answers `m=video 0`, and audio still completes (20 of 20 frames). The offerer must treat a rejected video m-line as "no video", and the call stays audio-only without an error. This must be tested in `dissent-media` (see the regression tests above).
+- The real codec, AV1 or H.264, is chosen in our own signalling, from `codec::negotiate` (`dissent-video/src/codec.rs`). AV1 is preferred when both sides have it, H.264 otherwise.
+- Receivers request keyframes with PLI or FIR, which map to `VideoEncoder::request_keyframe`. A resolution or fps change rebuilds the encoder, because both are fixed per encoder.
+- Handle `Event::MediaAdded` for video as well as audio.
+
+### Forwarder routing
+
+- `forward` takes the frame kind from the raw inbox, so video and audio get separate queues in `sfu.rs` and `link.rs`.
+- Video is relayed only for the top speakers already picked (`is_active`). Each downlink gets a whole keyframe or none of its frames.
+- Forwarders never decode, so their CPU cost stays at packet routing.
+- A listener that starts receiving a new speaker's video requests a keyframe from the forwarder, through the same request path as PLI.
+- Keyframe recovery: a downlink that sees a gap in `frame_id` drops delta frames and sends PLI upstream on its parent link, through `Writer::request_keyframe` on that link. A listener's PLI to its forwarder uses the same path. The receiver retries PLI every 200 ms until a keyframe arrives, as the spike did.
+- Mesh fan-out (`mesh.rs`) sends each encrypted frame once and relays it, with no re-encryption.
+
+### Bandwidth and congestion
+
+- **The audio reservation does not change.** The audio target still comes from `bwe.rs` through `on_target_bitrate`. The reservation stays `audio_target * 5 / 4 + 16` (`VideoAdapter::update`, `dissent-video/src/adapt.rs`).
+- **Video budget.** Handle `Event::EgressBitrateEstimate` in `call.rs`. The available bandwidth is str0m's estimate, and `VideoAdapter::update(available, audio_target)` gives the video budget after the reservation.
+- **CPU.** The governor's `apply_cpu` runs on the encoder timing, as in phase 1.
+
+### UI hooks
+
+- **Camera.** `toggleCamera` and `set_camera` already exist. Phase 2 replaces the stub at `calls.rs:2269` with a call into the media session, which opens `CameraSource`, runs the encoder and drives the send queue. The lobby preview (`ui/views/lobby.js`) and the incoming answer (`ui/views/incoming.js`) change from "off" to the real state.
+- **Remote video.** Decoded frames reach the UI through a Tauri `Channel`, one frame per message, as RGBA, drawn on a canvas tile per speaker. Remote video needs a new engine event beside `CallUpdated`.
+- **Share screen.** Part of the first cut, as the user asked. Linux has no screen capture yet, so it is Windows and macOS only.
+- **macOS.** Add `NSCameraUsageDescription` under `bundle.macOS` in `tauri.conf.json` before the first camera build.
+
+### Files to touch
+
+- `crates/dissent-media`: `call.rs` (codecs, BWE, video mid, events, `m=video 0` handling); new `video.rs` (the option E carrier, keyframe gating, PLI); `frame.rs` (video header); `sfu.rs` and `link.rs` (video queues, `forward`); `mesh.rs` (fan-out); `e2ee.rs` (video frames with the same keys); `auth.rs` (`for_video`, already present). `bwe.rs` and `election.rs` are unchanged. Regression tests from the spike live under `tests/`.
+- `crates/dissent-media/Cargo.toml`: depends on `dissent-video`. `dissent-video` is a leaf, so the dependency direction holds.
+- `crates/dissent-core/src/calls.rs`: a real `set_camera`, camera state, video events.
+- `apps/desktop/src-tauri/src/part6.rs`: `set_camera` wiring, the frame channel, and screen share.
+- `apps/desktop/src-tauri/tauri.conf.json`: `NSCameraUsageDescription`.
+- `apps/desktop/ui`: `actions.js`, `api.js`, `views/lobby.js`, `views/incoming.js`, the call view for tiles, `style.css`.
+- Not touched: `dissent-audio`, and the audio reservation in `adapt.rs`.
+
+### Test plan
+
+- **Carrier regression (in `dissent-media`, CI):** `escape`/`unescape` round trip; a 50 KB NAL survives FU-A fragmentation and reassembly; 5% loss delivers every frame intact with RTX; a str0m upgrade that parses NAL contents fails here.
+- **Unit, no network:** a gap drops deltas and asks for a keyframe; the keyframe flag is read from the clear part; SFrame video round trip across a key rotation; the `for_video` digest covers ten frames.
+- **Negotiation:** an offer with video from a peer without video answers `m=video 0`, and the call completes audio-only with no error. An audio-only offer to a video-capable answerer still completes.
+- **Integration, networked, `#[ignore]`, through `scripts/fwtest.sh` with `loopback_only`:** two peers get a first frame within 2 s, and the audio frame count is unchanged with video on. Loss runs repeat the spike's matrix. Three peers with the forwarder: only top speakers are forwarded.
+- **BWE:** with `enable_bwe`, `EgressBitrateEstimate` fires under sustained video; the video budget falls below the audio reservation's floor and never takes audio's share.
+- **Audio regression:** audio packet sizes and the reservation are checked before and after the change.
+- **Platform:** CI uses `PatternSource` for the video path, with no camera. A real camera and screen share are checked by hand on Windows and macOS.
+- **Benchmark:** 720p with three peers, forwarder CPU measured against the budget in "CPU cost".
+
+### Open decisions for the lead
+
+1. Keyframe cap: which encoder control to use, `max_qp_allowed` on all frames or a shorter keyframe interval for SVT, and whether OpenH264 needs a re-encode check. Needs an encoder spike.
+2. Screen share is in the first cut, as asked.
+
 ## Limits of the spike
 
 - No Opus codec, audio devices, or video. Frames are synthetic.

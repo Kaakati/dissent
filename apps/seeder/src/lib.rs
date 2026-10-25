@@ -185,10 +185,14 @@ pub fn node_config(loopback: bool) -> NodeConfig {
             relay: RelayChoice::Disabled,
             loopback_only: true,
             dht_lookup: false,
+            serves_lookups: true,
             ..NodeConfig::default()
         }
     } else {
-        NodeConfig::default()
+        NodeConfig {
+            serves_lookups: true,
+            ..NodeConfig::default()
+        }
     }
 }
 

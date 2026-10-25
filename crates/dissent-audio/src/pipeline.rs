@@ -11,20 +11,27 @@
 //!    to the playout device and to [`VoiceSender::push_far_reference`], which lets the echo
 //!    canceller remove the speaker's sound from the mic.
 //!
-//! Muted or push-to-talk-closed frames are sent as digital silence. The encoder then emits DTX
-//! packets, so the receiver never sees a gap and never runs concealment.
+//! Unvoiced frames, including muted and push-to-talk-closed ones, are digital silence. The encoder
+//! turns a run of silence into DTX packets of one or two bytes. The desktop call path does not
+//! send unvoiced frames. Their timestamps still advance, so the receiver sees a gap in time rather
+//! than loss, and it plays a gap after a quiet packet as silence (see [`QUIET_LEVEL`]).
 
 use std::collections::BTreeMap;
 
 use crate::codec::{Decoder, Encoder, OpusDecoder, OpusEncoder, FRAME_SAMPLES};
 use crate::dsp::{
-    audio_level, db_to_amp, rms, Agc, EchoCanceller, NoiseSuppressor, VoiceDetector, DENOISE_BLOCK,
+    audio_level, db_to_amp, rms, soft_limit, Agc, EchoCanceller, NoiseSuppressor, VoiceDetector,
+    DENOISE_BLOCK,
 };
 use crate::error::{AudioError, Result};
 use crate::jitter::{JitterBuffer, JitterStats, Packet};
 
 /// Audio level reported for silent or gated frames, as in RFC 6464.
 pub const SILENT_LEVEL: u8 = 127;
+
+/// Frames at or above this RFC 6464 level, which is -60 dBFS or quieter, count as silence when the
+/// receiver decides whether a missing slot is a silent gap. Speech sits well below this.
+pub const QUIET_LEVEL: u8 = 60;
 
 /// Options for [`VoiceSender`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,7 +135,7 @@ impl<E: Encoder> VoiceSender<E> {
         }
     }
 
-    /// Mutes or unmutes the mic. While muted, silence goes out as DTX packets.
+    /// Mutes or unmutes the mic. While muted, every frame is unvoiced, so the call path sends none.
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
     }
@@ -191,12 +198,13 @@ impl<E: Encoder> VoiceSender<E> {
         let voiced_speech = self.vad.update(vad_probability);
         if self.config.agc {
             self.agc.process(&mut frame);
+            soft_limit(&mut frame);
         }
 
         let transmit = self.transmitting();
         let voiced = voiced_speech && transmit;
         if !voiced {
-            // Silence goes out as digital zero, which the encoder turns into DTX packets.
+            // An unvoiced frame is digital zero. The encoder turns a run of them into DTX packets.
             frame.fill(0.0);
         }
         let audio_level = if voiced {
@@ -285,6 +293,7 @@ impl VoiceReceiver {
                 timestamp,
                 payload: payload.to_vec(),
                 arrival_ms,
+                silent: level >= QUIET_LEVEL,
             });
         }
         Ok(())

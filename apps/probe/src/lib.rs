@@ -197,6 +197,9 @@ pub struct Connect {
     pub ms: u64,
     pub path: &'static str,
     pub rtt_ms: u64,
+    /// The address source that resolved the first dial: `cache`, `peer`, `seeder`, `lan`, `dht`, or
+    /// `open` when the connection was already up. Shows whether the DHT was needed.
+    pub resolved_via: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,7 +270,8 @@ pub async fn dial(
             }
         }
     };
-    info!(ms = connect_ms, path = path_name(connect_report.path), "connected");
+    let resolved_via = node.dial_stats().last.map_or(dissent_net::OPEN, |sample| sample.via);
+    info!(ms = connect_ms, path = path_name(connect_report.path), via = resolved_via, "connected");
 
     // 2. Upgrade: ping on a fixed clock and record the path each time.
     let mut samples = Vec::new();
@@ -309,6 +313,7 @@ pub async fn dial(
             ms: connect_ms,
             path: path_name(connect_report.path),
             rtt_ms: connect_report.rtt_ms,
+            resolved_via,
         },
         upgrade,
         media,
@@ -426,8 +431,8 @@ pub fn summary_table(report: &ProbeReport) -> String {
     };
     line(format!("target            {}", report.target));
     line(format!(
-        "connect           {} ms, path {}, rtt {} ms",
-        report.connect.ms, report.connect.path, report.connect.rtt_ms
+        "connect           {} ms, path {}, rtt {} ms, resolved via {}",
+        report.connect.ms, report.connect.path, report.connect.rtt_ms, report.connect.resolved_via
     ));
     let direct = match report.upgrade.time_to_direct_ms {
         Some(ms) => format!("{ms} ms"),

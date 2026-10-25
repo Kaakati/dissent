@@ -18,6 +18,18 @@ function relayHost(relay) {
   }
 }
 
+const DIAL_SOURCES = ['cache', 'peer', 'seeder', 'lan', 'dht', 'open'];
+
+// "cache 3 · peer 12 · seeder 0 · lan 0 · dht 0 · open 40", with the latest dial and any failures.
+// Null until the engine reports dials. A zero on dht means the Mainline DHT was not needed.
+export function formatDials(dials) {
+  if (!dials) return null;
+  const counts = DIAL_SOURCES.map((source) => `${source} ${dials.by_source?.[source] ?? 0}`).join(' · ');
+  const last = dials.last_via ? ` · last ${dials.last_via}, ${dials.last_connect_ms} ms` : '';
+  const failed = dials.failed ? ` · ${dials.failed} failed` : '';
+  return `${counts}${last}${failed}`;
+}
+
 function formatCount(n) {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
@@ -28,8 +40,10 @@ function formatCount(n) {
 export function formatNet(status) {
   const host = relayHost(status.relay);
   const dht = status.dht;
+  const dials = formatDials(status.dials);
   if (!dht) {
-    return { text: `DHT offline · ${status.peers} peers`, title: `DHT offline · ${status.peers} peers`, ok: false };
+    const title = [`DHT offline · ${status.peers} peers`, dials ? `resolved via ${dials}` : null].filter(Boolean).join('\n');
+    return { text: `DHT offline · ${status.peers} peers`, title, ok: false };
   }
   const reach = dht.firewalled ? 'firewalled' : 'reachable';
   const parts = [`DHT ≈ ${formatCount(dht.size_estimate)} nodes`, reach, `${status.peers} peers`];
@@ -42,7 +56,8 @@ export function formatNet(status) {
     `${status.peers} peers`,
     host ? `relay ${host}` : null,
   ].filter(Boolean).join(' · ');
-  return { text: parts.join(' · '), title, ok: true };
+  return { text: parts.join(' · '), title: dials ? `${title}
+resolved via ${dials}` : title, ok: true };
 }
 
 export function initStatus() {

@@ -155,7 +155,7 @@ fn extension_of(bytes: &[u8]) -> &'static str {
 }
 
 /// The decrypted file for `picture`, if this device has it.
-fn picture_file(paths: &Paths, picture: &Picture) -> Option<String> {
+pub(crate) fn picture_file(paths: &Paths, picture: &Picture) -> Option<String> {
     let dir = paths.avatars_dir();
     ["webp", "png"]
         .iter()
@@ -385,7 +385,7 @@ impl Engine {
     }
 
     /// Downloads, verifies and decrypts one picture into the avatars directory.
-    async fn fetch_blob(&self, picture: &Picture, providers: &[PeerAddr]) -> Result<()> {
+    pub(crate) async fn fetch_blob(&self, picture: &Picture, providers: &[PeerAddr]) -> Result<()> {
         let from: Vec<_> = providers.iter().filter_map(|p| p.to_iroh().ok()).collect();
         let dir = self.read().paths.avatars_dir();
         std::fs::create_dir_all(&dir)?;

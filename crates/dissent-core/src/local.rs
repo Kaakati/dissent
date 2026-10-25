@@ -31,6 +31,11 @@ pub const CAPABILITIES: &[&str] = &[
     "ignore",
     "status",
     "avatars",
+    "member_only",
+    "contacts",
+    "groups",
+    "transfers",
+    "embeds",
 ];
 
 /// Which text a user note stores.

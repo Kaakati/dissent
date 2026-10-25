@@ -203,7 +203,7 @@ if (!window.__TAURI__) {
     ],
   };
 
-  let mockNetwork = { use_public_relays: true, relays: [] };
+  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false };
   // Voice settings as the desktop saves them (voice_settings / set_voice_settings), and the mic test's fake meter.
   let mockVoice = { profile: 'voice_isolation', input_volume: 100, output_volume: 100, noise_suppression: 'standard', echo_cancellation: true, agc: true, auto_sensitivity: true, threshold_db: -50, push_to_talk: false, ptt_key: null };
   let mockMicTimer = null;
@@ -230,6 +230,23 @@ if (!window.__TAURI__) {
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
   const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null });
+  // Invite previews: any link previews the Rustaceans server, Riverside Makers when it names "member", or a closed server
+  // when it names "revoked" or "expired". Joining the Rustaceans server makes its preview already_member.
+  const INVITE_SERVER = 'inv-rustaceans';
+  const invitePreview = (link) => {
+    const closed = ['revoked', 'expired'].find((word) => link.includes(word));
+    const id = link.includes('member') ? 'c1' : closed ? 'inv-closed' : INVITE_SERVER;
+    return {
+      community: id,
+      name: { c1: servers.c1.name, 'inv-closed': 'Old Workshop' }[id] ?? 'Rustaceans',
+      icon: null,
+      member_count: 12,
+      online_count: 3,
+      created_ms: 1767225600000,
+      invite: closed ?? 'live',
+      already_member: Boolean(servers[id]?.roles[ME]),
+    };
+  };
   const sharedServers = (user) => Object.values(servers).filter((c) => c.roles[user] && c.roles[ME]);
   const conversations = () =>
     Object.entries(dms)
@@ -476,14 +493,23 @@ if (!window.__TAURI__) {
       c.invites = [...(c.invites ?? []), { id: `inv${seq}`, link }];
       return link;
     },
+    create_full_invite: ({ communityId }) => `dissent://invite/mock-full-${communityId}`,
     list_invites: ({ communityId }) => servers[communityId].invites ?? [],
     revoke_invite: ({ communityId, inviteId }) => {
       const c = servers[communityId];
       c.invites = (c.invites ?? []).filter((inv) => inv.id !== inviteId);
       return null;
     },
+    invite_preview: async ({ link }) => {
+      if (link.includes('broken')) throw 'Invite not found. It may have been deleted.';
+      if (link.includes('slow')) await new Promise((r) => setTimeout(r, 1500));
+      return invitePreview(link);
+    },
     join_community: ({ invite }) => {
-      throw `Mock backend cannot join "${invite.slice(0, 24)}…"`;
+      const preview = invitePreview(invite);
+      if (preview.invite === 'revoked' || preview.invite === 'expired') throw 'This invite has expired or was revoked.';
+      servers[preview.community] ??= { id: INVITE_SERVER, name: 'Rustaceans', owner: GRACE, channels: [{ id: 'rch1', name: 'general' }], roles: { [GRACE]: 'owner', [ME]: 'member' }, banned: new Set(), msgs: { rch1: [] } };
+      return summary(servers[preview.community]);
     },
     leave_community: ({ communityId }) => {
       delete servers[communityId];
@@ -577,6 +603,21 @@ if (!window.__TAURI__) {
       const m = findMessage(c, channelId, messageId);
       need(m && (m.author === ME || canMod(c)), 'Not allowed to delete this message');
       m.deleted = true;
+      return null;
+    },
+    member_only_status: ({ communityId }) => {
+      const c = servers[communityId];
+      return { on: Boolean(c.memberOnly), can_enable: true, waiting: 0 };
+    },
+    set_member_only: ({ communityId, on }) => {
+      const c = servers[communityId];
+      need(myRole(c) === 'owner', 'Only the owner can hide server details');
+      c.memberOnly = Boolean(on);
+      return null;
+    },
+    set_history_visibility: ({ communityId }) => {
+      const c = servers[communityId];
+      need(canMod(c), 'Only owner or admin can change history');
       return null;
     },
     moderate: ({ communityId, action, user }) => {
@@ -718,7 +759,7 @@ if (!window.__TAURI__) {
         return url.toString();
       });
       need(settings.use_public_relays || relays.length > 0, 'Add at least one relay, or turn public relays back on.');
-      mockNetwork = { use_public_relays: Boolean(settings.use_public_relays), relays: [...new Set(relays)] };
+      mockNetwork = { use_public_relays: Boolean(settings.use_public_relays), relays: [...new Set(relays)], lan_discovery: Boolean(settings.lan_discovery) };
       return { ...mockNetwork, relays: [...mockNetwork.relays] };
     },
     net_status: () => ({
@@ -731,7 +772,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only'];
   const ignoredSet = new Set();
   const NADIA = id('nadia-c5v8m1wk');
   const YUSUF = id('yusuf-r3j6t0pb');
@@ -1035,7 +1076,7 @@ if (!window.__TAURI__) {
     [NADIA]: [{ id: id(`d${++seq}`), from: NADIA, text: 'Running a seeder for Book club', ms: at(0, 400), pending: false }],
     [YUSUF]: [{ id: id(`d${++seq}`), from: YUSUF, text: 'Sent you the invite link', ms: at(0, 500), pending: false }],
   });
-  if (!PLAIN_DM) dms[GRACE].push({ id: id(`d${++seq}`), from: GRACE, text: 'Peer-forwarded call: failover', ms: at(0, 1), pending: false, embeds: [{ kind: 'card', title: 'Peer-forwarded call: failover', subtitle: '20 participants · 3 speakers · audio', tile: { color: '#e8553a', label: 'Call capacity' } }] });
+  if (!PLAIN_DM) dms[GRACE].push({ id: id(`d${++seq}`), from: GRACE, text: 'The failover notes are in the issue: https://github.com/Kaakati/dissent/issues', ms: at(0, 1), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/issues', site: 'GitHub', title: 'Peer-forwarded call: failover', description: 'Issues for Dissent: failover notes for peer-forwarded calls, with the 20 participants and 3 speakers of the last test.' }] });
 
   // Screenshot helpers: post a message into any channel or DM, as if another person sent it.
   // A call built from a group's members, for the join and accept handlers.

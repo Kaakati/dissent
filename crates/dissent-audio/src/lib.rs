@@ -30,4 +30,4 @@ pub use gate::{Threshold, VoiceGate};
 pub use meter::LevelMeter;
 pub use error::{AudioError, Result};
 pub use jitter::{JitterBuffer, JitterStats, Packet, Playout};
-pub use pipeline::{SenderConfig, SenderPacket, VoiceReceiver, VoiceSender};
+pub use pipeline::{SenderConfig, SenderPacket, VoiceReceiver, VoiceSender, QUIET_LEVEL};

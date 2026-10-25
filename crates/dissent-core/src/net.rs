@@ -37,7 +37,7 @@ pub(crate) struct ControlEffects {
 /// `SetRelays` names, and an identity notice for a `KeyRotation` that concerns someone we know.
 /// The caller passes only events that replay accepted and that have not been handled yet.
 #[allow(clippy::too_many_arguments)]
-fn control_effects(
+pub(crate) fn control_effects(
     community: CommunityId,
     c: &Community,
     paths: &Paths,
@@ -133,6 +133,19 @@ impl Engine {
         } = &mut *guard;
         let mut emitted: Vec<EngineEvent> = Vec::new();
         let mut valid = Vec::with_capacity(items.len());
+        // A storage member is outside the group, so it keeps a member-sealed control event only if
+        // its tag checks out. An event whose epoch has no write key yet waits for one.
+        let storage_here = communities.get(&community).is_some_and(|c| {
+            c.state()
+                .members
+                .get(&self.inner.me)
+                .is_some_and(|m| m.storage && !m.left)
+        });
+        let writes = communities
+            .get(&community)
+            .map(|c| c.epochs.write_ring())
+            .unwrap_or_default();
+        let mut missing_writes = false;
         for se in items {
             let hlc = se.event.body.hlc;
             // A cert seen before was already checked, so only the event signature is left to verify.
@@ -148,6 +161,19 @@ impl Engine {
             if hlc.wall_ms > now.saturating_add(MAX_CLOCK_SKEW_MS) {
                 debug!(community = %community, "dropping event stamped too far ahead of our clock");
                 continue;
+            }
+            if storage_here && matches!(se.event.body.payload, Payload::MemberSealedControl { .. }) {
+                match dissent_events::verify_member_tag(&writes, &se.event.body) {
+                    Ok(()) => {}
+                    Err(dissent_events::OpenError::NoKey) => {
+                        missing_writes = true;
+                        continue;
+                    }
+                    Err(_) => {
+                        debug!(community = %community, "dropping a member-sealed event with a bad tag");
+                        continue;
+                    }
+                }
             }
             let path = paths.identity_changes();
             if let Some(ev) = identity_watch::learn_device(
@@ -196,6 +222,10 @@ impl Engine {
         );
         fx.emitted.splice(0..0, emitted);
         drop(guard);
+        if missing_writes {
+            let engine = self.clone();
+            self.spawn_task(async move { engine.fetch_write_keys(community).await });
+        }
         self.retry_deferred_commits(community);
         self.perform_effects(fx);
         self.unseal_pending(community);
@@ -312,6 +342,14 @@ impl Engine {
             }
             Request::Secret { community } => self.serve_secret(conn_from, community),
             Request::SecretHistory { community } => self.serve_secret_history(conn_from, community),
+            Request::EpochHistory { community } => self.serve_epoch_history(conn_from, community),
+            Request::WriteKeys { community } => self.serve_write_keys(conn_from, community),
+            Request::MemberSealedSupport { .. } => Response::MemberSealedSupport(true),
+            Request::InvitePreview {
+                community,
+                token,
+                invite_id,
+            } => self.answer_invite_preview(conn_from, community, token, invite_id),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }
@@ -337,6 +375,9 @@ impl Engine {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid presence: {e}")),
             },
+            Request::AddrSync { digest } => self.serve_addr_sync(conn_from, digest),
+            Request::AddrPush { records } => self.accept_addr_push(conn_from, records),
+            Request::AddrLookup { device } => self.serve_addr_lookup(conn_from, device),
             Request::Profile(sp) => match self.accept_profile(*sp) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile: {e}")),
@@ -625,6 +666,7 @@ pub(crate) async fn receive_loop(
                     let task = engine.clone();
                     engine.spawn_task(async move {
                         let _ = task.sync_with(community, device).await;
+                        task.peer_exchange(device).await;
                     });
                 }
             }
@@ -683,6 +725,7 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
                 warn!(error = %e, "could not deposit key packages");
             }
         }
+        engine.refresh_lan_keys();
         engine.anti_entropy().await;
         engine.mls_maintenance().await;
         engine.flush_mls(false);
@@ -691,6 +734,8 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         // learn it from gossip too.
         if rounds.is_multiple_of(ADDR_REBROADCAST_ROUNDS) {
             engine.rebroadcast_own_addr().await;
+            // Re-sign our record too, so it never reaches its expiry while we run.
+            engine.refresh_own_record_now().await;
         }
         // The first publish can run before the DHT node has bootstrapped. Pkarr then stores the
         // record on too few nodes, yet still reports success. So publish once more on the first

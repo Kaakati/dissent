@@ -99,22 +99,32 @@ impl Agc {
 
     /// Applies the current gain to `frame`, then updates it from the frame's level.
     pub fn process(&mut self, frame: &mut [f32]) {
-        let level = rms(frame);
-        if level > self.gate_rms {
-            let p = level * level;
-            self.power = if self.power == 0.0 {
-                p
-            } else {
-                AGC_SMOOTHING * self.power + (1.0 - AGC_SMOOTHING) * p
-            };
-        }
-        if self.power > 0.0 {
-            let wanted = (self.target_rms / self.power.sqrt()).clamp(self.min_gain, self.max_gain);
-            let step = if wanted < self.gain { 0.5 } else { 0.05 };
-            self.gain += (wanted - self.gain) * step;
+        self.process_while(frame, true);
+    }
+
+    /// Like [`Agc::process`], but the level and gain adapt only while `adapt` is true. The gain
+    /// still applies. The chain passes whether its gate is open, so the gain does not climb on
+    /// room noise the gate is about to silence.
+    pub fn process_while(&mut self, frame: &mut [f32], adapt: bool) {
+        if adapt {
+            let level = rms(frame);
+            if level > self.gate_rms {
+                let p = level * level;
+                self.power = if self.power == 0.0 {
+                    p
+                } else {
+                    AGC_SMOOTHING * self.power + (1.0 - AGC_SMOOTHING) * p
+                };
+            }
+            if self.power > 0.0 {
+                let wanted =
+                    (self.target_rms / self.power.sqrt()).clamp(self.min_gain, self.max_gain);
+                let step = if wanted < self.gain { 0.5 } else { 0.05 };
+                self.gain += (wanted - self.gain) * step;
+            }
         }
         for s in frame.iter_mut() {
-            *s = (*s * self.gain).clamp(-1.0, 1.0);
+            *s *= self.gain;
         }
     }
 
@@ -133,7 +143,7 @@ impl Default for Agc {
 /// Turns per-block voice probabilities into a voiced/unvoiced decision with hangover.
 ///
 /// Speech stays marked for `hangover` blocks after the probability drops, so word endings are
-/// not clipped when DTX takes over.
+/// not cut off when the frames turn to silence.
 #[derive(Debug, Clone)]
 pub struct VoiceDetector {
     threshold: f32,
@@ -166,7 +176,7 @@ impl VoiceDetector {
 }
 
 impl Default for VoiceDetector {
-    /// 0.5 threshold with 10 blocks (100 ms) of hangover.
+    /// 0.5 threshold with 10 frames (200 ms) of hangover. The sender calls it once per 20 ms frame.
     fn default() -> Self {
         Self::new(0.5, 10)
     }
@@ -185,13 +195,34 @@ pub fn audio_level(frame: &[f32]) -> u8 {
     (-dbov).round().clamp(0.0, 127.0) as u8
 }
 
+/// Samples of mic audio the lag estimate uses: one second.
+const LAG_WINDOW: usize = SAMPLE_RATE as usize;
+/// The lag estimate works on block averages of this many samples, which keeps it cheap.
+const LAG_DECIMATE: usize = 4;
+/// Largest speaker-to-mic delay the lag estimate searches for: 250 ms.
+const LAG_MAX: usize = SAMPLE_RATE as usize / 4;
+/// Samples between two lag estimates: one second.
+const LAG_PERIOD: usize = SAMPLE_RATE as usize;
+/// The reference is delayed so the filter window starts this far before the echo, about 16 ms.
+const LAG_MARGIN: usize = 768;
+/// Normalised correlation the lag estimate needs before the reference shift changes.
+const LAG_MIN_CORR: f32 = 0.3;
+/// A new shift this close to the current one is ignored, so jitter does not reset the filter.
+const SHIFT_HYSTERESIS: usize = 480;
+
 /// Normalised LMS echo canceller.
 ///
 /// The filter predicts the echo of the far-end reference, the audio that was played out, from the
 /// last `taps` reference samples, and subtracts that prediction from the microphone signal. The
-/// tail length must cover the acoustic path plus the device latency. Adaptation pauses when the
-/// reference is quiet, which avoids drifting the filter on silence. It does not detect double
-/// talk, so near-end speech during far-end speech slows convergence and can leave some residual.
+/// tail must cover the longest speaker-to-mic delay the filter has to model, which is the acoustic
+/// path plus the device latency. The window is placed by a delay estimate: every second the
+/// reference is cross-correlated with the mic, and the reference queue is set to that delay so the
+/// window starts just before the echo. Adaptation pauses when the reference is quiet, which
+/// avoids drifting the filter on silence. It does not detect double talk, so near-end speech during
+/// far-end speech slows convergence and can leave some residual.
+///
+/// Push the reference before processing the mic samples it echoes, on every tick. The desktop loop
+/// pushes each tick's playout before that tick's capture.
 pub struct EchoCanceller {
     taps: usize,
     mu: f32,
@@ -201,6 +232,14 @@ pub struct EchoCanceller {
     pos: usize,
     power: f32,
     pending: VecDeque<f32>,
+    /// The reference as it was pushed, before any delay, for the lag estimate.
+    far_log: VecDeque<f32>,
+    /// The mic as it was processed, for the lag estimate.
+    near_log: VecDeque<f32>,
+    /// Samples since the last lag estimate. It starts at a full period, so the first estimate runs
+    /// as soon as the logs hold enough audio.
+    since_estimate: usize,
+    lag: Option<usize>,
 }
 
 const EC_EPS: f32 = 1e-3;
@@ -218,6 +257,10 @@ impl EchoCanceller {
             pos: 0,
             power: 0.0,
             pending: VecDeque::new(),
+            far_log: VecDeque::with_capacity(LAG_WINDOW + LAG_MAX),
+            near_log: VecDeque::with_capacity(LAG_WINDOW),
+            since_estimate: LAG_PERIOD,
+            lag: None,
         }
     }
 
@@ -232,9 +275,19 @@ impl EchoCanceller {
         self.taps
     }
 
+    /// The speaker-to-mic delay found by the last estimate, in samples, or `None` before one
+    /// succeeds.
+    pub fn lag_estimate(&self) -> Option<usize> {
+        self.lag
+    }
+
     /// Feeds far-end reference samples, the audio that is being played out.
     pub fn push_far(&mut self, far: &[f32]) {
         self.pending.extend(far.iter().copied());
+        self.far_log.extend(far.iter().copied());
+        while self.far_log.len() > LAG_WINDOW + LAG_MAX {
+            self.far_log.pop_front();
+        }
         // If the capture side stalls, keep only the newest second of reference.
         let max = SAMPLE_RATE as usize;
         while self.pending.len() > max {
@@ -248,6 +301,10 @@ impl EchoCanceller {
     /// reference yet pass through unchanged.
     pub fn process(&mut self, near: &mut [f32]) {
         for sample in near.iter_mut() {
+            self.near_log.push_back(*sample);
+            if self.near_log.len() > LAG_WINDOW {
+                self.near_log.pop_front();
+            }
             let far = self.pending.pop_front().unwrap_or(0.0);
             self.push_history(far);
             let echo = self.dot_window();
@@ -258,6 +315,59 @@ impl EchoCanceller {
             }
             *sample = error;
         }
+        self.since_estimate += near.len();
+        if self.since_estimate >= LAG_PERIOD && self.far_log.len() == LAG_WINDOW + LAG_MAX {
+            self.since_estimate = 0;
+            if let Some(lag) = self.estimate_lag() {
+                self.apply_lag(lag);
+            }
+        }
+    }
+
+    /// Cross-correlates the last second of mic with the reference, lag by lag up to [`LAG_MAX`].
+    /// Returns the lag with the best normalised correlation, if that is strong enough.
+    fn estimate_lag(&self) -> Option<usize> {
+        let max_lag = LAG_MAX;
+        if self.far_log.len() < LAG_WINDOW + max_lag || self.near_log.len() < LAG_WINDOW {
+            return None;
+        }
+        let near: Vec<f32> = self.near_log.iter().copied().collect();
+        let skip = self.far_log.len() - (LAG_WINDOW + max_lag);
+        let far: Vec<f32> = self.far_log.iter().skip(skip).copied().collect();
+        let near_d = block_means(&near);
+        let far_d = block_means(&far);
+        let wd = near_d.len();
+        let md = max_lag / LAG_DECIMATE;
+        let e_near: f32 = near_d.iter().map(|x| x * x).sum();
+        let mut best = (0.0f32, 0usize);
+        for l in 0..=md {
+            let window = &far_d[md - l..md - l + wd];
+            let corr: f32 = near_d.iter().zip(window).map(|(a, b)| a * b).sum();
+            let e_far: f32 = window.iter().map(|x| x * x).sum();
+            let rho = corr / (e_near * e_far).sqrt().max(1e-12);
+            if rho > best.0 {
+                best = (rho, l);
+            }
+        }
+        (best.0 >= LAG_MIN_CORR).then_some(best.1 * LAG_DECIMATE)
+    }
+
+    /// Places the filter window for an echo `lag` samples late. The reference queue holds the
+    /// delay between a reference sample and the mic sample it pairs with, so the queue is sized to
+    /// the wanted delay. A large change resets the weights, since they describe the old window.
+    fn apply_lag(&mut self, lag: usize) {
+        self.lag = Some(lag);
+        let wanted = lag.saturating_sub(LAG_MARGIN);
+        if wanted.abs_diff(self.pending.len()) < SHIFT_HYSTERESIS {
+            return;
+        }
+        while self.pending.len() < wanted {
+            self.pending.push_front(0.0);
+        }
+        while self.pending.len() > wanted {
+            self.pending.pop_front();
+        }
+        self.weights.fill(0.0);
     }
 
     fn push_history(&mut self, x: f32) {
@@ -294,6 +404,15 @@ impl EchoCanceller {
     }
 }
 
+/// Averages `x` in blocks of [`LAG_DECIMATE`] samples. A trailing partial block is dropped.
+fn block_means(x: &[f32]) -> Vec<f32> {
+    x.as_chunks::<LAG_DECIMATE>()
+        .0
+        .iter()
+        .map(|c| c.iter().sum::<f32>() / LAG_DECIMATE as f32)
+        .collect()
+}
+
 impl std::fmt::Debug for EchoCanceller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EchoCanceller")
@@ -321,6 +440,22 @@ pub fn db_to_amp(db: f32) -> f32 {
 pub fn apply_gain(frame: &mut [f32], gain: f32) {
     for s in frame.iter_mut() {
         *s = (*s * gain).clamp(-1.0, 1.0);
+    }
+}
+
+/// Where the soft limiter starts to bend, about -2 dBFS.
+const LIMIT_KNEE: f32 = 0.8;
+
+/// Soft limiter. Samples up to [`LIMIT_KNEE`] pass unchanged. Above it the curve bends smoothly
+/// toward full scale, so a sample is never larger than 1.0 in magnitude. Unlike a hard clamp, it
+/// adds no flat tops, so a peak above full scale rounds off instead of clicking.
+pub fn soft_limit(frame: &mut [f32]) {
+    for s in frame.iter_mut() {
+        let a = s.abs();
+        if a > LIMIT_KNEE {
+            let over = (a - LIMIT_KNEE) / (1.0 - LIMIT_KNEE);
+            *s = (LIMIT_KNEE + (1.0 - LIMIT_KNEE) * over.tanh()).copysign(*s);
+        }
     }
 }
 

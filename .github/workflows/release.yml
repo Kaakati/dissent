@@ -87,6 +87,9 @@ jobs:
     name: Test
     needs: version
     runs-on: ubuntu-latest
+    env:
+      # ===== video codecs (dissent-video): pure-C OpenH264, see the codecs job below =====
+      OPENH264_NO_ASM: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,10 +116,77 @@ jobs:
       # also holds internet.rs, which needs the public network, so it is skipped here.
       - name: Loopback networked tests
         run: "cargo test -p dissent-core --test it -- --ignored --skip internet::"
+      # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
+      # google-chrome). Needs Node 24 for the driver's .ts import.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/ui-next/package-lock.json
+      - name: React UI driver
+        working-directory: apps/desktop/ui-next
+        env:
+          CHROME_PATH: google-chrome
+        run: npm ci && npm run test:ui
+
+  # ===== BEGIN video codecs (dissent-video) =====
+  # SVT-AV1 is behind the dissent-video `svt-av1` feature, off by default, so the test job and
+  # plain `cargo test --workspace` need no NASM or libclang. This job enables the feature: the
+  # shiguredo_svt_av1 crate builds SVT-AV1 from source (git clone of a pinned tag, CMake
+  # downloaded and SHA-256 checked), which needs git, a C compiler, NASM (x86 assembly) and
+  # libclang (bindgen). macOS Intel is not built here: no Intel runner is pinned.
+  codecs:
+    name: Video codecs (${{ matrix.name }})
+    needs: version
+    env:
+      # OpenH264 is built as pure C. Its NASM path links unresolved SSE symbols (openh264-sys2 0.9.9).
+      OPENH264_NO_ASM: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+          - name: macOS Apple Silicon
+            os: macos-latest
+          - name: Linux x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      # SVT-AV1's git clone and CMake build go past the 260-character Windows path limit.
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+      # bindgen (inside the SVT-AV1 build script) needs libclang. macOS has it from the Xcode tools.
+      - name: Install NASM and libclang (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nasm llvm --yes --no-progress
+      - name: Install NASM (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm
+      - name: Install NASM and libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codecs-${{ matrix.name }}
+      - name: Clippy (video crate)
+        run: cargo clippy -p dissent-video --features svt-av1 --all-targets -- -D warnings
+      - name: Tests (video crate)
+        run: cargo test -p dissent-video --features svt-av1
+  # ===== END video codecs (dissent-video) =====
 
   changelog:
     name: Tag, changelog and draft release
-    needs: [version, test]
+    needs: [version, test, codecs]
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.id }}
@@ -201,6 +271,16 @@ jobs:
         run: |
           v='${{ needs.version.outputs.version }}'
           perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$v\"/m" Cargo.toml
+      # The installers embed the React UI in apps/desktop/ui-next/dist. tauri.conf.json's beforeBuildCommand builds it too;
+      # this step builds it first, so a UI error shows here on every OS.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/ui-next/package-lock.json
+      - name: Build the React UI
+        working-directory: apps/desktop/ui-next
+        run: npm ci && npm run build
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
       # Bundling is off for local development; enable it only for releases. Signed

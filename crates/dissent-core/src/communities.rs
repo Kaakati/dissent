@@ -9,7 +9,7 @@ use crate::rpc::{Request, Response};
 use crate::store::{write_bin, write_community_key};
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
 use crate::wire::SignedAddr;
-use dissent_discovery::{CommunityRecord, Invite};
+use dissent_discovery::{CommunityRecord, Invite, InviteLink, ShortInvite};
 use dissent_events::{ChannelId, Payload, SignedEvent};
 use dissent_identity::{CommunityId, CommunityKey, DeviceId, Genesis};
 use dissent_net::{PeerAddr, TopicId, TopicReceiver, TopicSender};
@@ -54,6 +54,7 @@ impl Engine {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, key.0.seed());
         self.with_mls(|mls| mls.create_group(id.0)).map_err(crate::sealed::mls_err)?;
+        self.note_epoch(id, &[]);
         let topic_rx = self.subscribe_topic(id, Vec::new()).await?;
         self.spawn_receiver(id, topic_rx);
 
@@ -104,8 +105,10 @@ impl Engine {
                 .unwrap_or_else(PoisonError::into_inner);
             founded
                 .iter()
-                .filter_map(|(id, seed)| {
-                    let c = w.communities.get(id)?;
+                .flat_map(|(id, seed)| {
+                    let (Some(c), Some(keys)) = (w.communities.get(id), w.access.get(id)) else {
+                        return Vec::new();
+                    };
                     let record = CommunityRecord {
                         name: c.name().to_string(),
                         peers: vec![public_addr(&addr).to_string()],
@@ -116,8 +119,15 @@ impl Engine {
                             .filter_map(|s| url::Url::parse(s).ok())
                             .collect(),
                     };
-                    let secret = w.access.get(id)?.secret;
-                    Some((CommunityKey::from_seed(*seed), secret, record))
+                    // A short invite made before a rotation still names the retired secret, so the
+                    // record stays under each retired secret for as long as its grace period lasts.
+                    let now = now_ms();
+                    let mut secrets = vec![keys.secret];
+                    secrets.extend(keys.retired.iter().filter(|r| r.until_ms > now).map(|r| r.secret));
+                    secrets
+                        .into_iter()
+                        .map(|secret| (CommunityKey::from_seed(*seed), secret, record.clone()))
+                        .collect()
                 })
                 .collect()
         };
@@ -143,6 +153,16 @@ impl Engine {
     /// An invite link that stops admitting people at `expires_ms`, when that is set. Its id is
     /// recorded in the community, so the invite can be revoked and listed.
     pub async fn create_invite_until(&self, community: CommunityId, expires_ms: Option<u64>) -> Result<String> {
+        self.issue_invite(community, expires_ms, false).await
+    }
+
+    /// The long form of an invite, for people on versions before short invites. It works without
+    /// the DHT, and is the link to copy when the short one cannot be read.
+    pub async fn create_full_invite(&self, community: CommunityId) -> Result<String> {
+        self.issue_invite(community, None, true).await
+    }
+
+    async fn issue_invite(&self, community: CommunityId, expires_ms: Option<u64>, full: bool) -> Result<String> {
         let addr = self.node().addr().await;
         let genesis = {
             let mut guard = self.write();
@@ -164,17 +184,42 @@ impl Engine {
             },
         )
         .await?;
-        let invite = Invite {
-            genesis,
-            peers: vec![addr.to_string()],
-            secret: keys.secret,
-            secret_generation: keys.generation,
-            relays: self.community_relays(community),
-            invite_id: Some(invite_id),
+        let link = if !full && self.founded_here(community) {
+            // Only the founder signs the community's DHT record, so only its invites can be
+            // resolved through the DHT. Other members hand out the long form.
+            ShortInvite {
+                community,
+                secret: keys.secret,
+                secret_generation: keys.generation,
+                invite_id: Some(invite_id),
+            }
+            .to_url()
+            .to_string()
+        } else {
+            Invite {
+                genesis,
+                peers: vec![addr.to_string()],
+                secret: keys.secret,
+                secret_generation: keys.generation,
+                relays: self.community_relays(community),
+                invite_id: Some(invite_id),
+            }
+            .to_url()
+            .to_string()
         };
-        let link = invite.to_url().to_string();
         self.record_invite(community, invite_id, link.clone(), now_ms())?;
         Ok(link)
+    }
+
+    /// Whether this device founded `community`, and so signs its DHT record.
+    fn founded_here(&self, community: CommunityId) -> bool {
+        self.inner.discovery.is_some()
+            && self
+                .inner
+                .founded
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(&community)
     }
 
     /// Joins from an invite link. Joining a community we already have just returns its summary.
@@ -200,15 +245,15 @@ impl Engine {
     }
 
     async fn join_as(&self, invite: &str, with_group: bool, storage: bool) -> Result<CommunitySummary> {
-        let parsed = Invite::parse(invite)?;
-        let id = parsed.community();
+        let link = InviteLink::parse(invite)?;
+        let id = link.community();
         let Some((_, served)) = self.sync_invite(invite).await? else {
             return self.summary(&id);
         };
-        if let Some(invite_id) = parsed.invite_id {
+        if let Some(invite_id) = link.invite_id() {
             self.refuse_known_dead_invite(id, invite_id)?;
         }
-        self.announce_join_as(id, &served, with_group, storage, parsed.invite_id).await;
+        self.announce_join_as(id, &served, with_group, storage, link.invite_id()).await;
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
     }
@@ -218,11 +263,27 @@ impl Engine {
         &self,
         invite: &str,
     ) -> Result<Option<(CommunityId, Vec<DeviceId>)>> {
-        let invite = Invite::parse(invite)?;
-        let id = invite.community();
+        let link = InviteLink::parse(invite)?;
+        let id = link.community();
         if self.read().communities.contains_key(&id) {
             return Ok(None);
         }
+        let invite = match link {
+            InviteLink::Full(invite) => invite,
+            InviteLink::Short(short) => {
+                if self.inner.discovery.is_none() {
+                    return Err(CoreError::Invalid(
+                        "a short invite needs the DHT, which this device is not running".into(),
+                    ));
+                }
+                // The genesis fetch below is a community request, so it needs the invite's keys.
+                let keys = crate::access::Keys::from_invite(short.secret_generation, short.secret);
+                let paths = self.read().paths.clone();
+                crate::access::save(&paths, &id, &keys)?;
+                self.write().access.insert(id, keys);
+                self.resolve_short(&short).await?
+            }
+        };
         {
             let mut guard = self.write();
             let paths = guard.paths.clone();
@@ -290,7 +351,9 @@ impl Engine {
         storage: bool,
         invite_id: Option<[u8; 16]>,
     ) {
-        let display_name = self.read().my_name();
+        // A storage member's name stays: it is sealed to the community secret the seeder holds anyway.
+        let name = self.read().my_name();
+        let display_name = if storage { name } else { self.pre_join_name(id, name) };
         let payload = if storage {
             Payload::JoinAsStorage { display_name }
         } else if let Some(invite_id) = invite_id {
@@ -461,9 +524,44 @@ impl Engine {
         }
     }
 
+    /// Turns a short invite into the parts of a long one. The DHT record, opened with the invite
+    /// secret, names the peers and relays. The short form has no genesis, so it is fetched from
+    /// those peers and checked against the community id, which the genesis is signed under.
+    async fn resolve_short(&self, short: &ShortInvite) -> Result<Invite> {
+        let peers = self.record_peers(&short.community, &short.secret).await;
+        if peers.is_empty() {
+            return Err(CoreError::NotFound(
+                "the DHT has no record for this invite yet; try again shortly, or ask for a long link".into(),
+            ));
+        }
+        let genesis = self.fetch_genesis(short.community, &peers).await?;
+        Ok(Invite {
+            genesis,
+            peers: peers.iter().map(ToString::to_string).collect(),
+            secret: short.secret,
+            secret_generation: short.secret_generation,
+            relays: Vec::new(),
+            invite_id: short.invite_id,
+        })
+    }
+
+    /// The community's genesis, from the first of `peers` that serves one it can verify.
+    async fn fetch_genesis(&self, id: CommunityId, peers: &[PeerAddr]) -> Result<Genesis> {
+        for peer in peers {
+            match self.call(peer.id, &Request::Genesis { community: id }).await {
+                Ok(Response::Genesis { genesis, .. }) if genesis.community == id && genesis.verify().is_ok() => {
+                    return Ok(genesis)
+                }
+                Ok(_) => debug!(community = %id, peer = %peer.id, "peer did not serve a valid genesis"),
+                Err(e) => debug!(community = %id, peer = %peer.id, error = %e, "genesis not fetched"),
+            }
+        }
+        Err(CoreError::NotFound("no DHT peer served the community's genesis".into()))
+    }
+
     /// The peers named in the community's DHT record. They are remembered, so they can be dialled.
     /// Empty when there is no DHT, no record, or the lookup fails.
-    async fn record_peers(&self, id: &CommunityId, secret: &[u8; 32]) -> Vec<PeerAddr> {
+    pub(crate) async fn record_peers(&self, id: &CommunityId, secret: &[u8; 32]) -> Vec<PeerAddr> {
         let Some(discovery) = self.inner.discovery.clone() else {
             return Vec::new();
         };

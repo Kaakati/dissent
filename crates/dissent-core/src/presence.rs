@@ -443,6 +443,9 @@ impl Engine {
             );
             (before, w.presence_of(&root, now))
         };
+        if community.is_some() {
+            self.inner.member_seen.notify_waiters();
+        }
         if before != after {
             self.emit(EngineEvent::PresenceChanged {
                 user: root.to_string(),

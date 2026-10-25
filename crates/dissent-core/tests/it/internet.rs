@@ -7,7 +7,7 @@
 
 use crate::common::*;
 use dissent_core::{Engine, Identity, NodeConfig};
-use dissent_discovery::{Discovery, Invite};
+use dissent_discovery::{Discovery, InviteLink};
 use std::time::{Duration, Instant};
 
 /// Each wait for the network gets this long.
@@ -51,12 +51,12 @@ async fn join_over_the_dht_then_message_and_dm() {
     let id: dissent_core::CommunityId = server.id.parse().unwrap();
 
     let url = alice.engine.create_invite(id).await.expect("invite");
-    let invite = Invite::parse(&url).expect("invite parses");
+    let invite = InviteLink::parse(&url).expect("invite parses");
     // Alice's record must reach the DHT before Bob can find her there.
     let discovery = Discovery::new().expect("dht client");
     let started = Instant::now();
     let record = loop {
-        match tokio::time::timeout(Duration::from_secs(30), discovery.resolve(&id, &invite.secret)).await {
+        match tokio::time::timeout(Duration::from_secs(30), discovery.resolve(&id, &invite.secret())).await {
             Ok(Ok(Some(record))) => break record,
             Ok(Ok(None)) => eprintln!("[{:?}] no record yet", started.elapsed()),
             Ok(Err(e)) => eprintln!("resolve failed, retrying: {e}"),
@@ -67,11 +67,9 @@ async fn join_over_the_dht_then_message_and_dm() {
     };
     println!("DHT record visible after {:?}: {record:?}", started.elapsed());
 
-    // An invite with no peers forces Bob through the DHT record.
-    let url = alice.engine.create_invite(id).await.expect("invite");
-    let mut invite = Invite::parse(&url).expect("invite parses");
-    invite.peers.clear();
-    let dht_only = invite.to_url().to_string();
+    // A short invite names no peers, so Bob must find Alice through her DHT record.
+    let dht_only = alice.engine.create_invite(id).await.expect("invite");
+    assert!(matches!(InviteLink::parse(&dht_only), Ok(InviteLink::Short(_))), "{dht_only}");
 
     let joining = Instant::now();
     let joined = bob
@@ -132,6 +130,61 @@ async fn join_over_the_dht_then_message_and_dm() {
         assert!(dht.size_estimate > 0, "{name}: DHT size estimate is zero");
         assert!(status.peers >= 1, "{name}: no gossip neighbours");
     }
+
+    finish(vec![alice, bob]).await;
+    }).await;
+}
+
+/// A short invite is enough to join over the real network. Alice founds the community on the DHT,
+/// so her invite is the short form. Bob has only that link, so he resolves Alice's record with the
+/// secret inside it, fetches the genesis from her, and joins.
+///
+/// Ignored by default. Run it through the firewall-approved script:
+///   scripts/fwtest.sh dissent-core internet --ignored short_invite_joins_over_the_dht --nocapture
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_short_invite_joins_over_the_dht() {
+    bounded(async {
+    let alice = start_real("alice-short").await;
+    let bob = start_real("bob-short").await;
+    let created = alice
+        .engine
+        .create_community("Short over the DHT".into())
+        .await
+        .expect("alice creates the community");
+    let id: dissent_core::CommunityId = created.id.parse().unwrap();
+    let link = alice.engine.create_invite(id).await.expect("invite");
+    assert!(link.len() <= 170, "{} characters: {link}", link.len());
+    assert!(
+        matches!(InviteLink::parse(&link), Ok(InviteLink::Short(_))),
+        "a founder with the DHT makes a short invite: {link}"
+    );
+
+    // Alice's record must reach the DHT before Bob can find it, so retry the preview and the join.
+    let started = Instant::now();
+    let preview = loop {
+        match bob.engine.invite_preview(&link).await {
+            Ok(preview) => break preview,
+            Err(e) => eprintln!("[{:?}] no preview yet: {e}", started.elapsed()),
+        }
+        assert!(started.elapsed() < Duration::from_secs(180), "no preview over the DHT after 180 s");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    assert_eq!(preview.name, "Short over the DHT");
+    assert!(!preview.already_member);
+    println!("preview over the DHT after {:?}: {preview:?}", started.elapsed());
+
+    loop {
+        match bob.engine.join_community(&link).await {
+            Ok(_) => break,
+            Err(e) => eprintln!("[{:?}] join not yet: {e}", started.elapsed()),
+        }
+        assert!(started.elapsed() < Duration::from_secs(180), "no join over the DHT after 180 s");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let view = bob.engine.community_view(id).expect("bob is in the community");
+    assert_eq!(view.name, "Short over the DHT");
+    println!("bob joined over the DHT after {:?}", started.elapsed());
 
     finish(vec![alice, bob]).await;
     }).await;

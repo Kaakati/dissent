@@ -16,11 +16,42 @@ use crate::{ChannelId, Error, Event, EventBody, EventId, Hlc, Payload, Result};
 
 const KEY_DOMAIN: &str = "dissent/control-seal/v1";
 const AAD_DOMAIN: &[u8] = b"dissent/control-aad/v1";
+const MEMBER_AAD_DOMAIN: &[u8] = b"dissent/member-control-aad/v1";
+const MEMBER_ENC_DOMAIN: &str = "dissent/member-control-enc/v1";
+const MEMBER_WRITE_DOMAIN: &str = "dissent/member-control-write/v1";
+const TAG_DOMAIN: &[u8] = b"dissent/member-control-tag/v1";
 const NONCE_LEN: usize = 24;
+
+/// The MLS exporter label that control keys are drawn from. The keys of epoch `e` are derived from
+/// `export(EXPORT_LABEL, e)` of the community group in that epoch.
+pub const EXPORT_LABEL: &str = "dissent/control/v1";
 
 /// A community secret with its generation. A ring of these opens every control event its holder
 /// may read.
 pub type SealKey = (u64, [u8; 32]);
+
+/// The encryption key of one MLS epoch, with the epoch. A ring of these opens member-sealed control
+/// events. See `EpochKeys`.
+pub type EpochKey = (u64, [u8; 32]);
+
+/// The keys of one MLS epoch, both derived from the epoch's exporter secret. `enc` opens the
+/// member-sealed payloads of that epoch. `write` only computes and checks tags, so it cannot open
+/// anything. A storage member holds `write`, and never `enc`.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EpochKeys {
+    pub enc: [u8; 32],
+    pub write: [u8; 32],
+}
+
+impl EpochKeys {
+    /// The keys of an epoch from its exporter output. Any length works, the output is hashed.
+    pub fn from_export(export: &[u8]) -> Self {
+        Self {
+            enc: blake3::derive_key(MEMBER_ENC_DOMAIN, export),
+            write: blake3::derive_key(MEMBER_WRITE_DOMAIN, export),
+        }
+    }
+}
 
 /// Why a sealed control event could not be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +89,21 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::JoinVia { .. }
             | Payload::ProfileUpdate { .. }
             | Payload::CommunityIconSet { .. }
+            | Payload::MemberOnlyControl { .. }
+            | Payload::HistoryVisibility { .. }
     )
+}
+
+/// Whether a control payload is sealed under the epoch key while member-only control is on. Invite
+/// events stay under the community secret, since a joiner reads them before it has a group, and
+/// the invite a `JoinVia` names must be known to check the join. Everything else in `is_sealable`
+/// goes under the epoch key.
+pub fn is_member_sealable(payload: &Payload) -> bool {
+    is_sealable(payload)
+        && !matches!(
+            payload,
+            Payload::InviteCreate { .. } | Payload::InviteRevoke { .. }
+        )
 }
 
 /// The header a payload is sealed against. Parents are sorted and deduplicated, as `Event::sign`
@@ -75,6 +120,11 @@ struct Header<'a> {
 }
 
 fn aad(body: &EventBody, generation: u64) -> Result<Vec<u8>> {
+    aad_under(AAD_DOMAIN, body, generation)
+}
+
+/// The associated data for a payload sealed under `domain`, with `number` as its generation or epoch.
+fn aad_under(domain: &[u8], body: &EventBody, number: u64) -> Result<Vec<u8>> {
     let mut parents = body.parents.clone();
     parents.sort_unstable();
     parents.dedup();
@@ -85,9 +135,9 @@ fn aad(body: &EventBody, generation: u64) -> Result<Vec<u8>> {
         device: body.device,
         parents: &parents,
         hlc: body.hlc,
-        generation,
+        generation: number,
     };
-    let mut out = AAD_DOMAIN.to_vec();
+    let mut out = domain.to_vec();
     out.extend(postcard::to_allocvec(&header).map_err(|e| Error::Encoding(e.to_string()))?);
     Ok(out)
 }
@@ -95,6 +145,20 @@ fn aad(body: &EventBody, generation: u64) -> Result<Vec<u8>> {
 fn cipher(secret: &[u8; 32]) -> XChaCha20Poly1305 {
     let key = blake3::derive_key(KEY_DOMAIN, secret);
     XChaCha20Poly1305::new(Key::from_slice(&key))
+}
+
+fn member_cipher(enc: &[u8; 32]) -> XChaCha20Poly1305 {
+    XChaCha20Poly1305::new(Key::from_slice(enc))
+}
+
+/// The write tag over the associated data and the ciphertext, each length-prefixed.
+fn member_tag(write: &[u8; 32], aad: &[u8], ciphertext: &[u8]) -> [u8; 32] {
+    let mut input = TAG_DOMAIN.to_vec();
+    input.extend((aad.len() as u64).to_le_bytes());
+    input.extend(aad);
+    input.extend((ciphertext.len() as u64).to_le_bytes());
+    input.extend(ciphertext);
+    *blake3::keyed_hash(write, &input).as_bytes()
 }
 
 /// Seals `body.payload`, which is plaintext here, under `secret` of `generation`. The caller
@@ -170,10 +234,111 @@ pub fn open_event<'a>(
     ev: &'a Event,
     ring: &[SealKey],
 ) -> std::result::Result<Cow<'a, Event>, OpenError> {
-    if !matches!(ev.body.payload, Payload::SealedControl { .. }) {
-        return Ok(Cow::Borrowed(ev));
+    open_event_keyed(ev, ring, &[])
+}
+
+/// Seals `body.payload` under the encryption key of `epoch`, and tags it with the epoch's write key.
+/// The caller stores the returned payload in the body before it signs the event.
+pub fn seal_member(keys: &EpochKeys, epoch: u64, body: &EventBody) -> Result<Payload> {
+    if !is_sealable(&body.payload) {
+        return Err(Error::Encoding(
+            "this payload is not sealed as control".into(),
+        ));
     }
-    let payload = open(ring, &ev.body)?;
+    let plain = postcard::to_allocvec(&body.payload).map_err(|e| Error::Encoding(e.to_string()))?;
+    let nonce: [u8; NONCE_LEN] = rand::random();
+    let aad = aad_under(MEMBER_AAD_DOMAIN, body, epoch)?;
+    let sealed = member_cipher(&keys.enc)
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            AeadPayload {
+                msg: &plain,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| Error::Encoding("could not seal the control payload".into()))?;
+    let mut ciphertext = nonce.to_vec();
+    ciphertext.extend(sealed);
+    let tag = member_tag(&keys.write, &aad, &ciphertext);
+    Ok(Payload::MemberSealedControl {
+        epoch,
+        ciphertext,
+        tag,
+    })
+}
+
+/// Opens a member-sealed payload with the encryption keys in `ring`. Only the key of the payload's
+/// own epoch is tried.
+pub fn open_member(ring: &[EpochKey], body: &EventBody) -> std::result::Result<Payload, OpenError> {
+    let Payload::MemberSealedControl {
+        epoch,
+        ciphertext,
+        ..
+    } = &body.payload
+    else {
+        return Err(OpenError::Forged);
+    };
+    if ciphertext.len() < NONCE_LEN {
+        return Err(OpenError::Forged);
+    }
+    let Some((_, enc)) = ring.iter().find(|(e, _)| e == epoch) else {
+        return Err(OpenError::NoKey);
+    };
+    let aad = aad_under(MEMBER_AAD_DOMAIN, body, *epoch).map_err(|_| OpenError::Forged)?;
+    let (nonce, sealed) = ciphertext.split_at(NONCE_LEN);
+    let plain = member_cipher(enc)
+        .decrypt(
+            XNonce::from_slice(nonce),
+            AeadPayload {
+                msg: sealed,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| OpenError::Forged)?;
+    let payload: Payload = postcard::from_bytes(&plain).map_err(|_| OpenError::Forged)?;
+    if is_sealable(&payload) {
+        Ok(payload)
+    } else {
+        Err(OpenError::Forged)
+    }
+}
+
+/// Checks the write tag of a member-sealed event with the write keys in `ring`, without opening it.
+/// A storage member uses this to keep events that are well formed for a community, and drop the
+/// rest. A tag made by anyone holding the write key passes, so this rejects junk, not forgeries
+/// by a storage member.
+pub fn verify_member_tag(ring: &[EpochKey], body: &EventBody) -> std::result::Result<(), OpenError> {
+    let Payload::MemberSealedControl {
+        epoch,
+        ciphertext,
+        tag,
+    } = &body.payload
+    else {
+        return Err(OpenError::Forged);
+    };
+    let Some((_, write)) = ring.iter().find(|(e, _)| e == epoch) else {
+        return Err(OpenError::NoKey);
+    };
+    let aad = aad_under(MEMBER_AAD_DOMAIN, body, *epoch).map_err(|_| OpenError::Forged)?;
+    if blake3::Hash::from(*tag) == blake3::Hash::from(member_tag(write, &aad, ciphertext)) {
+        Ok(())
+    } else {
+        Err(OpenError::Forged)
+    }
+}
+
+/// [`open_event`] for both kinds of sealed control payload. `ring` holds the community secret
+/// generations, and `epochs` the encryption key of each MLS epoch.
+pub fn open_event_keyed<'a>(
+    ev: &'a Event,
+    ring: &[SealKey],
+    epochs: &[EpochKey],
+) -> std::result::Result<Cow<'a, Event>, OpenError> {
+    let payload = match &ev.body.payload {
+        Payload::SealedControl { .. } => open(ring, &ev.body)?,
+        Payload::MemberSealedControl { .. } => open_member(epochs, &ev.body)?,
+        _ => return Ok(Cow::Borrowed(ev)),
+    };
     let mut plain = ev.clone();
     plain.body.payload = payload;
     Ok(Cow::Owned(plain))
@@ -185,7 +350,7 @@ mod tests {
     use crate::replayer::Replayer;
     use crate::state::replay_with;
     use crate::testutil::{event, User};
-    use crate::{Dag, Rejection};
+    use crate::{Dag, HistorySetting, Rejection, Role};
 
     const S0: [u8; 32] = [7; 32];
     const S1: [u8; 32] = [8; 32];
@@ -496,6 +661,295 @@ mod tests {
         assert!(st.rejected.is_empty());
         assert_eq!(st.channels.values().collect::<Vec<_>>(), vec!["general"]);
         assert_eq!(st.members[&owner.id()].display_name, "boss");
+    }
+
+    fn epoch_keys(export: u8) -> EpochKeys {
+        EpochKeys::from_export(&[export; 32])
+    }
+
+    /// An event by `u` on the control channel, its payload sealed for `epoch` under `keys`.
+    fn member_sealed(
+        u: &User,
+        keys: &EpochKeys,
+        epoch: u64,
+        parents: Vec<EventId>,
+        wall_ms: u64,
+        payload: Payload,
+    ) -> Event {
+        let body = EventBody {
+            community: CommunityId([0; 32]),
+            channel: ChannelId::CONTROL,
+            author: u.id(),
+            device: u.device.id(),
+            parents,
+            hlc: at(wall_ms),
+            payload,
+        };
+        let payload = seal_member(keys, epoch, &body).unwrap();
+        Event::sign(EventBody { payload, ..body }, &u.device)
+    }
+
+    #[test]
+    fn member_of_the_epoch_opens_the_payload() {
+        let u = User::new();
+        let keys = epoch_keys(1);
+        let ev = member_sealed(&u, &keys, 4, vec![], 1, join("alice"));
+        assert!(matches!(
+            ev.body.payload,
+            Payload::MemberSealedControl { epoch: 4, .. }
+        ));
+        let plain = open_event_keyed(&ev, &[], &[(4, keys.enc)]).unwrap();
+        assert_eq!(plain.body.payload, join("alice"));
+        assert_eq!(plain.id, ev.id);
+    }
+
+    #[test]
+    fn member_payload_hides_the_name_and_needs_its_epoch() {
+        let u = User::new();
+        let keys = epoch_keys(2);
+        let ev = member_sealed(&u, &keys, 0, vec![], 1, join("hidden-name"));
+        let bytes = postcard::to_allocvec(&ev).unwrap();
+        assert!(!bytes.windows(b"hidden-name".len()).any(|w| w == b"hidden-name"));
+        assert_eq!(open_event(&ev, &[]).unwrap_err(), OpenError::NoKey);
+        // A key of another epoch, or another epoch's key, does not open it.
+        assert_eq!(
+            open_event_keyed(&ev, &[], &[(1, keys.enc)]).unwrap_err(),
+            OpenError::NoKey
+        );
+        assert_eq!(
+            open_event_keyed(&ev, &[], &[(0, epoch_keys(3).enc)]).unwrap_err(),
+            OpenError::Forged
+        );
+    }
+
+    #[test]
+    fn write_key_tags_but_cannot_open() {
+        let u = User::new();
+        let keys = epoch_keys(4);
+        let ev = member_sealed(&u, &keys, 0, vec![], 1, join("alice"));
+        // A storage member holds the write key only. It checks the tag, and it cannot decrypt.
+        assert!(verify_member_tag(&[(0, keys.write)], &ev.body).is_ok());
+        assert_eq!(
+            open_event_keyed(&ev, &[], &[(0, keys.write)]).unwrap_err(),
+            OpenError::Forged
+        );
+        assert_eq!(
+            verify_member_tag(&[(0, keys.enc)], &ev.body).unwrap_err(),
+            OpenError::Forged
+        );
+        assert_eq!(
+            verify_member_tag(&[], &ev.body).unwrap_err(),
+            OpenError::NoKey
+        );
+    }
+
+    #[test]
+    fn a_forged_tag_is_refused_and_a_moved_payload_fails_the_tag() {
+        let u = User::new();
+        let keys = epoch_keys(5);
+        let ev = member_sealed(&u, &keys, 0, vec![], 1, join("alice"));
+        // Any change to the ciphertext breaks the tag, even when the author re-signs.
+        let mut edited = ev.body.clone();
+        if let Payload::MemberSealedControl { ciphertext, .. } = &mut edited.payload {
+            let last = ciphertext.len() - 1;
+            ciphertext[last] ^= 1;
+        }
+        let resigned = Event::sign(edited, &u.device);
+        assert_eq!(
+            verify_member_tag(&[(0, keys.write)], &resigned.body).unwrap_err(),
+            OpenError::Forged
+        );
+        // A tag of zeros is junk.
+        let mut junk = ev.body.clone();
+        if let Payload::MemberSealedControl { tag, .. } = &mut junk.payload {
+            *tag = [0; 32];
+        }
+        assert_eq!(
+            verify_member_tag(&[(0, keys.write)], &junk).unwrap_err(),
+            OpenError::Forged
+        );
+        // Changing the header breaks the tag too, since the header is bound.
+        let mut moved = ev.body.clone();
+        moved.hlc = at(2);
+        assert_eq!(
+            verify_member_tag(&[(0, keys.write)], &moved).unwrap_err(),
+            OpenError::Forged
+        );
+    }
+
+    #[test]
+    fn a_member_sealed_payload_cannot_be_read_under_the_generation_path() {
+        let u = User::new();
+        let keys = epoch_keys(6);
+        let ev = member_sealed(&u, &keys, 0, vec![], 1, join("alice"));
+        // The generation ring cannot stand in for an epoch: a relabelled payload stays closed.
+        let mut relabelled = ev.clone();
+        relabelled.body.payload = Payload::SealedControl {
+            generation: 0,
+            ciphertext: vec![0; 40],
+        };
+        assert_eq!(
+            open_event_keyed(&relabelled, &[(0, keys.enc)], &[(0, keys.enc)]).unwrap_err(),
+            OpenError::Forged
+        );
+    }
+
+    #[test]
+    fn outsider_replay_of_member_sealed_control_names_nothing() {
+        let owner = User::new();
+        let keys = epoch_keys(7);
+        let join_ev = member_sealed(&owner, &keys, 0, vec![], 1, join("boss"));
+        let chan = member_sealed(
+            &owner,
+            &keys,
+            0,
+            vec![join_ev.id],
+            2,
+            Payload::ChannelCreate {
+                name: "secret-room".into(),
+            },
+        );
+        let mut dag = Dag::new();
+        dag.insert(join_ev).unwrap();
+        dag.insert(chan).unwrap();
+        // No epoch key: the DAG alone shows no member, role or channel.
+        let st = crate::state::replay_keyed(owner.id(), &dag, &[], &[]);
+        assert!(st.members.is_empty());
+        assert!(st.channels.is_empty());
+        assert!(st.rejected.iter().all(|(_, why)| *why == Rejection::Locked));
+        // The epoch key shows them.
+        let st = crate::state::replay_keyed(owner.id(), &dag, &[], &[(0, keys.enc)]);
+        assert!(st.rejected.is_empty());
+        assert_eq!(st.members[&owner.id()].display_name, "boss");
+    }
+
+    #[test]
+    fn a_departed_member_cannot_open_the_next_epoch() {
+        // The leaver kept epoch 0's key. The removal commit moves the group to epoch 1, whose key
+        // it never receives, so an event made in epoch 1 stays closed to it.
+        let owner = User::new();
+        let leaver = User::new();
+        let old = epoch_keys(8);
+        let new = epoch_keys(9);
+        let leave = member_sealed(&leaver, &old, 0, vec![], 1, Payload::Leave);
+        let after = member_sealed(
+            &owner,
+            &new,
+            1,
+            vec![leave.id],
+            2,
+            Payload::ChannelCreate {
+                name: "after-leave".into(),
+            },
+        );
+        assert_eq!(
+            open_event_keyed(&after, &[], &[(0, old.enc)]).unwrap_err(),
+            OpenError::NoKey
+        );
+        let mut dag = Dag::new();
+        dag.insert(leave).unwrap();
+        dag.insert(after).unwrap();
+        let st = crate::state::replay_keyed(owner.id(), &dag, &[], &[(0, old.enc)]);
+        assert!(st.channels.is_empty());
+        assert_eq!(st.rejected.len(), 1);
+    }
+
+    #[test]
+    fn member_only_switch_is_owner_only_and_latest_wins() {
+        let owner = User::new();
+        let admin = User::new();
+        let grant = event(
+            &owner,
+            vec![],
+            at(1),
+            Payload::RoleGrant {
+                user: admin.id(),
+                role: Role::Admin,
+            },
+        );
+        let by_admin = event(
+            &admin,
+            vec![grant.id],
+            at(2),
+            Payload::MemberOnlyControl { on: true },
+        );
+        let on = event(
+            &owner,
+            vec![by_admin.id],
+            at(3),
+            Payload::MemberOnlyControl { on: true },
+        );
+        let off = event(
+            &owner,
+            vec![on.id],
+            at(4),
+            Payload::MemberOnlyControl { on: false },
+        );
+        let mut dag = Dag::new();
+        for ev in [grant, by_admin.clone(), on, off] {
+            dag.insert(ev).unwrap();
+        }
+        let st = replay_with(owner.id(), &dag, &[]);
+        assert!(!st.member_only, "the owner's later switch-off wins");
+        assert_eq!(st.rejected.len(), 1);
+        assert_eq!(st.rejected[0], (by_admin.id, Rejection::NoPermission));
+    }
+
+    #[test]
+    fn history_defaults_to_all_and_admins_may_set_it() {
+        let owner = User::new();
+        let mut dag = Dag::new();
+        let set = event(
+            &owner,
+            vec![],
+            at(1),
+            Payload::HistoryVisibility {
+                setting: HistorySetting::SinceJoin,
+            },
+        );
+        dag.insert(set).unwrap();
+        assert_eq!(replay_with(owner.id(), &dag, &[]).history, HistorySetting::SinceJoin);
+        let empty = Dag::new();
+        assert_eq!(replay_with(owner.id(), &empty, &[]).history, HistorySetting::All);
+        // A plain user may not set it.
+        let user = User::new();
+        let mut dag = Dag::new();
+        dag.insert(event(
+            &user,
+            vec![],
+            at(1),
+            Payload::HistoryVisibility {
+                setting: HistorySetting::SinceJoin,
+            },
+        ))
+        .unwrap();
+        let st = replay_with(owner.id(), &dag, &[]);
+        assert_eq!(st.history, HistorySetting::All);
+        assert_eq!(st.rejected.len(), 1);
+    }
+
+    #[test]
+    fn invite_events_stay_under_the_community_secret() {
+        use crate::is_member_sealable;
+        assert!(!is_member_sealable(&Payload::InviteCreate {
+            invite_id: [0; 16],
+            expires_ms: None,
+        }));
+        assert!(!is_member_sealable(&Payload::InviteRevoke { invite_id: [0; 16] }));
+        assert!(is_member_sealable(&Payload::ChannelCreate { name: "x".into() }));
+    }
+
+    #[test]
+    fn member_only_and_history_payloads_are_sealable() {
+        assert!(is_sealable(&Payload::MemberOnlyControl { on: true }));
+        assert!(is_sealable(&Payload::HistoryVisibility {
+            setting: HistorySetting::SinceJoin,
+        }));
+        assert!(!is_sealable(&Payload::MemberSealedControl {
+            epoch: 0,
+            ciphertext: vec![],
+            tag: [0; 32],
+        }));
     }
 
     #[test]

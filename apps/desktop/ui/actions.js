@@ -271,6 +271,9 @@ export const joinCommunity = guard(async (invite) => {
   return summary;
 });
 
+// Not guarded: the invite card shows a failed preview itself, so the error has to reach it.
+export const invitePreview = (link) => api.invitePreview(link);
+
 export const leaveCommunity = guard(async (communityId) => {
   await api.leaveCommunity(communityId);
   await loadCommunities();
@@ -278,6 +281,7 @@ export const leaveCommunity = guard(async (communityId) => {
 });
 
 export const createInvite = guard((communityId) => api.createInvite(communityId));
+export const createFullInvite = guard((communityId) => api.createFullInvite(communityId));
 
 // Makes a text channel and opens it, or a voice channel, which stays unjoined until someone clicks it.
 export const createChannel = guard(async (communityId, name, { voice = false } = {}) => {
@@ -315,6 +319,19 @@ export const claimHandle = guard(async (communityId, handle) => {
 export const moderate = guard(async (communityId, action, user) => {
   await api.moderate(communityId, action, user);
   await loadCommunity(communityId);
+  return true;
+});
+
+// Turns member-only control on or off. A switch that some member device cannot read yet stays off, with the reason.
+export const toggleMemberOnly = guard(async (community) => {
+  const status = await api.memberOnlyStatus(community.id);
+  if (!status.on && !status.can_enable) {
+    toast(`Some members need to update (${status.waiting} device${status.waiting === 1 ? '' : 's'} not ready)`);
+    return false;
+  }
+  await api.setMemberOnly(community.id, !status.on);
+  await loadCommunity(community.id);
+  toast(status.on ? 'Server details are visible to storage members again' : 'Server details are hidden from storage members');
   return true;
 });
 

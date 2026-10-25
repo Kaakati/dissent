@@ -56,6 +56,108 @@ Controls:
   certs it issued, so a linked device needs no request to be included. If no device holds the root
   key, nothing is published and adding by address is unavailable; people add by contact link.
 
+## Peer exchange: what sharing addresses reveals, and to whom
+
+Peer exchange moves signed address records between devices, so a reconnect usually needs no DHT
+lookup. A record holds the device id, its relay URL, its direct IP addresses and port, a sequence
+number, an expiry of 24 hours, and the device cert that ties the device to its root. The device key
+signs it. Anyone who relays a record cannot change it, so a relay or seeder can withhold a record
+but cannot forge an address.
+
+Who receives what:
+
+| Exchange | Sent to | What it reveals |
+|---|---|---|
+| Own record, pushed when our address changes and re-signed every 10 minutes | Devices of members of our communities, and of our contacts | Our device id and direct IP addresses, to people who share a group with us. Never to the DHT. |
+| Digest, sent when we connect to a gossip neighbour | That neighbour, if in scope | Device ids and sequence numbers of the records we may share with it. |
+| Records of a third device | Only requesters who share a community with that device | Another member's device id and addresses, to its co-members. A contact who shares no community with a device never gets its address from us. |
+| Live lookup for device X | Connected neighbours that are in scope and share a community with X | The asker's device id and X's id, to people who already share a group with X. Anyone else is not asked. |
+| Lookup answer | The asker only, and only if the record is visible to it | The record. Other askers get an empty answer, so the reply does not show whether X exists. A device outside our groups is refused. |
+
+Two rules hold throughout. A device learns a record only if its root is in one of its groups, so a
+stranger's record never enters the cache. A device answers a lookup only for a requester in its
+groups. Both checks use the signed cert in the record, not the sender's word.
+
+Limits, against abuse and against a cache that grows without bound:
+
+- The cache holds at most 4096 records. The least recently used go first.
+- At most 4 devices per root. A fifth evicts that root's least recently used device.
+- A peer may push once per 10 seconds. Refused pushes do not restart the wait.
+- A record that fails verification, is expired, lives longer than 24 hours, or is not newer than the
+  one held is dropped.
+
+What the design does not change: direct IP addresses already reach community members and contacts
+through the existing signed-address announcements, which predate peer exchange. Peer exchange keeps
+that audience. It adds the rule that a third device's record goes only to its co-members.
+
+### Local network discovery (opt-in, off by default)
+
+With "Find people on the same network" on, a device sends a multicast beacon on UDP port 47320.
+The beacon carries a fresh random nonce and one token per community key. A token is a keyed hash of
+the ten-minute window and the nonce, under a key only that community's members hold.
+
+- **What an observer on the network sees.** A beacon's values are random, and no two beacons repeat
+  them, so an observer cannot link beacons from one device, track it across windows, or tell which
+  community a beacon belongs to. The observer does see that a Dissent device sends beacons on that
+  port, and that device's IP address.
+- **Device ids stay hidden until a handshake.** A device answers a beacon only with a challenge,
+  proving it holds the community key. The beaconing device then reveals its id only to a peer that
+  proved the key in return. Each side answers a fresh nonce from the other, so a recorded message
+  cannot be replayed to a new peer to reveal an id. A stranger without the key learns nothing.
+- **What a member on the network learns.** Other members of the same community on the LAN learn each
+  other's device ids and IP addresses. They are already members, so this matches what they learn
+  over the network. A device that has left a community stops being recognised once the key rotates.
+- **Off in loopback test mode.** The node never binds the multicast socket when loopback is set.
+- **Known limit.** LAN addresses stay in the lookup until the engine restarts. There is no expiry for
+  them yet.
+
+### Seeders
+
+A seeder is a member that keeps the records of its communities' members and answers lookups from
+members. It learns what any member learns: device ids and addresses of the members it holds, and
+which device each member asks about. A seeder cannot forge a record, because devices sign their own,
+and a stale record is bounded by its expiry. A seeder can withhold records, which only costs
+availability; the dial then falls back to the DHT or another member. Answers from a seeder are
+labelled `seeder` in the dial stats, so the user can see when one was used.
+
+Relays are not lookup points in this version. A relay forwards QUIC packets it cannot read, and it
+holds no records. A relay that also acted as a lookup point would need the same signed-record
+design, and it is not built.
+
+
+## Invite links and previews: what they reveal
+
+A short invite, `dissent://invite/<dss1 address>.<secret>.<generation>[.<invite id>]`, carries the
+community's address and its invite secret, and nothing else. The DHT record that names the peers and
+relays is sealed under that secret, so someone with only the address finds no record and no peers.
+Whoever holds the link can join, so the link is a bearer credential, like the long form. A short
+link resolves while its secret is current or inside the 30-day grace after a rotation: during that
+grace the founder keeps the record under each retired secret too.
+
+The preview (`Request::InvitePreview`) is answered only to a device that proves the invite secret,
+with the token every community request carries. The answer shows, and only to that holder:
+
+- the community name, its creation date, and a reference to its icon
+- the member count and the online count, as numbers only
+- whether the named invite is live, revoked, expired, or unknown to the answering member
+
+It shows no member name, device id, channel, or message. The answer carries the community's own
+genesis, so the name and date check against the community key, and it is signed by the answering
+device, whose cert is root-signed. Each requester gets ten previews a minute from one device, and a
+requester reuses a preview for 60 seconds.
+
+Who learns what:
+
+- **Invite holders:** the name, icon, counts and invite status above.
+- **Strangers who know only the community id:** nothing. The request has no valid token, so it is
+  refused.
+- **A banned device:** refused, as for every community request.
+- **DHT nodes:** the sealed record only. They learn that a key exists, as for community records.
+- **The answering member:** learns the requester's device id and address, as it does when joining.
+
+The online count comes from presence beacons. It is a count, not a list, is shown to invite holders
+only, and can be stale by up to the presence window.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
@@ -101,29 +203,19 @@ Controls:
   payload whose generation it lacks stays locked until the key arrives, and the replay is rebuilt
   then. Message content was already under MLS, and the rotation payload stays readable, because it
   carries the keys.
+  **Phase 3, member-only control: done, under the owner's switch.** With `MemberOnlyControl { on: true }`, new control events are sealed under the MLS epoch's key, exported from the community group, and not under the community secret. A storage member is never in the group, so it cannot open them, and a removed device loses the key when the removal commit moves the epoch. The owner can turn the switch on only when every member device supports it. Replay opens both forms, so old DAGs keep replaying. See `docs/design/05-encrypted-servers.md`, "Member-only control".
   **What remains in phase 3:**
-  - *Storage members read control payloads.* They fetch the current secret and every older one, so
-    they hold what members hold. Sealing protects against outsiders, DHT observers and past members
-    who kept only the DAG bytes. It does not hide control events from a seeder.
-  - *The window before a ban rotates.* Control events made after a ban, but before the rotation that
-    covers it lands, are still sealed under the old generation. A banned member who kept that
-    secret can open them. The rotation waits until the removal commit has applied
-    here, then goes out on the next maintenance pass, so the window is short but not zero.
-  - *Leaving does not rotate.* A departed member who kept the secret can still sync, as before, and
-    reads control events until the next ban rotation.
-  - *A member can send a wrong older secret.* A joiner stores what members send, and once a
-    generation has an entry it stops asking for that generation. A bad entry therefore leaves that
-    generation's events locked for the joiner. The member cannot forge or read anything, because
-    every payload is authenticated. Committing the older secrets to the rotation would close this.
-  - *Two admins rotating at once.* Events sealed under the losing secret open only on devices that
-    held it. Other devices show them as locked, so their replay can differ until they fetch it. The
-    history fetch reaches only the devices that answer, so this is a known gap.
-  - *Residual cleartext metadata.* Anyone with the DAG sees the event id, author root and device,
-    channel, parents, hlc, the generation and the payload length. The kind of a sealed control
-    event is hidden. Clear kinds remain: message content kinds, `Delete`, reaction emoji, and
-    `SecretRotation`. A rotation names the banned roots it covers, so a banned root's id and the time
-    of the ban are visible, though not the ban's author or reason.
-  **Still open in phase 3:** reaction emoji.
+  - *Before the switch.* Events made before the owner turns it on stay under the community secret, so storage members read them. A new community starts with the switch off, and its first events are readable to storage members until the owner turns it on.
+  - *Invite events.* They stay under the community secret, so storage members read them, including invite ids and expiry. Storage members already hold the secret that invite links carry.
+  - *A member can break the switch.* Replay does not check the form of a control event against the switch. A member that sends a community-secret event while the switch is on exposes that one event to storage members. Honest devices never do.
+  - *Storage members push junk.* A storage member holds the write key, so it can make tags that pass for any ciphertext. Other seeders keep such junk. Members refuse it, because it does not open under the epoch key.
+  - *Residual metadata under the switch.* Anyone with the DAG sees each member-sealed event's author root and device, channel, parents, hlc, the epoch number and the payload length. The epoch number counts membership changes, and storage members see it with the time. The kind of the payload is hidden.
+  - *The window before a removal commit lands.* A ban, leave or departure moves the epoch when the removal commit applies. Until then, the removed device still holds the current key, and it can read events made in that epoch. The commit waits for the removing device's turn, so this is short but not zero.
+  - *A member can send a wrong epoch key.* A joiner stores the keys that members send, and an epoch it already has keeps its key. A bad key leaves that epoch's events locked for the joiner, and the member cannot read or forge anything. Joiners check nothing against the DAG here, the same as older secrets.
+  - *Leaving does not rotate the community secret.* Under the switch, a departed member loses the epoch keys. Before the switch, it keeps the community secret until the next ban rotation, as before.
+  - *Two admins rotating at once.* Events sealed under the losing secret open only on devices that held it. Other devices show them as locked, so their replay can differ until they fetch it. The history fetch reaches only the devices that answer, so this is a known gap.
+  - *Residual cleartext metadata for old events.* Anyone with the DAG sees the event id, author root and device, channel, parents, hlc, the generation and the payload length of a community-secret control event. Clear kinds remain: message content kinds, `Delete`, reaction emoji, and `SecretRotation`. A rotation names the banned roots it covers, so a banned root's id and the time of the ban are visible, though not the ban's author or reason.
+  **Still open in phase 3:** reaction emoji. Member-only control does not cover it.
 3. **Fixed: key-change warnings.** The engine raises `IdentityChanged` when someone you share a
    server with or have messaged rotates their key through recovery, or when a person you've
    messaged gains a new device. The change is recorded on their profile, and the app shows a

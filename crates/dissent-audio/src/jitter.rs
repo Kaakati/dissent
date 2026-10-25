@@ -4,6 +4,11 @@
 //! calls [`JitterBuffer::pop`] once per 20 ms playout tick, and each call yields exactly one
 //! frame. The buffer does three things:
 //!
+//! Slots come from the RTP timestamp, not from the packet's `seq`. The sender's clock counts every
+//! frame it captured, including the silent ones it does not always send, so a gap in the stream
+//! is silence in time. A missing slot after a silent packet plays as silence and is counted as a
+//! silent gap, not as loss. Other missing slots are concealed as before.
+//!
 //! - It estimates network jitter from arrival times. The target delay is the 95th percentile of
 //!   the jitter, clamped to 20 to 200 ms. The target grows at once and shrinks slowly.
 //! - A missing frame is recovered with Opus FEC from the next packet when that packet is present,
@@ -36,8 +41,6 @@ const SHRINK_RATE: f64 = 0.02;
 const MAX_CONCEALED_RUN: u32 = 25;
 /// A packet this many sequence numbers ahead of the cursor means the stream restarted.
 const RESYNC_AHEAD: u32 = 100;
-/// Opus DTX sends one- or two-byte packets for silence. Only those may be stretched or skipped.
-const SILENT_PACKET_BYTES: usize = 2;
 /// Extra buffered audio, in ms above target, that triggers a skip of one silent frame.
 const SHRINK_SLACK_MS: f64 = 60.0;
 /// Extra buffered audio, in ms above target, that triggers a skip of one frame of any kind.
@@ -50,12 +53,16 @@ const INSERT_SPACING_TICKS: u64 = 3;
 /// One packet as it arrives from the network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
-    /// Sequence number, unwrapped by the caller so that it never wraps during a call.
+    /// Sequence number of the frame the packet came from. The buffer does not use it for timing;
+    /// slots come from `timestamp`.
     pub seq: u32,
-    /// RTP timestamp in samples at 48 kHz.
+    /// RTP timestamp in samples at 48 kHz. The playout slot is this clock in 20 ms frames.
     pub timestamp: u32,
     /// Codec payload.
     pub payload: Vec<u8>,
+    /// The sender marked the frame silent, as RFC 6464 audio level 127. A slot after a silent
+    /// packet that never arrives is a silent gap.
+    pub silent: bool,
     /// Local arrival time in milliseconds.
     pub arrival_ms: u64,
 }
@@ -69,8 +76,8 @@ pub enum Playout {
     Fec,
     /// Concealed by the decoder's packet loss concealment.
     Concealed,
-    /// Output silence. The buffer had not started, a delay adjustment repeated silence, or the
-    /// loss ran past the concealment budget.
+    /// Output silence. The buffer had not started, a delay adjustment repeated silence, the slot
+    /// was a silent gap the sender never sent, or the loss ran past the concealment budget.
     Silence,
 }
 
@@ -99,6 +106,8 @@ pub struct JitterStats {
     pub stretched: u64,
     /// Silent packets skipped to remove delay.
     pub compressed: u64,
+    /// Slots after a silent packet that the sender never sent. Played as silence, not loss.
+    pub silent_gaps: u64,
 }
 
 /// Estimates the target delay from packet arrival times.
@@ -136,10 +145,17 @@ impl DelayEstimator {
     }
 }
 
+/// One buffered packet.
+#[derive(Debug)]
+struct Slot {
+    payload: Vec<u8>,
+    silent: bool,
+}
+
 /// Adaptive jitter buffer over a [`Decoder`].
 pub struct JitterBuffer<D: Decoder> {
     decoder: D,
-    buffer: BTreeMap<u32, Vec<u8>>,
+    buffer: BTreeMap<u32, Slot>,
     delay: DelayEstimator,
     /// Sequence number of the next slot to play. `None` while the buffer waits to start.
     cursor: Option<u32>,
@@ -147,6 +163,10 @@ pub struct JitterBuffer<D: Decoder> {
     /// after it.
     first_arrival_ms: Option<u64>,
     concealed_run: u32,
+    /// True when the last slot played was a silent packet, so a missing slot is a silent gap.
+    last_silent: bool,
+    /// The last timestamp seen and its unwrapped sample clock.
+    clock: Option<(u32, i64)>,
     ticks: u64,
     last_insert_tick: u64,
     stats: JitterStats,
@@ -162,6 +182,8 @@ impl<D: Decoder> JitterBuffer<D> {
             cursor: None,
             first_arrival_ms: None,
             concealed_run: 0,
+            last_silent: false,
+            clock: None,
             ticks: 0,
             last_insert_tick: 0,
             stats: JitterStats::default(),
@@ -181,29 +203,50 @@ impl<D: Decoder> JitterBuffer<D> {
         s
     }
 
+    /// Playout slot of a timestamp: the unwrapped sample clock in 20 ms frames. The sender's clock
+    /// wraps at 2^32 samples, so each step is taken as a signed difference from the last one.
+    fn slot(&mut self, timestamp: u32) -> u32 {
+        let ext = match self.clock {
+            None => i64::from(timestamp),
+            Some((last, ext)) => {
+                let step = i64::from(timestamp.wrapping_sub(last) as i32);
+                (ext + step).max(0)
+            }
+        };
+        self.clock = Some((timestamp, ext));
+        (ext as u64 / FRAME_SAMPLES as u64) as u32
+    }
+
     /// Adds a packet that has just arrived.
     pub fn push(&mut self, packet: Packet) {
         self.stats.received += 1;
         self.delay.observe(packet.arrival_ms, packet.timestamp);
+        let seq = self.slot(packet.timestamp);
 
         if let Some(cursor) = self.cursor {
-            if packet.seq < cursor {
+            if seq < cursor {
                 self.stats.late += 1;
                 return;
             }
-            if packet.seq - cursor > RESYNC_AHEAD {
+            if seq - cursor > RESYNC_AHEAD {
                 // The sender restarted or was silent for a long time. Rebuffer from here.
                 self.restart();
             }
         }
-        if self.buffer.contains_key(&packet.seq) {
+        if self.buffer.contains_key(&seq) {
             self.stats.duplicates += 1;
             return;
         }
         if self.first_arrival_ms.is_none() {
             self.first_arrival_ms = Some(packet.arrival_ms);
         }
-        self.buffer.insert(packet.seq, packet.payload);
+        self.buffer.insert(
+            seq,
+            Slot {
+                payload: packet.payload,
+                silent: packet.silent,
+            },
+        );
     }
 
     /// Produces the frame for the current 20 ms tick and writes it into `out`.
@@ -234,7 +277,7 @@ impl<D: Decoder> JitterBuffer<D> {
         let target = self.delay.target_ms;
         let ahead_ms = self.buffered_frames() as f64 * FRAME_MS as f64;
         let present = self.buffer.get(&seq);
-        let silent_next = present.is_some_and(|p| is_silent(p));
+        let silent_next = present.is_some_and(|p| p.silent);
         let excess = ahead_ms - target;
         if present.is_some()
             && (excess > EXCESS_SLACK_MS || (silent_next && excess > SHRINK_SLACK_MS))
@@ -255,18 +298,28 @@ impl<D: Decoder> JitterBuffer<D> {
             };
         }
 
-        if let Some(payload) = self.buffer.remove(&seq) {
-            if self.decoder.decode(Some(&payload), out).is_ok() {
+        if let Some(slot) = self.buffer.remove(&seq) {
+            if self.decoder.decode(Some(&slot.payload), out).is_ok() {
                 self.concealed_run = 0;
+                self.last_silent = slot.silent;
                 self.cursor = Some(seq + 1);
                 return Ok(Playout::Decoded);
             }
         }
 
-        // The packet for this slot is missing. Try FEC from the next packet first.
+        // The packet for this slot is missing. After a silent packet, the sender did not send
+        // this slot because it was silence, so it plays as silence.
+        if self.last_silent {
+            self.stats.silent_gaps += 1;
+            self.cursor = Some(seq + 1);
+            return Ok(self.silence(out));
+        }
+
+        // Otherwise it is a loss. Try FEC from the next packet first.
         self.stats.lost += 1;
+        self.last_silent = false;
         let fec = match self.buffer.get(&(seq + 1)) {
-            Some(next) => self.decoder.decode_fec(next, out).is_ok(),
+            Some(next) => self.decoder.decode_fec(&next.payload, out).is_ok(),
             None => false,
         };
         self.cursor = Some(seq + 1);
@@ -314,9 +367,7 @@ impl<D: Decoder> JitterBuffer<D> {
         self.cursor = None;
         self.first_arrival_ms = None;
         self.concealed_run = 0;
+        self.last_silent = false;
     }
 }
 
-fn is_silent(payload: &[u8]) -> bool {
-    payload.len() <= SILENT_PACKET_BYTES
-}

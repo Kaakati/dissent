@@ -352,6 +352,7 @@ function toggleMenu(anchor, community) {
     }),
     manage ? item('Create channel', 'plus', () => openCreateChannelDialog(community.id)) : null,
     has('avatars') && ['owner', 'admin'].includes(community.my_role) ? item('Server icon', 'image', () => openServerIconDialog(community)) : null,
+    has('member_only') && community.my_role === 'owner' ? item('Hide server details from seeders', 'lock', () => actions.toggleMemberOnly(community)) : null,
     item('Leave server', 'log-out', async () => {
       if (await confirmDialog(`Leave ${community.name}? You can rejoin with an invite link.`, 'Leave')) {
         actions.leaveCommunity(community.id);

@@ -56,6 +56,8 @@ pub(crate) struct Community {
     pub content: BTreeMap<EventId, (Hlc, String)>,
     pub sender: Option<Arc<TopicSender>>,
     pub task: Option<ReceiverTask>,
+    /// Control keys of the MLS epochs this device has been in. See `epoch_keys`.
+    pub epochs: crate::epoch_keys::EpochStore,
 }
 
 impl Community {
@@ -75,6 +77,7 @@ impl Community {
             content: BTreeMap::new(),
             sender: None,
             task: None,
+            epochs: Default::default(),
         }
     }
 
@@ -113,6 +116,13 @@ impl Community {
     /// Installs the keys that open sealed control events, and rebuilds the replay if they changed.
     pub fn set_ring(&mut self, ring: Vec<SealKey>) {
         self.replayer.set_ring(&self.dag, ring);
+        self.join_times_refresh();
+        self.ring_dirty = true;
+    }
+
+    /// Installs the encryption keys of the MLS epochs, and rebuilds the replay if they changed.
+    pub fn set_epoch_ring(&mut self, epochs: Vec<dissent_events::EpochKey>) {
+        self.replayer.set_epoch_ring(&self.dag, epochs);
         self.join_times_refresh();
         self.ring_dirty = true;
     }

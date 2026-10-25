@@ -209,6 +209,32 @@ pub enum Payload {
     /// Sets or clears the community's icon. Owner and admin only. Sealed, like `ProfileUpdate`.
     /// Appended, see `control` and `picture`.
     CommunityIconSet { avatar: Option<crate::picture::Picture> },
+    /// A control payload sealed under the encryption key of MLS epoch `epoch`, exported from the
+    /// community's MLS group. Only devices that were members in that epoch hold the key, so storage
+    /// members and everyone removed since cannot open it. `tag` is a keyed hash over the header and
+    /// ciphertext, under the epoch's write key. A storage member checks it without being able to
+    /// decrypt, and drops events without a valid tag. Appended, see `control`.
+    MemberSealedControl {
+        epoch: u64,
+        ciphertext: Vec<u8>,
+        tag: [u8; 32],
+    },
+    /// Turns member-only control on or off. Owner only. While on, members author control events in
+    /// the `MemberSealedControl` form. Appended, see `control`.
+    MemberOnlyControl { on: bool },
+    /// Which past control content a new member is given keys for. Owner and admin only. Appended,
+    /// see `control`.
+    HistoryVisibility { setting: HistorySetting },
+}
+
+/// How much control history a member who joins later can read. See `Payload::HistoryVisibility`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistorySetting {
+    /// Every epoch's keys go to a new member. The default, as before.
+    #[default]
+    All,
+    /// A new member gets keys from the epoch it joins in, and nothing older.
+    SinceJoin,
 }
 
 /// Who may read a channel without a warning. Default is for everyone who can view the channel.

@@ -27,6 +27,7 @@ futures-lite.workspace = true
 negentropy.workspace = true
 data-encoding.workspace = true
 url.workspace = true
+n0-future.workspace = true
 
 [dev-dependencies]
 iroh-relay = { workspace = true, features = ["test-utils"] }

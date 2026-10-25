@@ -5,7 +5,7 @@
 //! Callers must pass every id that `Dag::insert` reports as entered to
 //! [`Replayer::on_insert`]. The replayer then matches [`crate::replay`] exactly.
 
-use crate::control::{open_event, SealKey};
+use crate::control::{open_event_keyed, EpochKey, SealKey};
 use crate::dag::OrderKey;
 use crate::state::{apply_event, CommunityState, Rejection};
 use crate::{Dag, Event, EventId};
@@ -30,6 +30,9 @@ pub struct Replayer {
     owner: RootId,
     /// Keys that open sealed control events. Changing them rebuilds the state.
     ring: Vec<SealKey>,
+    /// Encryption keys of the MLS epochs that open member-sealed control events. Changing them
+    /// rebuilds the state too.
+    epochs: Vec<EpochKey>,
     state: CommunityState,
     /// Key of the last applied event. Every stored event at or below it is applied.
     applied_up_to: Option<OrderKey>,
@@ -44,6 +47,7 @@ impl Replayer {
         Self {
             owner,
             ring: Vec::new(),
+            epochs: Vec::new(),
             state: CommunityState::new(owner),
             applied_up_to: None,
             snapshots: Vec::new(),
@@ -61,13 +65,31 @@ impl Replayer {
         &self.ring
     }
 
+    /// The epoch keys this replay opens member-sealed control events with.
+    pub fn epoch_ring(&self) -> &[EpochKey] {
+        &self.epochs
+    }
+
     /// Replaces the keys and rebuilds the state from `dag`, if they changed. A sealed event that
     /// was locked may open now, and an opened one may lock again if its key is dropped.
     pub fn set_ring(&mut self, dag: &Dag, ring: Vec<SealKey>) {
-        if self.ring == ring {
+        let epochs = self.epochs.clone();
+        self.set_keys(dag, ring, epochs);
+    }
+
+    /// Replaces the epoch keys and rebuilds the state from `dag`, if they changed. See `set_ring`.
+    pub fn set_epoch_ring(&mut self, dag: &Dag, epochs: Vec<EpochKey>) {
+        let ring = self.ring.clone();
+        self.set_keys(dag, ring, epochs);
+    }
+
+    /// Replaces both rings at once, so a change to each rebuilds the state once.
+    pub fn set_keys(&mut self, dag: &Dag, ring: Vec<SealKey>, epochs: Vec<EpochKey>) {
+        if self.ring == ring && self.epochs == epochs {
             return;
         }
         self.ring = ring;
+        self.epochs = epochs;
         self.apply_all(dag);
     }
 
@@ -111,7 +133,7 @@ impl Replayer {
     /// `ev` must sort after the applied prefix. Otherwise the answer is not exact.
     pub fn would_reject(&self, ev: &Event) -> Option<Rejection> {
         debug_assert!(self.applied_up_to.is_none_or(|k| (ev.body.hlc, ev.id) > k));
-        match open_event(ev, &self.ring) {
+        match open_event_keyed(ev, &self.ring, &self.epochs) {
             Ok(plain) => self.state.check(&plain).err(),
             Err(why) => Some(why.into()),
         }
@@ -143,7 +165,7 @@ impl Replayer {
     }
 
     fn apply_one(&mut self, key: OrderKey, ev: &Event) {
-        apply_event(&mut self.state, ev, &self.ring);
+        apply_event(&mut self.state, ev, &self.ring, &self.epochs);
         self.applied_up_to = Some(key);
         self.since_snapshot += 1;
         if self.since_snapshot >= SNAPSHOT_EVERY {

@@ -121,7 +121,9 @@ impl Engine {
     }
 
     /// Current epoch of a community's group, if this device is in it.
-    pub(crate) fn mls_epoch(&self, community: CommunityId) -> Option<u64> {
+    /// The MLS epoch this device is in for `community`. None when it has no group, as for a storage
+    /// member. A removal commit moves it, so a test can wait for one to land.
+    pub fn mls_epoch(&self, community: CommunityId) -> Option<u64> {
         let mls = self
             .inner
             .mls
