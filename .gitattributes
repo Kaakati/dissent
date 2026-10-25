@@ -2,3 +2,5 @@
 *.png binary
 *.ico binary
 *.icns binary
+crates/dissent-core/tests/fixtures/** binary
+crates/dissent-core/tests/fixtures/**/*.md text

@@ -10,3 +10,6 @@ apps/desktop/src-tauri/gen
 *.o
 .agents/
 /dist/
+
+# Upgrade-test profiles are real data files; keep every file, logs included.
+!crates/dissent-core/tests/fixtures/**
