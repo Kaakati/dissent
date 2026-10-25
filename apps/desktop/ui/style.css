@@ -389,6 +389,8 @@ button.link-btn:hover:not(:disabled) { background: var(--hover); }
 .switch-track::after { content: ''; position: absolute; left: 4px; top: 4px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); }
 
 /* Channel rows: owner actions on hover and focus (views/sidebar.js withChannelActions). */
+.spoiler-hidden { filter: blur(7px); cursor: pointer; user-select: none; border-radius: var(--r-2); }
+.spoiler-hidden:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .channel-row { position: relative; display: flex; flex-direction: column; }
 .row-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: none; gap: 2px; }
 .channel-row:hover .row-actions, .channel-row:focus-within .row-actions { display: flex; }
@@ -673,7 +675,8 @@ button.link-btn:hover:not(:disabled) { background: var(--hover); }
 .menu-item .menu-sub { color: var(--muted); font: 400 var(--fs-meta) / var(--lh-meta) var(--font); }
 .menu-item:hover .menu-sub, .menu-item:focus-visible .menu-sub { color: rgb(255 255 255 / .8); }
 .menu-item.has-sub::after { content: ""; }
-.menu-item > .icon.chev { margin-left: auto; }
+.menu-item > .icon.chev { margin-left: auto; flex: none; align-self: center; }
+.menu-item .menu-sub { white-space: normal; overflow-wrap: anywhere; }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--border-menu); flex: none; }
 .menu.context { position: fixed; top: auto; left: auto; right: auto; width: 264px; --ring: var(--ink); }
 .menu-head { padding: var(--s-2); }
@@ -688,7 +691,9 @@ button.link-btn:hover:not(:disabled) { background: var(--hover); }
 .menu-item:hover .status-glyph.presence, .menu-item:focus-visible .status-glyph.presence { --ring: var(--accent); }
 .menu-item:hover .status-glyph.presence.offline, .menu-item:focus-visible .status-glyph.presence.offline { box-shadow: inset 0 0 0 2px #fff; }
 .menu-item.has-sub { position: relative; }
-.menu.submenu { position: absolute; left: calc(100% + 6px); top: -6px; width: 220px; right: auto; }
+.menu.submenu { position: absolute; left: calc(100% + 6px); top: -6px; width: max-content; min-width: 220px; max-width: min(380px, calc(100vw - 32px)); right: auto; }
+/* Long labels (device names) end in an ellipsis instead of running under the radio or chevron. */
+.menu-item .menu-text > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* An invisible bridge over the gap, so moving the pointer from the row to its submenu doesn't close it. */
 .menu.submenu::before { content: ""; position: absolute; top: 0; bottom: 0; left: -12px; width: 12px; }
 .menu.submenu.flip::before { left: auto; right: -12px; }
@@ -847,6 +852,9 @@ button.link-btn:hover:not(:disabled) { background: var(--hover); }
 .id-row { display: flex; align-items: center; gap: var(--s-3); height: var(--hit); min-width: 0; }
 .id-label { width: 100px; flex: none; color: var(--muted); font: var(--fs-sm) / 19px var(--font); }
 .id-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A QR code stays dark on light in both themes so scanners read it. */
+.qr-code { display: block; width: fit-content; margin: var(--s-3) 0; padding: var(--s-3); border-radius: var(--r-2, 8px); background: #fff; }
+.qr-code svg { display: block; width: 168px; height: 168px; color: #000; }
 .radio-row, .toggle-row { display: flex; align-items: center; gap: var(--s-3); height: var(--hit); font: var(--fs-body) / 19px var(--font); color: var(--text-strong); cursor: pointer; }
 .volume-row { display: flex; align-items: center; gap: var(--s-3); min-height: var(--hit); font: var(--fs-body) / 19px var(--font); color: var(--text-strong); }
 .volume-row input[type="range"] { flex: 1; max-width: 260px; accent-color: var(--accent); }
@@ -1301,6 +1309,15 @@ html[data-density="compact"] .skel-lines { padding-top: 0; gap: var(--s-1); }
 .onboard-brand { display: flex; align-items: center; gap: 14px; color: var(--text-strong); font: 700 27px / 34px var(--font); }
 .onboard-mark { width: 56px; height: 56px; border-radius: 16px; background: var(--accent); color: #fff; display: grid; place-items: center; }
 .onboard-mark .icon { width: 32px; height: 32px; }
+/* Portable profile passphrase screen. It covers the window until the profile opens. */
+.unlock { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: var(--s-4); background: var(--rail); overflow: auto; }
+.unlock-card { width: min(420px, 100%); display: flex; flex-direction: column; gap: var(--s-3); padding: var(--s-8); border: 1px solid var(--border); border-radius: var(--r-row); background: var(--sidebar); }
+.unlock-card h1 { color: var(--text-strong); font: 700 var(--fs-title) / var(--lh-title) var(--font); }
+.chooser-option { display: grid; gap: var(--s-1); width: 100%; height: auto; padding: var(--s-4); text-align: left; background: var(--sidebar); border-color: var(--border-strong); border-radius: var(--r-row); }
+.chooser-option:hover:not(:disabled) { background: var(--hover); }
+.chooser-option:disabled { opacity: .55; cursor: default; }
+.chooser-title { color: var(--text-strong); font: 600 var(--fs-ui) / var(--lh-ui) var(--font); }
+.chooser-option .muted { font: var(--fs-meta) / var(--lh-meta) var(--font); }
 .onboard-intro h1 { margin-top: var(--s-10); color: var(--text-strong); font: 700 51px / 60px var(--font); letter-spacing: -.01em; }
 .onboard-intro p { max-width: 440px; font: 17px / 28px var(--font); }
 .onboard-steps { margin: auto 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
@@ -1660,3 +1677,42 @@ button.head-join { height: 32px; padding: 0 var(--s-4); background: var(--succes
 .mutual-list[hidden] { display: none; }
 .mutual-list .server-row { display: flex; align-items: center; gap: var(--s-2); color: var(--text); font: var(--fs-sm) / var(--lh-sm) var(--font); }
 .profile-body .since { margin-top: var(--s-1); color: var(--text); font: var(--fs-ui) / var(--lh-ui) var(--font); }
+
+/* ---- voice: device popovers on the user bar, and Settings > Voice ---- */
+/* A radio mark in a context menu. The accent when the row is idle, white on the accent row. */
+.menu-radio { flex: none; width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 2px var(--muted); }
+.menu-radio.on { box-shadow: inset 0 0 0 2px var(--accent); background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px); }
+.menu-item:hover .menu-radio, .menu-item:focus-visible .menu-radio { box-shadow: inset 0 0 0 2px #fff; }
+.menu-item:hover .menu-radio.on, .menu-item:focus-visible .menu-radio.on { background: radial-gradient(circle, #fff 0 4px, transparent 4.5px); }
+/* A volume row in a context menu: a heading with the value, then the slider. */
+.menu-range-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-2); padding: 6px var(--s-2) 0; color: var(--text); font: 500 var(--fs-sm) / var(--lh-sm) var(--font); }
+.menu-range-value { color: var(--muted); font: 400 var(--fs-meta) / var(--lh-meta) var(--mono); }
+.menu-range { display: block; width: calc(100% - 2 * var(--s-2)); margin: 4px var(--s-2) 8px; accent-color: var(--accent); }
+.menu-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-1); }
+
+.settings-page [hidden] { display: none !important; }
+.settings-page .radio-stack { height: auto; align-items: flex-start; padding: var(--s-1) 0; }
+.settings-page .radio-text { display: flex; flex-direction: column; min-width: 0; }
+.settings-page .radio-text .muted { font: var(--fs-meta) / var(--lh-meta) var(--font); }
+.voice-devices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); }
+.voice-field { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; color: var(--text-strong); font: var(--fs-sm) / 19px var(--font); }
+.voice-field > span { color: var(--muted); }
+.voice-select { width: 100%; min-width: 0; min-height: var(--hit); padding: 0 var(--s-2); background: var(--input); color: var(--text-strong); border: 1px solid var(--input-border); border-radius: var(--r-2); font: var(--fs-ui) / var(--lh-ui) var(--font); }
+.voice-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mic-test-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.level-meter { display: flex; align-items: flex-end; gap: 2px; flex: 1; min-width: 160px; height: 22px; }
+.level-bar { flex: 1; height: 100%; border-radius: 1px; background: var(--input-border); }
+.level-bar.on { background: var(--success); }
+/* The sensitivity track: the live level fills it in green, and the range input's handle is the threshold. */
+.sens { position: relative; height: var(--hit); }
+.sens-track { position: absolute; left: 0; right: 0; top: 50%; height: 8px; transform: translateY(-50%); overflow: hidden; background: var(--input); border: 1px solid var(--input-border); border-radius: var(--r-pill); }
+.sens-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--success); }
+.sens-range { position: relative; width: 100%; height: var(--hit); margin: 0; background: transparent; accent-color: var(--text-strong); }
+.sens-range::-webkit-slider-runnable-track { background: transparent; }
+.sens-range::-moz-range-track { background: transparent; }
+.sens-range:disabled { opacity: .55; }
+.sens-meta { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s-3); font: var(--fs-meta) / var(--lh-meta) var(--font); }
+.sens-meta output { color: var(--text-strong); font: var(--fs-meta) / var(--lh-meta) var(--mono); }
+.ptt-key { align-self: flex-start; min-height: var(--hit); padding: 0 var(--s-3); background: var(--input); color: var(--text-strong); border: 1px solid var(--input-border); border-radius: var(--r-2); font: 500 var(--fs-ui) / var(--lh-ui) var(--font); }
+.ptt-key.listening { border-color: var(--accent); color: var(--accent-text); background: var(--accent-tint-soft); }
+.ptt-key:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

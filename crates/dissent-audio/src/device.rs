@@ -22,6 +22,17 @@ use crate::resample::LinearResampler;
 /// Ring buffer length, in seconds of audio at the device rate.
 const RING_SECONDS: usize = 1;
 
+/// What a device looks like to a person, for picking its icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    /// Headphones, a headset or a USB audio device.
+    Headset,
+    /// A monitor or a display's HDMI or DisplayPort audio.
+    Display,
+    /// Anything else: built-in audio, speakers, line in.
+    Other,
+}
+
 /// A device the user can pick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
@@ -29,14 +40,62 @@ pub struct DeviceInfo {
     pub name: String,
     /// True for the system default device in its direction.
     pub is_default: bool,
+    /// The manufacturer, when the driver reports one and it differs from the name.
+    pub subtitle: Option<String>,
+    /// The kind the name and the driver's device type suggest.
+    pub kind: DeviceKind,
+}
+
+/// Guesses a device's kind from its name, then from the driver's device type. The name wins,
+/// because some drivers report every USB device as a headset.
+pub fn kind_hint(name: &str, device_type: Option<cpal::DeviceType>) -> DeviceKind {
+    let lower = name.to_ascii_lowercase();
+    if ["hdmi", "displayport", "display", "monitor"].iter().any(|w| lower.contains(w)) {
+        return DeviceKind::Display;
+    }
+    if ["headset", "headphone", "earphone", "earbud", "buds", "airpods", "usb"]
+        .iter()
+        .any(|w| lower.contains(w))
+    {
+        return DeviceKind::Headset;
+    }
+    match device_type {
+        Some(cpal::DeviceType::Headphones | cpal::DeviceType::Headset) => DeviceKind::Headset,
+        _ => DeviceKind::Other,
+    }
 }
 
 fn device_err(e: impl std::fmt::Display) -> AudioError {
     AudioError::Device(e.to_string())
 }
 
+/// The name and the driver's details of a device, or `None` when the driver will not describe it.
+fn describe(device: &cpal::Device) -> Option<DeviceInfo> {
+    let d = device.description().ok()?;
+    let name = d.name().to_string();
+    let subtitle = d
+        .manufacturer()
+        .filter(|m| !m.is_empty() && *m != name)
+        .map(str::to_string);
+    let kind = kind_hint(&name, Some(d.device_type()));
+    Some(DeviceInfo {
+        name,
+        is_default: false,
+        subtitle,
+        kind,
+    })
+}
+
 fn device_name(device: &cpal::Device) -> Option<String> {
-    device.description().ok().map(|d| d.name().to_string())
+    describe(device).map(|info| info.name)
+}
+
+/// Sets `is_default` on the entry named like the default device.
+fn with_default(mut list: Vec<DeviceInfo>, default: Option<&str>) -> Vec<DeviceInfo> {
+    for info in &mut list {
+        info.is_default = Some(info.name.as_str()) == default;
+    }
+    list
 }
 
 /// Lists the capture devices on the default host.
@@ -44,13 +103,8 @@ pub fn list_inputs() -> Result<Vec<DeviceInfo>> {
     let host = cpal::default_host();
     let default = host.default_input_device().as_ref().and_then(device_name);
     let devices = host.input_devices().map_err(device_err)?;
-    Ok(devices
-        .filter_map(|d| device_name(&d))
-        .map(|name| DeviceInfo {
-            is_default: Some(&name) == default.as_ref(),
-            name,
-        })
-        .collect())
+    let list = devices.filter_map(|d| describe(&d)).collect();
+    Ok(with_default(list, default.as_deref()))
 }
 
 /// Lists the playout devices on the default host.
@@ -58,13 +112,18 @@ pub fn list_outputs() -> Result<Vec<DeviceInfo>> {
     let host = cpal::default_host();
     let default = host.default_output_device().as_ref().and_then(device_name);
     let devices = host.output_devices().map_err(device_err)?;
-    Ok(devices
-        .filter_map(|d| device_name(&d))
-        .map(|name| DeviceInfo {
-            is_default: Some(&name) == default.as_ref(),
-            name,
-        })
-        .collect())
+    let list = devices.filter_map(|d| describe(&d)).collect();
+    Ok(with_default(list, default.as_deref()))
+}
+
+/// The name of the default input device, or `None` when there is none.
+pub fn default_input_name() -> Option<String> {
+    cpal::default_host().default_input_device().as_ref().and_then(device_name)
+}
+
+/// The name of the default output device, or `None` when there is none.
+pub fn default_output_name() -> Option<String> {
+    cpal::default_host().default_output_device().as_ref().and_then(device_name)
 }
 
 fn find_input(name: Option<&str>) -> Result<cpal::Device> {
@@ -360,4 +419,36 @@ fn build_output(
         }
     };
     stream.map_err(device_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_get_the_monitor_icon() {
+        assert_eq!(kind_hint("Display Audio (NVIDIA High Definition)", None), DeviceKind::Display);
+        assert_eq!(kind_hint("HDMI Output", None), DeviceKind::Display);
+        assert_eq!(kind_hint("DisplayPort 2 Output", None), DeviceKind::Display);
+    }
+
+    #[test]
+    fn headset_and_usb_names_get_the_headphone_icon() {
+        assert_eq!(kind_hint("Headset (Logitech G533)", None), DeviceKind::Headset);
+        assert_eq!(kind_hint("USB Audio Device", None), DeviceKind::Headset);
+        assert_eq!(kind_hint("Speakers (Realtek)", Some(cpal::DeviceType::Headphones)), DeviceKind::Headset);
+    }
+
+    #[test]
+    fn name_beats_the_driver_device_type() {
+        // A display-named device stays a monitor even when the driver calls it headphones.
+        assert_eq!(kind_hint("HDMI Output", Some(cpal::DeviceType::Headphones)), DeviceKind::Display);
+    }
+
+    #[test]
+    fn other_devices_get_the_generic_icon() {
+        assert_eq!(kind_hint("Speakers (Realtek Audio)", None), DeviceKind::Other);
+        assert_eq!(kind_hint("Speakers", Some(cpal::DeviceType::Speaker)), DeviceKind::Other);
+        assert_eq!(kind_hint("Line In", Some(cpal::DeviceType::Unknown)), DeviceKind::Other);
+    }
 }

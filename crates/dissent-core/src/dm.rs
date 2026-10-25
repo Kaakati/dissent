@@ -58,6 +58,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
                 root_id: m.to_string(),
                 display_name: w.display_name(m),
                 suffix: m.suffix(),
+                avatar: w.avatar_of(m),
             })
             .collect(),
         name,
@@ -65,7 +66,10 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         last_text: crate::attachments::text_of(&last_text),
         last_ms,
         status,
+        avatar: peer.and_then(|p| w.avatar_of(&p)),
         live_call: None,
+        contact_since_ms: peer.and_then(|p| w.contact_times.since.get(&p).copied()),
+        first_seen_ms: peer.and_then(|p| w.contact_times.first_seen.get(&p).copied()),
     }
 }
 
@@ -119,6 +123,10 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
         reason: None,
         attachments: Vec::new(),
         embeds: Vec::new(),
+        reply_to: None,
+        reactions: Vec::new(),
+        edited: false,
+        deleted: false,
     }
 }
 

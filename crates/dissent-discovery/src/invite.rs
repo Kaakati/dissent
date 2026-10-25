@@ -22,6 +22,33 @@ pub struct Invite {
     pub secret_generation: u64,
     /// Relay servers the community asks members to use: https URLs, at most four.
     pub relays: Vec<String>,
+    /// The id of an invite made with `InviteCreate`, which the community can revoke. Links made
+    /// before invite ids existed have none, and stay valid until the secret rotates.
+    pub invite_id: Option<[u8; 16]>,
+}
+
+/// An invite link from before `invite_id`. Postcard has no optional trailing field, so these
+/// decode with this shape instead.
+#[derive(Serialize, Deserialize)]
+struct LegacyInvite {
+    genesis: Genesis,
+    peers: Vec<String>,
+    secret: [u8; 32],
+    secret_generation: u64,
+    relays: Vec<String>,
+}
+
+impl From<LegacyInvite> for Invite {
+    fn from(old: LegacyInvite) -> Self {
+        Self {
+            genesis: old.genesis,
+            peers: old.peers,
+            secret: old.secret,
+            secret_generation: old.secret_generation,
+            relays: old.relays,
+            invite_id: None,
+        }
+    }
 }
 
 impl Invite {
@@ -42,7 +69,12 @@ impl Invite {
 
     /// Parses a full invite URL or the bare base32 payload, and verifies the genesis.
     pub fn parse(s: &str) -> Result<Self> {
-        let invite: Self = from_link(PREFIX, s).map_err(DiscoveryError::InvalidInvite)?;
+        let invite: Self = match from_link(PREFIX, s) {
+            Ok(invite) => invite,
+            Err(err) => from_link::<LegacyInvite>(PREFIX, s)
+                .map(Self::from)
+                .map_err(|_| DiscoveryError::InvalidInvite(err))?,
+        };
         invite
             .genesis
             .verify()
@@ -76,7 +108,24 @@ mod tests {
             secret: [7; 32],
             secret_generation: 0,
             relays: vec!["https://relay.example.org".into()],
+            invite_id: Some([9; 16]),
         }
+    }
+
+    #[test]
+    fn links_from_before_invite_ids_still_parse() {
+        let inv = sample();
+        let old = LegacyInvite {
+            genesis: inv.genesis.clone(),
+            peers: inv.peers.clone(),
+            secret: inv.secret,
+            secret_generation: inv.secret_generation,
+            relays: inv.relays.clone(),
+        };
+        let parsed = Invite::parse(to_link(PREFIX, &old).as_str()).unwrap();
+        assert_eq!(parsed.invite_id, None);
+        assert_eq!(parsed.secret, inv.secret);
+        assert_eq!(parsed.peers, inv.peers);
     }
 
     #[test]

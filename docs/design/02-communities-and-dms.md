@@ -12,6 +12,24 @@ Shared contract for all agents. "Server" in the UI = "community" in code.
 6. **Direct messages** are 1:1, sent device-to-device over a direct iroh connection (QUIC/TLS end to end between devices; relays only see ciphertext). Undelivered DMs stay in an outbox and are retried.
 7. Users who share no server can still DM by exchanging a **contact link** `dissent://contact/...`.
 
+## Addresses
+
+Users, servers and devices have a short, checkable form to read out or paste, in the style of Bitcoin addresses:
+
+| Kind | Prefix | Example |
+|---|---|---|
+| user (`RootId`) | `dsu1` | `dsu1qx7f…` |
+| server (`CommunityId`) | `dss1` | `dss1…` |
+| device (`DeviceId`) | `dsd1` | `dsd1…` |
+
+- The format is bech32m (BIP-350). The payload is the full 32-byte public key, so nothing is hashed or truncated, and the checksum catches typos. An address is about 62 characters.
+- Screens show the short form (first 8 and last 6 characters, `dsu1qx7f…k3f9q2`). The full address is in the tooltip and is what "Copy user address" and "Copy server address" put on the clipboard. My identity and the full profile also show a QR code.
+- Addresses are a display and input form only. State, storage, keys, contact and invite links, and the wire keep the lowercase base32 form (`Display`). `FromStr` accepts both forms, so a pasted address converts to base32 before it reaches the backend.
+- Adding by address works while the person allows it. Their user record is published on the Mainline DHT under their root key (`dissent-discovery`, `user_record.rs`), listing their device certs, which are verified against the address. The "Let people add me by address" switch (on by default) withdraws the record when off. Contact links keep working either way.
+- The shareable contact link is the short form, `dissent://contact/<address>`, while the record is published. The long card form (`dissent://contact/<base32>`) still parses and works, and is what is shared while the switch is off.
+- Only a device that holds the root key publishes the record. See `06-threat-model.md` for what publishing reveals.
+- Code: `crates/dissent-identity/src/address.rs` (encode, decode, prefixes), `apps/desktop/ui/address.js` (the same encoding in JavaScript; `address.test.js` checks the two agree on fixed keys).
+
 ## Already implemented (do not change unless your task says so)
 
 - `dissent-identity`: see CLAUDE.md. Plus `Genesis { community, owner, name, created_ms, sig }` with `Genesis::create(&CommunityKey, owner, name, created_ms)` and `.verify()`. This binds the owner to the community key; invites and sync carry it.
@@ -104,7 +122,7 @@ addresses.bin                       postcard Vec<StoredAddr { addr: PeerAddr, ts
 own_addr.bin                        postcard SignedAddr, our latest announced address. Its ts_ms keeps announcements
                                     increasing across restarts.
 communities/<id>/genesis.bin
-communities/<id>/community.key      founder only (32-byte seed)
+communities/<id>/community.key      founder only, sealed under the vault (32-byte seed inside; see 06-threat-model finding 7)
 communities/<id>/events.log         repeated [u32 BE len][SignedEvent postcard]; replayed on start
 dms/<peer-root-id>.log              repeated [u32 BE len][SignedDm postcard]
 dms/outbox.bin                      postcard Vec<SignedDm> not yet acked

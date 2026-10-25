@@ -136,7 +136,9 @@ async fn offline_message_is_collected_from_the_inbox_and_cleared() {
             .any(|m| m.text == "while you were away" && m.queued)
     })
     .await;
-    assert!(seeder.inbox_stats().envelopes > 0, "the inbox holds the mail");
+    // `send_dm` returns queued at once; the welcome and the message reach the inbox in the background,
+    // and alice must wait for both before she goes offline.
+    eventually("the inbox holds the welcome and the message", || seeder.inbox_stats().envelopes >= 2).await;
     alice.shutdown().await.expect("alice shuts down");
 
     // Bob comes back, collects from the inbox, and reads the message.

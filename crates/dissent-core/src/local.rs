@@ -30,6 +30,7 @@ pub const CAPABILITIES: &[&str] = &[
     "close_dm",
     "ignore",
     "status",
+    "avatars",
 ];
 
 /// Which text a user note stores.

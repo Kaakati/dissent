@@ -36,7 +36,7 @@ const fromChannel = (ch) => ({
   visibility: ch.visibility ?? 'default',
   bitrate_kbps: ch.bitrate_kbps ?? 64,
   user_limit: ch.user_limit ?? 0,
-  relay: ch.relay ?? 'automatic',
+  relay: ch.relay || 'automatic',
 });
 
 // The fields that differ between the saved channel and the edits.
@@ -153,7 +153,8 @@ function overview() {
       type: 'range', min: 0, max: 99, step: 1, value: d.user_limit, 'aria-label': 'User Limit',
       oninput: (e) => { d.user_limit = Number(e.target.value); limitValue.textContent = d.user_limit === 0 ? '∞' : String(d.user_limit); refresh(); },
     });
-    const relays = [{ id: 'automatic', name: 'Automatic' }, ...(state.community?.relays ?? [])];
+    // The community names its relays as URLs. Automatic is sent as 'automatic', which the desktop maps to none.
+    const relays = [{ id: 'automatic', name: 'Automatic' }, ...(state.community?.relays ?? []).map((url) => ({ id: url, name: new URL(url).host }))];
     const relay = el('select', {
       'aria-label': 'Relay',
       onchange: (e) => { d.relay = e.target.value; refresh(); },

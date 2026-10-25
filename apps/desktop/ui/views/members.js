@@ -1,5 +1,6 @@
 // Member list for the right column (servers). Grouped by role, banned members hidden.
 import { avatar, el, presenceOf } from '../ui.js';
+import { addressOf } from '../address.js';
 import { openProfile } from './profile.js';
 
 const GROUPS = [
@@ -18,7 +19,7 @@ export function membersNodes(community) {
     for (const m of people) {
       nodes.push(el('button', {
         class: 'member',
-        title: `${m.display_name}·${m.suffix}`,
+        title: `${m.display_name}·${addressOf('user', m.root_id)}`,
         onclick: (e) => openProfile(m.root_id, e.clientX, e.clientY),
       },
       avatar(m.display_name, m.root_id, '', presenceOf(m)),

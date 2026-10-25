@@ -2,6 +2,7 @@
 import { state, subscribe, notify, canModerate, inServer } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, stackAvatar, icon, linkify, dayKey, dayLabel, clockLabel, whenLabel, stampLabel, setHue, toast, copyText, skeletonRows } from '../ui.js';
+import { addressOf, shortOf } from '../address.js';
 import { confirmDialog, openInviteDialog, openSafetyDialog, openFileSendDialog, openNewGroupDialog } from './dialogs.js';
 import { openProfile } from './profile.js';
 import { openEmojiPicker } from './emoji.js';
@@ -223,7 +224,7 @@ function current() {
 
 function peerName() {
   const known = state.conversations.find((c) => c.peer === state.peer)?.display_name;
-  return known || state.peerName || `anon·${state.peer.slice(0, 8)}`;
+  return known || state.peerName || `anon·${shortOf('user', state.peer)}`;
 }
 
 function emptyNode(iconName, title, text) {
@@ -269,16 +270,16 @@ function render() {
   if (searchInput.value !== state.ui.filter) searchInput.value = state.ui.filter;
   searchInput.placeholder = view.dm ? `Search ${view.title}` : 'Search';
 
-  titleBox.replaceChildren(...titleNodes(view));
+  titleBox.replaceChildren(...titleNodes(view).filter(Boolean));
   const topicEl = view.topic ? [el('span', { class: 'chat-divider' }), el('span', { class: 'topic', text: view.topic, title: view.topic })] : [];
   header.querySelectorAll('.topic-wrap').forEach((n) => n.remove());
   header.insertBefore(el('div', { class: 'topic-wrap' }, ...topicEl), tools);
-  tools.replaceChildren(...toolNodes(view));
+  tools.replaceChildren(...toolNodes(view).filter(Boolean));
   const live = liveCallFor(view);
   if (live && !callHere(view) && lobbyDismissed !== view.key) {
     const head = lobbyHeader({ view, live, title: titleNodes(view) });
-    titleBox.replaceChildren(...head.title);
-    tools.replaceChildren(...head.tools);
+    titleBox.replaceChildren(...head.title.filter(Boolean));
+    tools.replaceChildren(...head.tools.filter(Boolean));
     // The right column shows who is in the call while the lobby is open.
     if (!state.ui.lobby || state.ui.lobby.key !== view.key) {
       state.ui.lobby = { key: view.key, live };
@@ -315,6 +316,15 @@ function render() {
     return;
   }
 
+  if (ageGated(view)) {
+    list.setAttribute('aria-busy', 'false');
+    list.replaceChildren(ageGate(view));
+    composerHost.replaceChildren();
+    composerKey = null;
+    listKey = view.key;
+    return;
+  }
+
   const shown = filtered(view.items);
   const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   let rows;
@@ -343,7 +353,7 @@ function renderPage() {
   showTyping(null);
   const built = pageBuilders[state.ui.page]();
   titleBox.replaceChildren(icon(built.titleIcon), el('h2', { text: built.title }));
-  tools.replaceChildren(...(built.headerExtra ?? []));
+  tools.replaceChildren(...(built.headerExtra ?? []).filter(Boolean));
   list.setAttribute('aria-busy', 'false');
   list.replaceChildren(built.body);
   composerHost.replaceChildren();
@@ -516,11 +526,11 @@ function messageRow(item, view, start) {
     : el('div', { class: 'gutter' }, el('span', { class: 'gutter-time', text: clockLabel(item.ms) }));
   const reactions = view.social && item.reactions?.length && !item.deleted ? reactionsNode(item) : null;
   const files = view.files && item.attachments?.length && !item.deleted
-    ? el('div', { class: 'attachments' }, item.attachments.map((a) => attachmentNode(a, { messageId: item.id })))
+    ? spoilerGuard(item, el('div', { class: 'attachments' }, item.attachments.map((a) => attachmentNode(a, { messageId: item.id }))))
     : null;
   const bodyOrNull = item.deleted || item.text || !files ? body : null; // a file-only message has no empty text line
   const cards = has('embeds') && !item.deleted && item.embeds?.length
-    ? el('div', { class: 'embeds' }, item.embeds.slice(0, 3).map(embedCard).filter(Boolean))
+    ? spoilerGuard(item, el('div', { class: 'embeds' }, item.embeds.slice(0, 3).map(embedCard).filter(Boolean)))
     : null;
   const content = start
     ? el('div', { class: 'msg-content' },
@@ -661,11 +671,85 @@ function authorButton(item) {
   return btn;
 }
 
+// Messages in a spoiler channel are blurred until someone clicks them. Reveals last for this session.
+const revealed = new Set();
+
 function bodyNode(item) {
   if (item.deleted) return el('p', { class: 'body deleted', text: 'message deleted' });
-  return el('p', { class: 'body' },
+  const hidden = channelVisibility() === 'spoiler' && !revealed.has(item.id);
+  const body = el('p', { class: `body${hidden ? ' spoiler-hidden' : ''}` },
     highlight(linkify(item.text), state.ui.filter),
     item.edited ? el('span', { class: 'edited', text: ' (edited)' }) : null);
+  if (hidden) {
+    const reveal = () => { revealed.add(item.id); notify('main'); };
+    body.tabIndex = 0;
+    body.setAttribute('role', 'button');
+    body.setAttribute('aria-label', 'Spoiler. Press to reveal');
+    body.onclick = reveal;
+    body.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reveal(); } };
+  }
+  return body;
+}
+
+// Attachments and link previews of a spoiler message are blurred with its text, and a click reveals them all.
+// The capture-phase handler stops the click reaching a download or open button while they are hidden.
+function spoilerGuard(item, node) {
+  if (channelVisibility() !== 'spoiler' || revealed.has(item.id)) return node;
+  node.classList.add('spoiler-hidden');
+  node.tabIndex = 0;
+  node.setAttribute('role', 'button');
+  node.setAttribute('aria-label', 'Spoiler media. Press to reveal');
+  const reveal = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    revealed.add(item.id);
+    notify('main');
+  };
+  node.addEventListener('click', reveal, true);
+  node.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') reveal(e);
+  }, true);
+  return node;
+}
+
+// The visibility of the open channel: 'default', 'spoiler' or 'age'.
+function channelVisibility() {
+  return state.community?.channels.find((c) => c.id === state.channelId)?.visibility ?? 'default';
+}
+
+// An age-restricted channel asks once per channel on this device before it shows anything.
+function ageKey(view) {
+  return `age-ok:${state.community?.id}:${state.channelId}`;
+}
+
+// Confirmations made in this session, for when storage is unavailable.
+const ageConfirmed = new Set();
+
+function ageGated(view) {
+  if (view.dm || channelVisibility() !== 'age') return false;
+  if (ageConfirmed.has(ageKey(view))) return false;
+  try {
+    return localStorage.getItem(ageKey(view)) !== 'yes';
+  } catch {
+    return true;
+  }
+}
+
+function ageGate(view) {
+  const confirm = () => {
+    ageConfirmed.add(ageKey(view));
+    try {
+      localStorage.setItem(ageKey(view), 'yes');
+    } catch {
+      // The session set above still lets the channel open.
+    }
+    render();
+  };
+  return el('div', { class: 'empty age-gate' },
+    icon('shield'),
+    el('p', { class: 'empty-title', text: 'Age-restricted channel' }),
+    el('p', { class: 'muted', text: 'Confirm that you are of age to view this channel. You confirm once per channel on this device.' }),
+    el('button', { class: 'primary', text: 'I am of age', onclick: confirm }));
 }
 
 // Own messages, and in a server channel also for owners, admins and moderators (the roles of that server).
@@ -930,7 +1014,7 @@ function welcomeNode(view) {
   }
   if (view.dm) {
     const mutual = state.peerProfile?.mutual_communities.length ?? 0;
-    const suffix = state.peerProfile?.suffix ?? view.peer.slice(0, 8);
+    const suffix = shortOf('user', view.peer);
     return el('div', { class: 'welcome' },
       avatar(view.title, view.peer, 'xl'),
       el('h2', { text: view.title }),

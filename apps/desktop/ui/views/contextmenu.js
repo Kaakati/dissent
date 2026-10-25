@@ -1,7 +1,9 @@
 // A right-click menu at a point. Items: { label, icon, leading, sub, danger, disabled, onPick, submenu: [...] }, 'sep',
-// or { header } for a non-item block (a node that the arrow keys skip).
+// or { header } for a non-item block (a node that the arrow keys skip). An item with `radio` shows a radio mark, checked
+// when `checked` is set. { slider: { label, min, max, value, format, onInput, onChange } } is a range row.
 // Keyboard: Up and Down move (closing any open submenu), Right opens a submenu, Left closes it, Enter picks, Escape
-// closes everything. A submenu opens on hover, click, Enter or Right, not on focus alone.
+// closes everything. A submenu opens on hover, click, Enter or Right, not on focus alone. On a range row, Left and Right
+// change the value and Up and Down move to the next row.
 import { el, icon } from '../ui.js';
 
 let open = null; // { root, opener }
@@ -24,7 +26,7 @@ function onKey(e) {
   if (!open) return;
   const active = document.activeElement;
   const menu = active?.closest('.menu') ?? open.root;
-  const items = [...menu.querySelectorAll(':scope > .menu-item:not([aria-disabled="true"])')];
+  const items = [...menu.querySelectorAll(':scope > .menu-item:not([aria-disabled="true"]), :scope > .menu-range')];
   const i = items.indexOf(active);
   switch (e.key) {
     case 'Escape': e.preventDefault(); closeContextMenu(); return;
@@ -58,15 +60,18 @@ function build(items, isSub = false) {
     if (item === 'sep') { menu.append(el('div', { class: 'menu-sep', role: 'separator' })); continue; }
     if (!item) continue;
     if (item.header) { menu.append(el('div', { class: 'menu-head', role: 'none' }, item.header)); continue; }
+    if (item.slider) { menu.append(...sliderRow(item.slider)); continue; }
     const node = el('button', {
       class: `menu-item${item.danger ? ' danger' : ''}${item.submenu ? ' has-sub' : ''}`,
-      role: 'menuitem',
+      role: item.radio ? 'menuitemradio' : 'menuitem',
+      'aria-checked': item.radio ? String(Boolean(item.checked)) : null,
       'aria-disabled': item.disabled ? 'true' : null,
       'aria-haspopup': item.submenu ? 'menu' : null,
       tabindex: '-1',
     },
     item.leading ?? (item.icon ? icon(item.icon) : null),
-    el('span', { class: 'menu-text' }, el('span', { text: item.label }), item.sub ? el('span', { class: 'menu-sub', text: item.sub }) : null),
+    el('span', { class: 'menu-text' }, el('span', { text: item.label, title: item.label }), item.sub ? el('span', { class: 'menu-sub', text: item.sub }) : null),
+    item.radio ? el('span', { class: `menu-radio${item.checked ? ' on' : ''}`, 'aria-hidden': 'true' }) : null,
     item.submenu ? el('span', { class: 'icon chev' }, icon('chevron-right')) : null);
     if (item.submenu) {
       const sub = build(item.submenu, true);
@@ -87,6 +92,27 @@ function build(items, isSub = false) {
     menu.append(node);
   }
   return menu;
+}
+
+// A heading with the value, then the range input. The input is a direct child of the menu, so the arrow keys reach it.
+function sliderRow({ label, min, max, step = 1, value, format = String, onInput, onChange }) {
+  const readout = el('output', { class: 'menu-range-value', text: format(value) });
+  const input = el('input', {
+    type: 'range',
+    class: 'menu-range',
+    min: String(min),
+    max: String(max),
+    step: String(step),
+    value: String(value),
+    'aria-label': label,
+    tabindex: '-1',
+    oninput: (e) => {
+      readout.textContent = format(Number(e.target.value));
+      onInput?.(Number(e.target.value));
+    },
+    onchange: (e) => onChange?.(Number(e.target.value)),
+  });
+  return [el('div', { class: 'menu-range-head', role: 'none' }, el('span', { text: label }), readout), input];
 }
 
 function placeSub(parent, sub) {

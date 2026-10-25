@@ -316,7 +316,7 @@ impl Community {
                 self.max_hlc = Some(ev.body.hlc);
             }
             joined |= open_event(ev, self.replayer.ring())
-                .is_ok_and(|plain| matches!(plain.body.payload, Payload::Join { .. }));
+                .is_ok_and(|plain| matches!(plain.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }));
         }
         if joined || self.rejected_ids() != rejected_before {
             self.join_times_refresh();
@@ -340,7 +340,7 @@ fn join_times(dag: &Dag, ring: &[SealKey], rejected: &[(EventId, Rejection)]) ->
         let Ok(ev) = open_event(stored, ring) else {
             continue;
         };
-        if !matches!(ev.body.payload, Payload::Join { .. }) || bad.contains(&ev.id) {
+        if !matches!(ev.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }) || bad.contains(&ev.id) {
             continue;
         }
         let latest = out.entry(ev.body.author).or_insert(ev.body.hlc);

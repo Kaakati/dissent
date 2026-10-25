@@ -14,7 +14,8 @@ use crate::groups::{dm_conv_id, ConvId};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, Request, Response};
 use crate::timings::{millis, Timings};
-use crate::views::EngineEvent;
+use crate::views::{EngineEvent, VoiceChannelView, VoiceParticipantView};
+use dissent_events::state::ChannelSettings;
 use dissent_events::{ChannelId, Payload};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId};
 use dissent_audio::{OpusEncoder, SenderConfig, SenderPacket, VoiceReceiver, VoiceSender};
@@ -142,6 +143,8 @@ pub(crate) struct PresenceMsg {
 pub(crate) struct PresenceMember {
     pub root: RootId,
     pub muted: bool,
+    /// Whether this person has deafened. Only the device of that person says it for certain.
+    pub deafened: bool,
 }
 
 /// A call another device said it is in. Kept per device, since a device is in one call at a time.
@@ -602,6 +605,8 @@ pub struct ParticipantView {
     pub root_id: String,
     pub display_name: String,
     pub muted: bool,
+    /// What the person's own device last said about deafening. False when it has not said.
+    pub deafened: bool,
     /// Video is not built yet, so this is always false.
     pub video: bool,
     pub speaking: bool,
@@ -1233,7 +1238,14 @@ impl Engine {
     /// Makes `room` the current call and starts driving it.
     fn install(&self, room: Arc<Room>) {
         if self.inner.calls.voice.load(Ordering::Relaxed) {
-            let config = *lock(&self.inner.calls.sender_config);
+            let mut config = *lock(&self.inner.calls.sender_config);
+            if let Scope::Channel { community, channel } = room.scope {
+                let w = self.read();
+                if let Some(c) = w.communities.get(&community) {
+                    let cap = c.state().settings(&channel).bitrate_kbps.saturating_mul(1000);
+                    config.bitrate_bps = config.bitrate_bps.min(cap);
+                }
+            }
             match VoiceAudio::new(config) {
                 Ok(voice) => *lock(&room.audio) = Box::new(voice),
                 Err(e) => warn!(error = %e, "voice audio unavailable; this call is silent"),
@@ -1288,11 +1300,12 @@ impl Engine {
         let se = self
             .author_publish(community, ChannelId::CONTROL, payload)
             .await?;
-        Ok(crate::views::ChannelInfo {
-            id: ChannelId(se.event.id.0).to_string(),
+        Ok(crate::views::ChannelInfo::new(
+            ChannelId(se.event.id.0),
             name,
-            voice: true,
-        })
+            true,
+            &ChannelSettings::default(),
+        ))
     }
 
     /// Joins the call in a voice channel, creating it if nobody is in it yet.
@@ -1319,6 +1332,17 @@ impl Engine {
                 .filter(|d| *d != self.inner.identity.device_id())
                 .collect::<Vec<DeviceId>>()
         };
+        // A full channel admits no one else. The count is what this device has heard, so it is the
+        // best this device can check, and the community's other devices check it the same way.
+        let limit = self
+            .read()
+            .communities
+            .get(&community)
+            .map(|c| c.state().settings(&channel).user_limit)
+            .unwrap_or(0);
+        if limit > 0 && self.voice_headcount(community, channel) >= limit as usize {
+            return Err(CoreError::Rejected("This voice channel is full".into()));
+        }
         let (key, epoch) = self.channel_key(community)?;
         let indexed = self.indexed_members(community)?;
         let my_device = self.inner.identity.device_id();
@@ -1340,6 +1364,7 @@ impl Engine {
             warn!(error = %e, "forwarder's own link not made");
         }
         self.join_devices(&room, &devices, None).await;
+        self.share_call(&room);
         self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
@@ -1630,9 +1655,6 @@ impl Engine {
         let Some(root) = self.read().directory.root_of(&from) else {
             return CallReply::Refused("unknown device".into());
         };
-        if matches!(msg.scope, Scope::Channel { .. }) {
-            return CallReply::Refused("not a direct or group call".into());
-        }
         if let Err(why) = self.may_join(&msg.scope, root) {
             return CallReply::Refused(why);
         }
@@ -1657,7 +1679,12 @@ impl Engine {
                 );
             }
         }
-        self.emit_conversation(msg.scope, Some(root));
+        match msg.scope {
+            Scope::Channel { community, .. } => self.emit(EngineEvent::CommunityUpdated {
+                community_id: community.to_string(),
+            }),
+            _ => self.emit_conversation(msg.scope, Some(root)),
+        }
         CallReply::Ack
     }
 
@@ -1692,13 +1719,23 @@ impl Engine {
     /// member's device, or the peer's devices for a DM. Also tells this device's own conversation
     /// list that the call changed.
     fn announce_call(&self, room: &Arc<Room>, members: Vec<PresenceMember>) {
+        let me = self.inner.identity.device_id();
         let devices = match room.scope {
             Scope::Group { conv } => self.group_devices(conv).unwrap_or_default(),
             Scope::Dm => room
                 .peer
                 .map(|peer| self.read().directory.devices_of(&peer))
                 .unwrap_or_default(),
-            Scope::Channel { .. } => return,
+            Scope::Channel { community, .. } => {
+                let w = self.read();
+                w.communities
+                    .get(&community)
+                    .map(|c| w.member_devices(c))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|d| *d != me)
+                    .collect()
+            }
         };
         for device in devices {
             let msg = PresenceMsg {
@@ -1714,7 +1751,12 @@ impl Engine {
                 }
             });
         }
-        self.emit_conversation(room.scope, room.peer);
+        match room.scope {
+            Scope::Channel { community, .. } => self.emit(EngineEvent::CommunityUpdated {
+                community_id: community.to_string(),
+            }),
+            _ => self.emit_conversation(room.scope, room.peer),
+        }
     }
 
     /// This device's roster for a room: itself, and each person whose device has joined.
@@ -1725,6 +1767,7 @@ impl Engine {
         let mut members = vec![PresenceMember {
             root: self.inner.me,
             muted: room.is_muted(),
+            deafened: room.deafened.load(Ordering::Relaxed),
         }];
         for device in lock(&room.live).values().filter(|d| **d != me) {
             let Some(root) = w.directory.root_of(device) else {
@@ -1734,9 +1777,96 @@ impl Engine {
                 continue;
             }
             let muted = peers.values().any(|p| p.device == *device && p.muted);
-            members.push(PresenceMember { root, muted });
+            members.push(PresenceMember { root, muted, deafened: false });
         }
         members
+    }
+
+    /// Each person's deafen state as their own device last reported it. Only that device's
+    /// account counts, so a relayed roster cannot change it.
+    fn self_reported_deafen(&self) -> BTreeMap<RootId, bool> {
+        let heard: Vec<Heard> = lock(&self.inner.calls.heard).values().cloned().collect();
+        let mut out = BTreeMap::new();
+        for h in &heard {
+            for m in h.members.iter().filter(|m| m.root == h.from) {
+                out.insert(m.root, m.deafened);
+            }
+        }
+        out
+    }
+
+    /// The people in each voice channel of `community`, as this device has heard them within the
+    /// presence TTL. A person's own device reports their mute and deafen state. This device's
+    /// own call is included too.
+    pub(crate) fn voice_channel_views(&self, community: CommunityId) -> Vec<VoiceChannelView> {
+        let now = now_ms();
+        let ttl = millis(self.inner.timings.call_presence_ttl);
+        let heard: Vec<Heard> = lock(&self.inner.calls.heard)
+            .values()
+            .filter(|h| now.saturating_sub(h.seen_ms) < ttl)
+            .cloned()
+            .collect();
+        let mine = lock(&self.inner.calls.current).clone();
+        let me = self.inner.me;
+        let w = self.read();
+        let Some(c) = w.communities.get(&community) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (channel, name) in &c.state().channels {
+            if !c.state().voice_channels.contains(channel) {
+                continue;
+            }
+            let here = Scope::Channel { community, channel: *channel };
+            let mut people: BTreeMap<RootId, VoiceParticipantView> = BTreeMap::new();
+            for h in heard.iter().filter(|h| h.scope == here) {
+                for m in &h.members {
+                    if m.root == me || c.state().banned.contains(&m.root) {
+                        continue;
+                    }
+                    let entry = people.entry(m.root).or_insert_with(|| VoiceParticipantView {
+                        root_id: m.root.to_string(),
+                        display_name: w.display_name(&m.root),
+                        muted: m.muted,
+                        deafened: m.deafened,
+                        speaking: false,
+                    });
+                    if m.root == h.from {
+                        entry.muted = m.muted;
+                        entry.deafened = m.deafened;
+                    }
+                }
+            }
+            if let Some(room) = mine.as_ref().filter(|r| r.scope == here) {
+                people.insert(
+                    me,
+                    VoiceParticipantView {
+                        root_id: me.to_string(),
+                        display_name: w.display_name(&me),
+                        muted: room.is_muted(),
+                        deafened: room.deafened.load(Ordering::Relaxed),
+                        speaking: false,
+                    },
+                );
+            }
+            out.push(VoiceChannelView {
+                id: channel.to_string(),
+                name: name.clone(),
+                participants: people.into_values().collect(),
+            });
+        }
+        out
+    }
+
+    /// How many people other than this one are heard in a voice channel.
+    pub(crate) fn voice_headcount(&self, community: CommunityId, channel: ChannelId) -> usize {
+        let me = self.inner.me.to_string();
+        self.voice_channel_views(community)
+            .iter()
+            .filter(|v| v.id == channel.to_string())
+            .flat_map(|v| v.participants.iter())
+            .filter(|p| p.root_id != me)
+            .count()
     }
 
     /// Emits that a DM or group conversation changed, so the conversation list reads it again.
@@ -2128,9 +2258,9 @@ impl Engine {
 
     /// Sets whether this device is deafened. Reported in the call view. Playout is not wired yet.
     pub fn set_deafened(&self, deafened: bool) -> Result<()> {
-        self.current_or_err()?
-            .deafened
-            .store(deafened, Ordering::Relaxed);
+        let room = self.current_or_err()?;
+        room.deafened.store(deafened, Ordering::Relaxed);
+        self.announce_call(&room, self.roster_of(&room));
         self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
@@ -2197,6 +2327,7 @@ impl Engine {
     /// The call on this device, or `None` when it is not in one.
     pub fn call_state(&self) -> Option<CallView> {
         let room = lock(&self.inner.calls.current).clone()?;
+        let reported = self.self_reported_deafen();
         let quality = lock(&room.quality);
         let now = Instant::now();
         let w = self.read();
@@ -2207,6 +2338,7 @@ impl Engine {
                 root_id: p.root.to_string(),
                 display_name: w.display_name(&p.root),
                 muted: p.muted,
+                deafened: reported.get(&p.root).copied().unwrap_or(false),
                 video: false,
                 speaking: !p.muted
                     && p.last_frame

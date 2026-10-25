@@ -19,6 +19,7 @@ import { applyAppearance } from './appearance.js';
 import { has } from './features.js';
 import { showOnboarding } from './views/onboarding.js';
 import { openSettingsPage } from './views/settings.js';
+import { unlockIfLocked } from './views/unlock.js';
 
 // Input counts as activity for auto-idle. The engine ignores repeats, so the UI reports at most once every 30 seconds.
 const ACTIVITY_EVERY_MS = 30_000;
@@ -37,6 +38,8 @@ function watchActivity() {
 async function start() {
   applyAppearance();
   if (!window.__TAURI__) await import('./mock.js');
+  // A portable profile waits here for its passphrase. Nothing below may call the engine before that.
+  await unlockIfLocked();
   await loadCapabilities(api);
   initTitlebar();
   initRail();

@@ -68,6 +68,24 @@ When two people can't connect directly, often because of home routers or mobile 
 - **Your identity:** back up and restore it with a recovery phrase. Each identity keeps its own separate data.
 - **Network:** use the public relays or your own, and see live network health in the corner of the window. That shows how big the public network is, whether you're reachable, and how many people you're connected to.
 
+## Portable version
+
+Dissent also comes as a portable zip for Windows. You don't install it. Unzip the folder anywhere, for example on a USB stick, and run `Dissent.exe` from inside it.
+
+The first time you run it, Dissent asks how you want to use it here. Each choice is saved in a small file called `portable-choice` next to `Dissent.exe`, so it only asks once:
+
+- **Use this computer's Dissent profile.** Opens the profile the installed Dissent already uses on this computer. Nothing is copied, and the installed app and this copy can't run at the same time.
+- **Link as a new device (recommended for a USB stick).** Gives this stick its own device key. Open the installed Dissent, go to Settings, then Devices, paste the code shown here under "Approve a new device", and paste the grant it gives you back. You can remove this device from the Devices list at any time.
+- **Copy my profile into this portable folder.** Makes a copy of the installed profile, protected by a passphrase. Both copies then share one device identity, so linking is the safer choice for a stick. Close the installed Dissent before you copy.
+- **Start fresh / restore from recovery phrase.** Starts a new identity protected by a passphrase, or restores one from your recovery phrase.
+
+Whichever you choose:
+
+- **Your data stays in the folder.** Dissent keeps its data in a `DissentData` folder next to `Dissent.exe`, so the whole folder is self-contained. To move Dissent to another computer, copy the whole folder. The "installed profile" option keeps its data in the installed app's folder instead.
+- **A passphrase protects it.** Options that keep data in `DissentData` ask for a passphrase every time Dissent starts. Keep it safe: without it, nobody can open that profile, and nobody can recover it for you.
+- **Only one copy runs at a time.** If Dissent is already open with the same profile, a second copy shows a message and closes.
+- **Updates are manual.** When a new version is out, Dissent tells you. Download the new portable zip from the release page and unpack it over the old folder. Your data stays in `DissentData`.
+
 ## Built, and coming to the app next
 
 These pieces are built and tested underneath, and are being connected to the app:

@@ -25,7 +25,7 @@ fn glyph_for(theme: Theme) -> tauri::Result<Image<'static>> {
 }
 
 /// Builds the tray icon and wires the window so closing it hides it instead of quitting.
-pub fn install(app: &tauri::App) -> tauri::Result<()> {
+pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Dissent", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit_item])?;
@@ -52,7 +52,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         .build(app)?;
 
     if let Some(window) = app.get_webview_window(WINDOW) {
-        let handle = app.handle().clone();
+        let handle = app.clone();
         window.on_window_event(move |event| match event {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();

@@ -1,10 +1,14 @@
 // Dev-only stand-in for the Tauri backend so ui/index.html opens in a plain browser.
 // Does nothing inside the desktop app, where window.__TAURI__ is injected before this module runs.
+import { addressOf, base32Encode, parseAddressInput } from './address.js';
+
 if (!window.__TAURI__) {
   window.__DISSENT_MOCK__ = true;
 
   let seq = 0;
-  const id = (name) => name.padEnd(52, 'a').slice(0, 52);
+  // Mock IDs must be valid base32 (addresses are made from them). The name's bytes are base32-encoded, so
+  // distinct names stay distinct: message ids like d1 and d10 must not collapse onto one id.
+  const id = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
   const MIN = 60 * 1000;
   const DAY = 24 * 60 * MIN;
   const now = Date.now();
@@ -18,6 +22,16 @@ if (!window.__TAURI__) {
   const people = { [ME]: 'Sami', [GRACE]: 'Maya', [LINUS]: 'Jonas', [KEN]: 'Omar', [RADIA]: 'Leila', [RANA]: 'Rana' };
   const handles = { [ME]: 'sami', [GRACE]: 'maya', [LINUS]: 'jonas', [KEN]: 'omar', [RADIA]: 'leila', [RANA]: 'rana' };
   const suffix = (root) => root.slice(0, 8);
+  // "Let people add me by address" (on by default). Off makes our own address not found.
+  let addressDiscoveryOn = true;
+  // Adding by address: a known person adds at once; a bad or wrong-kind address is refused as the backend does.
+  const byAddress = (text) => {
+    const found = parseAddressInput(text);
+    if (!found) return null;
+    need(found.kind === 'user', `That is a ${found.kind} address. Ask for a person's address or contact link.`);
+    need(found.id !== ME && people[found.id], "They may be offline, or they don't allow adding by address. Ask for their contact link.");
+    return found.id;
+  };
   // Presence for the member lists and DM rows: the mock sets a few, and leaves the rest without a dot.
   const MEMBER_STATUS = { [GRACE]: 'online', [LINUS]: 'idle', [KEN]: 'dnd', [RADIA]: 'offline' };
 
@@ -190,6 +204,10 @@ if (!window.__TAURI__) {
   };
 
   let mockNetwork = { use_public_relays: true, relays: [] };
+  // Voice settings as the desktop saves them (voice_settings / set_voice_settings), and the mic test's fake meter.
+  let mockVoice = { profile: 'voice_isolation', input_volume: 100, output_volume: 100, noise_suppression: 'standard', echo_cancellation: true, agc: true, auto_sensitivity: true, threshold_db: -50, push_to_talk: false, ptt_key: null };
+  let mockMicTimer = null;
+  let mockMicTick = 0;
   let mockStatus = { status: 'online', until_ms: null };
   let mockStatusTimer = null;
   const listeners = [];
@@ -227,7 +245,7 @@ if (!window.__TAURI__) {
     icon: c.icon ?? null,
     voice_channels: c.voice ?? [],
     // Relays the server can use for voice channels. The engine does not report these yet.
-    relays: [{ id: 'relay-eu', name: 'Relay in Europe' }, { id: 'relay-us', name: 'Relay in North America' }],
+    relays: ['https://relay-eu.riverside.example', 'https://relay-us.riverside.example'],
     my_role: myRole(c),
     channels: c.channels.map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', ...ch })),
     members: Object.keys(c.roles).map((r) => ({
@@ -365,8 +383,40 @@ if (!window.__TAURI__) {
 
   // The first-run flag stays set until the user completes onboarding (complete_first_run), never on export.
   let firstRunPending = window.__mockFirstRun ?? new URLSearchParams(location.search).has('firstrun');
+  // ?unlock=new starts a portable profile locked with no identity yet; ?unlock=1 starts it locked with one.
+  // In the mock, the passphrase "wrong" is refused so the retry path can be checked.
+  const unlockParam = new URLSearchParams(location.search).get('unlock');
+  // ?chooser=1 starts a portable exe's first run, before a choice is saved. ?choice=link|copy|fresh names the saved choice.
+  // ?installed=0 hides the options that use the installed profile.
+  const params = new URLSearchParams(location.search);
+  let chooser = params.has('chooser');
+  let choice = params.get('choice');
+  const installedProfile = params.get('installed') !== '0';
+  let locked = Boolean(unlockParam);
   const handlers = {
     complete_first_run: () => { firstRunPending = false; return null; },
+    vault_status: () => ({ chooser, locked: locked && !chooser, new_profile: unlockParam === 'new' || choice === 'link' || choice === 'copy', choice, installed_profile: installedProfile }),
+    choose_profile: ({ choice: picked }) => {
+      if (picked === 'installed' && !installedProfile) throw 'No Dissent profile was found on this computer.';
+      // The real app restarts here. The mock keeps the page and records the choice.
+      chooser = false;
+      choice = picked;
+      locked = picked !== 'installed';
+      return null;
+    },
+    unlock_profile: ({ passphrase }) => {
+      if (passphrase === 'wrong') throw 'That passphrase is wrong.';
+      // A link keeps the profile locked until the grant is accepted.
+      if (choice === 'link' && unlockParam === 'new') return 'link';
+      locked = false;
+      return 'open';
+    },
+    finish_portable_link: ({ grant }) => {
+      if (grant !== 'mock-grant') throw 'That grant does not match this link.';
+      locked = false;
+      return null;
+    },
+    open_release_page: () => null,
     me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
@@ -396,8 +446,15 @@ if (!window.__TAURI__) {
       emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
-    contact_link: () => `dissent://contact/mock-${suffix(ME)}`,
+    contact_link: () => (addressDiscoveryOn ? `dissent://contact/${addressOf('user', ME)}` : `dissent://contact/mock-${suffix(ME)}`),
+    address_discovery: () => addressDiscoveryOn,
+    set_address_discovery: ({ on }) => { addressDiscoveryOn = on; return on; },
     add_contact: ({ link }) => {
+      const known = byAddress(link);
+      if (known) {
+        contactSet.add(known);
+        return { root_id: known, suffix: suffix(known), display_name: people[known], is_contact: true, handles: [], mutual_communities: [] };
+      }
       need(link.startsWith('dissent://contact/'), 'Not a contact link');
       const root = id(`newcomer${++seq}`);
       people[root] = 'Newcomer';
@@ -674,7 +731,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars'];
   const ignoredSet = new Set();
   const NADIA = id('nadia-c5v8m1wk');
   const YUSUF = id('yusuf-r3j6t0pb');
@@ -841,6 +898,11 @@ if (!window.__TAURI__) {
       blocked: [],
     }),
     send_contact_request: ({ link }) => {
+      const known = byAddress(link);
+      if (known) {
+        outgoingSet.add(known);
+        return null;
+      }
       need(link.startsWith('dissent://contact/'), 'Not a contact link');
       outgoingSet.add(id(`pending-${link.slice(-8)}`));
       return null;
@@ -891,11 +953,34 @@ if (!window.__TAURI__) {
     decline_call: () => null,
     // Microphone and speaker. Null means the system default. Desktop's audio_devices and set_audio_devices shape.
     audio_devices: () => ({
-      inputs: [{ name: 'Microphone (USB Audio)', is_default: true }, { name: 'Headset microphone', is_default: false }],
-      outputs: [{ name: 'Speakers (Realtek)', is_default: true }, { name: 'Headphones', is_default: false }],
+      inputs: [
+        { name: 'Microphone (USB Audio)', is_default: true, subtitle: 'Logitech', kind: 'headset' },
+        { name: 'Headset microphone', is_default: false, subtitle: null, kind: 'headset' },
+      ],
+      outputs: [
+        { name: 'Speakers (Realtek)', is_default: true, subtitle: 'Realtek', kind: 'other' },
+        { name: 'Headphones', is_default: false, subtitle: null, kind: 'headset' },
+        { name: 'Display Audio (NVIDIA High Definition)', is_default: false, subtitle: 'NVIDIA', kind: 'display' },
+      ],
+      default_input: 'Microphone (USB Audio)', default_output: 'Speakers (Realtek)',
       input: window.__mockAudio?.input ?? null, output: window.__mockAudio?.output ?? null,
     }),
     set_audio_devices: ({ input, output }) => { window.__mockAudio = { input, output }; return null; },
+    voice_settings: () => ({ ...mockVoice }),
+    set_voice_settings: ({ settings }) => { mockVoice = { ...settings }; return null; },
+    // The mic test: a fake level that swings up and down, sent every 50 ms while the test runs.
+    mic_test_start: () => {
+      if (!mockMicTimer) {
+        mockMicTimer = setInterval(() => {
+          mockMicTick += 1;
+          const db = -62 + 40 * Math.abs(Math.sin(mockMicTick / 6));
+          const threshold = mockVoice.auto_sensitivity ? -48 : mockVoice.threshold_db;
+          emitTo('dissent://mic-level', { db, open: db >= threshold, threshold_db: threshold });
+        }, 50);
+      }
+      return null;
+    },
+    mic_test_stop: () => { clearInterval(mockMicTimer); mockMicTimer = null; return null; },
     store_stats: () => ({ used_bytes: 1.4 * 1024 ** 3, files: 6, budget_bytes: 10 * 1024 ** 3, shared_bytes: 0.6 * 1024 ** 3, downloaded_bytes: 0.5 * 1024 ** 3, partial_bytes: 0.1 * 1024 ** 3 }),
     join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
     join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
@@ -989,6 +1074,11 @@ if (!window.__TAURI__) {
     emitTo('dissent://call-state', { ...calls.current });
   };
   window.__mockCallMissed = () => emit({ kind: 'call_missed', call_id: 'call-maya', from: GRACE });
+  // Driver hook: sets a channel's content visibility on the mock server, as an owner's ChannelUpdate would.
+  window.__mockVisibility = (communityId, channelId, visibility) => {
+    const ch = servers[communityId].channels.find((x) => x.id === channelId);
+    if (ch) ch.visibility = visibility;
+  };
   window.__mockGroupPost = (groupId, from, text) => {
     groups[groupId].items.push({ id: id(`g${++seq}`), from, text, ms: Date.now(), pending: false });
     emit({ kind: 'group', group_id: groupId });

@@ -8,14 +8,16 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dissent_core::{
-    ChannelId, ChannelInfo, CommunityId, CommunitySummary, CommunityView, ConversationSummary,
+    ChannelId, ChannelInfo, CommunityId, CommunitySummary,
     Engine, EventId, Identity, MessageItem, MeView, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::warn;
 
+use crate::avatar_cmds::for_ui;
 use crate::events::forward_events;
 
 /// Shared state. `engine` is `None` only while an identity import is restarting it.
@@ -177,8 +179,8 @@ pub fn app_version() -> String {
 // ---- profile and contacts ----
 
 #[tauri::command]
-pub async fn me(state: State<'_, AppState>) -> Result<MeView, String> {
-    Ok(engine(&state).await?.me())
+pub async fn me(state: State<'_, AppState>) -> Result<Value, String> {
+    for_ui(&engine(&state).await?.me())
 }
 
 #[tauri::command]
@@ -197,16 +199,16 @@ pub async fn add_contact(state: State<'_, AppState>, link: String) -> Result<Use
 }
 
 #[tauri::command]
-pub async fn user_profile(state: State<'_, AppState>, user: String) -> Result<UserView, String> {
+pub async fn user_profile(state: State<'_, AppState>, user: String) -> Result<Value, String> {
     let user: RootId = parse("user id", &user)?;
-    Ok(engine(&state).await?.user_profile(user))
+    for_ui(&engine(&state).await?.user_profile(user))
 }
 
 // ---- servers ----
 
 #[tauri::command]
-pub async fn list_communities(state: State<'_, AppState>) -> Result<Vec<CommunitySummary>, String> {
-    Ok(engine(&state).await?.communities())
+pub async fn list_communities(state: State<'_, AppState>) -> Result<Value, String> {
+    for_ui(&engine(&state).await?.communities())
 }
 
 #[tauri::command]
@@ -232,9 +234,9 @@ pub async fn leave_community(state: State<'_, AppState>, community_id: String) -
 }
 
 #[tauri::command]
-pub async fn community_view(state: State<'_, AppState>, community_id: String) -> Result<CommunityView, String> {
+pub async fn community_view(state: State<'_, AppState>, community_id: String) -> Result<Value, String> {
     let community: CommunityId = parse("community id", &community_id)?;
-    engine(&state).await?.community_view(community).map_err(err)
+    for_ui(&engine(&state).await?.community_view(community).map_err(err)?)
 }
 
 #[tauri::command]
@@ -364,8 +366,8 @@ pub async fn unreact(
 // ---- direct messages ----
 
 #[tauri::command]
-pub async fn list_conversations(state: State<'_, AppState>) -> Result<Vec<ConversationSummary>, String> {
-    Ok(engine(&state).await?.conversations())
+pub async fn list_conversations(state: State<'_, AppState>) -> Result<Value, String> {
+    for_ui(&engine(&state).await?.conversations())
 }
 
 #[tauri::command]

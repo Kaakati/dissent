@@ -3,7 +3,7 @@
 use crate::error::{CoreError, Result};
 use crate::net::{maintenance, receive_loop, ReceiverTask};
 use crate::rpc::handler_for;
-use crate::store::{write_bytes_atomic, Paths};
+use crate::store::{read_community_key, write_bytes_atomic, Paths};
 use crate::timings::Timings;
 use crate::views::{CommunitySummary, EngineEvent, MeView, NetStatusView, UserView};
 use crate::world::World;
@@ -67,6 +67,8 @@ pub(crate) struct Inner {
     pub records_current: AtomicBool,
     /// Serializes DHT record publishes.
     pub publish_lock: tokio::sync::Mutex<()>,
+    /// Serializes conversation queue flushes, so one packet is never sent twice at once.
+    pub flush_lock: tokio::sync::Mutex<()>,
     /// Next member to try first in anti-entropy, per community.
     pub sync_cursor: Mutex<BTreeMap<CommunityId, usize>>,
     /// Devices whose last anti-entropy attempt failed, until the given instant.
@@ -115,7 +117,7 @@ impl Engine {
         let mut world = World::load(Paths::new(data_dir), &identity, &vault)?;
         world.timings = timings;
         let newest_stored = world.max_hlc();
-        let founded = load_founded(&world);
+        let founded = load_founded(&world, &vault)?;
         let mls = open_mls(&identity, &world, &vault)?;
         let mls_path = world.paths.mls_state();
         let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only {
@@ -150,6 +152,7 @@ impl Engine {
             warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),
+            flush_lock: tokio::sync::Mutex::new(()),
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
@@ -174,6 +177,7 @@ impl Engine {
         let engine = Engine { inner };
         let _ = engine.inner.node.set(node.clone());
         engine.adopt_all_relays().await;
+        engine.refetch_pictures();
         // Local stamps must sort after every stored event, so the clock starts past the newest.
         if let Some(newest) = newest_stored {
             engine.clock().observe(newest, now_ms());
@@ -238,12 +242,18 @@ impl Engine {
             device_id: self.inner.identity.device_id().to_string(),
             suffix: self.inner.me.suffix(),
             display_name: w.my_name(),
+            avatar: w.avatar_of(&self.inner.me),
             first_run: crate::local::first_run(&w),
         }
     }
 
-    /// A `dissent://contact/...` link. It carries our cert, our name and our address.
+    /// A `dissent://contact/...` link. While address discovery is on it is the short form, which
+    /// opens through our user record. Otherwise, or without the DHT, it is the long form, which
+    /// carries our cert, our name and our address.
     pub fn contact_link(&self) -> String {
+        if self.inner.discovery.is_some() && self.address_discovery() {
+            return dissent_discovery::short_url(&self.inner.me).to_string();
+        }
         let w = self.read();
         let peers: Vec<String> = w.my_addr.iter().map(|a| a.to_string()).collect();
         let cert = self.inner.identity.cert.clone();
@@ -428,18 +438,16 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Seeds of the communities we founded: those whose `community.key` file we hold.
-fn load_founded(w: &World) -> BTreeMap<CommunityId, [u8; 32]> {
-    w.communities
-        .keys()
-        .filter_map(|id| {
-            let seed: [u8; 32] = std::fs::read(w.paths.community_key(id))
-                .ok()?
-                .try_into()
-                .ok()?;
-            Some((*id, seed))
-        })
-        .collect()
+/// Seeds of the communities we founded: those whose `community.key` file we hold. A key file that does not
+/// open under `vault` is an error, so startup stops rather than running without the owner's key.
+fn load_founded(w: &World, vault: &Vault) -> Result<BTreeMap<CommunityId, [u8; 32]>> {
+    let mut founded = BTreeMap::new();
+    for id in w.communities.keys() {
+        if let Some(seed) = read_community_key(&w.paths.community_key(id), vault, id)? {
+            founded.insert(*id, seed);
+        }
+    }
+    Ok(founded)
 }
 
 /// Restores this device's MLS state from `mls.bin`, which is sealed under `vault`, and loads the

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use crate::rpc::{Request, Response};
-use crate::store::{write_bin, write_bytes_atomic};
+use crate::store::{write_bin, write_community_key};
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
 use crate::wire::SignedAddr;
 use dissent_discovery::{CommunityRecord, Invite};
@@ -23,7 +23,7 @@ const JOIN_GOSSIP_WAIT: Duration = Duration::from_secs(5);
 const LEAVE_WAIT: Duration = Duration::from_secs(2);
 /// How long a join waits for the DHT to return a community record.
 /// Resolve can take a DHT warm-up plus retries, so give it room.
-const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(90);
+pub(crate) const DHT_LOOKUP_WAIT: Duration = Duration::from_secs(90);
 /// Tries to join the encrypted group this many times, spaced by `JOIN_RETRY_EVERY`, before maintenance takes over.
 const JOIN_ATTEMPTS: usize = 6;
 const JOIN_RETRY_EVERY: Duration = Duration::from_millis(500);
@@ -39,7 +39,7 @@ impl Engine {
             let mut guard = self.write();
             let paths = guard.paths.clone();
             write_bin(&paths.genesis(&id), &genesis)?;
-            write_bytes_atomic(&paths.community_key(&id), &key.0.seed())?;
+            write_community_key(&paths.community_key(&id), &self.inner.vault, &id, &key.0.seed())?;
             let secret = crate::access::random_secret();
             let keys = crate::access::Keys::from_invite(0, secret);
             crate::access::save(&paths, &id, &keys)?;
@@ -137,6 +137,12 @@ impl Engine {
 
     /// An invite link for `community`, carrying our current address.
     pub async fn create_invite(&self, community: CommunityId) -> Result<String> {
+        self.create_invite_until(community, None).await
+    }
+
+    /// An invite link that stops admitting people at `expires_ms`, when that is set. Its id is
+    /// recorded in the community, so the invite can be revoked and listed.
+    pub async fn create_invite_until(&self, community: CommunityId, expires_ms: Option<u64>) -> Result<String> {
         let addr = self.node().addr().await;
         let genesis = {
             let mut guard = self.write();
@@ -148,14 +154,27 @@ impl Engine {
                 .ok_or_else(|| not_found(&community))?
         };
         let keys = self.access_keys(community).ok_or_else(|| not_found(&community))?;
+        let invite_id: [u8; 16] = rand::random();
+        self.author_publish(
+            community,
+            ChannelId::CONTROL,
+            Payload::InviteCreate {
+                invite_id,
+                expires_ms,
+            },
+        )
+        .await?;
         let invite = Invite {
             genesis,
             peers: vec![addr.to_string()],
             secret: keys.secret,
             secret_generation: keys.generation,
             relays: self.community_relays(community),
+            invite_id: Some(invite_id),
         };
-        Ok(invite.to_url().to_string())
+        let link = invite.to_url().to_string();
+        self.record_invite(community, invite_id, link.clone(), now_ms())?;
+        Ok(link)
     }
 
     /// Joins from an invite link. Joining a community we already have just returns its summary.
@@ -181,11 +200,15 @@ impl Engine {
     }
 
     async fn join_as(&self, invite: &str, with_group: bool, storage: bool) -> Result<CommunitySummary> {
-        let id = Invite::parse(invite)?.community();
+        let parsed = Invite::parse(invite)?;
+        let id = parsed.community();
         let Some((_, served)) = self.sync_invite(invite).await? else {
             return self.summary(&id);
         };
-        self.announce_join_as(id, &served, with_group, storage).await;
+        if let Some(invite_id) = parsed.invite_id {
+            self.refuse_known_dead_invite(id, invite_id)?;
+        }
+        self.announce_join_as(id, &served, with_group, storage, parsed.invite_id).await;
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
     }
@@ -255,7 +278,7 @@ impl Engine {
     /// Announces this device's Join to the devices that served the invite, then joins the
     /// community's encrypted group.
     pub(crate) async fn announce_join(&self, id: CommunityId, served: &[DeviceId], with_group: bool) {
-        self.announce_join_as(id, served, with_group, false).await;
+        self.announce_join_as(id, served, with_group, false, None).await;
     }
 
     /// As `announce_join`. A storage join announces `JoinAsStorage` and never joins the group.
@@ -265,10 +288,16 @@ impl Engine {
         served: &[DeviceId],
         with_group: bool,
         storage: bool,
+        invite_id: Option<[u8; 16]>,
     ) {
         let display_name = self.read().my_name();
         let payload = if storage {
             Payload::JoinAsStorage { display_name }
+        } else if let Some(invite_id) = invite_id {
+            Payload::JoinVia {
+                display_name,
+                invite_id,
+            }
         } else {
             Payload::Join { display_name }
         };
@@ -342,12 +371,16 @@ impl Engine {
     }
 
     pub fn community_view(&self, community: CommunityId) -> Result<CommunityView> {
-        let w = self.read();
-        let c = w
-            .communities
-            .get(&community)
-            .ok_or_else(|| not_found(&community))?;
-        Ok(w.community_view(c))
+        let mut view = {
+            let w = self.read();
+            let c = w
+                .communities
+                .get(&community)
+                .ok_or_else(|| not_found(&community))?;
+            w.community_view(c)
+        };
+        view.voice_channels = self.voice_channel_views(community);
+        Ok(view)
     }
 
     pub(crate) fn summary(&self, id: &CommunityId) -> Result<CommunitySummary> {
@@ -518,7 +551,7 @@ pub(crate) struct Fetched {
 }
 
 /// `addr` without its direct IP addresses: only the device id and relay URL go on the DHT.
-fn public_addr(addr: &PeerAddr) -> PeerAddr {
+pub(crate) fn public_addr(addr: &PeerAddr) -> PeerAddr {
     PeerAddr {
         id: addr.id,
         relay: addr.relay.clone(),

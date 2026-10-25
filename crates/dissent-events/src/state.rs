@@ -25,7 +25,7 @@
 use crate::emoji::normalize_emoji;
 use crate::names::{normalize_handle, skeleton};
 use crate::control::{open_event, OpenError, SealKey};
-use crate::{ChannelId, Dag, Event, EventId, Hlc, Payload, Role, SealedKind};
+use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, Hlc, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +63,61 @@ pub struct CommunityState {
     /// The event that set the current generation. A rival rotation with the same generation and a
     /// lower event id replaces it, so concurrent rotations converge.
     pub secret_winner: Option<EventId>,
+    /// Each member's profile picture, from their latest accepted `ProfileUpdate`, with its HLC. A
+    /// `None` picture is a removed one. A newer HLC wins.
+    pub avatars: BTreeMap<RootId, (Hlc, Option<crate::Picture>)>,
+    /// The community icon, from the latest accepted `CommunityIconSet`, with its HLC. A `None`
+    /// picture is a removed icon.
+    pub icon: Option<(Hlc, Option<crate::Picture>)>,
+    /// Settings from the accepted `ChannelUpdate`s. A channel not listed here has the defaults.
+    pub channel_settings: BTreeMap<ChannelId, ChannelSettings>,
+    /// Invites by id, from `InviteCreate`.
+    pub invites: BTreeMap<[u8; 16], InviteState>,
+    /// Wall time of each member's last accepted post in a channel. Slowmode reads it.
+    pub last_post: BTreeMap<(ChannelId, RootId), u64>,
+}
+
+/// What a channel's settings say. See `Payload::ChannelUpdate`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelSettings {
+    /// Seconds a member waits between posts. Zero is off.
+    pub slowmode_s: u32,
+    pub visibility: ChannelVisibility,
+    /// Opus target for this channel's calls, in kbps. Voice channels only.
+    pub bitrate_kbps: u32,
+    /// Most people who can be in this voice channel at once. Zero is no limit.
+    pub user_limit: u32,
+    /// Relay this channel's calls prefer, or empty for automatic.
+    pub relay: String,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            slowmode_s: 0,
+            visibility: ChannelVisibility::Default,
+            bitrate_kbps: 64,
+            user_limit: 0,
+            relay: String::new(),
+        }
+    }
+}
+
+/// The slowmode values a channel may use, in seconds. Matches the UI's list.
+pub const SLOWMODE_STEPS: &[u32] = &[0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600];
+/// Voice bitrate limits, in kbps.
+pub const BITRATE_RANGE: std::ops::RangeInclusive<u32> = 8..=96;
+/// Most people a voice channel's user limit may be set to.
+pub const MAX_USER_LIMIT: u32 = 99;
+
+/// An invite as the replay sees it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteState {
+    pub creator: RootId,
+    pub expires_ms: Option<u64>,
+    pub revoked: bool,
+    /// Accepted joins through this invite.
+    pub uses: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +175,14 @@ pub enum Rejection {
     Locked,
     /// A sealed control event that does not open under the key of its generation.
     Forged,
+    /// A member posted again before the channel's slowmode let them.
+    Slowmode,
+    /// A join through an invite this state has never seen.
+    UnknownInvite,
+    /// A join through an invite that was revoked.
+    InviteRevoked,
+    /// A join through an invite whose expiry has passed.
+    InviteExpired,
 }
 
 impl From<OpenError> for Rejection {
@@ -137,6 +200,19 @@ enum Rank {
     Moderator,
     Admin,
     Owner,
+}
+
+/// A message or reply, the posts slowmode limits.
+fn is_post(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::Message { .. }
+            | Payload::Reply { .. }
+            | Payload::Sealed {
+                kind: SealedKind::Message | SealedKind::Reply { .. },
+                ..
+            }
+    )
 }
 
 /// Replay the DAG's causal order against a fresh state owned by `owner`, with no keys. Sealed
@@ -191,7 +267,17 @@ impl CommunityState {
             secret_generation: 0,
             secret_covered: BTreeSet::new(),
             secret_winner: None,
+            avatars: BTreeMap::new(),
+            icon: None,
+            channel_settings: BTreeMap::new(),
+            invites: BTreeMap::new(),
+            last_post: BTreeMap::new(),
         }
+    }
+
+    /// The settings of a channel, with the defaults where none were set.
+    pub fn settings(&self, channel: &ChannelId) -> ChannelSettings {
+        self.channel_settings.get(channel).cloned().unwrap_or_default()
     }
 
     /// The root that now stands for `root`. Follows rotations transitively.
@@ -251,12 +337,15 @@ impl CommunityState {
         // A storage member may only join, or leave. Anything else is for people.
         let storage_only = matches!(
             ev.body.payload,
-            Payload::Join { .. } | Payload::JoinAsStorage { .. } | Payload::Leave
+            Payload::Join { .. } | Payload::JoinAsStorage { .. } | Payload::Leave | Payload::InviteCreate { .. }
         );
         if !storage_only && self.members.get(&actor).is_some_and(|m| m.storage) {
             return Err(Rejection::NoPermission);
         }
         let chan = ev.body.channel;
+        if is_post(&ev.body.payload) {
+            self.check_slowmode(chan, actor, rank, ev.body.hlc.wall_ms)?;
+        }
         match &ev.body.payload {
             // Opened by `apply_event` before it gets here. A sealed payload left is not a control event.
             Payload::SealedControl { .. } => return Err(Rejection::Forged),
@@ -307,6 +396,84 @@ impl CommunityState {
                 require_control(chan)?;
                 if display_name.trim().is_empty() {
                     return Err(Rejection::Malformed);
+                }
+            }
+            Payload::JoinVia {
+                display_name,
+                invite_id,
+            } => {
+                require_control(chan)?;
+                if display_name.trim().is_empty() {
+                    return Err(Rejection::Malformed);
+                }
+                let invite = self.invites.get(invite_id).ok_or(Rejection::UnknownInvite)?;
+                if invite.revoked {
+                    return Err(Rejection::InviteRevoked);
+                }
+                if invite.expires_ms.is_some_and(|at| ev.body.hlc.wall_ms >= at) {
+                    return Err(Rejection::InviteExpired);
+                }
+            }
+            Payload::ChannelUpdate {
+                channel,
+                name,
+                slowmode_s,
+                visibility: _,
+                bitrate_kbps,
+                user_limit,
+                relay,
+            } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !self.channels.contains_key(channel) {
+                    return Err(Rejection::UnknownChannel);
+                }
+                let voice = self.voice_channels.contains(channel);
+                if name.as_ref().is_some_and(|n| n.trim().is_empty()) {
+                    return Err(Rejection::Malformed);
+                }
+                // Slowmode is for text, and the voice fields are for voice.
+                if slowmode_s.is_some_and(|s| voice || !SLOWMODE_STEPS.contains(&s)) {
+                    return Err(Rejection::Malformed);
+                }
+                if (bitrate_kbps.is_some() || user_limit.is_some() || relay.is_some()) && !voice {
+                    return Err(Rejection::Malformed);
+                }
+                if bitrate_kbps.is_some_and(|b| !BITRATE_RANGE.contains(&b)) {
+                    return Err(Rejection::Malformed);
+                }
+                if user_limit.is_some_and(|u| u > MAX_USER_LIMIT) {
+                    return Err(Rejection::Malformed);
+                }
+                if relay.as_ref().is_some_and(|r| !r.is_empty() && !self.relays.contains(r)) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::ChannelDelete { channel } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !self.channels.contains_key(channel) {
+                    return Err(Rejection::UnknownChannel);
+                }
+            }
+            Payload::InviteCreate { invite_id, .. } => {
+                require_control(chan)?;
+                // Any device of an unbanned member may make an invite, as before invite ids existed.
+                if self.invites.contains_key(invite_id) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::InviteRevoke { invite_id } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !self.invites.contains_key(invite_id) {
+                    return Err(Rejection::UnknownTarget);
                 }
             }
             Payload::JoinAsStorage { display_name } => {
@@ -411,6 +578,21 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::ProfileUpdate { avatar } => {
+                require_control(chan)?;
+                if avatar.is_some_and(|p| !p.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::CommunityIconSet { avatar } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if avatar.is_some_and(|p| !p.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
         }
         Ok(())
     }
@@ -419,6 +601,10 @@ impl CommunityState {
     pub(crate) fn commit(&mut self, ev: &Event) {
         let actor = ev.body.author;
         let chan = ev.body.channel;
+        if is_post(&ev.body.payload) {
+            let last = self.last_post.entry((chan, actor)).or_insert(0);
+            *last = (*last).max(ev.body.hlc.wall_ms);
+        }
         match &ev.body.payload {
             Payload::SealedControl { .. } => {}
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
@@ -497,7 +683,7 @@ impl CommunityState {
                     m.reaction_order.clear();
                 }
             }
-            Payload::Join { display_name } => {
+            Payload::Join { display_name } | Payload::JoinVia { display_name, .. } => {
                 let m = self.members.entry(actor).or_insert_with(|| Member {
                     display_name: String::new(),
                     joined: ev.body.hlc,
@@ -506,6 +692,66 @@ impl CommunityState {
                 });
                 m.display_name = display_name.clone();
                 m.left = false;
+                if let Payload::JoinVia { invite_id, .. } = &ev.body.payload {
+                    if let Some(invite) = self.invites.get_mut(invite_id) {
+                        invite.uses += 1;
+                    }
+                }
+            }
+            Payload::ChannelUpdate {
+                channel,
+                name,
+                slowmode_s,
+                visibility,
+                bitrate_kbps,
+                user_limit,
+                relay,
+            } => {
+                if let Some(name) = name {
+                    self.channels.insert(*channel, name.clone());
+                }
+                let settings = self.channel_settings.entry(*channel).or_default();
+                if let Some(v) = slowmode_s {
+                    settings.slowmode_s = *v;
+                }
+                if let Some(v) = visibility {
+                    settings.visibility = *v;
+                }
+                if let Some(v) = bitrate_kbps {
+                    settings.bitrate_kbps = *v;
+                }
+                if let Some(v) = user_limit {
+                    settings.user_limit = *v;
+                }
+                if let Some(v) = relay {
+                    settings.relay = v.clone();
+                }
+            }
+            Payload::ChannelDelete { channel } => {
+                self.channels.remove(channel);
+                self.voice_channels.remove(channel);
+                self.messages.remove(channel);
+                self.channel_settings.remove(channel);
+                self.last_post.retain(|(c, _), _| c != channel);
+            }
+            Payload::InviteCreate {
+                invite_id,
+                expires_ms,
+            } => {
+                self.invites.insert(
+                    *invite_id,
+                    InviteState {
+                        creator: actor,
+                        expires_ms: *expires_ms,
+                        revoked: false,
+                        uses: 0,
+                    },
+                );
+            }
+            Payload::InviteRevoke { invite_id } => {
+                if let Some(invite) = self.invites.get_mut(invite_id) {
+                    invite.revoked = true;
+                }
             }
             Payload::JoinAsStorage { display_name } => {
                 let m = self.members.entry(actor).or_insert_with(|| Member {
@@ -619,6 +865,29 @@ impl CommunityState {
                     .or_insert(ev.body.hlc);
             }
             Payload::KeyRotation(rot) => self.migrate(rot.request.old_root, rot.request.new_root),
+            Payload::ProfileUpdate { avatar } => {
+                if self.avatars.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.avatars.insert(actor, (ev.body.hlc, *avatar));
+                }
+            }
+            Payload::CommunityIconSet { avatar } => {
+                if self.icon.is_none_or(|(hlc, _)| ev.body.hlc > hlc) {
+                    self.icon = Some((ev.body.hlc, *avatar));
+                }
+            }
+        }
+    }
+
+    /// Refuses a post sent before the channel's slowmode lets this author post again. Owners,
+    /// admins and moderators are exempt.
+    fn check_slowmode(&self, chan: ChannelId, actor: RootId, rank: Rank, wall_ms: u64) -> Result<(), Rejection> {
+        let seconds = self.settings(&chan).slowmode_s;
+        if seconds == 0 || rank >= Rank::Moderator {
+            return Ok(());
+        }
+        match self.last_post.get(&(chan, actor)) {
+            Some(last) if wall_ms < last.saturating_add(u64::from(seconds) * 1000) => Err(Rejection::Slowmode),
+            _ => Ok(()),
         }
     }
 

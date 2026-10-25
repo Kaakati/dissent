@@ -4,6 +4,7 @@
 import { state, notify, voiceChannelsOf } from '../state.js';
 import * as actions from '../actions.js';
 import { el, icon, avatar, copyText, toast, presenceOf, PRESENCE_LABEL } from '../ui.js';
+import { addressOf, isAddressToAdd, matchesSearch, shortOf } from '../address.js';
 import { openConversationMenu } from './sidebar.js';
 
 let tab = 'online';
@@ -90,7 +91,7 @@ function personText(p, sub) {
   return el('div', { class: 'text' },
     el('div', { class: 'line' },
       el('span', { class: 'name', text: p.display_name }),
-      el('span', { class: 'tag', text: `·${p.suffix}` })),
+      el('span', { class: 'tag', text: `·${shortOf('user', p.root_id)}`, title: addressOf('user', p.root_id) })),
     el('div', { class: 'sub', text: sub }));
 }
 
@@ -103,7 +104,7 @@ function tabsFor(data) {
 // The rows of the active tab, under one section title, filtered by the search box.
 function sectionsFor(data) {
   const q = query.trim().toLowerCase();
-  const match = (p) => !q || p.display_name.toLowerCase().includes(q) || p.suffix.includes(q);
+  const match = (p) => matchesSearch(p, q);
   const list = (arr) => (arr ?? []).filter(match);
   if (tab === 'pending') {
     const rows = [...list(data.incoming).map(incomingRow), ...list(data.outgoing).map(outgoingRow)];
@@ -145,10 +146,24 @@ function paintList(host, data) {
 
 function addBox() {
   const input = el('input', { placeholder: 'dissent://contact/…', 'aria-label': 'Contact link', spellcheck: false });
+  const status = el('p', { class: 'muted', role: 'status' });
+  const sendBtn = el('button', { class: 'primary', text: 'Send Friend Request', onclick: () => send() });
   const send = async () => {
     const link = input.value.trim();
     if (!link) return;
-    if (await actions.sendContactRequest(link)) {
+    let byAddress = false;
+    try {
+      byAddress = isAddressToAdd(link);
+    } catch (e) {
+      toast(e.message);
+      return;
+    }
+    sendBtn.disabled = true;
+    status.textContent = byAddress ? 'Looking them up…' : '';
+    const sent = await actions.sendContactRequest(link);
+    sendBtn.disabled = false;
+    status.textContent = '';
+    if (sent) {
       input.value = '';
       addOpen = false;
       tab = 'pending';
@@ -161,13 +176,14 @@ function addBox() {
   return el('div', { class: 'add-friend-form' },
     el('div', { class: 'add-head' },
       el('h3', { text: 'Add Friend' }),
-      el('p', { text: 'Paste someone’s contact link. They’ll see your request and can accept or decline it. Nothing is sent through a company server.' }),
-      el('div', { class: 'add-contact-box' }, input, el('button', { class: 'primary', text: 'Send Friend Request', onclick: send }))),
+      el('p', { text: 'Paste someone’s address or contact link. They’ll see your request and can accept or decline it. Nothing is sent through a company server.' }),
+      el('div', { class: 'add-contact-box' }, input, sendBtn),
+      status),
     el('div', { class: 'add-share' },
       el('h3', { text: 'Share yours' }),
       el('p', { text: 'Send it any way you like. People who open it can request to add you, and you decide who gets in.' }),
       linkBox,
-      el('button', { class: 'primary', icon: 'copy', text: 'Copy address', onclick: async () => {
+      el('button', { class: 'primary', icon: 'copy', text: 'Copy contact link', onclick: async () => {
         const link = await actions.contactLink();
         if (link && (await copyText(link))) toast('Contact link copied', 'info');
       } })));

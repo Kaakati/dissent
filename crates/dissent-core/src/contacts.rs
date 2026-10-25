@@ -8,12 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::presence::Presence;
-use dissent_discovery::ContactCard;
-use dissent_identity::{DeviceId, DeviceKey, RootId, Signature};
+use dissent_discovery::{ContactCard, ContactLink, UserRecord, MAX_DEVICES};
+use dissent_identity::{DeviceCert, DeviceId, DeviceKey, RootId, Signature};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::communities::{public_addr, DHT_LOOKUP_WAIT};
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, encode, Request, Response};
@@ -157,6 +158,11 @@ pub(crate) struct ContactBook {
     pub last_refusal: BTreeMap<RootId, u64>,
 }
 
+/// Whether "Let people add me by address" is off. Missing or unreadable means on.
+fn hide_address(paths: &Paths) -> bool {
+    read_bin::<bool>(&paths.address_privacy()).ok().flatten().unwrap_or_default()
+}
+
 impl ContactBook {
     pub fn load(paths: &Paths) -> Result<Self> {
         Ok(read_bin(&paths.contact_book())?.unwrap_or_default())
@@ -237,6 +243,8 @@ pub(crate) fn dm_allowed(w: &World, peer: &RootId) -> bool {
 /// Adds or replaces a contact from a verified card.
 fn befriend(w: &mut World, card: ContactCard) -> Result<()> {
     w.directory.learn(&card.cert);
+    w.contact_times.became_contact(card.cert.root, now_ms());
+    w.contact_times.save(&w.paths)?;
     w.contacts.retain(|c| c.cert.root != card.cert.root);
     w.contacts.push(card);
     w.save_contacts()
@@ -263,22 +271,88 @@ impl Engine {
     /// Asks `link`'s owner to become a contact, with a short note. The person becomes a contact
     /// once they accept. Until then the request is listed under `sent_contact_requests`.
     pub async fn request_contact(&self, link: &str, note: &str) -> Result<UserView> {
-        let card = ContactCard::parse(link)?;
-        let user = card.cert.root;
-        if user == self.inner.me {
-            return Err(CoreError::Invalid("that is your own contact link".into()));
+        let note = self.checked_note(note)?;
+        match ContactLink::parse(link)? {
+            ContactLink::Card(card) => {
+                let user = card.cert.root;
+                self.check_not_me(&user)?;
+                self.send_request(user, std::slice::from_ref(&card.cert), &card.peers, note)
+                    .await
+            }
+            ContactLink::Address(user) => self.lookup_and_request(user, note).await,
         }
+    }
+
+    /// Asks the owner of `address` to become a contact, without a link. Looks up the address's user
+    /// record on the DHT and verifies its device certs against the address. Refused when the record is
+    /// missing or empty, which is what an address that is not discoverable looks like.
+    pub async fn add_contact_by_address(&self, address: &str, note: &str) -> Result<UserView> {
+        let user = RootId::parse_address(address.trim())?;
+        let note = self.checked_note(note)?;
+        self.lookup_and_request(user, note).await
+    }
+
+    fn checked_note(&self, note: &str) -> Result<String> {
         let note = note.trim().to_string();
         if note.chars().count() > MAX_NOTE_CHARS {
             return Err(CoreError::Invalid(format!(
                 "note is longer than {MAX_NOTE_CHARS} characters"
             )));
         }
+        Ok(note)
+    }
+
+    fn check_not_me(&self, user: &RootId) -> Result<()> {
+        if *user == self.inner.me {
+            return Err(CoreError::Invalid("that is your own contact link or address".into()));
+        }
+        Ok(())
+    }
+
+    /// Resolves `user` from the DHT, then asks them. A lookup that finds nothing, or a record that
+    /// does not verify, gives the same message: the person may be offline or not discoverable.
+    async fn lookup_and_request(&self, user: RootId, note: String) -> Result<UserView> {
+        self.check_not_me(&user)?;
+        if self.read().is_contact(&user) {
+            return Ok(self.read().user_view(&user));
+        }
+        let not_found = || {
+            CoreError::Invalid(
+                "They may be offline, or they don't allow adding by address. Ask for their contact link."
+                    .into(),
+            )
+        };
+        let Some(discovery) = self.inner.discovery.clone() else {
+            return Err(CoreError::Invalid(
+                "looking up an address needs the internet. Ask for their contact link.".into(),
+            ));
+        };
+        let record: UserRecord = match tokio::time::timeout(DHT_LOOKUP_WAIT, discovery.resolve_user(&user)).await {
+            Ok(Ok(Some(rec))) if !rec.is_empty() => rec,
+            Ok(Ok(_)) | Err(_) => return Err(not_found()),
+            Ok(Err(e)) => {
+                warn!(error = %e, "user record does not verify");
+                return Err(not_found());
+            }
+        };
+        self.send_request(user, &record.devices, &record.peers, note).await
+    }
+
+    /// Learns the person's device certs and dial addresses, queues a request to them, and sends it now.
+    async fn send_request(
+        &self,
+        user: RootId,
+        certs: &[DeviceCert],
+        peers: &[String],
+        note: String,
+    ) -> Result<UserView> {
         {
             let mut guard = self.write();
             let w = &mut *guard;
-            w.directory.learn(&card.cert);
-            for peer in card.peers.iter().filter_map(|p| p.parse::<PeerAddr>().ok()) {
+            for cert in certs {
+                w.directory.learn(cert);
+            }
+            for peer in peers.iter().filter_map(|p| p.parse::<PeerAddr>().ok()) {
                 self.learn_address(w, peer);
             }
             if !w.is_contact(&user) {
@@ -387,6 +461,58 @@ impl Engine {
         let w = &mut *guard;
         w.contact_book.policy = policy;
         w.contact_book.save(&w.paths)
+    }
+
+    /// Whether people may add us by address. On unless turned off.
+    pub fn address_discovery(&self) -> bool {
+        !hide_address(&self.read().paths)
+    }
+
+    /// Turns "Let people add me by address" on or off. Off withdraws our user record from the DHT.
+    /// Contact links keep working either way.
+    pub fn set_address_discovery(&self, on: bool) -> Result<()> {
+        {
+            let guard = self.write();
+            write_bin(&guard.paths.address_privacy(), &!on)?;
+        }
+        self.spawn_publish_user_record();
+        Ok(())
+    }
+
+    /// Publishes the user record in the background. See [`Engine::publish_user_record`].
+    pub(crate) fn spawn_publish_user_record(&self) {
+        let engine = self.clone();
+        self.spawn_task(async move { engine.publish_user_record().await });
+    }
+
+    /// Publishes this address's user record: our device certs and a dial address, or an empty
+    /// record while address discovery is off. Only a device that holds the root key can publish,
+    /// so a linked device without it does nothing here; the root device lists its certs.
+    pub(crate) async fn publish_user_record(&self) {
+        let (Some(discovery), Some(root)) = (self.inner.discovery.clone(), self.inner.identity.root.clone()) else {
+            return;
+        };
+        let listed = self.load_devices().unwrap_or_default();
+        let _publishing = self.inner.publish_lock.lock().await;
+        let rec = {
+            let w = self.read();
+            if hide_address(&w.paths) {
+                UserRecord::default()
+            } else {
+                let mut devices = vec![self.inner.identity.cert.clone()];
+                devices.extend(listed.into_iter().map(|d| d.cert));
+                let mut seen = BTreeSet::new();
+                devices.retain(|c| seen.insert(c.device));
+                devices.truncate(MAX_DEVICES);
+                UserRecord {
+                    devices,
+                    peers: w.my_addr.iter().map(|a| public_addr(a).to_string()).collect(),
+                }
+            }
+        };
+        if let Err(e) = discovery.publish_user(&root, &rec).await {
+            warn!(error = %e, "could not publish the user record");
+        }
     }
 
     /// Our own card, built the same way as `contact_link`.
@@ -630,6 +756,12 @@ pub struct ContactEntry {
     pub online: bool,
     /// Names of the servers we share with them.
     pub shared_servers: Vec<String>,
+    /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
+    pub avatar: Option<String>,
+    /// When this person was added as a contact, in milliseconds. `None` if they are not one.
+    pub contact_since_ms: Option<u64>,
+    /// When this device first saw this person, in milliseconds.
+    pub first_seen_ms: Option<u64>,
 }
 
 /// The contacts page: who asked us, whom we asked, contacts, and blocked people.
@@ -660,6 +792,9 @@ impl Engine {
                 .filter(|c| c.is_member(&root) && c.is_member(&w.me))
                 .map(|c| c.name().to_string())
                 .collect(),
+            avatar: w.avatar_of(&root),
+            contact_since_ms: w.contact_times.since.get(&root).copied(),
+            first_seen_ms: w.contact_times.first_seen.get(&root).copied(),
             }
         };
         ContactsView {
@@ -689,6 +824,8 @@ impl Engine {
             let w = &mut *guard;
             w.contact_book.blocked.insert(user);
             w.contacts.retain(|c| c.cert.root != user);
+            w.contact_times.stopped_contact(&user);
+            w.contact_times.save(&w.paths)?;
             w.contact_book.incoming.retain(|r| r.from_card.cert.root != user);
             w.contact_book.outbox.retain(|o| o.to != user);
             if let Some(meta) = w.conv_book.convs.get_mut(&dm_conv_id(&w.me, &user)) {
@@ -718,6 +855,8 @@ impl Engine {
         let mut guard = self.write();
         let w = &mut *guard;
         w.contacts.retain(|c| c.cert.root != user);
+        w.contact_times.stopped_contact(&user);
+        w.contact_times.save(&w.paths)?;
         w.save_contacts()?;
         drop(guard);
         self.emit(EngineEvent::ContactsChanged);
@@ -771,4 +910,63 @@ pub(crate) fn refusal_for(w: &mut World, from: RootId, reason: String) -> Respon
         warn!(error = %e, "could not save refusal state");
     }
     Response::Refused(reason)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::store::Paths;
+    use dissent_identity::RootKey;
+
+    /// The contact book as written before the address setting existed. Its layout is what is on disk
+    /// for every existing install, so it must keep loading. Do not change this struct.
+    #[derive(Serialize, Deserialize)]
+    struct ContactBookV1 {
+        incoming: Vec<ContactRequest>,
+        outbox: Vec<Outbound>,
+        declined: BTreeSet<RootId>,
+        recent: Vec<(RootId, u64)>,
+        policy: DmPolicy,
+        my_inboxes: Vec<DeviceId>,
+        known_inboxes: BTreeMap<RootId, Vec<DeviceId>>,
+        blocked: BTreeSet<RootId>,
+        last_refusal: BTreeMap<RootId, u64>,
+    }
+
+    fn scratch_paths(name: &str) -> Paths {
+        let root = std::env::temp_dir().join(format!("dissent-{name}-{}", now_ms()));
+        Paths::new(root)
+    }
+
+    #[test]
+    fn a_contact_book_from_before_the_address_setting_still_loads() {
+        let paths = scratch_paths("contact-book-v1");
+        let blocked = RootKey::generate().id();
+        let old = ContactBookV1 {
+            incoming: vec![],
+            outbox: vec![],
+            declined: BTreeSet::new(),
+            recent: vec![],
+            policy: DmPolicy::ContactsOnly,
+            my_inboxes: vec![],
+            known_inboxes: BTreeMap::new(),
+            blocked: BTreeSet::from([blocked]),
+            last_refusal: BTreeMap::new(),
+        };
+        write_bin(&paths.contact_book(), &old).unwrap();
+        let book = ContactBook::load(&paths).expect("an older contact book loads");
+        assert_eq!(book.policy, DmPolicy::ContactsOnly);
+        assert!(book.blocked.contains(&blocked));
+        let _ = std::fs::remove_dir_all(paths.contact_book().parent().unwrap());
+    }
+
+    #[test]
+    fn the_address_setting_defaults_to_on_and_is_stored_apart() {
+        let paths = scratch_paths("address-privacy");
+        assert!(!hide_address(&paths), "missing means discoverable");
+        write_bin(&paths.address_privacy(), &true).unwrap();
+        assert!(hide_address(&paths));
+        assert!(!paths.contact_book().exists(), "the contact book is not touched by the setting");
+        let _ = std::fs::remove_dir_all(paths.address_privacy().parent().unwrap());
+    }
 }

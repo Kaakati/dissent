@@ -19,7 +19,7 @@ use crate::views::{
 };
 use crate::wire::SignedAddr;
 use dissent_discovery::ContactCard;
-use dissent_events::{ChannelId, EventId, Hlc, MessageView, SignedDm, SignedEvent};
+use dissent_events::{ChannelId, EventId, Hlc, MessageView, Picture, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, Genesis, Identity, RootId, Vault};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,10 @@ pub(crate) struct World {
     pub conv_book: crate::groups::ConvBook,
     /// Stored text messages, by conversation.
     pub conv_msgs: BTreeMap<crate::groups::ConvId, Vec<crate::groups::ConvMsg>>,
+    /// Stored replies, reactions, edits and deletes, by conversation. See `conv_actions.rs`.
+    pub conv_acts: BTreeMap<crate::groups::ConvId, Vec<crate::conv_actions::ConvAct>>,
+    /// When each contact was added, and when this device first saw each person.
+    pub contact_times: crate::contact_times::ContactTimes,
     /// Attachment downloads and mirror settings.
     pub attach: crate::attachments::AttachBook,
     /// Inbox service state: envelopes and key packages held for our root.
@@ -75,6 +79,10 @@ pub(crate) struct World {
     pub my_addr_ts: u64,
     /// Our latest signed address, passed on to others and re-broadcast on the community topics.
     pub my_signed: Option<SignedAddr>,
+    /// This device's own profile picture, if it has one.
+    pub own_avatar: Option<Picture>,
+    /// Pictures from contacts' direct profiles, by root, with the HLC of each.
+    pub peer_avatars: BTreeMap<RootId, (Hlc, Option<Picture>)>,
 }
 
 impl World {
@@ -103,6 +111,8 @@ impl World {
         let contact_book = crate::contacts::ContactBook::load(&paths)?;
         let conv_book = crate::groups::ConvBook::load(&paths)?;
         let conv_msgs = crate::groups::load_messages(&paths, &conv_book);
+        let conv_acts = crate::conv_actions::load_acts(&paths, &conv_book);
+        let contact_times = crate::contact_times::ContactTimes::load(&paths)?;
         let inbox = crate::inbox::InboxBook::load(&paths)?;
         let attach = crate::attachments::AttachBook::load(&paths)?;
         let access = crate::access::load(&paths, communities.keys().copied())?;
@@ -116,6 +126,10 @@ impl World {
         let identity_changes: Vec<IdentityChange> =
             crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
         let own = crate::presence::load_own(&paths);
+        let own_avatar = crate::avatars::read_sealed::<Option<Picture>>(&paths.own_avatar(), &crate::avatars::own_vault(vault))?
+            .flatten();
+        let peer_avatars = crate::avatars::read_sealed(&paths.peer_avatars(), &crate::avatars::peers_vault(vault))?
+            .unwrap_or_default();
         Ok(World {
             me: identity.root_id(),
             device: identity.device_id(),
@@ -130,6 +144,8 @@ impl World {
             contact_book,
             conv_book,
             conv_msgs,
+            conv_acts,
+            contact_times,
             inbox,
             attach,
             own,
@@ -141,6 +157,8 @@ impl World {
             my_addr: None,
             my_addr_ts,
             my_signed,
+            own_avatar,
+            peer_avatars,
         })
     }
 
@@ -228,6 +246,7 @@ impl World {
             name: c.name().to_string(),
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
+            icon: self.icon_of(c),
         }
     }
 
@@ -236,10 +255,9 @@ impl World {
             .state()
             .channels
             .iter()
-            .map(|(id, name)| ChannelInfo {
-                voice: c.state().voice_channels.contains(id),
-                id: id.to_string(),
-                name: name.clone(),
+            .map(|(id, name)| {
+                let voice = c.state().voice_channels.contains(id);
+                ChannelInfo::new(*id, name.clone(), voice, &c.state().settings(id))
             })
             .collect();
         let now = crate::engine::now_ms();
@@ -252,6 +270,7 @@ impl World {
                 root_id: root.to_string(),
                 suffix: root.suffix(),
                 display_name: self.display_name(root),
+                avatar: self.avatar_of(root),
                 handle: c.handle_of(root),
                 role: c.role_of(root).to_string(),
                 banned: c.state().banned.contains(root),
@@ -263,8 +282,12 @@ impl World {
             name: c.name().to_string(),
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
+            icon: self.icon_of(c),
             channels,
             members,
+            relays: c.state().relays.clone(),
+            // The engine fills in the people in each voice channel, which it hears on the calls side.
+            voice_channels: Vec::new(),
         }
     }
 
@@ -275,6 +298,7 @@ impl World {
             root_id: user.to_string(),
             suffix: user.suffix(),
             display_name: self.display_name(user),
+            avatar: self.avatar_of(user),
             is_contact: self.is_contact(user),
             identity_changed_ms: crate::identity_watch::last_change(&self.identity_changes, user),
             key_changed_ms: fields.key_changed_ms,
@@ -283,6 +307,8 @@ impl World {
             nickname: fields.nickname,
             ignored: fields.ignored,
             status: self.presence_of(user, crate::engine::now_ms()),
+            contact_since_ms: self.contact_times.since.get(user).copied(),
+            first_seen_ms: self.contact_times.first_seen.get(user).copied(),
             handles: shared
                 .iter()
                 .map(|c| HandleView {

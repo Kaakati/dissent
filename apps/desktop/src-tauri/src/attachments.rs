@@ -95,12 +95,12 @@ pub fn open_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: 
 }
 
 /// Forwards window drag-and-drop to the UI. The overlay is driven by drag-over and drag-leave.
-pub fn install(app: &tauri::App) {
+pub fn install(app: &AppHandle) {
     let Some(window) = app.get_webview_window(WINDOW) else {
         warn!("main window missing; drag and drop is off");
         return;
     };
-    let handle = app.handle().clone();
+    let handle = app.clone();
     window.on_window_event(move |event| {
         let WindowEvent::DragDrop(drop) = event else { return };
         match drop {
@@ -123,7 +123,7 @@ pub fn install(app: &tauri::App) {
 }
 
 /// Creates the downloads folder and allows the asset protocol to read it, and nothing else.
-pub fn allow_downloads(app: &tauri::App, data_dir: &Path) -> tauri::Result<()> {
+pub fn allow_downloads(app: &AppHandle, data_dir: &Path) -> tauri::Result<()> {
     let downloads = downloads_dir(data_dir);
     std::fs::create_dir_all(&downloads)?;
     app.asset_protocol_scope().allow_directory(&downloads, true)?;

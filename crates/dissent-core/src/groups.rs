@@ -33,7 +33,7 @@ use crate::engine::{clean_message, clean_name, now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, encode, Request, Response};
 use crate::sealed::mls_err;
-use crate::store::{append_record, read_bin, read_records, write_bin, Paths};
+use crate::store::{read_bin, read_records, write_bin, Paths};
 use crate::views::{ConversationSummary, DmItem, EngineEvent};
 use crate::world::World;
 
@@ -110,7 +110,7 @@ pub(crate) enum Delivery {
 }
 
 impl Delivery {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Delivery::Failed => "failed",
             Delivery::QueuedInbox => "queued_inbox",
@@ -144,6 +144,14 @@ pub(crate) enum Action {
     Text(String),
     Rename(String),
     Leave,
+    /// A message that answers `target`. Stored as a message, and linked to `target` (see `conv_actions.rs`).
+    Reply { target: [u8; 32], text: String },
+    /// Adds (`on`) or removes our reaction `emoji` on the message `target`.
+    React { target: [u8; 32], emoji: String, on: bool },
+    /// Replaces the text of our own message `target`.
+    Edit { target: [u8; 32], text: String },
+    /// Deletes our own message `target`. Its text is removed wherever the action arrives.
+    Delete { target: [u8; 32] },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,7 +294,7 @@ fn domain_bytes<T: Serialize>(domain: &[u8], value: &T) -> Result<Vec<u8>> {
 }
 
 /// The id of a body. Two copies of one message share it, so duplicates are easy to spot.
-fn msg_id(body: &Body) -> Result<[u8; 32]> {
+pub(crate) fn msg_id(body: &Body) -> Result<[u8; 32]> {
     Ok(*blake3::hash(&domain_bytes(MSG_ID_DOMAIN, body)?).as_bytes())
 }
 
@@ -402,7 +410,7 @@ impl Engine {
     }
 
     /// The meta of a conversation we can write to: not left.
-    fn active_meta(&self, conv: &ConvId) -> Result<ConvMeta> {
+    pub(crate) fn active_meta(&self, conv: &ConvId) -> Result<ConvMeta> {
         let meta = self.meta(conv)?;
         if meta.left {
             return Err(CoreError::Invalid("you have left this conversation".into()));
@@ -424,13 +432,13 @@ impl Engine {
         }
     }
 
-    fn save_book(w: &World) -> Result<()> {
+    pub(crate) fn save_book(w: &World) -> Result<()> {
         w.conv_book.save(&w.paths)
     }
 
     /// Seals `body` under the conversation's current epoch and queues it for every other member.
     /// The conversation must hold an MLS group.
-    fn seal_and_queue(&self, body: Body) -> Result<()> {
+    pub(crate) fn seal_and_queue(&self, body: Body) -> Result<()> {
         let conv = body.conv;
         let signed = Signed::sign(body, &self.inner.identity.device, &self.inner.identity.cert)?;
         let plaintext = encode(&signed)?;
@@ -449,8 +457,8 @@ impl Engine {
         Self::save_book(&guard)
     }
 
-    /// Key packages for `root`. Tries the root's devices first, then its inboxes. The first source
-    /// that answers wins.
+    /// Key packages for `root`: every device that answers adds its own. When none does, the root's
+    /// inboxes are asked for one.
     async fn key_packages_for(&self, root: RootId) -> Result<Vec<Vec<u8>>> {
         let node = self.node();
         // Inbox devices are skipped here. Answering with one would hand them the welcome, and an inbox
@@ -470,14 +478,22 @@ impl Engine {
             .filter(|d| !inboxes_of_root.contains(d))
             .collect();
         let req = self.request_bytes(&Request::DmKeyPackage)?;
+        // Every device of the root joins the conversation, so each one that answers adds its packages.
+        let mut asks = tokio::task::JoinSet::new();
         for device in devices {
-            if let Ok(reply) = direct(node.request(device, req.clone())).await {
-                if let Ok(Response::KeyPackages(pkgs)) = decode::<Response>(&reply) {
-                    if !pkgs.is_empty() {
-                        return Ok(pkgs);
-                    }
+            let (node, req) = (node.clone(), req.clone());
+            asks.spawn(async move { direct(node.request(device, req)).await });
+        }
+        let mut pkgs = Vec::new();
+        while let Some(joined) = asks.join_next().await {
+            if let Ok(Ok(reply)) = joined {
+                if let Ok(Response::KeyPackages(found)) = decode::<Response>(&reply) {
+                    pkgs.extend(found);
                 }
             }
+        }
+        if !pkgs.is_empty() {
+            return Ok(pkgs);
         }
         let inboxes = self
             .read()
@@ -548,7 +564,7 @@ impl Engine {
     }
 
     /// Tells listeners that a conversation changed. A 1:1 DM also emits the peer-keyed event.
-    fn notify_conv(&self, meta: &ConvMeta) {
+    pub(crate) fn notify_conv(&self, meta: &ConvMeta) {
         self.emit(EngineEvent::ConversationChanged {
             id: meta.id.to_string(),
         });
@@ -581,7 +597,7 @@ impl Engine {
     }
 
     /// Moves a message's delivery state up to `to`. A state never moves down.
-    fn raise_status(&self, id: [u8; 32], to: Delivery) {
+    pub(crate) fn raise_status(&self, id: [u8; 32], to: Delivery) {
         let mut guard = self.write();
         let entry = guard.conv_book.status.entry(id).or_insert(to);
         if to > *entry {
@@ -861,77 +877,15 @@ impl Engine {
 
     /// Seals a payload into a conversation and sends it. `plain` is text, or packed attachments.
     pub(crate) async fn send_conversation_plain(&self, conv: ConvId, text: String) -> Result<DmItem> {
-        let meta = self.active_meta(&conv)?;
-        let body = Body {
-            conv,
-            from: self.inner.me,
-            hlc: self.stamp(),
-            action: Action::Text(text.clone()),
-        };
-        let id = msg_id(&body)?;
-        let stored = ConvMsg {
-            id,
-            conv,
-            from: self.inner.me,
-            hlc: body.hlc,
-            text,
-        };
-        {
-            let mut guard = self.write();
-            append_record(&guard.paths.conv_log(&conv), &stored)?;
-            guard.conv_msgs.entry(conv).or_default().push(stored.clone());
-            if !meta.ready {
-                guard.conv_book.unsent.push(body.clone());
-                Self::save_book(&guard)?;
-            }
-        }
-        if meta.ready {
-            self.seal_and_queue(body)?;
-        } else if let Err(e) = self.ensure_group(conv).await {
-            debug!(error = %e, "conversation has no group yet");
-        }
-        self.flush_conv_queues().await;
-        let item = {
-            let w = self.read();
-            self.item(&w, &stored)
-        };
-        self.notify_conv(&meta);
-        Ok(item)
+        let id = self.post_action(conv, Action::Text(text)).await?;
+        self.item_of(conv, id)
     }
 
     /// The newest `limit` messages of a conversation, oldest first.
     pub fn conversation_messages(&self, conv: ConvId, limit: usize) -> Vec<DmItem> {
-        let w = self.read();
-        let Some(log) = w.conv_msgs.get(&conv) else {
-            return Vec::new();
-        };
-        let mut sorted: Vec<&ConvMsg> = log.iter().collect();
-        sorted.sort_by_key(|m| m.hlc);
-        let start = sorted.len().saturating_sub(limit);
-        sorted[start..].iter().map(|m| self.item(&w, m)).collect()
-    }
-
-    pub(crate) fn item(&self, w: &World, m: &ConvMsg) -> DmItem {
-        let delivery = if m.from == self.inner.me {
-            w.conv_book
-                .status
-                .get(&m.id)
-                .map_or("sending", |s| s.as_str())
-        } else {
-            "delivered"
-        };
-        DmItem {
-            id: data_encoding::BASE32_NOPAD.encode(&m.id).to_lowercase(),
-            from: m.from.to_string(),
-            text: crate::attachments::text_of(&m.text),
-            attachments: w.attachment_views(&m.text),
-            embeds: crate::attachments::embeds_of(&m.text),
-            ms: m.hlc.wall_ms,
-            pending: delivery == "sending",
-            delivery: delivery.to_string(),
-            queued: delivery == "queued_inbox",
-            reason: w.conv_book.failures.get(&m.id).cloned(),
-        }
+        let mut items = self.conv_items(conv);
+        let start = items.len().saturating_sub(limit);
+        items.split_off(start)
     }
 
     fn summary_of(&self, conv: ConvId) -> Result<ConversationSummary> {
@@ -949,6 +903,9 @@ impl Engine {
     /// dropped, so one bad packet cannot block the queue. A 1:1 conversation still waiting for its
     /// group gets a creation attempt first.
     pub(crate) async fn flush_conv_queues(&self) {
+        // One flush at a time. Two would send the same head packet twice, and a duplicate welcome is
+        // refused, which abandons the conversation.
+        let _serial = self.inner.flush_lock.lock().await;
         let waiting: Vec<ConvId> = {
             let w = self.read();
             w.conv_book
@@ -1328,23 +1285,13 @@ impl Engine {
         }
         let body = signed.body;
         match body.action {
-            Action::Text(text) => {
-                self.maybe_mirror(&text);
-                self.auto_download(None, data_encoding::BASE32_NOPAD.encode(&id).to_lowercase(), &text);
-                let stored = ConvMsg {
-                    id,
-                    conv,
-                    from: body.from,
-                    hlc: body.hlc,
-                    text,
-                };
-                {
-                    let mut guard = self.write();
-                    append_record(&guard.paths.conv_log(&conv), &stored)?;
-                    guard.conv_msgs.entry(conv).or_default().push(stored);
-                }
+            Action::Text(text) => self.on_text(&meta, id, body.from, body.hlc, text, None, device, signed.cert.root)?,
+            Action::Reply { target, text } => {
+                self.on_text(&meta, id, body.from, body.hlc, text, Some(target), device, signed.cert.root)?
+            }
+            action @ (Action::React { .. } | Action::Edit { .. } | Action::Delete { .. }) => {
+                self.record_action(conv, id, body.from, body.hlc, action)?;
                 self.notify_conv(&meta);
-                self.queue_receipt(conv, id, device, signed.cert.root)?;
             }
             Action::Rename(name) => {
                 if body.hlc > meta.name_hlc {
@@ -1386,7 +1333,7 @@ impl Engine {
     }
 
     /// Queues a signed receipt for the device that sent message `id`.
-    fn queue_receipt(&self, conv: ConvId, id: [u8; 32], device: DeviceId, root: RootId) -> Result<()> {
+    pub(crate) fn queue_receipt(&self, conv: ConvId, id: [u8; 32], device: DeviceId, root: RootId) -> Result<()> {
         let sig = self
             .inner
             .identity

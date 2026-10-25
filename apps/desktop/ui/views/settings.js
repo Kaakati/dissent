@@ -3,7 +3,8 @@
 import { state, subscribe } from '../state.js';
 import * as actions from '../actions.js';
 import { api } from '../api.js';
-import { el, icon, copyText, toast } from '../ui.js';
+import { el, icon, toast } from '../ui.js';
+import { addressCard } from './address-card.js';
 import { confirmDialog } from './dialogs.js';
 import { cardContent } from './profile.js';
 import { avatarSection } from './avatar.js';
@@ -12,6 +13,7 @@ import { getSoundSettings, setSoundSettings } from '../sounds.js';
 import { openUpdateDialog } from './updater.js';
 import { has } from '../features.js';
 import { recoveryNodes, devicesNodes } from './guardians.js';
+import { voiceNodes, stopVoicePage } from './settings-voice.js';
 
 // One group, in the board's order. Recovery and Devices appear only when the engine reports them.
 const NAV = [
@@ -21,6 +23,7 @@ const NAV = [
   { key: 'profile', label: 'Contacts & privacy', icon: 'shield-check' },
   { key: 'appearance', label: 'Appearance', icon: 'palette' },
   { key: 'sounds', label: 'Notifications & sounds', icon: 'volume-2' },
+  { key: 'voice', label: 'Voice', icon: 'mic' },
   { key: 'network', label: 'Network', icon: 'wifi' },
   { key: 'updates', label: 'Updates', icon: 'download' },
 ];
@@ -75,6 +78,7 @@ export function closeSettingsPage() {
   clearInterval(netTimer);
   netTimer = null;
   document.removeEventListener('keydown', onKey, true);
+  stopVoicePage();
   page.remove();
   page = null;
   if (opener?.isConnected) opener.focus();
@@ -83,7 +87,8 @@ export function closeSettingsPage() {
 
 function onKey(e) {
   // An open dialog (Edit Image, a confirmation) takes the Escape first; it closes the dialog, not the page.
-  if (e.key === 'Escape' && !document.querySelector('dialog[open]')) {
+  // A key being bound for push to talk takes the Escape first, so it cancels the binding and not the page.
+  if (e.key === 'Escape' && !document.querySelector('dialog[open], [data-binding]')) {
     e.preventDefault();
     e.stopPropagation();
     closeSettingsPage();
@@ -111,10 +116,11 @@ function renderNav() {
 
 function show(which) {
   section = which;
+  stopVoicePage();
   clearInterval(netTimer);
   netTimer = null;
   renderNav();
-  const asyncSection = { recovery: () => recoveryNodes({ onCancel: closeSettingsPage }), devices: devicesNodes }[section];
+  const asyncSection = { recovery: () => recoveryNodes({ onCancel: closeSettingsPage }), devices: devicesNodes, voice: voiceNodes }[section];
   const host = el('div', { class: 'settings-async' }, asyncSection ? el('p', { class: 'muted', text: 'Loading…' }) : null);
   const body = asyncSection ? host : { account, profile, network, appearance, sounds, updates }[section]();
   page.querySelector('.settings-content').replaceChildren(
@@ -124,7 +130,7 @@ function show(which) {
   if (asyncSection) {
     const current = section;
     asyncSection().then((nodes) => {
-      if (section === current) host.replaceChildren(...nodes);
+      if (section === current) host.replaceChildren(...nodes.filter(Boolean));
     });
   }
 }
@@ -181,14 +187,14 @@ function account() {
   });
 
   return el('div', { class: 'settings-card' },
-    avatarSection(),
+    has('avatars') ? avatarSection() : null,
     el('section', { class: 'settings-block' },
       el('h2', { text: 'Display name' }),
       el('div', { class: 'row' }, nameInput, saveBtn)),
     el('section', { class: 'settings-block' },
       el('h2', { text: 'Identity' }),
-      idRow('Root ID', me?.root_id ?? ''),
-      idRow('Device ID', me?.device_id ?? '')),
+      addressCard('user', me?.root_id, { label: 'User address', qr: true }),
+      addressCard('device', me?.device_id, { label: 'Device address' })),
     el('section', { class: 'settings-block' },
       el('h2', { text: 'Recovery phrase' }),
       el('div', { class: 'row' }, phraseBtn),
@@ -201,20 +207,6 @@ function account() {
       el('div', { class: 'row end' }, importBtn)));
 }
 
-function idRow(label, value) {
-  return el('div', { class: 'id-row' },
-    el('span', { class: 'id-label', text: label }),
-    el('code', { class: 'mono id-value', text: value }),
-    el('button', {
-      class: 'icon-btn',
-      'aria-label': `Copy ${label}`,
-      title: `Copy ${label}`,
-      icon: 'copy',
-      onclick: async () => {
-        if (await copyText(value)) toast(`${label} copied`, 'info');
-      },
-    }));
-}
 
 // ---- Profile: the profile card as others see it ----
 
@@ -228,8 +220,23 @@ function profile() {
     });
   }
   return el('div', { class: 'settings-card' },
+    addressToggle(),
     el('p', { class: 'muted', text: 'This is your card as other people see it.' }),
     host);
+}
+
+// Let people add me by address. On by default. Off takes our address off the DHT; contact links keep working.
+function addressToggle() {
+  const toggle = el('input', { type: 'checkbox', 'aria-label': 'Let people add me by address' });
+  toggle.addEventListener('change', async () => {
+    const saved = await actions.setAddressDiscovery(toggle.checked);
+    if (saved === undefined) toggle.checked = !toggle.checked;
+  });
+  actions.addressDiscovery().then((on) => { if (on !== undefined) toggle.checked = on; });
+  return el('section', { class: 'settings-block' },
+    el('h2', { text: 'Adding by address' }),
+    el('label', { class: 'row' }, toggle, el('span', { text: 'Let people add me by address' })),
+    el('p', { class: 'muted', text: 'Your address is published on the Mainline DHT with your device ids, so people who have it can add you. Turning this off removes it. Contact links work either way.' }));
 }
 
 // ---- Network: relay list, the public-relay toggle, and live status ----

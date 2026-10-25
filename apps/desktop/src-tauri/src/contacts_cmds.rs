@@ -2,7 +2,7 @@
 //! the engine method of the same concept. Names and argument keys match `ui/api.js`.
 
 use dissent_core::{
-    ConversationSummary, ConvId, ContactsView, DmItem, DmPolicy, RootId, UserView,
+    ConversationSummary, ConvId, DmItem, DmPolicy, RootId, UserView,
 };
 use tauri::State;
 
@@ -17,13 +17,25 @@ fn parse_peers(peers: &[String]) -> Result<Vec<RootId>, String> {
 // ---- contacts ----
 
 #[tauri::command]
-pub async fn list_contacts(state: State<'_, AppState>) -> Result<ContactsView, String> {
-    Ok(engine(&state).await?.list_contacts())
+pub async fn list_contacts(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    crate::avatar_cmds::for_ui(&engine(&state).await?.list_contacts())
 }
 
 #[tauri::command]
 pub async fn send_contact_request(state: State<'_, AppState>, link: String) -> Result<UserView, String> {
     engine(&state).await?.add_contact(&link).await.map_err(err)
+}
+
+/// Whether people may add us by address (the user record is published).
+#[tauri::command]
+pub async fn address_discovery(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(engine(&state).await?.address_discovery())
+}
+
+#[tauri::command]
+pub async fn set_address_discovery(state: State<'_, AppState>, on: bool) -> Result<bool, String> {
+    engine(&state).await?.set_address_discovery(on).map_err(err)?;
+    Ok(on)
 }
 
 #[tauri::command]

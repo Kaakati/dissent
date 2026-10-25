@@ -4,6 +4,8 @@
 import { state } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, setHue, copyText, toast, openDialog, initials, presenceOf, withImage } from '../ui.js';
+import { addressOf, shortOf } from '../address.js';
+import { addressCard } from './address-card.js';
 import { openSafetyDialog } from './dialogs.js';
 import { openConversationMenu } from './sidebar.js';
 
@@ -68,7 +70,7 @@ export function profilePanelNodes() {
     el('div', { class: 'profile-body' },
       big,
       el('h3', { text: p.display_name }),
-      el('div', { class: 'suffix', text: `${p.display_name}·${p.suffix}` }),
+      el('div', { class: 'suffix', text: `${p.display_name}·${shortOf('user', peer)}`, title: addressOf('user', peer) }),
       el('div', { class: 'mutual' }, toggle, serverList),
       sinceText ? el('h4', { text: 'Contact since' }) : null,
       sinceText ? el('p', { class: 'since', text: sinceText }) : null),
@@ -95,7 +97,8 @@ export function openFullProfile(peer) {
   const profile = openDialog({
     title: p.display_name,
     content: el('div', { class: 'full-profile' },
-      el('p', { class: 'suffix', text: `${p.display_name}·${p.suffix}` }),
+      el('p', { class: 'suffix', text: `${p.display_name}·${shortOf('user', peer)}`, title: addressOf('user', peer) }),
+      addressCard('user', peer, { label: 'Address', qr: true }),
       el('h4', { text: 'Mutual servers' }),
       (p.mutual_communities ?? []).length
         ? el('ul', { class: 'plain' }, p.mutual_communities.map((c) => el('li', { class: 'server-row' }, withImage(setHue(el('span', { class: 'mini-server', text: initials(c.name) }), c.id), c.id), el('span', { text: c.name }))))

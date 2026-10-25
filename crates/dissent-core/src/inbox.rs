@@ -243,18 +243,23 @@ impl Engine {
                 }
             };
             let mut ids = Vec::new();
+            let mut packets = Vec::new();
             for env in envelopes {
-                let packet: ConvPacket = match decode(&env.packet) {
-                    Ok(p) => p,
+                match decode::<ConvPacket>(&env.packet) {
+                    Ok(p) => packets.push((env.id, p)),
                     Err(e) => {
                         warn!(error = %e, "dropping an undecodable envelope");
                         ids.push(env.id);
-                        continue;
                     }
-                };
+                }
+            }
+            // A welcome or a commit must land before the messages it makes readable, whatever order
+            // the inbox returned them in. A refused message is acknowledged and gone for good.
+            packets.sort_by_key(|(_, p)| !matches!(p, ConvPacket::Welcome { .. } | ConvPacket::Commit { .. }));
+            for (id, packet) in packets {
                 // Refusals are acknowledged too. A refused packet would be refused again.
                 let _ = self.receive_conv(packet).await;
-                ids.push(env.id);
+                ids.push(id);
                 handled += 1;
             }
             if !ids.is_empty() {

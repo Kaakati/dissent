@@ -84,6 +84,15 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                 Ok(EngineEvent::TypingChanged { target }) => {
                     crate::typing_cmds::emit_typing(&app, &target).await;
                 }
+                Ok(EngineEvent::AvatarChanged { root_id, community_id }) => {
+                    let payload = match (root_id, community_id) {
+                        (Some(root_id), _) => json!({ "root_id": root_id }),
+                        (None, community_id) => json!({ "community_id": community_id }),
+                    };
+                    if let Err(e) = app.emit(crate::avatar_cmds::AVATAR_EVENT, payload) {
+                        warn!(error = %e, "could not emit avatar change");
+                    }
+                }
                 Ok(event) => {
                     if let EngineEvent::IncomingCall { call_id, from, conv, .. } = &event {
                         emit_ringing(&app, call_id, from, conv.as_deref()).await;

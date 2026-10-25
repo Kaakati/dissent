@@ -51,6 +51,13 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::KeyRotation(_)
             | Payload::DeviceRevoke(_)
             | Payload::SetRelays { .. }
+            | Payload::ChannelUpdate { .. }
+            | Payload::ChannelDelete { .. }
+            | Payload::InviteCreate { .. }
+            | Payload::InviteRevoke { .. }
+            | Payload::JoinVia { .. }
+            | Payload::ProfileUpdate { .. }
+            | Payload::CommunityIconSet { .. }
     )
 }
 

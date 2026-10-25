@@ -1,6 +1,8 @@
 //! Serialisable views handed to the UI. Ids are base32 strings and fields are snake_case.
 
 use dissent_discovery::DhtStats;
+use dissent_events::state::ChannelSettings;
+use dissent_events::{ChannelId, ChannelVisibility};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -9,6 +11,8 @@ pub struct MeView {
     pub device_id: String,
     pub suffix: String,
     pub display_name: String,
+    /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
+    pub avatar: Option<String>,
     /// True until the recovery phrase has been shown on a fresh device. See `capabilities`.
     pub first_run: bool,
 }
@@ -20,6 +24,8 @@ pub struct CommunitySummary {
     pub owner: String,
     /// One of `owner`, `admin`, `moderator`, `member`.
     pub my_role: String,
+    /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
+    pub icon: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -28,8 +34,15 @@ pub struct CommunityView {
     pub name: String,
     pub owner: String,
     pub my_role: String,
+    /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
+    pub icon: Option<String>,
     pub channels: Vec<ChannelInfo>,
     pub members: Vec<MemberInfo>,
+    /// Relays the community asks members to use, from its latest `SetRelays`.
+    pub relays: Vec<String>,
+    /// Each voice channel with the people in its call, as far as this device has heard. Includes
+    /// people who are not in the call themselves.
+    pub voice_channels: Vec<VoiceChannelView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +51,64 @@ pub struct ChannelInfo {
     pub name: String,
     /// True for a voice channel, made with `create_voice_channel`.
     pub voice: bool,
+    pub slowmode_s: u32,
+    /// `default`, `spoiler` or `age`.
+    pub visibility: &'static str,
+    pub bitrate_kbps: u32,
+    /// Zero is no limit.
+    pub user_limit: u32,
+    /// The relay URL, or empty for automatic.
+    pub relay: String,
+}
+
+impl ChannelInfo {
+    pub(crate) fn new(id: ChannelId, name: String, voice: bool, settings: &ChannelSettings) -> Self {
+        Self {
+            id: id.to_string(),
+            name,
+            voice,
+            slowmode_s: settings.slowmode_s,
+            visibility: match settings.visibility {
+                ChannelVisibility::Default => "default",
+                ChannelVisibility::Spoiler => "spoiler",
+                ChannelVisibility::AgeRestricted => "age",
+            },
+            bitrate_kbps: settings.bitrate_kbps,
+            user_limit: settings.user_limit,
+            relay: settings.relay.clone(),
+        }
+    }
+}
+
+/// A voice channel with the people in its call.
+#[derive(Clone, Debug, Serialize)]
+pub struct VoiceChannelView {
+    pub id: String,
+    pub name: String,
+    pub participants: Vec<VoiceParticipantView>,
+}
+
+/// One person in a voice channel, as this device has heard it.
+#[derive(Clone, Debug, Serialize)]
+pub struct VoiceParticipantView {
+    pub root_id: String,
+    pub display_name: String,
+    pub muted: bool,
+    pub deafened: bool,
+    /// Speaking is only known for people this device is connected to, so it is false here.
+    pub speaking: bool,
+}
+
+/// An invite this device made, with what the community knows of it.
+#[derive(Clone, Debug, Serialize)]
+pub struct InviteView {
+    pub id: String,
+    pub link: String,
+    pub created_ms: u64,
+    pub expires_ms: Option<u64>,
+    /// Accepted joins through the invite, as this device's replay counts them.
+    pub uses: u32,
+    pub revoked: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -45,6 +116,8 @@ pub struct MemberInfo {
     pub root_id: String,
     pub suffix: String,
     pub display_name: String,
+    /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
+    pub avatar: Option<String>,
     pub handle: Option<String>,
     pub role: String,
     pub banned: bool,
@@ -103,6 +176,8 @@ pub struct UserView {
     pub root_id: String,
     pub suffix: String,
     pub display_name: String,
+    /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
+    pub avatar: Option<String>,
     pub is_contact: bool,
     pub handles: Vec<HandleView>,
     pub mutual_communities: Vec<CommunityRef>,
@@ -120,6 +195,10 @@ pub struct UserView {
     pub ignored: bool,
     /// What others see of this person: their status, or offline.
     pub status: crate::presence::Presence,
+    /// When this person was added as a contact, in milliseconds. `None` if they are not one.
+    pub contact_since_ms: Option<u64>,
+    /// When this device first saw this person, in milliseconds. `None` if it never has.
+    pub first_seen_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -141,6 +220,8 @@ pub struct ConvMember {
     pub root_id: String,
     pub display_name: String,
     pub suffix: String,
+    /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
+    pub avatar: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -160,8 +241,14 @@ pub struct ConversationSummary {
     pub last_ms: u64,
     /// The other party's status in a 1:1 DM. `None` for a group.
     pub status: Option<crate::presence::Presence>,
+    /// The other party's picture in a 1:1 DM. `None` for a group, or when there is none yet.
+    pub avatar: Option<String>,
     /// The call in this conversation that another member's device says is live. `None` when none is.
     pub live_call: Option<crate::calls::LiveCallView>,
+    /// When the other party was added as a contact, in milliseconds. `None` for a group or a non-contact.
+    pub contact_since_ms: Option<u64>,
+    /// When this device first saw the other party, in milliseconds. `None` for a group.
+    pub first_seen_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -183,6 +270,14 @@ pub struct DmItem {
     pub attachments: Vec<crate::attachments::AttachmentView>,
     /// Link previews the sender made.
     pub embeds: Vec<crate::previews::Embed>,
+    /// The message this one replies to, if any. See `conv_actions.rs`.
+    pub reply_to: Option<ReplyPreview>,
+    /// Reactions in the order each emoji first got one. Empty when there are none.
+    pub reactions: Vec<ReactionView>,
+    /// True once the author edited the message.
+    pub edited: bool,
+    /// True once the author deleted the message. `text` is empty then.
+    pub deleted: bool,
 }
 
 /// Change notifications. Serialised as `{"kind": "...", ...}`.
@@ -190,6 +285,11 @@ pub struct DmItem {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EngineEvent {
     CommunitiesChanged,
+    /// A profile picture or a community icon changed, or was fetched. Exactly one of the two ids is set.
+    AvatarChanged {
+        root_id: Option<String>,
+        community_id: Option<String>,
+    },
     CommunityUpdated { community_id: String },
     Message { community_id: String, channel_id: String },
     Dm { peer: String },

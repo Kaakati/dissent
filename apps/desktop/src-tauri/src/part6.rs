@@ -8,8 +8,9 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use dissent_core::{
-    CallView, ChannelId, ChannelInfo, CommunityId, ConvId, DeviceView, Engine, EventId, GuardianView,
-    Identity, MessageItem, NoteKind, PendingDevice, RootId,
+    CallView, ChannelId, ChannelInfo, ChannelPatch, ChannelVisibility, CommunityId, ConvId,
+    DeviceView, Engine, EventId, GuardianView, Identity, InviteView, MessageItem, NoteKind,
+    PendingDevice, RootId,
 };
 use dissent_identity::{keystore, DeviceId};
 use serde_json::{json, Value};
@@ -171,6 +172,80 @@ pub async fn create_voice_channel(
 ) -> Result<ChannelInfo, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     engine(&state).await?.create_voice_channel(community, name).await.map_err(err)
+}
+
+/// Changes a channel. Fields left out stay as they are. `visibility` is `default`, `spoiler` or
+/// `age`, and `relay` is a relay URL, or `automatic` for none.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn update_channel(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+    name: Option<String>,
+    slowmode_s: Option<u32>,
+    visibility: Option<String>,
+    bitrate_kbps: Option<u32>,
+    user_limit: Option<u32>,
+    relay: Option<String>,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    let visibility = match visibility.as_deref() {
+        None => None,
+        Some("default") => Some(ChannelVisibility::Default),
+        Some("spoiler") => Some(ChannelVisibility::Spoiler),
+        Some("age") => Some(ChannelVisibility::AgeRestricted),
+        Some(other) => return Err(format!("unknown visibility {other}")),
+    };
+    let relay = relay.map(|r| if r == "automatic" { String::new() } else { r });
+    let patch = ChannelPatch {
+        name,
+        slowmode_s,
+        visibility,
+        bitrate_kbps,
+        user_limit,
+        relay,
+    };
+    engine(&state)
+        .await?
+        .update_channel(community, channel, patch)
+        .await
+        .map_err(err)
+}
+
+/// Deletes a channel and its messages for everyone.
+#[tauri::command]
+pub async fn delete_channel(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    engine(&state).await?.delete_channel(community, channel).await.map_err(err)
+}
+
+/// The invites this device made for a community.
+#[tauri::command]
+pub async fn list_invites(
+    state: State<'_, AppState>,
+    community_id: String,
+) -> Result<Vec<InviteView>, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.list_invites(community).map_err(err)
+}
+
+/// Stops new joins through an invite. `invite_id` is the id that `list_invites` returned.
+#[tauri::command]
+pub async fn revoke_invite(
+    state: State<'_, AppState>,
+    community_id: String,
+    invite_id: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let invite = dissent_core::parse_invite_id(&invite_id).map_err(err)?;
+    engine(&state).await?.revoke_invite(community, invite).await.map_err(err)
 }
 
 #[tauri::command]

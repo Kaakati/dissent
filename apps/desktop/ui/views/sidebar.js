@@ -3,6 +3,7 @@
 import { state, subscribe, canManage, textChannelsOf, voiceChannelsOf } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, stackAvatar, skeletonRows, icon, copyText, toast, plural, presenceDot, presenceOf } from '../ui.js';
+import { addressOf, shortOf } from '../address.js';
 import { has } from '../features.js';
 import { openSwitcher } from './switcher.js';
 import {
@@ -22,6 +23,7 @@ import { openProfile } from './profile.js';
 import { openContextMenu } from './contextmenu.js';
 import { openServerIconDialog } from './avatar.js';
 import { openStatusMenu, selfPresence, statusLabel } from './statusmenu.js';
+import { openInputMenu, openOutputMenu } from './voice-menus.js';
 
 let menu = null;
 
@@ -262,6 +264,10 @@ export function openConversationMenu(x, y, conv) {
           if (link && (await copyText(link))) toast(`${name}'s contact link copied`, 'info');
         },
       } : null,
+      { label: 'Copy user address', icon: 'copy', onPick: async () => {
+        const address = addressOf('user', conv.peer);
+        if (address && (await copyText(address))) toast(`${name}'s address copied`, 'info');
+      } },
       group ? null : (has('close_dm') ? { label: 'Close DM', onPick: () => actions.closeDm(key) } : null),
       'sep',
       state.communities.length ? {
@@ -340,8 +346,12 @@ function toggleMenu(anchor, community) {
   menu = el('div', { class: 'menu', role: 'menu' },
     item('Create invite', 'user-plus', () => openInviteDialog(community.id)),
     item('Claim handle', 'at-sign', () => openClaimHandleDialog(community.id)),
+    item('Copy server address', 'copy', async () => {
+      const address = addressOf('server', community.id);
+      if (address && (await copyText(address))) toast(`${community.name} address copied`, 'info');
+    }),
     manage ? item('Create channel', 'plus', () => openCreateChannelDialog(community.id)) : null,
-    ['owner', 'admin'].includes(community.my_role) ? item('Server icon', 'image', () => openServerIconDialog(community)) : null,
+    has('avatars') && ['owner', 'admin'].includes(community.my_role) ? item('Server icon', 'image', () => openServerIconDialog(community)) : null,
     item('Leave server', 'log-out', async () => {
       if (await confirmDialog(`Leave ${community.name}? You can rejoin with an invite link.`, 'Leave')) {
         actions.leaveCommunity(community.id);
@@ -375,7 +385,7 @@ function renderMe() {
     class: 'me-self',
     'aria-label': `${name}, ${status}. Profile and status`,
     'aria-haspopup': has('status') ? 'menu' : null,
-    title: me ? `${me.display_name}·${me.suffix}` : '',
+    title: me ? `${me.display_name}·${addressOf('user', me.root_id)}` : '',
     onclick: (e) => (has('status') ? openStatusMenu(e.currentTarget) : openSettingsPage('identity')),
   },
   avatar(me?.display_name || '?', me?.root_id, '', selfPresence()),
@@ -388,9 +398,9 @@ function renderMe() {
     const deaf = Boolean(call?.deafened);
     tools.push(
       el('button', { class: `icon-btn${muted ? ' on' : ''}`, 'aria-label': muted ? 'Unmute' : 'Mute', 'aria-pressed': muted ? 'true' : 'false', title: muted ? 'Unmute' : 'Mute', icon: muted ? 'mic-off' : 'mic', disabled: !call, onclick: () => actions.toggleMuted() }),
-      el('button', { class: 'icon-btn narrow', 'aria-label': 'Microphone options', title: 'Microphone options', icon: 'chevron-down', disabled: true }),
+      el('button', { class: 'icon-btn narrow', 'aria-label': 'Microphone options', 'aria-haspopup': 'menu', title: 'Microphone options', icon: 'chevron-down', onclick: (e) => openInputMenu(e.currentTarget).catch(toast) }),
       el('button', { class: `icon-btn${deaf ? ' on' : ''}`, 'aria-label': deaf ? 'Undeafen' : 'Deafen', 'aria-pressed': deaf ? 'true' : 'false', title: deaf ? 'Undeafen' : 'Deafen', icon: 'headphones', disabled: !call, onclick: () => actions.toggleDeafened() }),
-      el('button', { class: 'icon-btn narrow', 'aria-label': 'Output options', title: 'Output options', icon: 'chevron-down', disabled: true }),
+      el('button', { class: 'icon-btn narrow', 'aria-label': 'Output options', 'aria-haspopup': 'menu', title: 'Output options', icon: 'chevron-down', onclick: (e) => openOutputMenu(e.currentTarget).catch(toast) }),
     );
   }
   tools.push(el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', 'aria-keyshortcuts': 'Control+, Meta+,', icon: 'settings', onclick: () => openSettingsPage() }));

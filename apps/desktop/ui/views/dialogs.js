@@ -2,6 +2,9 @@
 import { state } from '../state.js';
 import * as actions from '../actions.js';
 import { el, icon, avatar, openDialog, copyText, toast } from '../ui.js';
+import { addressOf, isAddressToAdd, matchesSearch, shortOf } from '../address.js';
+import { addressCard } from './address-card.js';
+import { qrSvg } from '../qr.js';
 import { has } from '../features.js';
 
 // Resolves true on confirm, false on cancel or dismiss.
@@ -73,7 +76,7 @@ export function openServerDialog() {
 }
 
 // Shows a link that is loaded on open, with a Copy button.
-function openLinkDialog(title, description, loadLink) {
+function openLinkDialog(title, description, loadLink, extra = null) {
   const input = el('input', { readOnly: true, class: 'link-input', placeholder: 'Creating link…', 'aria-label': title });
   const copy = el('button', {
     class: 'primary',
@@ -89,7 +92,7 @@ function openLinkDialog(title, description, loadLink) {
   });
   openDialog({
     title,
-    content: el('div', {}, el('p', { class: 'muted', text: description }), el('div', { class: 'row' }, input, copy)),
+    content: el('div', {}, el('p', { class: 'muted', text: description }), el('div', { class: 'row' }, input, copy), extra),
   });
   loadLink().then((link) => {
     if (!link) {
@@ -110,16 +113,33 @@ export function openInviteDialog(communityId) {
 }
 
 export function openContactDialog() {
+  // The QR encodes the contact link, so scanning it adds you. It appears once the link has loaded.
+  const qrBox = el('div', {});
+  const loadLink = () => actions.contactLink().then((link) => {
+    // The long form can be too long for a QR code. Then the link is still there to copy, just without the code.
+    if (link) {
+      try {
+        qrBox.replaceChildren(el('div', { class: 'qr-code', role: 'img', 'aria-label': 'QR code of your contact link', title: link }, qrSvg(link)));
+      } catch {
+        qrBox.replaceChildren();
+      }
+    }
+    return link;
+  });
   openLinkDialog(
     'My contact link',
     'Share this so someone can message you directly, even without a shared server.',
-    () => actions.contactLink(),
+    loadLink,
+    el('div', {},
+      qrBox,
+      state.me?.root_id ? addressCard('user', state.me.root_id, { label: 'Your address' }) : null),
   );
 }
 
 export function openAddContactDialog() {
   let close = () => {};
-  const input = el('textarea', { rows: 3, placeholder: 'dissent://contact/…', 'aria-label': 'Contact link' });
+  const input = el('textarea', { rows: 3, placeholder: 'dsu1… or dissent://contact/…', 'aria-label': 'Address or contact link' });
+  const status = el('p', { class: 'muted', role: 'status' });
   const addBtn = el('button', {
     class: 'primary',
     icon: 'user-plus',
@@ -127,15 +147,24 @@ export function openAddContactDialog() {
     onclick: async () => {
       const link = input.value.trim();
       if (!link) return;
+      let byAddress = false;
+      try {
+        byAddress = isAddressToAdd(link);
+      } catch (e) {
+        toast(e.message);
+        return;
+      }
       addBtn.disabled = true;
+      status.textContent = byAddress ? 'Looking them up…' : '';
       const ok = await actions.addContact(link);
       addBtn.disabled = false;
+      status.textContent = '';
       if (ok) close();
     },
   });
   ({ close } = openDialog({
     title: 'Add contact',
-    content: el('div', {}, el('p', { class: 'muted', text: 'Paste a contact link to start a direct conversation.' }), input, el('div', { class: 'row end' }, addBtn)),
+    content: el('div', {}, el('p', { class: 'muted', text: 'Paste their address to start a direct conversation. A contact link works too.' }), input, status, el('div', { class: 'row end' }, addBtn)),
   }));
 }
 
@@ -290,7 +319,7 @@ export function openNewGroupDialog({ preselect = [] } = {}) {
   const people = [...contacts, ...preselect.filter((p) => !contacts.some((c) => c.root_id === p.root_id))];
   const picked = new Set(preselect.map((p) => p.root_id));
   const nameInput = el('input', { value: 'New group', 'aria-label': 'Group name' });
-  const search = el('input', { placeholder: 'Type a name or paste a contact link', 'aria-label': 'Find contacts' });
+  const search = el('input', { placeholder: 'Type a name or paste an address', 'aria-label': 'Find contacts' });
   const count = el('span', { class: 'pick-count' });
   const chips = el('div', { class: 'pick-chips' });
   const list = el('ul', { class: 'pick-list', 'aria-label': 'Contacts' });
@@ -314,13 +343,13 @@ export function openNewGroupDialog({ preselect = [] } = {}) {
   };
   const paint = () => {
     const q = search.value.trim().toLowerCase();
-    const shown = people.filter((p) => !q || p.display_name.toLowerCase().includes(q) || p.suffix.includes(q));
+    const shown = people.filter((p) => matchesSearch(p, q));
     list.replaceChildren(...shown.map((p) => el('li', {},
       el('label', { class: 'pick-row' + (picked.has(p.root_id) ? ' on' : '') },
         avatar(p.display_name, p.root_id),
         el('span', { class: 'pick-text' },
           el('span', { class: 'pick-name', text: p.display_name }),
-          el('span', { class: 'pick-tag', text: '·' + p.suffix })),
+          el('span', { class: 'pick-tag', text: '·' + shortOf('user', p.root_id), title: addressOf('user', p.root_id) })),
         el('input', {
           type: 'checkbox',
           checked: picked.has(p.root_id),

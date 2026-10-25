@@ -5,18 +5,20 @@ mod storage;
 mod tray;
 mod updates;
 mod attachments;
+mod avatar_cmds;
 mod voice;
+mod voice_settings;
+mod mic_test;
 mod transfers_cmds;
 mod part6;
 mod contacts_cmds;
+mod conv_cmds;
 mod status_cmds;
 mod typing_cmds;
-
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod profile;
 
 use commands::AppState;
-use dissent_core::{Engine, NodeConfig};
+use dissent_core::NodeConfig;
 use dissent_identity::{keystore, Vault};
 use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
@@ -36,83 +38,37 @@ pub(crate) fn node_config(settings: &network::NetworkSettings) -> NodeConfig {
     network::node_config(settings)
 }
 
-/// Credential-store entry name for this data dir. The default dir uses "identity". A `DISSENT_DATA_DIR`
-/// gets its own entry, so two test instances on one machine don't share a key.
-fn vault_profile(data_dir: &std::path::Path) -> String {
-    if std::env::var_os("DISSENT_DATA_DIR").is_some_and(|d| !d.is_empty()) {
-        let hash = blake3::hash(data_dir.to_string_lossy().as_bytes()).to_hex();
-        format!("identity-{}", &hash.as_str()[..16])
-    } else {
-        "identity".to_string()
-    }
-}
-
-/// `DISSENT_DATA_DIR` overrides the app data directory, so two instances can run on one machine.
-fn data_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
-    match std::env::var_os("DISSENT_DATA_DIR") {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ => app.path().app_data_dir(),
-    }
-}
-
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,mainline=error,mainline::rpc=off")))
         .init();
 
-    let app = tauri::Builder::default()
+    // Custom and portable profiles are locked before Tauri starts (see profile::claim_early). The guard lives
+    // until run() returns, which is when the app exits.
+    let _profile_lock = profile::claim_early();
+    let mut builder = tauri::Builder::default();
+    // Only the default profile is single instance. Dev and portable profiles can run beside it (see profile.rs).
+    if profile::mode() == profile::Mode::Default {
+        builder = builder.plugin(profile::single_instance());
+    }
+    let app = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    voice::on_shortcut(app, shortcut, event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed)
+                })
+                .build(),
+        )
         .setup(|app| {
-            let data_dir = data_dir(app)?;
-            std::fs::create_dir_all(&data_dir)?;
-            attachments::allow_downloads(app, &data_dir)?;
-            tracing::info!(dir = %data_dir.display(), "data dir");
-
-            // chisle: the data key comes from the OS credential store. If none is available we refuse to start
-            // rather than write plaintext. Passphrase entry is the planned fallback; it is not built yet.
-            let vault = match Vault::open("dissent", &vault_profile(&data_dir)) {
-                Ok(vault) => vault,
-                Err(e) => {
-                    tracing::error!(error = %e, "no credential store for the identity key; refusing to start");
-                    return Err(Box::new(e));
-                }
-            };
-            let identity = keystore::load_or_create(&data_dir.join("identity.bin"), commands::now_ms()?, &vault)?;
-            let vault = std::sync::Arc::new(vault);
-            let profile = storage::profile_dir(&data_dir, &identity);
-            storage::migrate_legacy(&data_dir, &profile)?;
-            std::fs::create_dir_all(&profile)?;
-            tracing::info!(dir = %profile.display(), "engine data dir");
-
-            let settings = network::load(&data_dir);
-            let voice = voice::Voice::new(data_dir.clone());
-            let (engine, rx) = tauri::async_runtime::block_on(Engine::start(
-                identity.clone(),
-                profile,
-                node_config(&settings),
-                vault.clone(),
-            ))?;
-            voice::prepare(&engine, &voice);
-            app.manage(voice);
-
-            app.manage(part6::PendingLink::default());
-            app.manage(AppState {
-                data_dir,
-                vault,
-                identity: Mutex::new(identity),
-                engine: tokio::sync::RwLock::new(Some(engine)),
-            });
-            events::forward_events(app.handle().clone(), rx);
-            events::forward_notification_clicks(app.handle());
-            app.manage(status_cmds::LastInput::new());
-            status_cmds::start_idle_watch(app.handle().clone());
-            tray::install(app)?;
-            updates::start_background(app.handle().clone());
-            attachments::install(app);
+            // Any startup failure ends in a native error box, never a hidden window or a silent exit.
+            if let Err(e) = setup(app) {
+                profile::fatal(&e.to_string());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -133,6 +89,10 @@ pub fn run() {
             commands::community_view,
             commands::create_channel,
             part6::create_voice_channel,
+            part6::update_channel,
+            part6::delete_channel,
+            part6::list_invites,
+            part6::revoke_invite,
             commands::moderate,
             commands::claim_handle,
             commands::channel_messages,
@@ -144,6 +104,10 @@ pub fn run() {
             voice::set_audio_devices,
             voice::get_cascade_at,
             voice::set_cascade_at,
+            voice_settings::voice_settings,
+            voice_settings::set_voice_settings,
+            mic_test::mic_test_start,
+            mic_test::mic_test_stop,
             transfers_cmds::transfer_settings,
             transfers_cmds::set_transfer_settings,
             transfers_cmds::store_stats,
@@ -170,6 +134,8 @@ pub fn run() {
             contacts_cmds::pinned_conversations,
             contacts_cmds::list_contacts,
             contacts_cmds::send_contact_request,
+            contacts_cmds::address_discovery,
+            contacts_cmds::set_address_discovery,
             contacts_cmds::accept_contact,
             contacts_cmds::decline_contact,
             contacts_cmds::cancel_contact_request,
@@ -182,6 +148,16 @@ pub fn run() {
             contacts_cmds::create_group,
             contacts_cmds::group_messages,
             contacts_cmds::send_group_message,
+            conv_cmds::dm_reply,
+            conv_cmds::dm_react,
+            conv_cmds::dm_unreact,
+            conv_cmds::dm_edit,
+            conv_cmds::dm_delete,
+            conv_cmds::group_reply,
+            conv_cmds::group_react,
+            conv_cmds::group_unreact,
+            conv_cmds::group_edit,
+            conv_cmds::group_delete,
             contacts_cmds::add_group_members,
             contacts_cmds::leave_group,
             commands::react,
@@ -196,10 +172,19 @@ pub fn run() {
             typing_cmds::stop_typing,
             typing_cmds::typing_in,
             status_cmds::record_activity,
+            avatar_cmds::set_avatar,
+            avatar_cmds::clear_avatar,
+            avatar_cmds::set_community_icon,
+            avatar_cmds::clear_community_icon,
             commands::get_network_settings,
             commands::safety_number,
             updates::check_update,
             updates::install_update,
+            updates::open_release_page,
+            profile::vault_status,
+            profile::unlock_profile,
+            profile::finish_portable_link,
+            profile::choose_profile,
             attachments::pick_files,
             attachments::reveal_attachment,
             attachments::open_attachment,
@@ -240,11 +225,18 @@ pub fn run() {
             part6::finish_device_link,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Dissent");
+        .unwrap_or_else(|e| profile::fatal(&format!("The app could not be built: {e}")));
 
     app.run(|handle, event| {
+        // A refused second launch has no window. Keep it running until its message is dismissed.
+        if let RunEvent::ExitRequested { api, .. } = &event {
+            if profile::is_refusing(handle) {
+                api.prevent_exit();
+            }
+        }
         if let RunEvent::Exit = event {
-            let state = handle.state::<AppState>();
+            // A portable profile that never unlocked has no engine to stop.
+            let Some(state) = handle.try_state::<AppState>() else { return };
             let engine = tauri::async_runtime::block_on(state.engine.write()).take();
             if let Some(engine) = engine {
                 if let Err(e) = tauri::async_runtime::block_on(engine.shutdown()) {
@@ -253,4 +245,55 @@ pub fn run() {
             }
         }
     });
+}
+
+/// Starts the app's state: the profile, the engine and the windows. Any error returned here is shown to
+/// the user by [`profile::fatal`].
+fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Managed before any branch, so the link screens can use it before a profile is open.
+    app.manage(part6::PendingLink::default());
+    let mode = profile::mode();
+    // A portable exe's first run. The chooser saves an answer, then the app restarts in that mode.
+    if mode == profile::Mode::Undecided {
+        app.manage(profile::Chooser);
+        profile::show_window(app.handle());
+        return Ok(());
+    }
+    let data_dir = profile::data_dir(app, mode)?;
+    // A portable copy that is still pending has no folder yet. The copy creates it, so nothing is made here.
+    if profile::copy_pending(mode) {
+        app.manage(profile::Locked::new(data_dir));
+        profile::show_window(app.handle());
+        return Ok(());
+    }
+    std::fs::create_dir_all(&data_dir)?;
+    // The default profile's lock. The single-instance plugin normally stops a second launch before this.
+    if mode == profile::Mode::Default {
+        let Some(lock) = profile::lock(&data_dir)? else {
+            profile::refuse_second_instance(app);
+            return Ok(());
+        };
+        app.manage(lock);
+    }
+    tracing::info!(dir = %data_dir.display(), ?mode, "data dir");
+
+    // A portable profile has no keychain entry. It waits for the passphrase (profile::unlock_profile).
+    if mode == profile::Mode::Portable {
+        app.manage(profile::Locked::new(data_dir));
+        profile::show_window(app.handle());
+        return Ok(());
+    }
+
+    // chisle: the data key comes from the OS credential store. If none is available we refuse to start
+    // rather than write plaintext.
+    let vault = match Vault::open("dissent", &profile::vault_profile(&data_dir)) {
+        Ok(vault) => vault,
+        Err(e) => {
+            tracing::error!(error = %e, "no credential store for the identity key; refusing to start");
+            return Err(Box::new(e));
+        }
+    };
+    let identity = keystore::load_or_create(&data_dir.join("identity.bin"), commands::now_ms()?, &vault)?;
+    tauri::async_runtime::block_on(profile::open_profile(app.handle(), data_dir, vault, identity))?;
+    Ok(())
 }

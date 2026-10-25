@@ -172,6 +172,54 @@ pub enum Payload {
         generation: u64,
         ciphertext: Vec<u8>,
     },
+    /// Changes a channel's settings. A field left `None` stays as it is. Owner and admin only.
+    /// `slowmode_s` and the voice fields are checked against the channel's kind. Appended, see
+    /// `control`.
+    ChannelUpdate {
+        channel: ChannelId,
+        name: Option<String>,
+        slowmode_s: Option<u32>,
+        visibility: Option<ChannelVisibility>,
+        bitrate_kbps: Option<u32>,
+        user_limit: Option<u32>,
+        /// A relay from the community's `SetRelays`, or empty for automatic.
+        relay: Option<String>,
+    },
+    /// Deletes a channel and its messages. Owner and admin only. Appended, see `control`.
+    ChannelDelete { channel: ChannelId },
+    /// Creates an invite. Its link carries `invite_id`, and it admits no one after `expires_ms`
+    /// when that is set. Appended, see `control`.
+    InviteCreate {
+        invite_id: [u8; 16],
+        expires_ms: Option<u64>,
+    },
+    /// Stops new joins through an invite. Members already in the community stay. Owner and admin
+    /// only. Appended, see `control`.
+    InviteRevoke { invite_id: [u8; 16] },
+    /// Joins through an invite made with `InviteCreate`. Refused once the invite is revoked or
+    /// expired, so every member refuses it the same way. Appended, see `control`.
+    JoinVia {
+        display_name: String,
+        invite_id: [u8; 16],
+    },
+    /// Sets or clears the author's profile picture. Sealed under the community secret, so only
+    /// members see the picture's key. Only the author can change their own picture, so there is
+    /// no permission to check beyond the author. Appended, see `control` and `picture`.
+    ProfileUpdate { avatar: Option<crate::picture::Picture> },
+    /// Sets or clears the community's icon. Owner and admin only. Sealed, like `ProfileUpdate`.
+    /// Appended, see `control` and `picture`.
+    CommunityIconSet { avatar: Option<crate::picture::Picture> },
+}
+
+/// Who may read a channel without a warning. Default is for everyone who can view the channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelVisibility {
+    #[default]
+    Default,
+    /// Messages and attachments are blurred until someone clicks to reveal them.
+    Spoiler,
+    /// Viewers confirm their age once before they see the channel.
+    AgeRestricted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -24,6 +24,37 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 | Direct messages | Sent only device to device over the authenticated QUIC connection, never stored by third parties. Signed by the sender and bound to the recipient. |
 | Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 16 per device. |
 | Presence privacy | Online status comes only from signed beacons, sent every 30 s to community members and direct contacts, never from traffic. Invisible sends none, but a peer may still show the last beacon for up to 60 s after you go invisible. Status is per device, not per account. |
+| Address lookup | A user record is signed by the root key that is the address, and every device cert in it is verified against that root. A forged record, a cert from another root, or a packet signed by anyone else is refused. |
+
+## Address discovery: what publishing reveals
+
+Adding someone by address needs their user record on the Mainline DHT, stored under their root key
+(`dissent-discovery`, `user_record.rs`). Unlike community records, this record is **public**: anyone
+who holds the address can resolve it. Publishing it reveals:
+
+- **That the address uses Dissent.** Any DHT node that stores or serves the record, and anyone who
+  watches lookups for that key, learns that the key holds a Dissent record.
+- **The device ids** of every device the root has certified, each with its issue time, and one dial
+  address for the root device. The dial address is the public form the communities use: no direct IPs.
+
+It does not reveal a display name, contacts, communities, messages or the device's network location
+beyond that public form. The root key is the address, so every device in the list is linked to one
+person by anyone who resolves the record.
+
+Controls:
+
+- **The switch.** "Let people add me by address" is on by default. Off publishes an empty record that
+  replaces the old one on the DHT, so the address stops resolving within minutes. Contact links keep
+  working either way.
+- **Forgery.** Each device cert is checked against the address, and the packet must be signed by it.
+  A stranger who copies the layout cannot publish under someone else's address.
+- **Replay.** A DHT node can keep serving an older, validly signed record until a newer one replaces
+  it. So a device that was revoked can still appear for up to an hour, the republish interval, and
+  the DHT's own expiry. Revocation for messages is unaffected: it is still enforced by the signed
+  device-revocation event.
+- **Linked-only setups.** Only a device that holds the root key publishes. The root device lists the
+  certs it issued, so a linked device needs no request to be included. If no device holds the root
+  key, nothing is published and adding by address is unavailable; people add by contact link.
 
 ## Findings
 
@@ -118,11 +149,15 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 6. **Accepted, documented:** a peer forwarder in a large call sees who is speaking and how
    loudly, through the audio-level byte. Message metadata (author, time, channel) is visible to
    members, as in any group chat.
-7. **Fixed: data at rest.** The identity file, the MLS state and the decrypted content log are sealed with
-   XChaCha20-Poly1305 under a per-file subkey of the data key. The data key is held in the OS credential store: Windows
-   Credential Manager, macOS Keychain or Linux Secret Service. Argon2id passphrase derivation is the fallback for
-   headless machines. A plaintext MLS snapshot or content log from before this change is sealed on first open. A wrong
-   key refuses to start the engine rather than overwrite the state. Malware running as the user is out of scope.
+7. **Fixed: data at rest.** The identity file, the MLS state, the decrypted content log and each founder's
+   community signing key (`community.key`) are sealed with XChaCha20-Poly1305 under a per-file subkey of the data
+   key. The community key's label names its community, so a copied file doesn't open in another community's folder.
+   The data key is held in the OS credential store: Windows Credential Manager, macOS Keychain or Linux Secret
+   Service. Argon2id passphrase derivation is the fallback for headless machines. A plaintext MLS snapshot, content
+   log or community key from before this change is sealed on first open. A plaintext community key is exactly 32
+   bytes, and any other file that doesn't open is refused and left as it is. A wrong key refuses to start the engine
+   rather than overwrite the state. A portable copy re-seals all of these under its own passphrase, so the USB copy
+   doesn't depend on this machine's keychain. Malware running as the user is out of scope.
 
 ## How the fixes are verified
 

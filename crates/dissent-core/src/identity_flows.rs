@@ -21,8 +21,8 @@ use tracing::warn;
 
 /// A device of our root, as recorded when it was linked.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct DeviceRecord {
-    cert: DeviceCert,
+pub(crate) struct DeviceRecord {
+    pub(crate) cert: DeviceCert,
     name: String,
     /// When this device was linked, in milliseconds.
     added_ms: u64,
@@ -103,7 +103,7 @@ impl Engine {
             .ok_or_else(|| CoreError::Invalid("this device does not hold the root key".into()))
     }
 
-    fn load_devices(&self) -> Result<Vec<DeviceRecord>> {
+    pub(crate) fn load_devices(&self) -> Result<Vec<DeviceRecord>> {
         let path = self.read().paths.devices();
         Ok(read_bin(&path)?.unwrap_or_default())
     }
@@ -316,6 +316,8 @@ impl Engine {
             last_seen_ms: now,
         });
         self.save_devices(&devices)?;
+        // The user record lists our devices, so the new one goes on it.
+        self.spawn_publish_user_record();
         Ok(grant.to_link()?)
     }
 
@@ -327,6 +329,7 @@ impl Engine {
         let mut devices = self.load_devices()?;
         devices.retain(|d| d.cert.device != device);
         self.save_devices(&devices)?;
+        self.spawn_publish_user_record();
         let ids: Vec<CommunityId> = self.read().communities.keys().copied().collect();
         for id in ids {
             self.author_publish(id, ChannelId::CONTROL, Payload::DeviceRevoke(revocation))

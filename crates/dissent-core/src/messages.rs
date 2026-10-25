@@ -6,6 +6,7 @@ use crate::store::append_records;
 use crate::views::{ChannelInfo, EngineEvent, MessageItem, ModAction};
 use crate::wire::{encode_gossip, GossipMsg};
 use crate::world::World;
+use dissent_events::state::ChannelSettings;
 use dissent_events::{ChannelId, Event, EventBody, EventId, Hlc, Payload, Role, SealedKind, SignedEvent};
 use dissent_identity::{CommunityId, RootId};
 use tracing::{debug, warn};
@@ -43,11 +44,12 @@ impl Engine {
         let se = self
             .author_publish(community, ChannelId::CONTROL, payload)
             .await?;
-        Ok(ChannelInfo {
-            id: ChannelId(se.event.id.0).to_string(),
+        Ok(ChannelInfo::new(
+            ChannelId(se.event.id.0),
             name,
-            voice: false,
-        })
+            false,
+            &ChannelSettings::default(),
+        ))
     }
 
     pub async fn send_message(

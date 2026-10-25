@@ -469,7 +469,7 @@ async fn gossip_beacon(senders: &[Arc<TopicSender>], sp: &SignedPresence) {
 }
 
 /// Devices that get our beacon directly: those of our contacts, minus blocked people.
-fn beacon_devices(w: &World) -> Vec<DeviceId> {
+pub(crate) fn beacon_devices(w: &World) -> Vec<DeviceId> {
     let mut devices: BTreeSet<DeviceId> = BTreeSet::new();
     for card in &w.contacts {
         let root = card.cert.root;

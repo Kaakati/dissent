@@ -77,6 +77,13 @@ export const api = {
   safetyNumber: (user) => call('safety_number', { user }),
   checkUpdate: () => call('check_update'),
   installUpdate: () => call('install_update'),
+  openReleasePage: () => call('open_release_page'),
+  // Portable exes: `chooser` until a first-run choice is saved, then `locked` until the passphrase opens the profile.
+  // `new_profile` means no identity yet. unlockProfile resolves to 'link' (approve this device first) or 'open'.
+  vaultStatus: () => call('vault_status'),
+  chooseProfile: (choice) => call('choose_profile', { choice }),
+  unlockProfile: (passphrase) => call('unlock_profile', { passphrase }),
+  finishPortableLink: (grant) => call('finish_portable_link', { grant }),
 
   listConversations: () => call('list_conversations'),
   dmMessages: (peer, limit) => call('dm_messages', { peer, limit }),
@@ -95,6 +102,8 @@ export const api = {
   // contacts
   listContacts: () => call('list_contacts'),
   sendContactRequest: (link) => call('send_contact_request', { link }),
+  addressDiscovery: () => call('address_discovery'),
+  setAddressDiscovery: (on) => call('set_address_discovery', { on }),
   acceptContact: (rootId) => call('accept_contact', { rootId }),
   declineContact: (rootId) => call('decline_contact', { rootId }),
   cancelContactRequest: (rootId) => call('cancel_contact_request', { rootId }),
@@ -128,6 +137,10 @@ export const api = {
   joinDmCall: (peer) => call('join_dm_call', { peer }),
   audioDevices: () => call('audio_devices'),
   setAudioDevices: (input, output) => call('set_audio_devices', { input, output }),
+  voiceSettings: () => call('voice_settings'),
+  setVoiceSettings: (settings) => call('set_voice_settings', { settings }),
+  micTestStart: (playback) => call('mic_test_start', { playback }),
+  micTestStop: () => call('mic_test_stop'),
   storeStats: () => call('store_stats'),
   // transfers
   listTransfers: () => call('list_transfers'),

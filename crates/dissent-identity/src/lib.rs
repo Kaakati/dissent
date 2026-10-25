@@ -11,6 +11,7 @@
 //! Public IDs serialise as lowercase base32 (RFC 4648, no padding) and the
 //! first 8 chars (40 bits) form the `name·keysuffix` suffix.
 
+mod address;
 pub mod devices;
 pub mod keystore;
 mod link;
@@ -72,7 +73,7 @@ pub enum IdentityError {
 pub type Result<T> = std::result::Result<T, IdentityError>;
 
 macro_rules! public_key_newtype {
-    ($name:ident, $doc:literal) => {
+    ($name:ident, $hrp:expr, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         pub struct $name(pub [u8; 32]);
@@ -93,6 +94,23 @@ macro_rules! public_key_newtype {
             pub fn suffix(&self) -> String {
                 self.to_string()[..8].to_string()
             }
+            /// Bitcoin-style bech32m address, e.g. `dsu1…` for a user. Carries the full key.
+            pub fn address(&self) -> String {
+                address::encode($hrp, &self.0)
+            }
+            /// Parse a bech32m address of this kind. Other kinds are refused with a clear error.
+            pub fn parse_address(s: &str) -> Result<Self> {
+                let (hrp, payload) = address::decode(s.trim())?;
+                if hrp != $hrp {
+                    return Err(address::wrong_kind(&hrp, $hrp));
+                }
+                Self::from_key_bytes(&payload)
+            }
+            fn from_key_bytes(bytes: &[u8]) -> Result<Self> {
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| IdentityError::InvalidKey)?;
+                VerifyingKey::from_bytes(&arr).map_err(|_| IdentityError::InvalidKey)?;
+                Ok(Self(arr))
+            }
         }
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,13 +124,17 @@ macro_rules! public_key_newtype {
         }
         impl FromStr for $name {
             type Err = IdentityError;
+            /// Accepts the base32 form (`Display`) or a bech32m address.
             fn from_str(s: &str) -> Result<Self> {
+                let s = s.trim();
+                // Base32 never contains '1', so its presence marks a bech32m address.
+                if s.contains('1') {
+                    return Self::parse_address(s);
+                }
                 let bytes = data_encoding::BASE32_NOPAD
-                    .decode(s.trim().to_ascii_uppercase().as_bytes())
+                    .decode(s.to_ascii_uppercase().as_bytes())
                     .map_err(|e| IdentityError::Encoding(e.to_string()))?;
-                let arr: [u8; 32] = bytes.try_into().map_err(|_| IdentityError::InvalidKey)?;
-                VerifyingKey::from_bytes(&arr).map_err(|_| IdentityError::InvalidKey)?;
-                Ok(Self(arr))
+                Self::from_key_bytes(&bytes)
             }
         }
     };
@@ -120,14 +142,17 @@ macro_rules! public_key_newtype {
 
 public_key_newtype!(
     RootId,
+    address::USER,
     "Public half of a user's root key. The user's identity."
 );
 public_key_newtype!(
     DeviceId,
+    address::DEVICE,
     "Public half of a device key. Also the iroh node id of that device."
 );
 public_key_newtype!(
     CommunityId,
+    address::SERVER,
     "Public half of a community key. The community's address."
 );
 
@@ -373,6 +398,61 @@ mod tests {
         assert_eq!(r, s.parse::<RootId>().unwrap());
         assert_eq!(r.suffix().len(), 8);
     }
+
+    #[test]
+    fn address_round_trip_and_prefixes() {
+        let root = RootKey::from_seed([7; 32]).id();
+        let server = CommunityKey::from_seed([7; 32]).id();
+        let device = DeviceKey::from_seed([7; 32]).id();
+        assert!(root.address().starts_with("dsu1"));
+        assert!(server.address().starts_with("dss1"));
+        assert!(device.address().starts_with("dsd1"));
+        assert_eq!(root.address().len(), 62);
+        assert_eq!(RootId::parse_address(&root.address()).unwrap(), root);
+        assert_eq!(root.address().parse::<RootId>().unwrap(), root);
+        assert_eq!(server.address().parse::<CommunityId>().unwrap(), server);
+        assert_eq!(device.address().parse::<DeviceId>().unwrap(), device);
+        // Uppercase addresses are all-caps, so they are valid; mixed case is not.
+        assert_eq!(root.address().to_uppercase().parse::<RootId>().unwrap(), root);
+        let mut mixed = root.address();
+        mixed.replace_range(0..1, "D");
+        assert!(mixed.parse::<RootId>().is_err());
+        // Display (base32) is unchanged and still parses.
+        assert_eq!(root.to_string().parse::<RootId>().unwrap(), root);
+        assert!(!root.to_string().contains('1'));
+    }
+
+    #[test]
+    fn address_refuses_wrong_kind_and_typos() {
+        let root = RootKey::from_seed([7; 32]).id();
+        let server = CommunityKey::from_seed([7; 32]).id();
+        let err = server.address().parse::<RootId>().unwrap_err().to_string();
+        assert!(err.contains("this is a server address, not a user address"), "{err}");
+        let mut typo = root.address().into_bytes();
+        let last = typo.len() - 1;
+        typo[last] = if typo[last] == b'q' { b'p' } else { b'q' };
+        assert!(RootId::parse_address(std::str::from_utf8(&typo).unwrap()).is_err());
+    }
+
+    #[test]
+    fn address_fixed_vectors() {
+        // Shared with apps/desktop/ui/address.test.js; keep both in sync.
+        let root = RootKey::from_seed([7; 32]).id();
+        let server = CommunityKey::from_seed([7; 32]).id();
+        let device = DeviceKey::from_seed([7; 32]).id();
+        assert_eq!(root.to_string(), "5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa");
+        assert_eq!(
+            root.address(),
+            "dsu1af9xcclzn3fq40h42pa3xtk9lx25wa4wh6l8hyjzrm4xj9zx6gkq8syqmr"
+        );
+        assert_eq!(
+            server.address(),
+            "dss1af9xcclzn3fq40h42pa3xtk9lx25wa4wh6l8hyjzrm4xj9zx6gkqhrl784"
+        );
+        assert_eq!(
+            device.address(),
+            "dsd1af9xcclzn3fq40h42pa3xtk9lx25wa4wh6l8hyjzrm4xj9zx6gkqy0w8n3"
+        );    }
 
     #[test]
     fn signature_serde_json_and_postcard() {

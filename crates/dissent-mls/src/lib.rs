@@ -259,6 +259,20 @@ impl MlsClient {
         Ok(vault.subkey(SNAPSHOT_PURPOSE).seal(SNAPSHOT_AAD, legacy))
     }
 
+    /// Opens a sealed snapshot under `vault` and returns the plaintext snapshot. A wrong vault is refused.
+    pub fn unseal_snapshot(snapshot: &[u8], vault: &Vault) -> Result<Vec<u8>> {
+        vault
+            .subkey(SNAPSHOT_PURPOSE)
+            .open_sealed(SNAPSHOT_AAD, snapshot)
+            .map_err(|e| MlsError::Sealed(e.to_string()))
+    }
+
+    /// Seals a snapshot that `from` opens under `to`, for a profile copied under a new vault.
+    pub fn reseal_snapshot(snapshot: &[u8], from: &Vault, to: &Vault) -> Result<Vec<u8>> {
+        let plain = Self::unseal_snapshot(snapshot, from)?;
+        Ok(to.subkey(SNAPSHOT_PURPOSE).seal(SNAPSHOT_AAD, &plain))
+    }
+
     /// The plaintext snapshot: header, then the postcard body. Sealed by [`snapshot_sealed`](Self::snapshot_sealed).
     fn plain_snapshot(&self) -> Result<Vec<u8>> {
         let values = self
@@ -901,6 +915,26 @@ mod tests {
         assert!(!contains(&sealed, marker));
         let restored =
             MlsClient::restore_sealed(&device, &cert, &vault, &sealed, &[group]).unwrap();
+        assert_eq!(restored.epoch(&group).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_snapshot_reseals_under_a_new_vault() {
+        let group = [7u8; 32];
+        let device = DeviceKey::generate();
+        let cert = RootKey::generate().certify(device.id(), 1);
+        let mut client = MlsClient::new(&device, &cert).unwrap();
+        client.create_group(group).unwrap();
+        let from = Vault::ephemeral_for_tests();
+        let to = Vault::ephemeral_for_tests();
+
+        let sealed = client.snapshot_sealed(&from).unwrap();
+        let moved = MlsClient::reseal_snapshot(&sealed, &from, &to).unwrap();
+        assert!(matches!(
+            MlsClient::restore_sealed(&device, &cert, &from, &moved, &[group]),
+            Err(MlsError::Sealed(_))
+        ));
+        let restored = MlsClient::restore_sealed(&device, &cert, &to, &moved, &[group]).unwrap();
         assert_eq!(restored.epoch(&group).unwrap(), 0);
     }
 

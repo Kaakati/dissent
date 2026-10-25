@@ -9,20 +9,23 @@ mod contact;
 mod dns;
 mod invite;
 mod record;
+mod user_record;
 
 use data_encoding::BASE32_NOPAD;
-use dissent_identity::{CommunityId, CommunityKey, IdentityError};
+use dissent_identity::{CommunityId, CommunityKey, IdentityError, RootId, RootKey};
 use pkarr::dht::{DhtClient, DhtConfig, ResolveError};
+use pkarr::{PublicKey, SignedPacket};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
 use tracing::{debug, warn};
 use url::Url;
 
-pub use contact::ContactCard;
+pub use contact::{short_url, ContactCard, ContactLink};
 pub use dns::{dns_record_value, normalize_domain, verify_dns_handle};
 pub use invite::Invite;
 pub use record::{CommunityRecord, MAX_PEERS};
+pub use user_record::{UserRecord, MAX_DEVICES, MAX_USER_PEERS};
 
 /// A publish that stores on fewer nodes than this is retried; see [`Discovery::publish`].
 pub const MIN_STORED_NODES: usize = 8;
@@ -54,6 +57,8 @@ pub enum DiscoveryError {
     InvalidInvite(String),
     #[error("invalid contact card: {0}")]
     InvalidContact(String),
+    #[error("invalid user record: {0}")]
+    InvalidRecord(String),
     #[error("invalid domain: {0}")]
     InvalidDomain(String),
     #[error("DNS lookup failed: {0}")]
@@ -72,11 +77,17 @@ fn to_link<T: Serialize>(prefix: &str, value: &T) -> Url {
 
 /// Decodes a full link or a bare payload. Errors are plain strings for the caller to wrap.
 fn from_link<T: DeserializeOwned>(prefix: &str, s: &str) -> std::result::Result<T, String> {
-    let s = s.trim();
-    let payload = s.strip_prefix(prefix).unwrap_or(s);
-    let bytes = BASE32_NOPAD
-        .decode(payload.to_ascii_uppercase().as_bytes())
-        .map_err(|e| format!("bad base32: {e}"))?;
+    // Links pasted from chat or email often pick up line breaks or spaces where they wrapped, so
+    // drop all whitespace, not just the ends.
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let payload = s.strip_prefix(prefix).unwrap_or(&s);
+    let bytes = BASE32_NOPAD.decode(payload.to_ascii_uppercase().as_bytes()).map_err(|e| {
+        if matches!(e.kind, data_encoding::DecodeKind::Length | data_encoding::DecodeKind::Trailing) {
+            "the link looks cut off. Copy it again with its Copy button".to_string()
+        } else {
+            format!("the link has a character that doesn't belong in it ({e})")
+        }
+    })?;
     let (value, rest) = postcard::take_from_bytes::<T>(&bytes).map_err(|e| e.to_string())?;
     if !rest.is_empty() {
         return Err("trailing bytes".into());
@@ -131,17 +142,34 @@ impl Discovery {
     /// It is an error only if no attempt stored on any node.
     pub async fn publish(&self, key: &CommunityKey, secret: &[u8; 32], rec: &CommunityRecord) -> Result<usize> {
         let packet = rec.to_private_packet(key, secret)?;
+        let best = self.publish_packet(&packet).await?;
+        debug!(stored_on = best, community = %key.id(), "published community record");
+        Ok(best)
+    }
+
+    /// Publishes the user record for `root`. An empty record withdraws the address. Same retry
+    /// rules as [`Discovery::publish`].
+    pub async fn publish_user(&self, root: &RootKey, rec: &UserRecord) -> Result<usize> {
+        let packet = rec.to_packet(root)?;
+        let best = self.publish_packet(&packet).await?;
+        debug!(stored_on = best, "published user record");
+        Ok(best)
+    }
+
+    /// Stores a signed packet on the DHT, retrying as described on [`Discovery::publish`]. Returns
+    /// the highest count of nodes any attempt stored on.
+    async fn publish_packet(&self, packet: &SignedPacket) -> Result<usize> {
         self.wait_warm().await;
         let deadline = tokio::time::Instant::now() + PUBLISH_DEADLINE;
         let mut best = 0usize;
         let mut last_err = None;
         let mut short_on_node = 0;
         loop {
-            match self.dht().publish(&packet).await {
+            match self.dht().publish(packet).await {
                 Ok(n) => best = best.max(n as usize),
                 Err(e) => last_err = Some(e.to_string()),
             }
-            debug!(stored_on = best, community = %key.id(), "dht publish attempt");
+            debug!(stored_on = best, "dht publish attempt");
             if best >= MIN_STORED_NODES || tokio::time::Instant::now() >= deadline {
                 break;
             }
@@ -158,7 +186,6 @@ impl Discovery {
                 last_err.unwrap_or_else(|| "no DHT node stored the record".into()),
             ));
         }
-        debug!(stored_on = best, community = %key.id(), "published community record");
         Ok(best)
     }
 
@@ -215,15 +242,31 @@ impl Discovery {
     /// Waits for the node to warm up first, then retries a lookup that finds nothing
     /// up to [`RESOLVE_ATTEMPTS`] times. A lookup from a young node can miss the record.
     pub async fn resolve(&self, id: &CommunityId, secret: &[u8; 32]) -> Result<Option<CommunityRecord>> {
-        self.wait_warm().await;
         let public_key = record::dht_public_key(secret, id);
-        // A lookup can end without reaching the nodes that hold the record. Retry before giving up.
+        match self.resolve_packet(&public_key).await? {
+            Some(packet) => CommunityRecord::from_private_packet(&packet, id, secret).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Fetches the user record of `id`. Returns `Ok(None)` if the address has none, and an error
+    /// if the record does not verify against `id`. An empty record means not discoverable.
+    pub async fn resolve_user(&self, id: &RootId) -> Result<Option<UserRecord>> {
+        let public_key = user_record::dht_key(id)?;
+        match self.resolve_packet(&public_key).await? {
+            Some(packet) => UserRecord::from_packet(&packet, id).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The newest packet stored under `public_key`. Waits for the node to warm up, and retries a
+    /// lookup that finds nothing: a lookup can end without reaching the nodes that hold the record.
+    async fn resolve_packet(&self, public_key: &PublicKey) -> Result<Option<SignedPacket>> {
+        self.wait_warm().await;
         for attempt in 1..=RESOLVE_ATTEMPTS {
-            let outcome = self.dht().resolve(&public_key, None).await.complete().await;
+            let outcome = self.dht().resolve(public_key, None).await.complete().await;
             match outcome.most_recent {
-                Ok(packet) => {
-                    return CommunityRecord::from_private_packet(&packet, id, secret).map(Some)
-                }
+                Ok(packet) => return Ok(Some(packet)),
                 Err(ResolveError::NotFound) if attempt < RESOLVE_ATTEMPTS => {
                     tokio::time::sleep(RESOLVE_RETRY_DELAY).await;
                 }
@@ -350,5 +393,46 @@ mod dht_privacy_tests {
         assert_eq!(holder, Some(rec));
         let stranger = discovery.resolve(&id, &[6u8; 32]).await.expect("stranger resolves");
         assert_eq!(stranger, None, "a stranger with only the id finds no record");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_user_record_resolves_by_address_and_an_empty_one_withdraws_it() {
+        let root = dissent_identity::RootKey::generate();
+        let device = dissent_identity::DeviceKey::generate();
+        let rec = UserRecord {
+            devices: vec![root.certify(device.id(), 1)],
+            peers: vec![],
+        };
+        let discovery = Discovery::new().expect("dht node");
+        discovery.publish_user(&root, &rec).await.expect("publish");
+        let found = discovery.resolve_user(&root.id()).await.expect("resolve");
+        assert_eq!(found, Some(rec));
+
+        discovery
+            .publish_user(&root, &UserRecord::default())
+            .await
+            .expect("withdraw");
+        let after = discovery.resolve_user(&root.id()).await.expect("resolve");
+        assert!(after.is_none_or(|r| r.is_empty()), "a withdrawn record is empty");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::{from_link, to_link};
+
+    #[test]
+    fn links_survive_wrapping_and_explain_truncation() {
+        let value: (u64, [u8; 32], String) = (7, [9; 32], "a contact card body".into());
+        let link = to_link("dissent://test/", &value).to_string();
+        // Line breaks and spaces where a chat client or email wrapped the link.
+        let (a, b) = link.split_at(link.len() / 2);
+        let wrapped = format!("  {a}\r\n {b}\n");
+        assert_eq!(from_link::<(u64, [u8; 32], String)>("dissent://test/", &wrapped).unwrap(), value);
+        // A link cut short says so plainly.
+        let cut = &link[..link.len() - 3];
+        let err = from_link::<(u64, [u8; 32], String)>("dissent://test/", cut).unwrap_err();
+        assert!(err.contains("cut off"), "{err}");
     }
 }

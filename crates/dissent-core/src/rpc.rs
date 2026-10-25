@@ -73,6 +73,8 @@ pub(crate) enum Request {
     /// Every community secret the responder holds, with its generation, for an active member that
     /// joined after a rotation. Appended, so the encoding of earlier variants is unchanged.
     SecretHistory { community: CommunityId },
+    /// A profile picture, sent directly to a contact's device. Appended, see `avatars`.
+    Profile(Box<crate::avatars::SignedProfile>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

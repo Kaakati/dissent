@@ -17,7 +17,8 @@
         "width": 1100,
         "height": 720,
         "decorations": false,
-        "shadow": true
+        "shadow": true,
+        "visible": false
       }
     ],
     "security": {

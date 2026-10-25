@@ -51,10 +51,39 @@ function notesNodes(text) {
   return el('div', {}, out);
 }
 
+// A portable build can't update in place. The dialog sends the user to the release page for the new portable zip.
+function openPortableDialog(info) {
+  let close = () => {};
+  const later = el('button', {
+    class: 'ghost',
+    text: 'Later',
+    onclick: () => {
+      state.updateDismissed = true;
+      notify('update');
+      close();
+    },
+  });
+  const download = el('button', {
+    class: 'primary',
+    icon: 'download',
+    text: 'Download the portable build',
+    onclick: () => api.openReleasePage().catch(toast),
+  });
+  ({ close } = openDialog({
+    title: 'Update available',
+    content: el('div', {},
+      el('p', { text: 'A new version is available. Download the portable build.' }),
+      el('p', { class: 'muted', text: `Version ${info.version} is available. You have ${info.current_version}.` }),
+      notesNodes(info.notes),
+      el('div', { class: 'row end' }, later, download)),
+  }));
+}
+
 const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
 
 export function openUpdateDialog(info) {
   if (!info) return;
+  if (info.portable) return openPortableDialog(info);
   let close = () => {};
   const fill = el('div', { class: 'progress-fill' });
   const bar = el('div', { class: 'progress', hidden: true }, fill);

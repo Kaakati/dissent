@@ -2,6 +2,7 @@
 // until the user confirms they saved the recovery phrase. The engine clears the flag; the UI only hides the screen.
 import { api } from '../api.js';
 import { el, icon, avatar, copyText, toast, openDialog } from '../ui.js';
+import { shortOf } from '../address.js';
 import * as actions from '../actions.js';
 import { setTitleOverride } from './titlebar.js';
 import { state } from '../state.js';
@@ -40,7 +41,7 @@ export async function showOnboarding() {
         avatar(me.display_name || '?', me.root_id),
         el('div', { class: 'text' },
           el('div', { class: 'name', text: me.display_name || 'Set a display name later' }),
-          el('div', { class: 'tag', text: me.suffix ? `·${me.suffix}` : '' })),
+          el('div', { class: 'tag', text: me.root_id ? `·${shortOf('user', me.root_id)}` : '' })),
         el('p', { class: 'muted', text: 'Names can repeat. The tag after the dot comes from your key, so people can tell you apart.' })),
       el('h2', { text: 'Your recovery phrase' }),
       el('p', { class: 'muted', text: `With these ${words.length} words you can restore yourself on a new computer. Nobody else holds a copy, so nobody can recover it for you.` }),

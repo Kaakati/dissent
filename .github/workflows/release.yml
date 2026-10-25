@@ -232,15 +232,35 @@ jobs:
           releaseId: ${{ needs.changelog.outputs.release_id }}
           includeUpdaterJson: ${{ steps.bundle.outputs.updater }}
           args: ${{ matrix.args }} --config '${{ steps.bundle.outputs.config }}'
-      # A single-file Windows build people can pass around and run without installing.
-      - name: Upload portable exe
+      # A Windows build that runs without installing. The zip holds Dissent.exe, an empty `portable` marker
+      # (the exe then keeps its data in DissentData beside it) and a README. DissentData is never shipped.
+      - name: Upload portable zip
         if: runner.os == 'Windows'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          name="Dissent_${{ needs.version.outputs.version }}_x64_portable.exe"
-          cp target/release/dissent-desktop.exe "$name"
+          ver="${{ needs.version.outputs.version }}"
+          name="Dissent_${ver}_x64_portable.zip"
+          stage="portable"
+          rm -rf "$stage" && mkdir "$stage"
+          cp target/release/dissent-desktop.exe "$stage/Dissent.exe"
+          : > "$stage/portable"
+          cat > "$stage/README.txt" <<EOF
+          Dissent ${ver} (portable)
+
+          This folder is self-contained. Run Dissent.exe from here. It needs no installer.
+
+          Your data lives in the DissentData folder next to Dissent.exe. Keep the whole folder together.
+          To move Dissent to another computer, copy the whole folder, DissentData included.
+
+          Dissent asks for a passphrase when it starts. You choose it on first run. Keep it safe: without
+          it this portable profile can't be opened, and nobody can recover it for you.
+
+          When a new version is out, Dissent tells you. Download the new portable zip from the release
+          page and unpack it over this folder. Your data stays in DissentData.
+          EOF
+          (cd "$stage" && 7z a -tzip "../$name" . >/dev/null)
           gh release upload "${{ needs.version.outputs.tag }}" "$name" --clobber
 
   tools:

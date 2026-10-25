@@ -23,6 +23,7 @@ export const FEATURES = [
   'close_dm', // "Close DM" in the conversation menu (close_conversation)
   'ignore', // "Ignore" and "Unignore" in the DM menu; ignored users' messages collapse
   'status', // your status (online, idle, Do Not Disturb, invisible) from the profile popover on the user bar
+  'avatars', // profile pictures in Settings › My identity, and the server icon in the server menu
 ];
 
 const supported = new Set();

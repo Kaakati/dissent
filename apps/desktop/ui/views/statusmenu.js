@@ -4,6 +4,7 @@
 import { state } from '../state.js';
 import { setStatus } from '../actions.js';
 import { el, avatar, clockLabel } from '../ui.js';
+import { shortOf } from '../address.js';
 import { openContextMenu } from './contextmenu.js';
 
 const MIN = 60 * 1000;
@@ -61,7 +62,7 @@ export function openStatusMenu(anchor) {
         avatar(me?.display_name || '?', me?.root_id, 'xl', selfPresence()),
         el('span', { class: 'status-id' },
           el('span', { class: 'name', text: me?.display_name || 'Set a display name' }),
-          el('span', { class: 'tag', text: me ? `${me.display_name}·${me.suffix}` : '' }))),
+          el('span', { class: 'tag', text: me ? shortOf('user', me.root_id) : '' }))),
     },
     'sep',
     {

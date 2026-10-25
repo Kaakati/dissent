@@ -30,6 +30,7 @@ use tracing::{debug, warn};
 pub(crate) struct ControlEffects {
     emitted: Vec<EngineEvent>,
     relay_sets: Vec<Vec<String>>,
+    pictures: Vec<crate::avatars::PictureFetch>,
 }
 
 /// Collects what the accepted `events` ask of the engine: a notice for each, the relays a
@@ -53,6 +54,9 @@ fn control_effects(
         };
         if let Payload::SetRelays { relays } = &ev.body.payload {
             fx.relay_sets.push(relays.clone());
+        }
+        if let Some(fetch) = crate::avatars::picture_fetch_for(community, c, ev.body.author, &ev.body.payload) {
+            fx.pictures.push(fetch);
         }
         if let Payload::KeyRotation(rot) = &ev.body.payload {
             let (old, new) = (rot.request.old_root, rot.request.new_root);
@@ -205,6 +209,12 @@ impl Engine {
             let engine = self.clone();
             self.spawn_task(async move { engine.adopt_relays(&relays).await });
         }
+        for fetch in fx.pictures {
+            match fetch.picture {
+                Some(picture) => self.fetch_picture(fetch.owner, picture, fetch.roots),
+                None => self.emit_owner(fetch.owner),
+            }
+        }
         for ev in fx.emitted {
             self.emit(ev);
         }
@@ -326,6 +336,10 @@ impl Engine {
             Request::Presence(sp) => match self.accept_presence(None, *sp) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid presence: {e}")),
+            },
+            Request::Profile(sp) => match self.accept_profile(*sp) {
+                Ok(()) => Response::Ack,
+                Err(e) => Response::Error(format!("invalid profile: {e}")),
             },
             Request::Typing(st) => match self.accept_typing(None, *st) {
                 Ok(()) => Response::Ack,
@@ -647,6 +661,8 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
     tick.tick().await;
     // Republish DHT records every 30 minutes, so they never age out of the DHT.
     const REPUBLISH_EVERY_ROUNDS: u32 = 60;
+    // The user record: an hour at one pass per 30 s.
+    const USER_REPUBLISH_ROUNDS: u32 = 120;
     // Ten minutes at one pass per 30 s.
     const ADDR_REBROADCAST_ROUNDS: u32 = 20;
     let mut rounds: u32 = 0;
@@ -685,6 +701,10 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
             .load(std::sync::atomic::Ordering::Relaxed);
         if retry || rounds == 1 || rounds.is_multiple_of(REPUBLISH_EVERY_ROUNDS) {
             engine.publish_records().await;
+        }
+        // The user record is republished hourly, so it stays on the DHT and follows device changes.
+        if rounds == 1 || rounds.is_multiple_of(USER_REPUBLISH_ROUNDS) {
+            engine.publish_user_record().await;
         }
     }
 }

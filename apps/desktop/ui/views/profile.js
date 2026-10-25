@@ -3,6 +3,7 @@
 import { state, canModerate, myRole } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, setHue, presenceOf } from '../ui.js';
+import { addressOf, shortOf } from '../address.js';
 import { openSafetyDialog } from './dialogs.js';
 
 const CARD_W = 300;
@@ -55,7 +56,7 @@ export async function openProfile(userId, x = 0, y = 0) {
     closeProfile();
     return;
   }
-  card.replaceChildren(...cardContent(view, userId));
+  card.replaceChildren(...cardContent(view, userId).filter(Boolean));
   place(card, x, y);
 }
 
@@ -97,7 +98,7 @@ export function cardContent(view, userId) {
     el('div', { class: 'card-body' },
       avatar(view.display_name, userId, 'card-avatar', presenceOf(view) ?? presenceOf(member)),
       el('div', { class: 'card-name', text: view.display_name, title: view.display_name }),
-      el('div', { class: 'card-suffix mono', text: `${view.display_name}·${view.suffix}` }),
+      el('div', { class: 'card-suffix mono', text: `${view.display_name}·${shortOf('user', userId)}`, title: addressOf('user', userId) }),
       member?.handle ? el('div', { class: 'card-handle', text: `@${member.handle} in ${state.community.name}` }) : null,
       chip ? el('div', { class: 'chips' }, chip) : null,
       el('div', { class: 'card-meta', text: mutual ? `${mutual} mutual server${mutual === 1 ? '' : 's'}` : 'No mutual servers' }),

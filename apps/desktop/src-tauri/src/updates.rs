@@ -5,10 +5,15 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
 use crate::commands::AppState;
+use crate::profile;
+
+/// The release page. A portable build can't update in place, so the user downloads the new portable zip here.
+const RELEASES_PAGE: &str = "https://github.com/Kaakati/dissent/releases/latest";
 
 /// Emitted when a background check finds a newer release.
 pub const EVENT_AVAILABLE: &str = "dissent://update-available";
@@ -25,6 +30,8 @@ pub struct UpdateInfo {
     pub date: Option<String>,
     /// Release notes as published. The UI shows them as plain text.
     pub notes: Option<String>,
+    /// True in a portable build. It is told to download the new portable zip instead of installing.
+    pub portable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -39,6 +46,7 @@ fn describe(update: &tauri_plugin_updater::Update) -> UpdateInfo {
         current_version: update.current_version.clone(),
         date: update.date.map(|d| d.date().to_string()),
         notes: update.body.clone(),
+        portable: profile::is_portable_exe(),
     }
 }
 
@@ -61,9 +69,18 @@ pub async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
     Ok(found.as_ref().map(describe))
 }
 
+/// Opens the release page in the browser. Portable builds send the user here to download the new zip.
+#[tauri::command]
+pub fn open_release_page(app: AppHandle) -> Result<(), String> {
+    app.opener().open_url(RELEASES_PAGE, None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Downloads and installs the newest release, shuts the engine down, and restarts the app.
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    if profile::is_portable_exe() {
+        return Err("A portable build can't update in place. Download the new portable build instead.".into());
+    }
     let update = app
         .updater()
         .map_err(|e| e.to_string())?

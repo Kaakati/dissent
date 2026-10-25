@@ -315,3 +315,62 @@ pub fn rms(frame: &[f32]) -> f32 {
 pub fn db_to_amp(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
+
+/// Multiplies every sample by `gain` and clamps to -1.0 to 1.0. A gain of 1.0 leaves the frame
+/// unchanged.
+pub fn apply_gain(frame: &mut [f32], gain: f32) {
+    for s in frame.iter_mut() {
+        *s = (*s * gain).clamp(-1.0, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_gain_leaves_the_frame_alone() {
+        let mut frame = vec![0.25, -0.5, 0.0];
+        apply_gain(&mut frame, 1.0);
+        assert_eq!(frame, vec![0.25, -0.5, 0.0]);
+    }
+
+    #[test]
+    fn gain_scales_and_clamps() {
+        let mut frame = vec![0.25, -0.6, 0.0];
+        apply_gain(&mut frame, 2.0);
+        assert_eq!(frame, vec![0.5, -1.0, 0.0]);
+        apply_gain(&mut frame, 0.0);
+        assert!(frame.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn agc_pulls_loud_speech_down_and_stays_put_on_silence() {
+        let mut agc = Agc::new();
+        let loud: Vec<f32> = (0..960).map(|i| 0.5 * (i as f32 * 0.3).sin()).collect();
+        for _ in 0..200 {
+            let mut frame = loud.clone();
+            agc.process(&mut frame);
+        }
+        assert!(agc.gain() < 0.5, "gain {} should drop for loud input", agc.gain());
+
+        let mut quiet_agc = Agc::new();
+        for _ in 0..200 {
+            let mut frame = vec![0.0; 960];
+            quiet_agc.process(&mut frame);
+        }
+        assert_eq!(quiet_agc.gain(), 1.0, "silence must not raise the gain");
+    }
+
+    #[test]
+    fn agc_raises_quiet_speech_within_its_range() {
+        let mut agc = Agc::new();
+        let quiet: Vec<f32> = (0..960).map(|i| 0.02 * (i as f32 * 0.3).sin()).collect();
+        for _ in 0..400 {
+            let mut frame = quiet.clone();
+            agc.process(&mut frame);
+        }
+        assert!(agc.gain() > 1.5, "gain {} should rise for quiet input", agc.gain());
+        assert!(agc.gain() <= db_to_amp(12.0) + 1e-3);
+    }
+}

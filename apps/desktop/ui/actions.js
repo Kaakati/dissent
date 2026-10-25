@@ -485,6 +485,10 @@ export const addContact = guard(async (link) => {
 
 export const contactLink = guard(() => api.contactLink());
 
+// Whether people may add us by address. Setting it returns the saved value.
+export const addressDiscovery = guard(() => api.addressDiscovery());
+export const setAddressDiscovery = guard((on) => api.setAddressDiscovery(on));
+
 export const createGroup = guard(async (name, peers) => {
   const conv = await api.createGroup(name, peers);
   await loadConversations();

@@ -69,14 +69,15 @@ pub async fn send_files(
     community_id: String,
     channel_id: String,
     paths: Vec<String>,
-    text: String,
+    // Files may go without a message: the UI sends null then.
+    text: Option<String>,
     seed: Option<bool>,
 ) -> Result<MessageItem, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let channel = parse("channel id", &channel_id)?;
     engine(&state)
         .await?
-        .send_files(community, channel, to_paths(paths), text, seed.unwrap_or(true))
+        .send_files(community, channel, to_paths(paths), text.unwrap_or_default(), seed.unwrap_or(true))
         .await
         .map_err(err)
 }
@@ -86,10 +87,10 @@ pub async fn send_dm_files(
     state: State<'_, AppState>,
     peer: String,
     paths: Vec<String>,
-    text: String,
+    text: Option<String>,
 ) -> Result<DmItem, String> {
     let peer: RootId = parse("peer id", &peer)?;
-    engine(&state).await?.send_dm_files(peer, to_paths(paths), text).await.map_err(err)
+    engine(&state).await?.send_dm_files(peer, to_paths(paths), text.unwrap_or_default()).await.map_err(err)
 }
 
 // ---- transfers ----

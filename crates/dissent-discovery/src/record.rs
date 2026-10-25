@@ -127,27 +127,7 @@ impl CommunityRecord {
         let id = key.id();
         let sealed = seal(secret, &id, &plain)?;
 
-        let chunks: Vec<&[u8]> = sealed.chunks(CHUNK_DATA).collect();
-        let total = u8::try_from(chunks.len())
-            .map_err(|_| DiscoveryError::RecordTooLarge(sealed.len()))?;
-        // All chunks share one TXT record. Each chunk is its own character-string, and a record
-        // header costs more than the framing it would save.
-        let mut text = TXT::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let mut frame = Vec::with_capacity(CHUNK_HEADER + chunk.len());
-            frame.push(i as u8);
-            frame.push(total);
-            frame.extend_from_slice(chunk);
-            text = text.with_char_string(CharacterString::new(&frame).map_err(enc)?.into_owned());
-        }
-        let name = Name::new(RECORD_NAME).map_err(enc)?;
-        let builder = SignedPacket::builder().txt(name, text, TTL_SECS);
-        builder
-            .sign(&dht_keypair(secret, &id))
-            .map_err(|e| match e {
-                SignedPacketBuildError::PacketTooLarge(n) => DiscoveryError::RecordTooLarge(n),
-                other => DiscoveryError::Pkarr(other.to_string()),
-            })
+        chunked_packet(&sealed, &dht_keypair(secret, &id))
     }
 
     /// Opens a packet with `secret` and checks the record is signed by the community `id`.
@@ -162,8 +142,34 @@ impl CommunityRecord {
     }
 }
 
-/// Joins the TXT chunks of a packet back into the sealed bytes.
-fn reassemble(p: &SignedPacket) -> Result<Vec<u8>> {
+/// Splits `payload` into TXT frames under `_dissent` and signs the packet with `keypair`. Community
+/// and user records share this layout.
+pub(crate) fn chunked_packet(payload: &[u8], keypair: &pkarr::Keypair) -> Result<SignedPacket> {
+    let chunks: Vec<&[u8]> = payload.chunks(CHUNK_DATA).collect();
+    let total = u8::try_from(chunks.len())
+        .map_err(|_| DiscoveryError::RecordTooLarge(payload.len()))?;
+    // All chunks share one TXT record. Each chunk is its own character-string, and a record
+    // header costs more than the framing it would save.
+    let mut text = TXT::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut frame = Vec::with_capacity(CHUNK_HEADER + chunk.len());
+        frame.push(i as u8);
+        frame.push(total);
+        frame.extend_from_slice(chunk);
+        text = text.with_char_string(CharacterString::new(&frame).map_err(enc)?.into_owned());
+    }
+    let name = Name::new(RECORD_NAME).map_err(enc)?;
+    let builder = SignedPacket::builder().txt(name, text, TTL_SECS);
+    builder
+        .sign(keypair)
+        .map_err(|e| match e {
+            SignedPacketBuildError::PacketTooLarge(n) => DiscoveryError::RecordTooLarge(n),
+            other => DiscoveryError::Pkarr(other.to_string()),
+        })
+}
+
+/// Joins the TXT chunks of a packet back into the payload bytes.
+pub(crate) fn reassemble(p: &SignedPacket) -> Result<Vec<u8>> {
     let mut chunks: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
     let mut total: Option<u8> = None;
     for rr in p.resource_records(RECORD_NAME) {

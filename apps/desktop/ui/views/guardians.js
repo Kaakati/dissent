@@ -1,6 +1,7 @@
 // Settings > Recovery (recovery guardians) and Settings > Devices. Both need their feature; Settings only lists them then.
 import { api } from '../api.js';
 import { el, icon, avatar, copyText, toast } from '../ui.js';
+import { shortOf } from '../address.js';
 
 const MAX_GUARDIANS = 16;
 
@@ -39,7 +40,7 @@ export async function recoveryNodes({ onCancel } = {}) {
       avatar(g.display_name, g.root_id),
       el('span', { class: 'text' },
         el('span', { class: 'name', text: g.display_name }),
-        el('span', { class: 'tag', text: `·${g.suffix}` })),
+        el('span', { class: 'tag', text: `·${shortOf('user', g.root_id)}` })),
       el('span', { class: 'shared', text: g.shared_servers ? `${g.shared_servers} shared server${g.shared_servers === 1 ? '' : 's'}` : 'Contact' }),
       el('button', {
         class: 'icon-btn',

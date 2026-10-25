@@ -26,6 +26,18 @@ impl Paths {
     pub fn contacts(&self) -> PathBuf {
         self.root.join("contacts.bin")
     }
+    /// This device's own profile picture, if it has one.
+    pub fn own_avatar(&self) -> PathBuf {
+        self.root.join("avatar.bin")
+    }
+    /// Pictures received directly from contacts, by root, with the HLC of each.
+    pub fn peer_avatars(&self) -> PathBuf {
+        self.root.join("peer_avatars.bin")
+    }
+    /// Decrypted pictures, one file per content hash.
+    pub fn avatars_dir(&self) -> PathBuf {
+        self.root.join("avatars")
+    }
     /// Inbox service state.
     pub fn inbox(&self) -> PathBuf {
         self.root.join("inbox.bin")
@@ -38,9 +50,21 @@ impl Paths {
     pub fn conv_log(&self, id: &crate::groups::ConvId) -> PathBuf {
         self.root.join("conversations").join(format!("{id}.log"))
     }
+    /// Stored actions of one conversation: replies, reactions, edits and deletes. See `conv_actions.rs`.
+    pub fn conv_acts(&self, id: &crate::groups::ConvId) -> PathBuf {
+        self.root.join("conversations").join(format!("{id}.acts"))
+    }
+    /// When each contact was added, and when we first saw each person. See `contact_times.rs`.
+    pub fn contact_times(&self) -> PathBuf {
+        self.root.join("contact_times.bin")
+    }
     /// Contact requests, accepts we owe, declines and the DM policy.
     pub fn contact_book(&self) -> PathBuf {
         self.root.join("contact_book.bin")
+    }
+    /// "Let people add me by address" turned off. A separate file, so the contact book keeps its layout.
+    pub fn address_privacy(&self) -> PathBuf {
+        self.root.join("address_privacy.bin")
     }
     /// Identity changes seen for the people we talk to, so the notice survives a restart.
     pub fn identity_changes(&self) -> PathBuf {
@@ -137,6 +161,28 @@ pub(crate) fn append_records<T: Serialize>(path: &Path, values: &[T]) -> Result<
     if values.is_empty() {
         return Ok(());
     }
+    let framed = frame_records(values)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&framed)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+/// Replaces every record of a log with `values`, atomically. Used when a stored record must lose
+/// its content, such as a deleted message's text.
+pub(crate) fn rewrite_records<T: Serialize>(path: &Path, values: &[T]) -> Result<()> {
+    let framed = frame_records(values)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    write_bytes_atomic(path, &framed)
+}
+
+/// The length-prefixed bytes of each record, in order.
+fn frame_records<T: Serialize>(values: &[T]) -> Result<Vec<u8>> {
     let mut framed = Vec::new();
     for value in values {
         let body = postcard::to_allocvec(value).map_err(encoding)?;
@@ -145,13 +191,7 @@ pub(crate) fn append_records<T: Serialize>(path: &Path, values: &[T]) -> Result<
         framed.extend_from_slice(&len.to_be_bytes());
         framed.extend_from_slice(&body);
     }
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&framed)?;
-    file.sync_data()?;
-    Ok(())
+    Ok(framed)
 }
 
 /// Reads every complete record from a log. A partly written tail is ignored and cut
@@ -222,7 +262,50 @@ pub(crate) fn write_bytes_unsynced(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Label bound to every sealed content record. A record sealed for another file does not open here.
-const CONTENT_AAD: &[u8] = b"dissent/content-log.sealed";
+pub(crate) const CONTENT_AAD: &[u8] = b"dissent/content-log.sealed";
+
+/// Subkey purpose for a founder's community signing key, and the label its seal is bound to.
+const COMMUNITY_KEY_PURPOSE: &[u8] = b"dissent/community-key/v1";
+const COMMUNITY_KEY_AAD: &[u8] = b"dissent/community-key.sealed";
+
+/// The label a community key seal is bound to. It names the community, so a file moved to another
+/// community's folder does not open.
+pub(crate) fn community_key_aad(community: &CommunityId) -> Vec<u8> {
+    [COMMUNITY_KEY_AAD, community.0.as_slice()].concat()
+}
+
+/// Seals a founder's community signing seed under `vault`.
+pub(crate) fn write_community_key(path: &Path, vault: &Vault, community: &CommunityId, seed: &[u8; 32]) -> Result<()> {
+    let sealed = vault
+        .subkey(COMMUNITY_KEY_PURPOSE)
+        .seal(&community_key_aad(community), seed);
+    write_bytes_atomic(path, &sealed)
+}
+
+/// Reads a founder's community signing seed. `None` when there is no file.
+///
+/// A file that does not open under `vault` is refused, and never overwritten. The one exception is a
+/// plaintext seed from before sealing, which is exactly 32 bytes. It is sealed in place on first read.
+pub(crate) fn read_community_key(path: &Path, vault: &Vault, community: &CommunityId) -> Result<Option<[u8; 32]>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if let Ok(plain) = vault
+        .subkey(COMMUNITY_KEY_PURPOSE)
+        .open_sealed(&community_key_aad(community), &bytes)
+    {
+        let seed = <[u8; 32]>::try_from(plain.as_slice())
+            .map_err(|_| CoreError::Invalid("community key has the wrong length".into()))?;
+        return Ok(Some(seed));
+    }
+    let seed = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        CoreError::Invalid(format!("community key {} does not open under this vault", community))
+    })?;
+    write_community_key(path, vault, community, &seed)?;
+    Ok(Some(seed))
+}
 
 /// The vault for one community's content log. Each log has its own subkey.
 pub(crate) fn content_vault(vault: &Vault, community: &CommunityId) -> Vault {
@@ -304,6 +387,92 @@ pub(crate) fn migrate_plain_log<T: Serialize + DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn a_community_key_is_sealed_at_rest() {
+        let dir = scratch("community-key-rest");
+        let path = dir.join("community.key");
+        let vault = Vault::from_passphrase("correct horse", &[5u8; 16]).unwrap();
+        let seed = [7u8; 32];
+        let id = dissent_identity::CommunityKey::from_seed(seed).id();
+
+        write_community_key(&path, &vault, &id, &seed).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert_ne!(bytes.len(), 32);
+        assert!(!contains(&bytes, &seed));
+        assert_eq!(read_community_key(&path, &vault, &id).unwrap(), Some(seed));
+    }
+
+    #[test]
+    fn a_plaintext_community_key_is_sealed_on_first_read() {
+        let dir = scratch("community-key-migrate");
+        let path = dir.join("community.key");
+        let vault = Vault::from_passphrase("correct horse", &[5u8; 16]).unwrap();
+        let seed = [8u8; 32];
+        let id = dissent_identity::CommunityKey::from_seed(seed).id();
+        fs::write(&path, seed).unwrap();
+
+        assert_eq!(read_community_key(&path, &vault, &id).unwrap(), Some(seed));
+        let bytes = fs::read(&path).unwrap();
+        assert_ne!(bytes.len(), 32);
+        assert!(!contains(&bytes, &seed));
+        // Once sealed, a second read opens the same seed and does not rewrite the file.
+        assert_eq!(read_community_key(&path, &vault, &id).unwrap(), Some(seed));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_community_key_that_is_not_one_plain_seed_is_never_overwritten() {
+        let dir = scratch("community-key-odd");
+        let path = dir.join("community.key");
+        let vault = Vault::from_passphrase("correct horse", &[5u8; 16]).unwrap();
+        let id = dissent_identity::CommunityKey::from_seed([9u8; 32]).id();
+        fs::write(&path, [1u8; 31]).unwrap();
+        assert!(read_community_key(&path, &vault, &id).is_err());
+        assert_eq!(fs::read(&path).unwrap(), vec![1u8; 31]);
+    }
+
+    #[test]
+    fn a_community_key_opens_only_under_its_own_vault_and_community() {
+        let dir = scratch("community-key-wrong");
+        let path = dir.join("community.key");
+        let right = Vault::from_passphrase("correct horse", &[5u8; 16]).unwrap();
+        let wrong = Vault::from_passphrase("battery staple", &[5u8; 16]).unwrap();
+        let seed = [10u8; 32];
+        let id = dissent_identity::CommunityKey::from_seed(seed).id();
+        let other = dissent_identity::CommunityKey::from_seed([11u8; 32]).id();
+        write_community_key(&path, &right, &id, &seed).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        // A wrong vault is refused, and the file is left as it was.
+        assert!(read_community_key(&path, &wrong, &id).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        // A file moved to another community's folder does not open.
+        assert!(read_community_key(&path, &right, &other).is_err());
+        assert_eq!(read_community_key(&path, &right, &id).unwrap(), Some(seed));
+    }
+
+    #[test]
+    fn the_owner_still_signs_after_a_restart() {
+        let dir = scratch("community-key-restart");
+        let path = dir.join("community.key");
+        let seed = [12u8; 32];
+        let key = dissent_identity::CommunityKey::from_seed(seed);
+        let id = key.id();
+        write_community_key(&path, &Vault::from_passphrase("correct horse", &[6u8; 16]).unwrap(), &id, &seed).unwrap();
+
+        // A restart derives the vault again from the passphrase and salt, then reads the key.
+        let after = Vault::from_passphrase("correct horse", &[6u8; 16]).unwrap();
+        let loaded = read_community_key(&path, &after, &id).unwrap().unwrap();
+        let signer = dissent_identity::CommunityKey::from_seed(loaded);
+        let sig = signer.sign(b"owner statement");
+        assert!(id.verify(b"owner statement", &sig).is_ok());
+        assert!(id.verify(b"another statement", &sig).is_err());
+    }
 
     #[test]
     fn sealed_records_round_trip_and_hide_their_text() {
