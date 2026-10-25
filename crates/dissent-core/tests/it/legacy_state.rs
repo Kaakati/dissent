@@ -2,9 +2,8 @@
 //! disk. Opening it under a vault must migrate both, keep the messages readable, remove the
 //! plaintext files, and leave no plaintext marker in the sealed files.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{ChannelId, CommunityId, Engine, Identity};
 use dissent_identity::Vault;
 use std::path::Path;

@@ -4,9 +4,8 @@
 //! Ignored by default. Run it through the firewall-approved script:
 //!   scripts/fwtest.sh dissent-core internet --ignored --nocapture
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{Engine, Identity, NodeConfig};
 use dissent_discovery::{Discovery, Invite};
 use std::time::{Duration, Instant};
@@ -90,10 +89,7 @@ async fn join_over_the_dht_then_message_and_dm() {
         .await
         .expect("bob posts");
     let alice_general = channel_id(&alice.engine, id, "general").expect("general channel");
-    eventually_within(LIMIT, "alice receives bob's message", || {
-        has_message(&alice.engine, id, alice_general, "hello from bob").then_some(())
-    })
-    .await;
+    wait_seen(&alice, id, alice_general, "hello from bob").await;
     println!("alice received bob's message after {:?}", sent_at.elapsed());
 
     let sent_at = Instant::now();

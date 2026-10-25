@@ -51,6 +51,7 @@ async function start() {
   listenTo('dissent://transfers', (p) => actions.handleTransfersEvent(p)).catch(() => {});
   listenTo('dissent://call-state', (c) => actions.handleCallEvent(c)).catch(() => {});
   listenTo('dissent://status-changed', (s) => actions.applyStatus(s)).catch(() => {});
+  listenTo('dissent://avatar-changed', (p) => actions.avatarChanged(p)).catch(() => {});
   listenTo('dissent://typing-changed', (p) => applyTyping(p)).catch(() => {});
   listenTo('dissent://call-ringing', (p) => { if (has('calls')) showIncomingCall(p); }).catch(() => {});
   listenTo('dissent://notification-click', (p) => actions.openNotifiedConversation(p?.conv)).catch(() => {});

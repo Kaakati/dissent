@@ -1,9 +1,8 @@
 //! A peer that restarts on a new port stays reachable. Relays are off, so Alice can only learn
 //! Bob's new address from his own signed announcement.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::Identity;
 use std::time::{Duration, Instant};
 

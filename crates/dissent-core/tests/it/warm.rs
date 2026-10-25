@@ -1,9 +1,8 @@
 //! Warm connections on loopback: warming a community pings its other members, and a second warm
 //! right after is skipped.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread")]

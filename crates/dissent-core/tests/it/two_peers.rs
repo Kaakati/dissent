@@ -90,24 +90,8 @@ async fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn has_message(engine: &Engine, community: CommunityId, channel: ChannelId, text: &str) -> bool {
-    engine
-        .channel_messages(community, channel, 100)
-        .iter()
-        .any(|m| m.text == text)
-}
-
-fn channel_id(engine: &Engine, community: CommunityId, name: &str) -> Option<ChannelId> {
-    engine
-        .community_view(community)
-        .ok()?
-        .channels
-        .iter()
-        .find(|c| c.name == name)
-        .and_then(|c| c.id.parse().ok())
-}
-
-/// Alice creates "Rustaceans" and Bob joins it. Returns the community id.
+/// Alice creates "Rustaceans" and Bob joins it. Returns the community id once Alice lists Bob, so
+/// Bob's messages are admitted from then on.
 async fn rustaceans(alice: &Peer, bob: &Peer) -> CommunityId {
     let server = alice
         .engine
@@ -127,8 +111,36 @@ async fn rustaceans(alice: &Peer, bob: &Peer) -> CommunityId {
         .expect("join community");
     assert_eq!(joined.id, server.id);
     assert_eq!(joined.my_role, "member");
+    let bob_root = bob.identity.root_id().to_string();
+    eventually("alice lists bob as a member", || {
+        alice
+            .engine
+            .community_view(id)
+            .ok()
+            .filter(|v| v.members.iter().any(|m| m.root_id == bob_root))
+            .map(|_| ())
+    })
+    .await;
     id
 }
+
+fn has_message(engine: &Engine, community: CommunityId, channel: ChannelId, text: &str) -> bool {
+    engine
+        .channel_messages(community, channel, 100)
+        .iter()
+        .any(|m| m.text == text)
+}
+
+fn channel_id(engine: &Engine, community: CommunityId, name: &str) -> Option<ChannelId> {
+    engine
+        .community_view(community)
+        .ok()?
+        .channels
+        .iter()
+        .find(|c| c.name == name)
+        .and_then(|c| c.id.parse().ok())
+}
+
 
 /// Shuts every engine down and deletes its data directory.
 async fn finish(peers: Vec<Peer>) {

@@ -1,8 +1,8 @@
 // Quick switcher (Ctrl+K / Cmd+K): one search field over servers, channels and direct messages.
-import { state } from '../state.js';
+import { state, textChannelsOf } from '../state.js';
 import * as actions from '../actions.js';
 import { api } from '../api.js';
-import { el, icon, avatar, initials, setHue } from '../ui.js';
+import { el, icon, avatar, initials, setHue, withImage } from '../ui.js';
 
 let panel = null; // { overlay, input, list, items, active, opener, all }
 
@@ -113,7 +113,7 @@ async function loadChannels() {
     } catch {
       continue;
     }
-    for (const ch of view.channels) {
+    for (const ch of textChannelsOf(view)) {
       channels.push({
         kind: 'channel',
         label: ch.name,
@@ -160,7 +160,7 @@ function row(item, index) {
   });
   let lead;
   if (item.kind === 'dm') lead = avatar(item.label, item.peer, 'sm');
-  else if (item.kind === 'server') lead = setHue(el('span', { class: 'mini-server', text: initials(item.label) }), item.seed);
+  else if (item.kind === 'server') lead = withImage(setHue(el('span', { class: 'mini-server', text: initials(item.label) }), item.seed), item.seed);
   else lead = icon('hash');
   option.append(...[
     lead,

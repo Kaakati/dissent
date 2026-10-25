@@ -1,9 +1,8 @@
 //! Control events reach online members within seconds on loopback. They must not wait for the
 //! next anti-entropy round, which runs every 30 s.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::ModAction;
 use std::time::{Duration, Instant};
 

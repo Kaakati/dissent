@@ -1,9 +1,8 @@
 //! Presence as others see it: statuses, invisibility, timed statuses, and who receives a beacon.
 //! Loopback only.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{CommunityId, EngineEvent, NoteKind, Presence, RootId, Status};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -51,17 +50,14 @@ async fn an_invisible_member_reads_as_offline_while_messaging() {
         .parse()
         .unwrap();
     let invite = alice.engine.create_invite(id).await.expect("invite");
-    bob.engine.join_community(&invite).await.expect("bob joins");
+    join_ready(&alice, &bob, &invite).await;
     let channel = channel_id(&alice.engine, id, "general").expect("general channel");
 
     bob.engine
         .send_message(id, channel, "hello from bob".into())
         .await
         .expect("bob posts");
-    eventually("alice reads bob's message", || {
-        has_message(&alice.engine, id, channel, "hello from bob").then_some(())
-    })
-    .await;
+    wait_seen(&alice, id, channel, "hello from bob").await;
 
     // Alice's beacons reach Bob, so the beacon path works in this community.
     eventually("bob sees alice online", || {

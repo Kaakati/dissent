@@ -4,6 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::net::{maintenance, receive_loop, ReceiverTask};
 use crate::rpc::handler_for;
 use crate::store::{write_bytes_atomic, Paths};
+use crate::timings::Timings;
 use crate::views::{CommunitySummary, EngineEvent, MeView, NetStatusView, UserView};
 use crate::world::World;
 use dissent_discovery::{ContactCard, Discovery};
@@ -74,6 +75,8 @@ pub(crate) struct Inner {
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
     /// The voice call on this device, and the media links waiting for it.
     pub calls: crate::calls::CallHub,
+    /// The real-time intervals this engine runs on. Production values unless a test changed them.
+    pub timings: Timings,
     /// Who is typing where. In memory only, so a restart clears it.
     pub typing: Mutex<crate::typing::Typing>,
     /// Encrypted file storage for attachments. Mounted on the node, so it shares its lifetime.
@@ -87,17 +90,30 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Opens the data directory, replays every community, and joins the network.
+    /// Opens the data directory, replays every community, and joins the network. Uses the
+    /// production intervals in `Timings::default()`.
     pub async fn start(
         identity: Identity,
         data_dir: PathBuf,
         net: NodeConfig,
         vault: Arc<Vault>,
     ) -> Result<(Engine, broadcast::Receiver<EngineEvent>)> {
+        Self::start_with_timings(identity, data_dir, net, vault, Timings::default()).await
+    }
+
+    /// `start` with the given intervals. Tests use this to shorten presence, call and typing waits.
+    pub async fn start_with_timings(
+        identity: Identity,
+        data_dir: PathBuf,
+        net: NodeConfig,
+        vault: Arc<Vault>,
+        timings: Timings,
+    ) -> Result<(Engine, broadcast::Receiver<EngineEvent>)> {
         let me = identity.root_id();
         let files_dir = data_dir.join("files");
         let files = std::sync::Arc::new(Self::open_files(&files_dir).await?);
-        let world = World::load(Paths::new(data_dir), &identity, &vault)?;
+        let mut world = World::load(Paths::new(data_dir), &identity, &vault)?;
+        world.timings = timings;
         let newest_stored = world.max_hlc();
         let founded = load_founded(&world);
         let mls = open_mls(&identity, &world, &vault)?;
@@ -137,8 +153,9 @@ impl Engine {
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
             neighbours: Mutex::new(BTreeMap::new()),
-            calls: Default::default(),
-            typing: Default::default(),
+            calls: crate::calls::CallHub::new(&timings),
+            typing: Mutex::new(crate::typing::Typing::new(&timings)),
+            timings,
             files,
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));

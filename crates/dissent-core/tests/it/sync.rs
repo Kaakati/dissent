@@ -1,9 +1,8 @@
 //! Set reconciliation: a joiner gets a long history in one go, and two diverged histories
 //! converge in both directions.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::Identity;
 use std::time::{Duration, Instant};
 

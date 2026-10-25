@@ -65,6 +65,8 @@ pub(crate) struct World {
     pub auto_idle: bool,
     /// The newest presence beacon held for each person. See `presence.rs`.
     pub presence: BTreeMap<RootId, crate::presence::Heard>,
+    /// The presence window in use. Set from the engine's `Timings` when it starts.
+    pub timings: crate::timings::Timings,
     pub directory: Directory,
     pub addresses: AddressBook,
     /// Our dialable address. Set once the endpoint is up.
@@ -133,6 +135,7 @@ impl World {
             own,
             auto_idle: false,
             presence: BTreeMap::new(),
+            timings: crate::timings::Timings::default(),
             directory,
             addresses: AddressBook::from_list(addrs),
             my_addr: None,

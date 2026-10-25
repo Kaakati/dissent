@@ -1,4 +1,14 @@
 // Single source of UI state. Actions mutate `state` and call notify() with the parts that changed.
+// The DM profile panel's open state is kept on this device. Storage can be unavailable: the panel then starts open.
+export const PROFILE_PANEL_KEY = 'dissent.profilePanel.v1';
+const savedProfileOpen = (() => {
+  try {
+    return window.localStorage.getItem(PROFILE_PANEL_KEY) !== 'closed';
+  } catch {
+    return true;
+  }
+})();
+
 export const state = {
   me: null,
   status: { status: 'online', until_ms: null }, // your own status: 'online' | 'idle' | 'dnd' | 'invisible', until_ms when timed
@@ -27,9 +37,10 @@ export const state = {
   transferRates: null, // { down_bps, up_bps }
   call: null, // CallState while in a call, else null
   voiceChannelId: null, // the voice channel whose call board is open (server route)
+  voiceConnection: null, // { communityId, channelId } of the voice channel this device is connected to
   ui: {
     membersOpen: true, // server member list, right column
-    profileOpen: true, // DM profile panel, right column
+    profileOpen: savedProfileOpen, // DM profile panel, right column; remembered on this device
     filter: '', // client-side message search
     page: null, // 'contacts' | 'transfers' | null: pages that replace the chat pane
     transferId: null, // transfer whose details panel is open in the right column
@@ -48,6 +59,22 @@ export function subscribe(part, fn) {
 export function notify(...parts) {
   for (const part of parts) for (const fn of subscribers.get(part) ?? []) fn();
 }
+
+// The voice channels of the open server, each with the people in it. People in a call elsewhere come from the
+// view's `voice_channels`. For the channel this device is connected to, they come from the live call, with this device first.
+export function voiceChannelsOf(community) {
+  if (!community) return [];
+  const connected = state.voiceConnection?.communityId === community.id ? state.voiceConnection : null;
+  return community.channels.filter((c) => c.voice).map((ch) => {
+    const remote = community.voice_channels?.find((v) => v.id === ch.id)?.participants ?? [];
+    const here = connected?.channelId === ch.id && state.call && state.me;
+    const self = here ? { root_id: state.me.root_id, display_name: state.me.display_name, muted: state.call.muted, deafened: state.call.deafened, speaking: false } : null;
+    return { id: ch.id, name: ch.name, participants: here ? [self, ...state.call.participants] : remote };
+  });
+}
+
+// The text channels of a server: voice channels share the channel list but have no messages.
+export const textChannelsOf = (community) => (community?.channels ?? []).filter((c) => !c.voice);
 
 export const inServer = () => state.route.kind === 'server' && state.community !== null;
 export const myRole = () => state.community?.my_role ?? null;

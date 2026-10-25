@@ -132,6 +132,7 @@ pub fn run() {
             commands::leave_community,
             commands::community_view,
             commands::create_channel,
+            part6::create_voice_channel,
             commands::moderate,
             commands::claim_handle,
             commands::channel_messages,

@@ -20,3 +20,21 @@ pub fn vault_for(dir: &Path) -> Arc<Vault> {
         .or_insert_with(|| Arc::new(Vault::ephemeral_for_tests()))
         .clone()
 }
+
+/// Engine intervals short enough for tests. Everything stays well apart: a beacon still arrives
+/// several times inside its presence window, so one late beacon does not flicker a peer offline.
+pub fn fast_timings() -> crate::Timings {
+    use std::time::Duration;
+    crate::Timings {
+        presence_window: Duration::from_secs(8),
+        beacon_every: Duration::from_secs(1),
+        presence_sweep: Duration::from_secs(1),
+        ring_timeout: Duration::from_secs(8),
+        tier_sustain: Duration::from_secs(2),
+        reelect_sustain: Duration::from_secs(2),
+        call_presence_every: Duration::from_secs(2),
+        call_presence_ttl: Duration::from_secs(6),
+        typing_expiry: Duration::from_secs(2),
+        typing_every: Duration::from_secs(1),
+    }
+}

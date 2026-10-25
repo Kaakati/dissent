@@ -6,6 +6,7 @@ import { api } from '../api.js';
 import { el, icon, copyText, toast } from '../ui.js';
 import { confirmDialog } from './dialogs.js';
 import { cardContent } from './profile.js';
+import { avatarSection } from './avatar.js';
 import { getAppearance, setAppearance } from '../appearance.js';
 import { getSoundSettings, setSoundSettings } from '../sounds.js';
 import { openUpdateDialog } from './updater.js';
@@ -81,7 +82,8 @@ export function closeSettingsPage() {
 }
 
 function onKey(e) {
-  if (e.key === 'Escape') {
+  // An open dialog (Edit Image, a confirmation) takes the Escape first; it closes the dialog, not the page.
+  if (e.key === 'Escape' && !document.querySelector('dialog[open]')) {
     e.preventDefault();
     e.stopPropagation();
     closeSettingsPage();
@@ -179,6 +181,7 @@ function account() {
   });
 
   return el('div', { class: 'settings-card' },
+    avatarSection(),
     el('section', { class: 'settings-block' },
       el('h2', { text: 'Display name' }),
       el('div', { class: 'row' }, nameInput, saveBtn)),

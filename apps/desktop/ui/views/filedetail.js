@@ -1,7 +1,7 @@
 // File details in the right column (FilesServer and FilesDirect boards): one transfer, its sources, its verified pieces,
 // its fingerprint, and where it is shared. Opened from the Details button on a downloading card (Part 6.7).
 import { state, notify } from '../state.js';
-import { el, icon } from '../ui.js';
+import { el, icon, initials, withImage } from '../ui.js';
 import * as actions from '../actions.js';
 import { formatSize, formatRate, pieceCells } from './attachments.js';
 
@@ -67,7 +67,7 @@ function directTransferNodes(found) {
   return [el('div', { class: 'file-detail direct-transfer', 'aria-label': 'Transfer details' },
     el('div', { class: 'fd-head' }, el('h3', { text: 'Direct transfer' }), close),
     el('div', { class: 'dt-peers' },
-      el('span', { class: 'dt-peer' }, el('span', { class: 'dt-initials', text: 'SK' }), el('span', { text: 'You' })),
+      el('span', { class: 'dt-peer' }, withImage(el('span', { class: 'dt-initials', text: initials(state.me?.display_name) }), state.me?.root_id), el('span', { text: 'You' })),
       el('span', { class: 'dt-line', 'aria-hidden': 'true' }),
       el('span', { class: 'dt-peer' }, el('span', { class: 'dt-initials', text: d.peer.slice(0, 2).toUpperCase() }), el('span', { text: d.peer }))),
     el('h4', { class: 'dt-title', text: `Straight to ${d.peer}’s device` }),

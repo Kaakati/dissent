@@ -1,6 +1,6 @@
 // Second column. Server: header with its menu, quick links, text and voice channels. Home: find box, quick links,
 // direct messages. The user panel (#me) floats over the rail and the sidebar and is rendered here too.
-import { state, subscribe, canManage } from '../state.js';
+import { state, subscribe, canManage, textChannelsOf, voiceChannelsOf } from '../state.js';
 import * as actions from '../actions.js';
 import { el, avatar, stackAvatar, skeletonRows, icon, copyText, toast, plural, presenceDot, presenceOf } from '../ui.js';
 import { has } from '../features.js';
@@ -17,11 +17,16 @@ import {
   openNoteDialog,
 } from './dialogs.js';
 import { openSettingsPage } from './settings.js';
+import { openChannelSettings } from './channel-settings.js';
 import { openProfile } from './profile.js';
 import { openContextMenu } from './contextmenu.js';
+import { openServerIconDialog } from './avatar.js';
 import { openStatusMenu, selfPresence, statusLabel } from './statusmenu.js';
 
 let menu = null;
+
+// The second line of a direct row, for the presence states that have one worth saying.
+const PRESENCE_TEXT = { idle: 'Idle', dnd: 'Do Not Disturb' };
 
 export function initSidebar() {
   subscribe('sidebar', render);
@@ -94,20 +99,20 @@ function transfersLink() {
 
 function serverList(community) {
   const manage = canManage();
-  const channels = community.channels.map((ch) => {
+  const channels = textChannelsOf(community).map((ch) => {
     const active = ch.id === state.channelId && !state.voiceChannelId && !state.ui.page;
     const unread = state.unread.has(`ch:${community.id}:${ch.id}`) && !active;
-    return el('button', {
+    return withChannelActions(community, el('button', {
       class: `row-item${active ? ' active' : ''}${unread ? ' unread' : ''}`,
       'aria-current': active ? 'true' : null,
       icon: 'hash',
       onclick: () => actions.openChannel(ch.id),
-    }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name, title: `#${ch.name}` }));
+    }, unread ? el('span', { class: 'unread-dot', 'aria-label': 'unread' }) : null, el('span', { class: 'name', text: ch.name, title: `#${ch.name}` })), ch);
   });
   const addChannel = manage
     ? el('button', { class: 'icon-btn', 'aria-label': 'Create channel', title: 'Create channel', icon: 'plus', onclick: () => openCreateChannelDialog(community.id) })
     : null;
-  const voice = has('calls') && Array.isArray(community.voice_channels) ? voiceSection(community) : [];
+  const voice = has('calls') ? voiceSection(community) : [];
   return [
     quickLink('user-plus', 'Invite people', () => openInviteDialog(community.id)),
     transfersLink(),
@@ -118,24 +123,47 @@ function serverList(community) {
   ];
 }
 
-// Voice channels (calls feature): a speaker row per channel, and the people in its call under it.
+// A channel row with the owner's hover actions: Create invite and Edit Channel. They show on hover and focus.
+function withChannelActions(community, row, ch) {
+  if (!canManage()) return row;
+  return el('div', { class: 'channel-row' }, row,
+    el('span', { class: 'row-actions' },
+      el('button', { class: 'row-action', icon: 'user-plus', 'aria-label': 'Create invite', title: 'Create invite', onclick: () => openInviteDialog(community.id) }),
+      el('button', { class: 'row-action', icon: 'settings', 'aria-label': 'Edit Channel', title: 'Edit Channel', onclick: () => openChannelSettings(community.id, ch.id) })));
+}
+
+// Voice channels (calls feature): a row per channel that joins it on click, and the people in it under the row.
 function voiceSection(community) {
+  const addVoice = canManage()
+    ? el('button', { class: 'icon-btn', 'aria-label': 'Create voice channel', title: 'Create voice channel', icon: 'plus', onclick: () => openCreateChannelDialog(community.id, 'voice') })
+    : null;
   const rows = [];
-  for (const ch of community.voice_channels) {
+  for (const ch of voiceChannelsOf(community)) {
     const active = state.voiceChannelId === ch.id;
-    rows.push(el('button', {
+    const connected = state.voiceConnection?.channelId === ch.id;
+    rows.push(withChannelActions(community, el('button', {
       class: `row-item voice${active ? ' active' : ''}`,
       'aria-current': active ? 'true' : null,
       icon: 'volume-2',
+      title: connected ? `Connected to ${ch.name}` : `Join ${ch.name}`,
       onclick: () => actions.openVoiceChannel(ch.id),
-    }, el('span', { class: 'name', text: ch.name, title: ch.name })));
-    for (const p of ch.participants ?? []) {
-      const a = avatar(p.display_name, p.root_id);
-      if (p.speaking) a.classList.add('speaking');
-      rows.push(el('div', { class: 'voice-member' }, a, el('span', { class: 'name', text: p.display_name })));
+    }, el('span', { class: 'name', text: ch.name, title: ch.name })), ch));
+    if (ch.participants.length) {
+      rows.push(el('div', { role: 'list', 'aria-label': `In ${ch.name}` }, ch.participants.map(voiceMember)));
     }
   }
-  return [el('div', { class: 'section-head spaced' }, el('span', { text: 'Voice channels' })), ...rows];
+  return [el('div', { class: 'section-head spaced' }, el('span', { text: 'Voice channels' }), addVoice), ...rows];
+}
+
+// One person in a voice channel: avatar with a speaking ring, name, and mute and deafen flags.
+function voiceMember(p) {
+  const a = avatar(p.display_name, p.root_id);
+  if (p.speaking) a.classList.add('speaking');
+  return el('div', { class: 'voice-member', role: 'listitem' },
+    a,
+    el('span', { class: 'name', text: p.display_name, title: p.display_name }),
+    p.muted ? el('span', { class: 'voice-flag', title: 'Muted', icon: 'mic-off' }, el('span', { class: 'sr-only', text: 'Muted' })) : null,
+    p.deafened ? el('span', { class: 'voice-flag danger', title: 'Deafened', icon: 'headphones' }, el('span', { class: 'sr-only', text: 'Deafened' })) : null);
 }
 
 // ---- home: direct messages ----
@@ -144,7 +172,7 @@ function homeList() {
   const incoming = state.contacts?.incoming?.length ?? 0;
   const links = [
     has('contacts')
-      ? quickLink('users', 'Contacts', () => actions.openPage('contacts'),
+      ? quickLink('users', 'Friends', () => actions.openPage('contacts'),
         incoming ? el('span', { class: 'count', text: String(incoming), 'aria-label': `${incoming} contact requests` }) : null,
         state.ui.page === 'contacts')
       : null,
@@ -179,11 +207,12 @@ function conversationRow(conv) {
   const active = state.route.kind === 'home' && !state.ui.page && state.peer === (group ? conv.id : conv.peer);
   const unread = state.unread.has(key) && !active;
   const name = group ? conv.name : conv.display_name;
-  // A live call on the row replaces the preview: "Call · 3 in", or "In a call with you" for a direct call.
+  // A live call on the row replaces the second line: "Call · 3 in", or "In a call with you" for a direct call.
+  // Otherwise a direct row shows its status (Idle, Do Not Disturb) or its last message, as before.
   const live = conv.live_call ?? null;
   const sub = live
     ? (live.scope === 'dm' ? 'In a call with you' : `Call · ${live.participants?.length ?? 0} in`)
-    : (group ? plural(conv.members?.length ?? 0, 'member') : conv.last_text ?? '');
+    : (group ? plural(conv.members?.length ?? 0, 'member') : (PRESENCE_TEXT[presenceOf(conv)] ?? conv.last_text ?? ''));
   const row = el('button', {
     class: `row-item convo${active ? ' active' : ''}${unread ? ' unread' : ''}`,
     'aria-current': active ? 'true' : null,
@@ -312,6 +341,7 @@ function toggleMenu(anchor, community) {
     item('Create invite', 'user-plus', () => openInviteDialog(community.id)),
     item('Claim handle', 'at-sign', () => openClaimHandleDialog(community.id)),
     manage ? item('Create channel', 'plus', () => openCreateChannelDialog(community.id)) : null,
+    ['owner', 'admin'].includes(community.my_role) ? item('Server icon', 'image', () => openServerIconDialog(community)) : null,
     item('Leave server', 'log-out', async () => {
       if (await confirmDialog(`Leave ${community.name}? You can rejoin with an invite link.`, 'Leave')) {
         actions.leaveCommunity(community.id);
@@ -364,12 +394,15 @@ function renderMe() {
     );
   }
   tools.push(el('button', { class: 'icon-btn', title: 'Settings', 'aria-label': 'Settings', 'aria-keyshortcuts': 'Control+, Meta+,', icon: 'settings', onclick: () => openSettingsPage() }));
+  const connected = state.voiceConnection && state.community?.id === state.voiceConnection.communityId
+    ? state.community.channels.find((c) => c.id === state.voiceConnection.channelId)
+    : null;
   const voice = call
     ? el('div', { class: 'me-voice' },
       el('div', { class: 'text' },
         el('div', { class: 'state', text: 'Voice connected' }),
-        el('div', { class: 'where', text: call.where ?? [call.channel_name, call.community_name].filter(Boolean).join(' / ') })),
-      el('button', { class: 'icon-btn', 'aria-label': 'Leave call', title: 'Leave call', icon: 'phone-off', onclick: () => actions.leaveCall() }))
+        el('div', { class: 'where', text: connected ? `#${connected.name} · ${state.community.name}` : call.where ?? [call.channel_name, call.community_name].filter(Boolean).join(' / ') })),
+      el('button', { class: 'icon-btn', 'aria-label': 'Disconnect', title: 'Disconnect', icon: 'phone-off', onclick: () => actions.leaveCall() }))
     : null;
   // A re-render drops focus with the old button, so the user bar keeps it when it had it.
   const hadFocus = host.contains(document.activeElement);

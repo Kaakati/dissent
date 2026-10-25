@@ -8,8 +8,8 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use dissent_core::{
-    CallView, ChannelId, CommunityId, ConvId, DeviceView, Engine, EventId, GuardianView, Identity,
-    MessageItem, NoteKind, PendingDevice, RootId,
+    CallView, ChannelId, ChannelInfo, CommunityId, ConvId, DeviceView, Engine, EventId, GuardianView,
+    Identity, MessageItem, NoteKind, PendingDevice, RootId,
 };
 use dissent_identity::{keystore, DeviceId};
 use serde_json::{json, Value};
@@ -160,6 +160,17 @@ pub async fn join_call(
 #[tauri::command]
 pub async fn leave_call(state: State<'_, AppState>) -> Result<(), String> {
     engine(&state).await?.leave_call().await.map_err(err)
+}
+
+/// Makes a voice channel in a community. Joining it is a separate step.
+#[tauri::command]
+pub async fn create_voice_channel(
+    state: State<'_, AppState>,
+    community_id: String,
+    name: String,
+) -> Result<ChannelInfo, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.create_voice_channel(community, name).await.map_err(err)
 }
 
 #[tauri::command]

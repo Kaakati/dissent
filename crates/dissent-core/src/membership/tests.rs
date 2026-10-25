@@ -67,9 +67,15 @@ impl Node {
 
 pub(crate) fn scratch(name: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
+    // Process ids get reused and a failed run can leave its directories behind. Without the
+    // timestamp, a later run with the same pid would open the old state under a new vault key.
     static N: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "dissent-mls-{name}-{}-{}",
+        "dissent-mls-{name}-{}-{nanos}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));

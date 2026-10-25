@@ -1,9 +1,8 @@
 //! Replies and reactions on loopback: a reply shows a preview of its original, and reactions
 //! count per emoji, with the reactor's own mark and names.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{ChannelId, CommunityId, Engine, EventId};
 use std::time::{Duration, Instant};
 

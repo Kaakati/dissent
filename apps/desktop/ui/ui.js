@@ -1,4 +1,5 @@
 // DOM helpers. User-supplied text only ever goes in through textContent or text nodes, never innerHTML.
+import { imageOf } from './avatars.js';
 
 export function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -34,7 +35,7 @@ export function icon(name) {
   return svg;
 }
 
-// ---- generated avatars: a hue from the id's hash, initials on top. No images. ----
+// ---- avatars: a hue from the id's hash with initials on top, or the picture when the id has one ----
 
 export function hueOf(seed) {
   const forced = globalThis.__mockHues?.[String(seed)];
@@ -62,7 +63,20 @@ export function initials(name) {
 export function avatar(name, seed, size = '', presence) {
   const node = el('span', { class: `avatar ${size}`.trim(), text: initials(name) });
   node.style.setProperty('--hue', String(hueOf(seed || name)));
+  withImage(node, seed);
   if (typeof presence === 'boolean' || PRESENCE.includes(presence)) node.append(presenceDot(presence));
+  return node;
+}
+
+// Lays the picture for `id` over a node's initials, when the id has one. A picture that fails to load is removed, so
+// the initials show again. The node must be positioned (every avatar and mark is).
+export function withImage(node, id) {
+  const src = imageOf(id);
+  if (!src || node.querySelector(':scope > img')) return node;
+  const img = el('img', { src, alt: '', onerror: () => img.remove() });
+  img.draggable = false;
+  node.classList.add('has-image');
+  node.append(img);
   return node;
 }
 
@@ -185,8 +199,8 @@ export async function copyText(text) {
 
 // Opens a native modal <dialog>. Returns { dialog, close }. onClose runs once the dialog is dismissed.
 // `sub` is a one-line description under the title; `wide` uses the 600 px variant; `footer` is a row of buttons.
-export function openDialog({ title, sub, content, footer, onClose, wide = false }) {
-  const dialog = el('dialog', { class: `dialog${wide ? ' wide' : ''}` });
+export function openDialog({ title, sub, content, footer, onClose, wide = false, className = '' }) {
+  const dialog = el('dialog', { class: ['dialog', wide && 'wide', className].filter(Boolean).join(' ') });
   const close = () => dialog.close();
   dialog.append(
     el('header', { class: 'dialog-head' },

@@ -111,7 +111,8 @@ fn the_send_throttle_allows_one_signal_per_interval() {
     let start = Instant::now();
     assert!(typing.may_send(target, start));
     assert!(!typing.may_send(target, start + Duration::from_secs(1)));
-    assert!(typing.may_send(target, start + TYPING_EVERY));
+    let every = crate::timings::Timings::default().typing_every;
+    assert!(typing.may_send(target, start + every));
 }
 
 #[test]

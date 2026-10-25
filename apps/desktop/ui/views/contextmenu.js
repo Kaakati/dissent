@@ -81,7 +81,7 @@ function build(items, isSub = false) {
         e.stopPropagation();
         if (item.disabled) return;
         closeContextMenu();
-        item.onPick?.();
+        item.onPick?.(e); // the click event, so a pick can read Shift (Delete message skips its confirm)
       });
     }
     menu.append(node);
@@ -91,8 +91,10 @@ function build(items, isSub = false) {
 
 function placeSub(parent, sub) {
   sub.style.left = '';
+  sub.style.top = '';
+  sub.classList.remove('flip');
   const r = sub.getBoundingClientRect();
-  if (r.right > window.innerWidth - 8) sub.style.left = `${-r.width - 10}px`;
+  if (r.right > window.innerWidth - 8) { sub.style.left = `${-r.width - 6}px`; sub.classList.add('flip'); }
   if (r.bottom > window.innerHeight - 8) sub.style.top = `${window.innerHeight - 8 - r.bottom - 6}px`;
 }
 

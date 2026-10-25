@@ -25,6 +25,14 @@ const titleBox = el('div', { class: 'chat-title' });
 const tools = el('div', { class: 'header-tools' });
 const searchInput = el('input', { type: 'search', placeholder: 'Search', 'aria-label': 'Search messages', autocomplete: 'off' });
 searchInput.addEventListener('input', () => actions.setFilter(searchInput.value));
+// Esc clears the search (and keeps the key from leaving the DM while there is a search to clear).
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && searchInput.value) {
+    e.preventDefault();
+    searchInput.value = '';
+    actions.setFilter('');
+  }
+});
 const header = el('header', { class: 'chat-header' }, titleBox, tools, el('div', { class: 'update-host', id: 'update-host' }), el('div', { class: 'search' }, searchInput, icon('search')));
 const list = el('div', { class: 'messages', role: 'log', 'aria-label': 'Messages', 'aria-live': 'polite', tabindex: '0' });
 const composerHost = el('div', { class: 'composer-host' });
@@ -105,9 +113,19 @@ function renderStaged() {
 }
 
 // Keyboard in the message list: Up and Down move focus between messages, R replies to the focused one.
-// A focused message shows its action bar, so Tab then reaches those buttons.
+// A focused message shows its action bar, so Tab then reaches those buttons. The Menu key and Shift+F10 open its menu.
 function onListKey(e) {
   const focused = e.target.closest?.('.msg');
+  if ((e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) && focused && e.target === focused) {
+    e.preventDefault();
+    const view = current();
+    const item = view?.items.find((m) => m.id === focused.dataset.id);
+    if (item) {
+      const r = focused.getBoundingClientRect();
+      openMessageMenu(item, view, r.left + 40, r.top + 16, focused);
+    }
+    return;
+  }
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
     if (e.target !== list && !(focused && e.target === focused)) return;
     const rows = [...list.querySelectorAll('.msg')];
@@ -174,15 +192,15 @@ function current() {
         authorName: own ? me?.display_name : (state.group?.members?.find((x) => x.root_id === m.from)?.display_name ?? name),
         text: m.text,
         ms: m.ms,
-        edited: false,
-        deleted: false,
+        edited: Boolean(m.edited),
+        deleted: Boolean(m.deleted),
         own,
         pending: m.pending,
         queued: Boolean(m.queued),
         system: m.system === true, // a membership line in a group, e.g. "added Omar and Rana." (Part 6.1)
         embeds: Array.isArray(m.embeds) ? m.embeds : [],
-        replyTo: null,
-        reactions: null,
+        replyTo: m.reply_to ?? null,
+        reactions: Array.isArray(m.reactions) ? m.reactions : null,
         attachments: Array.isArray(m.attachments) ? m.attachments : null,
       };
     });
@@ -195,7 +213,8 @@ function current() {
       title: name,
       placeholder: `Message ${name}`,
       items,
-      social: false,
+      // Replies and reactions as in a channel: shown when the backend sends a `reactions` array on messages.
+      social: items.some((m) => m.reactions !== null),
       files: items.some((m) => m.attachments !== null),
     };
   }
@@ -248,6 +267,7 @@ function render() {
     staged = [];
   }
   if (searchInput.value !== state.ui.filter) searchInput.value = state.ui.filter;
+  searchInput.placeholder = view.dm ? `Search ${view.title}` : 'Search';
 
   titleBox.replaceChildren(...titleNodes(view));
   const topicEl = view.topic ? [el('span', { class: 'chat-divider' }), el('span', { class: 'topic', text: view.topic, title: view.topic })] : [];
@@ -283,7 +303,7 @@ function render() {
   }
   if (callHere(view)) {
     const count = state.call.participants?.length ?? 0;
-    const channelName = view.dm ? view.title : (state.community?.voice_channels?.find((c) => c.id === state.voiceChannelId)?.name ?? state.call.channel_name ?? view.title);
+    const channelName = view.dm ? view.title : (state.community?.channels.find((c) => c.id === state.voiceChannelId)?.name ?? state.call.channel_name ?? view.title);
     header.querySelectorAll('.topic-wrap').forEach((n) => n.remove());
     titleBox.replaceChildren(icon('volume-2'), el('h2', { text: channelName, title: channelName }), el('span', { class: 'call-count', text: `${count} in call` }), el('span', { class: 'e2e-pill' }, icon('lock'), 'End-to-end encrypted'));
     list.setAttribute("aria-busy", "false");
@@ -344,7 +364,7 @@ function callHere(view) {
   const call = state.call;
   if (!call || !has('calls')) return false;
   if (view.dm) return call.scope === 'dm' && call.peer === view.peer;
-  return call.scope === 'channel' && state.voiceChannelId !== null;
+  return call.scope === 'channel' && state.voiceChannelId !== null && state.voiceChannelId === state.voiceConnection?.channelId;
 }
 
 function titleNodes(view) {
@@ -364,9 +384,39 @@ function titleNodes(view) {
   return [icon('hash'), el('h2', { text: view.title, title: `#${view.title}` })];
 }
 
+// Wraps each match of the search text in a <mark>, inside the text of a message body. A link keeps its href and
+// gets the marks in its own text.
+function highlight(nodes, query) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return nodes;
+  const out = [];
+  for (const node of nodes) {
+    if (node.nodeName === 'A') {
+      const link = node.cloneNode(false);
+      link.append(...highlight([...node.childNodes], query));
+      out.push(link);
+      continue;
+    }
+    if (node.nodeType !== Node.TEXT_NODE) {
+      out.push(node);
+      continue;
+    }
+    const text = node.textContent;
+    const lower = text.toLowerCase();
+    let last = 0;
+    for (let i = lower.indexOf(needle); i !== -1; i = lower.indexOf(needle, last)) {
+      if (i > last) out.push(document.createTextNode(text.slice(last, i)));
+      out.push(el('mark', { class: 'search-hit', text: text.slice(i, i + needle.length) }));
+      last = i + needle.length;
+    }
+    if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  }
+  return out;
+}
+
 function iconButton(name, label, onclick, on = false) {
   return el('button', {
-    class: `icon-btn lg${on ? ' on' : ''}`,
+    class: `icon-btn${on ? ' on' : ''}`,
     'aria-label': label,
     title: label,
     'aria-pressed': on ? 'true' : 'false',
@@ -378,7 +428,14 @@ function iconButton(name, label, onclick, on = false) {
 function toolNodes(view) {
   if (view.dm) {
     const open = state.ui.profileOpen;
-    return [iconButton('panel-right', open ? 'Hide profile panel' : 'Show profile panel', () => actions.toggleProfile(), open)];
+    const peer = view.peer;
+    const who = view.title;
+    const suffix = state.peerProfile?.suffix ?? '';
+    return [
+      has('calls') ? iconButton('phone', `Start voice call with ${who}`, () => actions.startCall(peer)) : null,
+      has('groups') ? iconButton('users-round', 'Add friends to group', () => openNewGroupDialog({ preselect: [{ root_id: peer, display_name: who, suffix }] })) : null,
+      iconButton('panel-right', open ? 'Hide profile panel' : 'Show profile panel', () => actions.toggleProfile(), open),
+    ];
   }
   // Group header: the member list lives in the overflow menu (GroupDM board).
   const open = state.ui.membersOpen;
@@ -472,9 +529,16 @@ function messageRow(item, view, start) {
         el('time', { title: stampLabel(item.ms), text: whenLabel(item.ms) })),
       bodyOrNull, cards, files, pending, reactions)
     : el('div', { class: 'msg-content' }, bodyOrNull, cards, files, pending, reactions);
-  return el('article', { class: classes, 'data-id': item.id, tabindex: '-1' },
+  const row = el('article', { class: classes, 'data-id': item.id, tabindex: '-1' },
     item.replyTo ? replyRef(item.replyTo) : null,
-    gutter, content, view.dm || editing ? null : rowActions(item, view));
+    gutter, content, editing ? null : rowActions(item, view));
+  if (!editing) {
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openMessageMenu(item, view, e.clientX, e.clientY, row);
+    });
+  }
+  return row;
 }
 
 // ---- replies ----
@@ -600,9 +664,12 @@ function authorButton(item) {
 function bodyNode(item) {
   if (item.deleted) return el('p', { class: 'body deleted', text: 'message deleted' });
   return el('p', { class: 'body' },
-    linkify(item.text),
+    highlight(linkify(item.text), state.ui.filter),
     item.edited ? el('span', { class: 'edited', text: ' (edited)' }) : null);
 }
+
+// Own messages, and in a server channel also for owners, admins and moderators (the roles of that server).
+const canDelete = (item, view) => item.own || (!view.dm && canModerate());
 
 function rowActions(item, view) {
   if (item.deleted) return null;
@@ -630,27 +697,60 @@ function rowActions(item, view) {
       'aria-label': 'Edit message',
       title: 'Edit',
       icon: 'pencil',
-      onclick: () => {
-        editingId = item.id;
-        editInput = null;
-        render();
-      },
+      onclick: () => beginEdit(item.id),
     }));
   }
-  if (item.own || canModerate()) {
+  if (canDelete(item, view)) {
     buttons.push(el('button', {
       class: 'icon-btn danger-text',
       'aria-label': 'Delete message',
-      title: 'Delete',
+      title: 'Delete (Shift+click skips the confirm)',
       icon: 'trash-2',
-      onclick: () => removeMessage(item.id),
+      onclick: (e) => removeMessage(item.id, e.shiftKey),
     }));
   }
-  return buttons.length ? el('div', { class: 'msg-actions' }, buttons) : null;
+  buttons.push(el('button', {
+    class: 'icon-btn',
+    'aria-label': 'More message actions',
+    'aria-haspopup': 'menu',
+    title: 'More',
+    icon: 'ellipsis',
+    onclick: (e) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      openMessageMenu(item, view, r.left, r.bottom + 4, e.currentTarget.closest('.msg'));
+    },
+  }));
+  return el('div', { class: 'msg-actions' }, buttons);
 }
 
-async function removeMessage(messageId) {
-  if (!(await confirmDialog('Delete this message?', 'Delete'))) return;
+// The message menu: a right click, the hover "…" button, or the Menu key and Shift+F10 on a focused message.
+// `anchor` is the message row, which the emoji picker returns focus to.
+function openMessageMenu(item, view, x, y, anchor) {
+  const main = [
+    view.social && !item.deleted ? { label: 'Add reaction', icon: 'smile-plus', onPick: () => pickReaction(item, anchor) } : null,
+    view.social && !item.deleted ? { label: 'Reply', icon: 'reply', onPick: () => startReply(item) } : null,
+    !item.deleted && item.text ? { label: 'Copy text', icon: 'copy', onPick: () => copyMessage(item.text, 'Text copied') } : null,
+    item.own && !item.deleted ? { label: 'Edit message', icon: 'pencil', onPick: () => beginEdit(item.id) } : null,
+    canDelete(item, view) && !item.deleted
+      ? { label: 'Delete message', icon: 'trash-2', danger: true, onPick: (e) => removeMessage(item.id, e?.shiftKey) }
+      : null,
+  ].filter(Boolean);
+  openContextMenu(x, y, [...main, main.length ? 'sep' : null, { label: 'Copy message ID', icon: 'copy', onPick: () => copyMessage(item.id, 'Message ID copied') }]);
+}
+
+function beginEdit(messageId) {
+  editingId = messageId;
+  editInput = null;
+  render();
+}
+
+async function copyMessage(text, done) {
+  if (await copyText(text)) toast(done, 'info');
+}
+
+// Shift+click (or Shift+Enter on the menu item) skips the confirm, as in Discord.
+async function removeMessage(messageId, skipConfirm = false) {
+  if (!skipConfirm && !(await confirmDialog("Delete message? This can't be undone.", 'Delete'))) return;
   await actions.deleteMessage(messageId);
 }
 
@@ -699,7 +799,12 @@ function composer(view) {
   replyBar = el('div', { class: 'reply-bar', role: 'status', hidden: true });
   renderReplyBar();
   stagedRow = el('div', { class: 'staged', role: 'list', 'aria-label': 'Files to send', hidden: true });
+  // One send at a time. The text leaves the box as soon as it is sent, so repeated clicks or Enter
+  // presses while a send is still in flight (a DM to someone offline can take a while) find nothing
+  // to send. On failure the text comes back, unless something new was typed meanwhile.
+  let sending = false;
   const send = async () => {
+    if (sending) return;
     const text = input.value.trim();
     const files = staged;
     if (!text && files.length === 0) return;
@@ -708,21 +813,27 @@ function composer(view) {
       toast(`Remove files over ${MAX_FILE_LABEL} before sending.`);
       return;
     }
-    input.disabled = true;
+    sending = true;
+    const draft = input.value;
+    input.value = '';
     const reply = replyTo;
-    let ok;
-    if (files.length) ok = await actions.sendFiles(files.map((f) => f.path), text || null);
-    else if (view.dm) ok = await actions.sendDm(text);
-    else if (reply) ok = await actions.sendReply(reply.id, text);
-    else ok = await actions.sendMessage(text);
-    input.disabled = false;
+    let ok = false;
+    try {
+      if (files.length) ok = await actions.sendFiles(files.map((f) => f.path), text || null);
+      else if (reply) ok = await actions.sendReply(reply.id, text);
+      else if (view.dm) ok = await actions.sendDm(text);
+      else ok = await actions.sendMessage(text);
+    } finally {
+      sending = false;
+    }
     if (ok) {
-      input.value = '';
       if (staged === files) {
         staged = [];
         renderStaged();
       }
       if (replyTo === reply) cancelReply();
+    } else if (!input.value) {
+      input.value = draft;
     }
     input.focus();
   };

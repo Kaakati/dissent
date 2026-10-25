@@ -1,6 +1,6 @@
 // Keyboard shortcuts: Ctrl/Cmd+K quick switcher, Alt+Up/Down between channels or DMs,
 // Alt+Shift+Up/Down to the next or previous unread, and arrow keys through the server rail.
-import { state } from './state.js';
+import { state, textChannelsOf } from './state.js';
 import * as actions from './actions.js';
 import { openSwitcher } from './views/switcher.js';
 import { openSettingsPage } from './views/settings.js';
@@ -11,6 +11,13 @@ export function initKeyboard() {
 }
 
 function onKey(e) {
+  // Esc in a DM or group leaves it for Friends. Overlays and the message editor handle their own Esc first.
+  if (e.key === 'Escape' && !e.defaultPrevented && state.route.kind === 'home' && (state.peer || state.group)
+    && !document.querySelector('dialog[open], .switcher, .menu.context, .profile-card, .emoji-picker, .settings-page, .edit-input')) {
+    e.preventDefault();
+    actions.openHome();
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
     e.preventDefault();
     openSwitcher();
@@ -31,7 +38,7 @@ function onKey(e) {
 // The conversations in the current context, in the order the sidebar shows them.
 function entries() {
   if (state.route.kind === 'server' && state.community) {
-    return state.community.channels.map((ch) => ({
+    return textChannelsOf(state.community).map((ch) => ({
       key: `ch:${state.community.id}:${ch.id}`,
       open: () => actions.openChannel(ch.id),
       active: state.channelId === ch.id,

@@ -3,13 +3,14 @@
 //! A typing signal is ephemeral. It is signed by the typer's device, and it is never stored or put
 //! in the event DAG. A channel signal goes on the community topic, so only members get it. A DM or
 //! group signal goes direct to each device of the people in the conversation, as presence does. A
-//! typer drops out `TYPING_EXPIRY_MS` after their last signal, and a message from them clears them.
+//! typer drops out `typing_expiry` after their last signal, and a message from them clears them.
 
 use crate::engine::{not_found, now_ms, Engine, Inner, MAX_CLOCK_SKEW_MS};
 use crate::error::{CoreError, Result};
 use crate::groups::{dm_conv_id, ConvId};
 use crate::presence::Status;
 use crate::rpc::Request;
+use crate::timings::{millis, Timings};
 use crate::views::EngineEvent;
 use crate::wire::{encode_gossip, GossipMsg};
 use crate::world::World;
@@ -23,10 +24,6 @@ use tracing::debug;
 
 /// Domain prefix for the signature over a typing signal.
 const TYPING_DOMAIN: &[u8] = b"dissent/typing/v1";
-/// The least time between two typing signals for one target.
-pub(crate) const TYPING_EVERY: Duration = Duration::from_secs(3);
-/// A typer drops out this long after their last signal. One lost signal is tolerated.
-pub(crate) const TYPING_EXPIRY_MS: u64 = 6 * 1000;
 /// How often the expiry sweep runs.
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
@@ -107,27 +104,45 @@ struct Typer {
 }
 
 impl Typer {
-    fn live(&self, now: u64) -> bool {
-        self.seen_ms.saturating_add(TYPING_EXPIRY_MS) > now
+    fn live(&self, now: u64, expiry_ms: u64) -> bool {
+        self.seen_ms.saturating_add(expiry_ms) > now
     }
 }
 
 /// Who is typing where, and when we last sent a signal for each target. Lives only in memory.
-#[derive(Default)]
 pub(crate) struct Typing {
     typers: BTreeMap<TypingTarget, BTreeMap<RootId, Typer>>,
     /// When a typing signal last went out for each target, for the send throttle.
     sent: BTreeMap<TypingTarget, Instant>,
+    /// A typer drops out this long after their last signal. One lost signal is tolerated.
+    expiry_ms: u64,
+    /// The least time between two signals for one target.
+    every: Duration,
+}
+
+impl Default for Typing {
+    fn default() -> Self {
+        Self::new(&Timings::default())
+    }
 }
 
 impl Typing {
+    pub(crate) fn new(timings: &Timings) -> Self {
+        Self {
+            typers: BTreeMap::new(),
+            sent: BTreeMap::new(),
+            expiry_ms: millis(timings.typing_expiry),
+            every: timings.typing_every,
+        }
+    }
+
     /// Notes a typing signal from `root`. Returns true when the set of typers changed.
     fn start(&mut self, target: TypingTarget, root: RootId, ts_ms: u64, now: u64) -> bool {
         let slot = self.typers.entry(target).or_default();
         match slot.entry(root) {
             Entry::Occupied(mut held) => {
                 let typer = held.get_mut();
-                if !typer.live(now) {
+                if !typer.live(now, self.expiry_ms) {
                     *typer = Typer { since_ms: now, ts_ms, seen_ms: now };
                     return true;
                 }
@@ -164,7 +179,7 @@ impl Typing {
         let Some(slot) = self.typers.get_mut(&target) else {
             return false;
         };
-        let was_live = slot.remove(&root).is_some_and(|t| t.live(now));
+        let was_live = slot.remove(&root).is_some_and(|t| t.live(now, self.expiry_ms));
         if slot.is_empty() {
             self.typers.remove(&target);
         }
@@ -174,9 +189,10 @@ impl Typing {
     /// Drops every typer whose last signal has expired. Returns the targets that lost someone.
     fn expire(&mut self, now: u64) -> Vec<TypingTarget> {
         let mut changed = Vec::new();
+        let expiry_ms = self.expiry_ms;
         self.typers.retain(|target, slot| {
             let before = slot.len();
-            slot.retain(|_, t| t.live(now));
+            slot.retain(|_, t| t.live(now, expiry_ms));
             if slot.len() != before {
                 changed.push(*target);
             }
@@ -192,7 +208,7 @@ impl Typing {
         };
         let mut live: Vec<(u64, RootId)> = slot
             .iter()
-            .filter(|(_, t)| t.live(now))
+            .filter(|(_, t)| t.live(now, self.expiry_ms))
             .map(|(root, t)| (t.since_ms, *root))
             .collect();
         live.sort();
@@ -202,7 +218,7 @@ impl Typing {
     /// Whether a signal for `target` may go out now. Records the send when it may.
     fn may_send(&mut self, target: TypingTarget, now: Instant) -> bool {
         if let Some(last) = self.sent.get(&target) {
-            if now.duration_since(*last) < TYPING_EVERY {
+            if now.duration_since(*last) < self.every {
                 return false;
             }
         }
@@ -277,7 +293,7 @@ fn authorize(w: &World, via: Option<CommunityId>, root: RootId, scope: Scope) ->
 }
 
 impl Engine {
-    /// Says we are typing in `target`. At most one signal goes out per target every `TYPING_EVERY`,
+    /// Says we are typing in `target`. At most one signal goes out per target every `typing_every`,
     /// and none goes out while our status is invisible. Call it on each keystroke.
     pub fn typing(&self, target: TypingTarget) -> Result<()> {
         self.signal(target, false)

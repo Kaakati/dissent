@@ -13,6 +13,7 @@ use crate::engine::{now_ms, Engine, Inner};
 use crate::groups::{dm_conv_id, ConvId};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, Request, Response};
+use crate::timings::{millis, Timings};
 use crate::views::EngineEvent;
 use dissent_events::{ChannelId, Payload};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId};
@@ -158,12 +159,6 @@ pub(crate) struct Heard {
 
 /// The most people a presence message may list. Groups are capped well below this.
 const MAX_PRESENCE_MEMBERS: usize = 64;
-/// How often a device in a DM or group call re-sends its roster.
-const PRESENCE_EVERY: Duration = Duration::from_secs(30);
-/// A roster not re-sent within this long is dropped, so a device that died mid-call leaves no
-/// call behind.
-const PRESENCE_TTL_MS: u64 = 90_000;
-
 /// Answers to a [`CallMsg`].
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum CallReply {
@@ -530,9 +525,6 @@ pub(crate) struct Room {
     clocked: AtomicBool,
 }
 
-/// How long an incoming or outgoing direct call rings before it counts as missed.
-pub const RING_TIMEOUT: Duration = Duration::from_secs(45);
-
 /// An incoming direct call the user has not answered yet. No media exists until they accept.
 pub(crate) struct Ringing {
     id: RoomId,
@@ -567,8 +559,8 @@ pub(crate) struct CallHub {
     sender_config: Mutex<SenderConfig>,
 }
 
-impl Default for CallHub {
-    fn default() -> Self {
+impl CallHub {
+    pub(crate) fn new(timings: &Timings) -> Self {
         Self {
             current: Mutex::new(None),
             staged: Mutex::new(None),
@@ -577,7 +569,7 @@ impl Default for CallHub {
             incoming: Mutex::new(BTreeMap::new()),
             arrived: Notify::new(),
             ringing: Mutex::new(None),
-            ring_timeout: Mutex::new(RING_TIMEOUT),
+            ring_timeout: Mutex::new(timings.ring_timeout),
             heard: Mutex::new(BTreeMap::new()),
             voice: AtomicBool::new(false),
             sender_config: Mutex::new(SenderConfig::default()),
@@ -1685,7 +1677,7 @@ impl Engine {
         let room = Arc::downgrade(room);
         self.spawn_task(async move {
             loop {
-                tokio::time::sleep(PRESENCE_EVERY).await;
+                tokio::time::sleep(engine.inner.timings.call_presence_every).await;
                 let Some(room) = room.upgrade() else { break };
                 let current = lock(&engine.inner.calls.current).clone();
                 if !current.is_some_and(|c| Arc::ptr_eq(&c, &room)) {
@@ -2656,8 +2648,6 @@ mod roster_tests {
     }
 }
 
-/// How long the live roster must want another tier before a call migrates.
-const TIER_SUSTAIN: Duration = Duration::from_secs(10);
 /// Live participant count at which a forwarded call grows into a cascade.
 const CASCADE_AT: usize = 50;
 const GEN_DOMAIN: &[u8] = b"dissent/call-gen/v1";
@@ -2707,7 +2697,7 @@ impl Engine {
             return;
         }
         let since = *lock(&room.tier_since).get_or_insert_with(Instant::now);
-        if since.elapsed() >= TIER_SUSTAIN && !room.migrating.swap(true, Ordering::SeqCst) {
+        if since.elapsed() >= self.inner.timings.tier_sustain && !room.migrating.swap(true, Ordering::SeqCst) {
             self.spawn_migration(room.clone(), want, None);
         }
     }
@@ -2972,8 +2962,6 @@ impl Engine {
 const CAPACITY_DOMAIN: &[u8] = b"dissent/call-capacity/v1";
 /// How long an announced capacity counts before it is ignored.
 const CAPACITY_FRESH: Duration = Duration::from_secs(30);
-/// How long a better forwarder must hold before the call re-elects.
-const REELECT_SUSTAIN: Duration = Duration::from_secs(15);
 /// Ticks of the membership check between capacity measurements. The check runs about twice a
 /// second, so this announces about every five seconds.
 const CAPACITY_EVERY: u64 = 10;
@@ -3087,7 +3075,7 @@ impl Engine {
             return;
         };
         let since = *lock(&room.forwarder_since).get_or_insert_with(Instant::now);
-        if since.elapsed() >= REELECT_SUSTAIN && !room.migrating.swap(true, Ordering::SeqCst) {
+        if since.elapsed() >= self.inner.timings.reelect_sustain && !room.migrating.swap(true, Ordering::SeqCst) {
             *lock(&room.forwarder_since) = None;
             self.spawn_migration(room.clone(), Tier::Forwarded, Some(best));
         }
@@ -3344,7 +3332,7 @@ impl Engine {
         let now = now_ms();
         lock(&self.inner.calls.heard)
             .values()
-            .filter(|h| now.saturating_sub(h.seen_ms) < PRESENCE_TTL_MS)
+            .filter(|h| now.saturating_sub(h.seen_ms) < millis(self.inner.timings.call_presence_ttl))
             .cloned()
             .collect()
     }

@@ -58,18 +58,19 @@ fn a_peer_drops_out_of_the_sweep_once_its_window_ends() {
     presence.insert(alice, heard(Status::Online, 10_000));
     presence.insert(quiet, heard(Status::Dnd, 10_000));
     presence.insert(offline, heard(Status::Invisible, 10_000));
-    let end = 10_000 + PRESENCE_WINDOW_MS;
+    let window = millis(crate::timings::Timings::default().presence_window);
+    let end = 10_000 + window;
 
     // Nothing ages out before the window ends.
-    assert!(aged_out(&presence, end - 15_000, end - 1).is_empty());
+    assert!(aged_out(&presence, window, end - 15_000, end - 1).is_empty());
     // Both beacons whose window ended in this sweep age out, once each. The offline one never does.
-    let mut aged = aged_out(&presence, end - 1, end);
+    let mut aged = aged_out(&presence, window, end - 1, end);
     aged.sort();
     let mut expected = vec![alice, quiet];
     expected.sort();
     assert_eq!(aged, expected);
     // A later sweep does not report them again.
-    assert!(aged_out(&presence, end, end + 15_000).is_empty());
+    assert!(aged_out(&presence, window, end, end + 15_000).is_empty());
 }
 
 #[test]

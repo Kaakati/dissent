@@ -1,8 +1,7 @@
 //! Contact requests, declines, the daily limit, DM privacy, and persistence. Loopback only.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::DmPolicy;
 
 #[tokio::test(flavor = "multi_thread")]

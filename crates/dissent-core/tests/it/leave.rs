@@ -1,8 +1,7 @@
 //! Leaving a community stops its gossip topic and deletes its local data.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -18,10 +17,7 @@ async fn left_community_gets_no_more_gossip() {
         .send_message(id, general, "before".into())
         .await
         .expect("alice posts");
-    eventually("bob has the first message", || {
-        has_message(&bob.engine, id, general, "before").then_some(())
-    })
-    .await;
+    wait_seen(&bob, id, general, "before").await;
 
     bob.engine
         .leave_community(id)

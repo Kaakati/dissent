@@ -1,7 +1,7 @@
 // Far-left column: Home (direct messages) on top, one round button per server, "+" at the end of the list.
 import { state, subscribe } from '../state.js';
 import * as actions from '../actions.js';
-import { el, initials, setHue, icon } from '../ui.js';
+import { el, initials, setHue, icon, withImage } from '../ui.js';
 import { openServerDialog } from './dialogs.js';
 
 export function initRail() {
@@ -24,6 +24,7 @@ function render() {
       onclick: () => actions.openServer(c.id),
     }, initials(c.name));
     setHue(btn, c.hue ?? c.id);
+    withImage(btn, c.id);
     const unreadKeys = [...state.unread].filter((k) => k.startsWith(`ch:${c.id}:`));
     const badge = typeof c.mentions === 'number' && c.mentions > 0
       ? el('span', { class: 'rail-badge', text: String(c.mentions), 'aria-label': `${c.mentions} mentions` })

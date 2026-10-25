@@ -57,10 +57,17 @@ pub fn offline_on(port: u16) -> NodeConfig {
     }
 }
 
+/// Starts an engine with the short test intervals, so presence, call and typing waits are seconds.
 pub async fn start_on(identity: Identity, dir: PathBuf, port: u16) -> Peer {
-    let (engine, events) = Engine::start(identity.clone(), dir.clone(), offline_on(port), dissent_core::test_support::vault_for(&dir))
-        .await
-        .expect("engine starts");
+    let (engine, events) = Engine::start_with_timings(
+        identity.clone(),
+        dir.clone(),
+        offline_on(port),
+        dissent_core::test_support::vault_for(&dir),
+        dissent_core::test_support::fast_timings(),
+    )
+    .await
+    .expect("engine starts");
     Peer {
         engine,
         identity,
@@ -122,6 +129,102 @@ pub async fn eventually_within<T>(
     }
 }
 
+/// Like `eventually`, but wakes on every event `engine` emits, not only on the 50 ms poll. Use it
+/// when the engine that changes is the one being watched. The subscription is taken before the
+/// first check, so an event that lands in between is not lost.
+pub async fn until_event<T>(
+    engine: &Engine,
+    limit: Duration,
+    what: &str,
+    mut check: impl FnMut() -> Option<T>,
+) -> T {
+    let mut events = engine.subscribe();
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut open = true;
+    loop {
+        if let Some(value) = check() {
+            return value;
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "timed out waiting for {what}");
+        tokio::select! {
+            event = events.recv(), if open => {
+                // A lagged receiver still has events to report, so only a closed channel stops us
+                // listening. Polling continues after that.
+                if matches!(event, Err(broadcast::error::RecvError::Closed)) {
+                    open = false;
+                }
+            }
+            _ = tokio::time::sleep(left.min(Duration::from_millis(50))) => {}
+        }
+    }
+}
+
+/// Makes `a` and `b` contacts, each adding the other, and returns once each side lists the other.
+/// Adding is asynchronous on the far side, so a call or a message sent before this can be refused.
+pub async fn make_contacts_ready(a: &Peer, b: &Peer) {
+    let (a_root, b_root) = (a.identity.root_id(), b.identity.root_id());
+    a.engine
+        .add_contact(&b.engine.contact_link())
+        .await
+        .expect("a adds b");
+    b.engine
+        .add_contact(&a.engine.contact_link())
+        .await
+        .expect("b adds a");
+    until_event(&a.engine, Duration::from_secs(60), "a lists b as a contact", || {
+        lists_contact(&a.engine, b_root).then_some(())
+    })
+    .await;
+    until_event(&b.engine, Duration::from_secs(60), "b lists a as a contact", || {
+        lists_contact(&b.engine, a_root).then_some(())
+    })
+    .await;
+}
+
+fn lists_contact(engine: &Engine, user: RootId) -> bool {
+    let user = user.to_string();
+    engine
+        .list_contacts()
+        .contacts
+        .iter()
+        .any(|c| c.root_id == user)
+}
+
+/// Waits until `peer` holds `text` in the channel. A send is visible on another engine only after
+/// it has gossiped there, so a test asserts on the far side through this.
+pub async fn wait_seen(peer: &Peer, community: CommunityId, channel: ChannelId, text: &str) {
+    until_event(
+        &peer.engine,
+        Duration::from_secs(60),
+        &format!("{text:?} to reach {}", peer.identity.root_id()),
+        || has_message(&peer.engine, community, channel, text).then_some(()),
+    )
+    .await;
+}
+
+/// Joins `joiner` with `invite` and returns once `host` lists the joiner as a member. Until then
+/// the host may not admit the joiner's messages, calls or key material.
+pub async fn join_ready(host: &Peer, joiner: &Peer, invite: &str) -> CommunityId {
+    let joined = joiner
+        .engine
+        .join_community(invite)
+        .await
+        .expect("join community");
+    let id: CommunityId = joined.id.parse().expect("community id");
+    assert_eq!(joined.my_role, "member");
+    let joiner_root = joiner.identity.root_id().to_string();
+    until_event(&host.engine, Duration::from_secs(60), "the host lists the joiner", || {
+        host.engine
+            .community_view(id)
+            .ok()
+            .filter(|v| v.members.iter().any(|m| m.root_id == joiner_root))
+            .map(|_| ())
+    })
+    .await;
+    id
+}
+
 pub fn has_message(
     engine: &Engine,
     community: CommunityId,
@@ -165,7 +268,7 @@ pub fn channel_id(engine: &Engine, community: CommunityId, name: &str) -> Option
         .and_then(|c| c.id.parse().ok())
 }
 
-/// Alice creates "Rustaceans" and Bob joins it. Returns the community id.
+/// Alice creates "Rustaceans" and Bob joins it. Returns the community id, once Alice lists Bob.
 pub async fn rustaceans(alice: &Peer, bob: &Peer) -> CommunityId {
     let server = alice
         .engine
@@ -174,13 +277,8 @@ pub async fn rustaceans(alice: &Peer, bob: &Peer) -> CommunityId {
         .expect("create community");
     let id: CommunityId = server.id.parse().unwrap();
     let invite = alice.engine.create_invite(id).await.expect("create invite");
-    let joined = bob
-        .engine
-        .join_community(&invite)
-        .await
-        .expect("join community");
-    assert_eq!(joined.id, server.id);
-    assert_eq!(joined.my_role, "member");
+    let joined = join_ready(alice, bob, &invite).await;
+    assert_eq!(joined, id);
     id
 }
 

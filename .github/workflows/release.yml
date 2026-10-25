@@ -103,12 +103,16 @@ jobs:
         run: sed -i '0,/^version = ".*"/s//version = "${{ needs.version.outputs.version }}"/' Cargo.toml
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Build every test binary once, so the test and loopback steps below only run them.
+      - name: Build tests
+        run: cargo test --workspace --no-run
       - name: Tests (networked tests stay ignored)
         run: cargo test --workspace
-      # Loopback-only suites that are #[ignore]d locally so Windows Firewall doesn't prompt
-      # for every rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt.
+      # Loopback-only tests that are #[ignore]d locally so Windows Firewall doesn't prompt for every
+      # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
+      # also holds internet.rs, which needs the public network, so it is skipped here.
       - name: Loopback networked tests
-        run: cargo test -p dissent-core --test calls --test part6 --test identity_flows --test typing -- --ignored
+        run: cargo test -p dissent-core --test it -- --ignored --skip internet::
 
   changelog:
     name: Tag, changelog and draft release

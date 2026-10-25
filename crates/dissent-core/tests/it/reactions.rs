@@ -1,9 +1,8 @@
 //! Reactions: the emoji is sealed under the community's group. Members count it, and a storage
 //! member who cannot read the group sees the reaction exist but never learns which emoji.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn members_see_the_emoji_and_a_storage_member_does_not() {

@@ -1,8 +1,7 @@
 //! Typing indicators as others see them: channels, DMs and groups. Loopback only.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{ChannelId, CommunityId, ConvId, RootId, Status, TypingTarget};
 use std::time::Duration;
 
@@ -27,21 +26,6 @@ fn channel(id: CommunityId, channel: ChannelId) -> TypingTarget {
         community: id,
         channel,
     }
-}
-
-/// Makes `a` and `b` contacts, as the presence tests do.
-async fn meet(a: &Peer, b: &Peer) {
-    a.engine
-        .add_contact(&b.engine.contact_link())
-        .await
-        .expect("a asks b");
-    let a_root = a.identity.root_id();
-    eventually("b sees the request", || (!b.engine.contact_requests().is_empty()).then_some(())).await;
-    b.engine.accept_request(a_root).await.expect("b accepts");
-    eventually("a counts b as a contact", || {
-        a.engine.user_profile(b.identity.root_id()).is_contact.then_some(())
-    })
-    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -183,7 +167,7 @@ async fn a_contact_sees_the_typer_in_a_dm() {
     let bob = peer("bob").await;
     let alice_root: RootId = alice.identity.root_id();
     let bob_root: RootId = bob.identity.root_id();
-    meet(&alice, &bob).await;
+    make_contacts_ready(&alice, &bob).await;
 
     typing_until_seen(
         &alice,
@@ -207,9 +191,9 @@ async fn group_members_see_the_typer_and_the_message_clears_it() {
     let bob = peer("bob").await;
     let carol = peer("carol").await;
     let dave = peer("dave").await;
-    meet(&alice, &bob).await;
-    meet(&alice, &carol).await;
-    meet(&alice, &dave).await;
+    make_contacts_ready(&alice, &bob).await;
+    make_contacts_ready(&alice, &carol).await;
+    make_contacts_ready(&alice, &dave).await;
     let created = alice
         .engine
         .create_group(

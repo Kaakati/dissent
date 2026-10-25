@@ -1,24 +1,12 @@
 //! Group invite links: a holder asks, the creator approves, and revoked links are refused.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::ConvId;
-
-async fn meet(a: &Peer, b: &Peer) {
-    a.engine
-        .request_contact(&b.engine.contact_link(), "")
-        .await
-        .expect("a asks b");
-    b.engine
-        .request_contact(&a.engine.contact_link(), "")
-        .await
-        .expect("b asks a");
-}
 
 async fn group_of_three(alice: &Peer, others: [&Peer; 3]) -> ConvId {
     for o in others {
-        meet(alice, o).await;
+        make_contacts_ready(alice, o).await;
     }
     let roots: Vec<_> = others.iter().map(|o| o.identity.root_id()).collect();
     let created = alice
@@ -133,8 +121,8 @@ async fn a_welcome_from_someone_else_does_not_pull_you_in() {
         .request_contact(&erin.engine.contact_link(), "")
         .await
         .expect("carol asks erin");
-    meet(&carol, &bob).await;
-    meet(&carol, &dave).await;
+    make_contacts_ready(&carol, &bob).await;
+    make_contacts_ready(&carol, &dave).await;
     carol
         .engine
         .create_group("trap".into(), vec![erin.identity.root_id(), bob.identity.root_id(), dave.identity.root_id()])

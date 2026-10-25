@@ -1,9 +1,8 @@
 //! Community relays on loopback, through a relay server started in this process with a
 //! self-signed certificate that the nodes are told to trust.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{CommunityId, Engine, Identity, NodeConfig, RelayChoice};
 use iroh::tls::CaTlsConfig;
 use iroh_relay::server::{

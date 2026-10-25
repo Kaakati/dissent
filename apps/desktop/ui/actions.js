@@ -1,6 +1,6 @@
 // Everything that talks to the backend and then updates state. Views call these; they never call api directly.
 import { api } from './api.js';
-import { state, notify } from './state.js';
+import { state, notify, textChannelsOf, PROFILE_PANEL_KEY } from './state.js';
 import { toast } from './ui.js';
 import { seenMs, markSeen } from './unread.js';
 import { has } from './features.js';
@@ -31,7 +31,7 @@ export async function boot() {
   state.peer = null;
   state.group = null;
   state.dmMessages = [];
-  state.ui.page = null;
+  state.ui.page = has('contacts') ? 'contacts' : null;
   state.me = await api.me();
   await loadCommunities();
   await loadConversations();
@@ -58,9 +58,10 @@ async function loadCommunity(communityId) {
   const view = await api.communityView(communityId);
   if (state.route.kind !== 'server' || state.route.communityId !== communityId) return;
   state.community = view;
-  if (state.voiceChannelId && !(view.voice_channels ?? []).some((c) => c.id === state.voiceChannelId)) state.voiceChannelId = null;
-  if (!state.voiceChannelId && !view.channels.some((c) => c.id === state.channelId)) {
-    state.channelId = (view.channels.find((c) => c.name === 'general') ?? view.channels[0])?.id ?? null;
+  if (state.voiceChannelId && !view.channels.some((c) => c.id === state.voiceChannelId && c.voice)) state.voiceChannelId = null;
+  const texts = textChannelsOf(view);
+  if (!state.voiceChannelId && !texts.some((c) => c.id === state.channelId)) {
+    state.channelId = (texts.find((c) => c.name === 'general') ?? texts[0])?.id ?? null;
   }
   notify('sidebar', 'right');
   await loadMessages();
@@ -111,12 +112,23 @@ function resetConversation() {
   state.ui.transferId = null;
 }
 
+// Home is Friends: it deselects any DM or group and shows the Friends page (when the contacts feature is on).
 export const openHome = guard(async () => {
   state.route = { kind: 'home' };
   resetConversation();
+  clearPeer();
+  state.ui.page = has('contacts') ? 'contacts' : null;
   notify('rail', 'sidebar', 'main', 'right', 'title');
-  await loadConversations();
+  await Promise.all([loadConversations(), has('contacts') ? loadContacts() : null]);
 });
+
+function clearPeer() {
+  state.peer = null;
+  state.peerName = '';
+  state.group = null;
+  state.dmMessages = [];
+  state.peerProfile = null;
+}
 
 export const openServer = guard(async (communityId, channelId = null) => {
   state.route = { kind: 'server', communityId };
@@ -150,16 +162,23 @@ export const openChannel = guard(async (channelId) => {
   notify('sidebar', 'rail', 'main');
 });
 
-// Opens a voice channel's call board without joining; Join is a separate step on the board.
+// Clicking a voice channel joins it, as in Discord. Another call on this device is left first, so this one replaces it.
 export const openVoiceChannel = guard(async (channelId) => {
-  state.voiceChannelId = channelId;
+  const communityId = state.community?.id;
+  if (!has('calls') || !communityId) return;
+  if (state.voiceConnection?.channelId === channelId && state.call) {
+    state.voiceChannelId = channelId;
+    state.ui.page = null;
+    state.ui.transferId = null;
+    notify('sidebar', 'main', 'right', 'title');
+    return;
+  }
+  if (state.call) await leaveCall();
+  const joined = await joinCall(communityId, channelId);
+  state.voiceChannelId = joined ? channelId : null;
   state.ui.page = null;
   state.ui.transferId = null;
   notify('sidebar', 'main', 'right', 'title');
-  // Opening a voice channel joins its call (calls feature), so the call pane shows the people in it.
-  if (has('calls') && state.community && state.call?.channel_id !== channelId) {
-    await joinCall(state.community.id, channelId);
-  }
 });
 
 export const openDm = guard(async (peer, displayName = '') => {
@@ -209,13 +228,14 @@ export function openConversation(conv) {
   return conv.kind === 'group' ? openGroup(conv) : openDm(conv.peer, conv.display_name);
 }
 
-// Pages replace the chat pane on Home: 'contacts' or 'transfers'. null returns to the conversation.
+// Pages replace the chat pane on Home: 'contacts' (Friends) or 'transfers'. null returns to the conversation.
 export const openPage = guard(async (page) => {
   if (page === 'contacts' && !has('contacts')) return;
   if (page === 'transfers' && !has('transfers')) return;
-  if (state.route.kind !== 'home') {
+  if (state.route.kind !== 'home' || state.peer || state.group) {
     state.route = { kind: 'home' };
     resetConversation();
+    clearPeer();
   }
   state.ui.page = page;
   state.ui.transferId = null;
@@ -259,10 +279,29 @@ export const leaveCommunity = guard(async (communityId) => {
 
 export const createInvite = guard((communityId) => api.createInvite(communityId));
 
-export const createChannel = guard(async (communityId, name) => {
+// Makes a text channel and opens it, or a voice channel, which stays unjoined until someone clicks it.
+export const createChannel = guard(async (communityId, name, { voice = false } = {}) => {
+  if (voice) {
+    await api.createVoiceChannel(communityId, name);
+    await loadCommunity(communityId);
+    return true;
+  }
   const channel = await api.createChannel(communityId, name);
   await loadCommunity(communityId);
   await openChannel(channel.id);
+  return true;
+});
+
+// Changes only the fields in `patch`. Owner and admin only; the engine checks it again.
+export const updateChannel = guard(async (communityId, channelId, patch) => {
+  await api.updateChannel(communityId, channelId, patch);
+  await loadCommunity(communityId);
+  return true;
+});
+
+export const deleteChannel = guard(async (communityId, channelId) => {
+  await api.deleteChannel(communityId, channelId);
+  await loadCommunity(communityId);
   return true;
 });
 
@@ -300,7 +339,16 @@ function markOwnSend() {
   }
 }
 
+// A direct message or a group is open (not a server channel). Its message actions use the dm_* or group_* commands.
+const inDmView = () => state.route.kind === 'home' && Boolean(state.peer);
+
 export const editMessage = guard(async (messageId, text) => {
+  if (inDmView()) {
+    if (state.group) await api.groupEdit(state.group.id, messageId, text);
+    else await api.dmEdit(state.peer, messageId, text);
+    await loadDm();
+    return true;
+  }
   const community = state.community;
   if (!community || !state.channelId) return false;
   await api.editMessage(community.id, state.channelId, messageId, text);
@@ -309,6 +357,12 @@ export const editMessage = guard(async (messageId, text) => {
 });
 
 export const deleteMessage = guard(async (messageId) => {
+  if (inDmView()) {
+    if (state.group) await api.groupDelete(state.group.id, messageId);
+    else await api.dmDelete(state.peer, messageId);
+    await loadDm();
+    return true;
+  }
   const community = state.community;
   if (!community || !state.channelId) return false;
   await api.deleteMessage(community.id, state.channelId, messageId);
@@ -319,6 +373,13 @@ export const deleteMessage = guard(async (messageId) => {
 // ---- replies and reactions (only offered when the backend reports them, see views/chat.js) ----
 
 export const sendReply = guard(async (messageId, text) => {
+  if (inDmView()) {
+    if (state.group) await api.groupReply(state.group.id, messageId, text);
+    else await api.dmReply(state.peer, messageId, text);
+    await Promise.all([loadDm(), loadConversations()]);
+    markOwnSend();
+    return true;
+  }
   const community = state.community;
   if (!community || !state.channelId) return false;
   await api.sendReply(community.id, state.channelId, messageId, text);
@@ -329,6 +390,15 @@ export const sendReply = guard(async (messageId, text) => {
 
 // Adds the reaction, or removes it when `mine` says the current user already reacted with it.
 export const toggleReaction = guard(async (messageId, emoji, mine) => {
+  if (inDmView()) {
+    if (state.group) {
+      if (mine) await api.groupUnreact(state.group.id, messageId, emoji);
+      else await api.groupReact(state.group.id, messageId, emoji);
+    } else if (mine) await api.dmUnreact(state.peer, messageId, emoji);
+    else await api.dmReact(state.peer, messageId, emoji);
+    await loadDm();
+    return true;
+  }
   const community = state.community;
   if (!community || !state.channelId) return false;
   if (mine) await api.unreact(community.id, state.channelId, messageId, emoji);
@@ -567,6 +637,8 @@ export function handleTransfersEvent(payload) {
 function setCall(next) {
   const prev = state.call;
   state.call = next ?? null;
+  // The voice channel connection lasts only while the call is a channel call on this device.
+  if (state.call?.scope !== 'channel') state.voiceConnection = null;
   callChanged(prev, state.call);
 }
 
@@ -588,6 +660,7 @@ export function handleCallEvent(call) {
 
 export const joinCall = guard(async (communityId, channelId) => {
   setCall(await api.joinCall(communityId, channelId));
+  if (state.call) state.voiceConnection = { communityId, channelId };
   notify('me', 'sidebar', 'main', 'right');
   return true;
 });
@@ -604,7 +677,9 @@ export const startCall = guard(async (peer) => {
 export const leaveCall = guard(async () => {
   await api.leaveCall();
   setCall(null);
-  notify('me', 'sidebar', 'main', 'right');
+  // Leaving a voice channel closes its board, so the chat shows the text channel again.
+  state.voiceChannelId = null;
+  notify('me', 'sidebar', 'main', 'right', 'title');
   return true;
 });
 
@@ -716,6 +791,51 @@ export const setDisplayName = guard(async (name) => {
   toast('Display name saved', 'info');
   return true;
 });
+
+// Profile picture and server icon. The engine's responses carry the new picture (see avatars.js), so the views only redraw.
+export const setAvatar = guard(async (bytes) => {
+  await api.setAvatar(bytes);
+  state.me = await api.me();
+  notify('sidebar', 'me', 'right');
+  return true;
+});
+
+export const clearAvatar = guard(async () => {
+  await api.clearAvatar();
+  state.me = await api.me();
+  notify('sidebar', 'me', 'right');
+  return true;
+});
+
+export const setCommunityIcon = guard(async (communityId, bytes) => {
+  await api.setCommunityIcon(communityId, bytes);
+  await refreshServer(communityId);
+  return true;
+});
+
+export const clearCommunityIcon = guard(async (communityId) => {
+  await api.clearCommunityIcon(communityId);
+  await refreshServer(communityId);
+  return true;
+});
+
+// dissent://avatar-changed { root_id | community_id }: someone's picture or a server icon changed. Reload what can show it.
+export const avatarChanged = guard(async (payload) => {
+  if (payload?.community_id) {
+    await refreshServer(payload.community_id);
+  } else {
+    state.me = await api.me();
+    await Promise.all([loadConversations(), loadContacts()]);
+    if (state.community) await refreshServer(state.community.id);
+    notify('sidebar', 'me', 'right');
+  }
+});
+
+async function refreshServer(communityId) {
+  state.communities = await api.listCommunities();
+  if (state.route.kind === 'server' && state.route.communityId === communityId) state.community = await api.communityView(communityId);
+  notify('rail', 'sidebar', 'main', 'right');
+}
 
 export const loadRecoveryPhrase = guard(() => api.identityExportPhrase());
 
@@ -934,6 +1054,11 @@ export function toggleMembers() {
 
 export function toggleProfile() {
   state.ui.profileOpen = !state.ui.profileOpen;
+  try {
+    window.localStorage.setItem(PROFILE_PANEL_KEY, state.ui.profileOpen ? 'open' : 'closed');
+  } catch {
+    // storage unavailable: the choice lasts this session only
+  }
   notify('right', 'main');
 }
 
@@ -966,7 +1091,7 @@ export async function refreshUnread() {
     } catch {
       continue;
     }
-    for (const ch of view.channels) {
+    for (const ch of textChannelsOf(view)) {
       const key = `ch:${c.id}:${ch.id}`;
       if (key === openChannelKey) continue;
       let latest;

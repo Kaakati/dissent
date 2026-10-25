@@ -139,26 +139,77 @@ export function openAddContactDialog() {
   }));
 }
 
-export function openCreateChannelDialog(communityId) {
+// Text channel names follow Discord: lowercase, spaces become hyphens, other characters are dropped.
+// Voice names are kept as typed.
+export const cleanChannelName = (raw, voice) => (voice ? raw : raw.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, ''));
+
+// Create Channel, laid out as Discord's: a channel type, a name that follows the type, a Private Channel
+// switch (not built yet, so disabled) and two footer buttons. Text is the default unless `kind` is 'voice'.
+export function openCreateChannelDialog(communityId, kind = 'text') {
   let close = () => {};
-  const input = el('input', { placeholder: 'channel-name', maxLength: 64, 'aria-label': 'Channel name' });
-  const createBtn = el('button', {
-    class: 'primary',
-    icon: 'plus',
-    text: 'Create channel',
-    onclick: async () => {
-      const name = input.value.trim();
-      if (!name) return;
-      createBtn.disabled = true;
-      const ok = await actions.createChannel(communityId, name);
-      createBtn.disabled = false;
-      if (ok) close();
-    },
-  });
+  const picked = { voice: kind === 'voice' };
+  const serverName = state.community?.id === communityId ? state.community.name : '';
+  const nameInput = el('input', { placeholder: 'new-channel', maxLength: 64, 'aria-label': 'Channel name', autocomplete: 'off' });
+  const nameIcon = el('span', { class: 'channel-name-icon', 'aria-hidden': 'true' });
+  const createBtn = el('button', { class: 'primary channel-create', disabled: true, text: 'Create Channel', onclick: () => submit() });
+  const cancelBtn = el('button', { type: 'button', text: 'Cancel', onclick: () => close() });
+
+  const cleanName = (raw) => cleanChannelName(raw, picked.voice);
+  const sync = () => {
+    nameInput.value = cleanName(nameInput.value);
+    nameIcon.replaceChildren(icon(picked.voice ? 'volume-2' : 'hash'));
+    nameInput.placeholder = 'new-channel';
+    createBtn.disabled = !nameInput.value.trim();
+  };
+  async function submit() {
+    const name = cleanName(nameInput.value).trim();
+    if (!name) return;
+    createBtn.disabled = true;
+    const ok = await actions.createChannel(communityId, name, { voice: picked.voice });
+    if (ok) close();
+    else createBtn.disabled = !nameInput.value.trim();
+  }
+  nameInput.addEventListener('input', sync);
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submit(); } });
+
+  const kindRow = (value, text, iconName, description) => el('label', { class: 'kind-row' },
+    el('input', {
+      type: 'radio',
+      name: 'channel-kind',
+      value,
+      checked: picked.voice === (value === 'voice'),
+      onchange: () => { picked.voice = value === 'voice'; sync(); },
+    }),
+    el('span', { class: 'kind-body' },
+      el('span', { class: 'kind-title', icon: iconName, text }),
+      el('span', { class: 'kind-desc', text: description })));
+
+  const privateSwitch = el('label', { class: 'switch', title: 'Coming soon' },
+    el('input', { type: 'checkbox', role: 'switch', class: 'sr-only', disabled: true, 'aria-label': 'Private Channel', 'aria-description': 'Coming soon' }),
+    el('span', { class: 'switch-track', 'aria-hidden': 'true' }));
+
+  sync();
   ({ close } = openDialog({
-    title: 'Create channel',
-    content: el('div', {}, input, el('div', { class: 'row end' }, createBtn)),
+    title: 'Create Channel',
+    sub: serverName ? `in ${serverName}` : null,
+    className: 'create-channel',
+    content: el('div', { class: 'channel-form' },
+      el('section', { class: 'form-section' },
+        el('h3', { class: 'form-label', id: 'channel-type-label', text: 'Channel Type' }),
+        el('div', { class: 'kind-group', role: 'radiogroup', 'aria-labelledby': 'channel-type-label' },
+          kindRow('text', 'Text', 'hash', 'Send messages, images, GIFs, emoji, opinions, and puns'),
+          kindRow('voice', 'Voice', 'volume-2', 'Hang out together with voice'))),
+      el('section', { class: 'form-section' },
+        el('h3', { class: 'form-label', text: 'Channel Name' }),
+        el('div', { class: 'name-field' }, nameIcon, nameInput)),
+      el('section', { class: 'form-section private-row' },
+        el('div', { class: 'private-head' },
+          el('span', { class: 'private-title', icon: 'lock', text: 'Private Channel' }),
+          privateSwitch),
+        el('p', { class: 'kind-desc', text: 'Only selected members and roles will be able to view this channel.' }))),
+    footer: [cancelBtn, createBtn],
   }));
+  nameInput.focus();
 }
 
 export function openClaimHandleDialog(communityId) {
@@ -233,9 +284,11 @@ export async function openSafetyDialog(userId) {
 
 // Create a group (NewGroup board): pick at least three contacts, see them as chips, name the group, then create it.
 // Needs the groups feature. The footer button says how many people the group will have, counting me.
-export function openNewGroupDialog() {
-  const people = state.contacts?.contacts ?? [];
-  const picked = new Set();
+// `preselect` people (the DM's person, from "Add friends to group") start picked; they join the list if not a contact yet.
+export function openNewGroupDialog({ preselect = [] } = {}) {
+  const contacts = state.contacts?.contacts ?? [];
+  const people = [...contacts, ...preselect.filter((p) => !contacts.some((c) => c.root_id === p.root_id))];
+  const picked = new Set(preselect.map((p) => p.root_id));
   const nameInput = el('input', { value: 'New group', 'aria-label': 'Group name' });
   const search = el('input', { placeholder: 'Type a name or paste a contact link', 'aria-label': 'Find contacts' });
   const count = el('span', { class: 'pick-count' });

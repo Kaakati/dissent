@@ -1,9 +1,8 @@
 //! Network status for the status bar. With relays disabled there is no DHT and no relay, but the
 //! gossip neighbour count still follows the topic.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread")]

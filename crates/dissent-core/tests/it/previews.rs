@@ -1,8 +1,7 @@
 //! Link previews: off by default, and a link to a private address gets no preview.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn previews_are_off_by_default_and_fetch_nothing() {

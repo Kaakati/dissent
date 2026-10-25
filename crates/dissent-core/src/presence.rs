@@ -1,7 +1,7 @@
 //! Presence: the status this device shows, how long a timed status lasts, and the signed beacons
 //! that tell the people who can see us what it is.
 //!
-//! A beacon goes out every `BEACON_EVERY` to each community topic we are on, and to the devices of
+//! A beacon goes out every `beacon_every` to each community topic we are on, and to the devices of
 //! each contact. Invisible sends none. Others read a person as online only while a fresh beacon
 //! from them is held. Traffic alone never makes someone look online.
 
@@ -9,6 +9,7 @@ use crate::engine::{now_ms, Engine, Inner, MAX_CLOCK_SKEW_MS};
 use crate::error::{CoreError, Result};
 use crate::rpc::Request;
 use crate::store::{read_bin, write_bin};
+use crate::timings::millis;
 use crate::views::EngineEvent;
 use crate::wire::{encode_gossip, GossipMsg};
 use crate::world::World;
@@ -23,14 +24,8 @@ use tracing::{debug, warn};
 
 /// Domain prefix for the signature over a presence beacon.
 const PRESENCE_DOMAIN: &[u8] = b"dissent/presence/v1";
-/// How often a beacon is sent.
-const BEACON_EVERY: Duration = Duration::from_secs(30);
-/// How often the engine looks for peers whose last beacon has just run out of its window.
-const SWEEP_EVERY: Duration = Duration::from_secs(15);
 /// Longest a shutdown waits to send the offline beacon.
 pub(crate) const OFFLINE_WAIT: Duration = Duration::from_secs(2);
-/// A beacon received this recently makes its sender online. One lost beacon is tolerated.
-pub(crate) const PRESENCE_WINDOW_MS: u64 = 60 * 1000;
 
 /// The status a person sets for themselves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,7 +196,7 @@ impl World {
             return Presence::of(self.own_status(now).0);
         }
         match self.presence.get(user) {
-            Some(heard) if now.saturating_sub(heard.received_ms) < PRESENCE_WINDOW_MS => {
+            Some(heard) if now.saturating_sub(heard.received_ms) < millis(self.timings.presence_window) => {
                 Presence::of(heard.status)
             }
             _ => Presence::Offline,
@@ -373,7 +368,10 @@ impl Engine {
     /// Emits `PresenceChanged` for each peer whose last beacon ran out of its window between
     /// `since` and now, so the UI updates without polling.
     fn sweep_presence(&self, since: u64) {
-        let aged = aged_out(&self.read().presence, since, now_ms());
+        let aged = {
+            let w = self.read();
+            aged_out(&w.presence, millis(w.timings.presence_window), since, now_ms())
+        };
         for user in aged {
             self.emit(EngineEvent::PresenceChanged {
                 user: user.to_string(),
@@ -489,7 +487,7 @@ fn beacon_devices(w: &World) -> Vec<DeviceId> {
 fn offline_devices(w: &World, now: u64) -> Vec<DeviceId> {
     let mut devices: BTreeSet<DeviceId> = beacon_devices(w).into_iter().collect();
     for (root, heard) in &w.presence {
-        let fresh = now.saturating_sub(heard.received_ms) < PRESENCE_WINDOW_MS;
+        let fresh = now.saturating_sub(heard.received_ms) < millis(w.timings.presence_window);
         let shared = w.communities.values().any(|c| c.is_member(root));
         if fresh && shared && *root != w.me && !w.contact_book.blocked.contains(root) {
             devices.extend(w.directory.devices_of(root));
@@ -501,12 +499,17 @@ fn offline_devices(w: &World, now: u64) -> Vec<DeviceId> {
 
 /// The people whose last beacon ran out of its window after `since` and no later than `now`. An
 /// invisible beacon already reads as offline, so it is left out.
-pub(crate) fn aged_out(presence: &BTreeMap<RootId, Heard>, since: u64, now: u64) -> Vec<RootId> {
+pub(crate) fn aged_out(
+    presence: &BTreeMap<RootId, Heard>,
+    window_ms: u64,
+    since: u64,
+    now: u64,
+) -> Vec<RootId> {
     presence
         .iter()
         .filter(|(_, heard)| heard.status != Status::Invisible)
         .filter(|(_, heard)| {
-            let end = heard.received_ms.saturating_add(PRESENCE_WINDOW_MS);
+            let end = heard.received_ms.saturating_add(window_ms);
             since < end && end <= now
         })
         .map(|(root, _)| *root)
@@ -514,7 +517,8 @@ pub(crate) fn aged_out(presence: &BTreeMap<RootId, Heard>, since: u64, now: u64)
 }
 
 /// Runs for the life of the engine. Once a second it reverts an expired status. Every
-/// `BEACON_EVERY` it sends a beacon, starting at once. Every `SWEEP_EVERY` it reports peers gone quiet.
+/// `beacon_every` it sends a beacon, starting at once. Every `presence_sweep` it reports peers gone
+/// quiet. Both intervals are whole seconds.
 pub(crate) async fn presence_loop(weak: Weak<Inner>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut seconds: u64 = 0;
@@ -525,11 +529,12 @@ pub(crate) async fn presence_loop(weak: Weak<Inner>) {
             break;
         };
         let engine = Engine { inner };
+        let timings = engine.inner.timings;
         engine.expire_status();
-        if seconds.is_multiple_of(BEACON_EVERY.as_secs()) {
+        if seconds.is_multiple_of(timings.beacon_every.as_secs()) {
             engine.send_presence().await;
         }
-        if seconds.is_multiple_of(SWEEP_EVERY.as_secs()) {
+        if seconds.is_multiple_of(timings.presence_sweep.as_secs()) {
             engine.sweep_presence(swept_at);
             swept_at = now_ms();
         }

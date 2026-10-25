@@ -1,8 +1,7 @@
 //! Files in direct messages: sent sealed, fetched from the sender's device, decrypted on the other side.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dm_file_is_sealed_and_downloads_for_the_recipient() {
@@ -229,7 +228,7 @@ async fn a_paused_download_resumes_after_a_restart() {
     bob.engine
         .resume_transfer(&attachment_id)
         .expect("bob resumes");
-    common::eventually_within(std::time::Duration::from_secs(90), "bob finishes the download", || {
+    crate::common::eventually_within(std::time::Duration::from_secs(90), "bob finishes the download", || {
         (transfer_state(&bob, &attachment_id).as_deref() == Some("done")).then_some(())
     })
     .await;

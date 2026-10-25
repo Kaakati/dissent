@@ -35,6 +35,7 @@ mod rotation;
 mod rpc;
 mod store;
 mod sync;
+mod timings;
 mod typing;
 mod views;
 mod warm;
@@ -58,6 +59,7 @@ pub use groups::{ConvId, MAX_GROUP_MEMBERS, MAX_GROUP_NAME_CHARS, MIN_GROUP_MEMB
 pub use inbox::{InboxStats, MAX_INBOXES};
 pub use invites::{JoinRequestView, GROUP_INVITE_TTL_MS};
 pub use previews::Embed;
+pub use timings::Timings;
 pub use presence::{Presence, Status};
 pub use typing::TypingTarget;
 pub use identity_flows::{start_device_link, DeviceView, GuardianEntry, GuardianView, PendingDevice};

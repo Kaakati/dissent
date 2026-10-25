@@ -31,7 +31,8 @@ function render() {
     mode = 'members';
     nodes = fileDetailNodes();
   } else if (state.ui.page && pageBuilders[state.ui.page]) {
-    mode = 'members';
+    // Friends has its own 340 px column for Active Now; the other pages keep the standard width.
+    mode = state.ui.page === 'contacts' ? 'wide' : 'members';
     nodes = [pageBuilders[state.ui.page]().aside];
   } else if (state.route.kind === 'server' && state.community && state.ui.membersOpen) {
     mode = 'members';

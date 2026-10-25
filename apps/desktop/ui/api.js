@@ -1,11 +1,23 @@
+import { noteImages } from './avatars.js';
+
 // Every Tauri command the UI calls, in one place. Args are camelCase (Tauri maps them to snake_case params).
 // Commands below the "not in the engine yet" line are the contracts in docs/design/07-visual-system.md, Part 6.
 // The UI calls them only after `capabilities` reports the feature, so an engine without them never sees the call.
-const call = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+// Every response passes through noteImages, so avatars and server icons reach the renderers that show them.
+const call = async (cmd, args) => {
+  const out = await window.__TAURI__.core.invoke(cmd, args);
+  noteImages(out);
+  return out;
+};
 
 export const api = {
   me: () => call('me'),
   setDisplayName: (name) => call('set_display_name', { name }),
+  // Profile picture and server icon: `bytes` is the 256 px WebP or PNG as base64. See views/avatar.js.
+  setAvatar: (bytes) => call('set_avatar', { bytes }),
+  clearAvatar: () => call('clear_avatar'),
+  setCommunityIcon: (communityId, bytes) => call('set_community_icon', { communityId, bytes }),
+  clearCommunityIcon: (communityId) => call('clear_community_icon', { communityId }),
   contactLink: () => call('contact_link'),
   addContact: (link) => call('add_contact', { link }),
 
@@ -16,6 +28,12 @@ export const api = {
   leaveCommunity: (communityId) => call('leave_community', { communityId }),
   communityView: (communityId) => call('community_view', { communityId }),
   createChannel: (communityId, name) => call('create_channel', { communityId, name }),
+  createVoiceChannel: (communityId, name) => call('create_voice_channel', { communityId, name }),
+  // channelId plus any of name, slowmode_s, visibility, bitrate_kbps, user_limit, relay.
+  updateChannel: (communityId, channelId, patch) => call('update_channel', { communityId, channelId, ...patch }),
+  deleteChannel: (communityId, channelId) => call('delete_channel', { communityId, channelId }),
+  listInvites: (communityId) => call('list_invites', { communityId }),
+  revokeInvite: (communityId, inviteId) => call('revoke_invite', { communityId, inviteId }),
   channelMessages: (communityId, channelId, limit) =>
     call('channel_messages', { communityId, channelId, limit }),
   sendMessage: (communityId, channelId, text) => call('send_message', { communityId, channelId, text }),
@@ -32,6 +50,17 @@ export const api = {
     call('send_reply', { communityId, channelId, messageId, text }),
   react: (communityId, channelId, messageId, emoji) => call('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId, channelId, messageId, emoji) => call('unreact', { communityId, channelId, messageId, emoji }),
+  // The same actions in a direct message (`peer`) and a group (`groupId`). Message items carry reply_to, reactions, edited and deleted.
+  dmReply: (peer, messageId, text) => call('dm_reply', { peer, messageId, text }),
+  dmReact: (peer, messageId, emoji) => call('dm_react', { peer, messageId, emoji }),
+  dmUnreact: (peer, messageId, emoji) => call('dm_unreact', { peer, messageId, emoji }),
+  dmEdit: (peer, messageId, text) => call('dm_edit', { peer, messageId, text }),
+  dmDelete: (peer, messageId) => call('dm_delete', { peer, messageId }),
+  groupReply: (groupId, messageId, text) => call('group_reply', { groupId, messageId, text }),
+  groupReact: (groupId, messageId, emoji) => call('group_react', { groupId, messageId, emoji }),
+  groupUnreact: (groupId, messageId, emoji) => call('group_unreact', { groupId, messageId, emoji }),
+  groupEdit: (groupId, messageId, text) => call('group_edit', { groupId, messageId, text }),
+  groupDelete: (groupId, messageId) => call('group_delete', { groupId, messageId }),
   // File attachments. The UI shows them only when message items carry an `attachments` array.
   pickFiles: () => call('pick_files'),
   // `seed` keeps an encrypted copy on the community seeder (servers only). Defaults to true on the engine side.

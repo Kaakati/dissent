@@ -1,9 +1,8 @@
 //! Engine surfaces of the UI contract (design doc 07, part 6): capabilities, notes, pins, read
 //! markers, first run, safety verification, call controls, and guardian entries.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{CallScope, NoteKind};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

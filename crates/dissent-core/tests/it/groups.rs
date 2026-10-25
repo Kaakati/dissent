@@ -1,21 +1,8 @@
 //! Sealed direct messages and group DMs over MLS. Loopback only, relays off.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{ConvId, CoreError};
-
-/// Makes `a` and `b` know each other's devices and addresses, through a contact request each way.
-async fn meet(a: &Peer, b: &Peer) {
-    a.engine
-        .request_contact(&b.engine.contact_link(), "")
-        .await
-        .expect("a asks b");
-    b.engine
-        .request_contact(&a.engine.contact_link(), "")
-        .await
-        .expect("b asks a");
-}
 
 fn conv_named(p: &Peer, name: &str) -> Option<String> {
     p.engine
@@ -104,10 +91,10 @@ async fn group_dm_create_message_rename_and_remove() {
     let dave = peer("dave").await;
     let erin = peer("erin").await;
     for other in [&bob, &carol, &dave, &erin] {
-        meet(&alice, other).await;
+        make_contacts_ready(&alice, other).await;
     }
     for (x, y) in [(&bob, &carol), (&bob, &dave), (&carol, &dave)] {
-        meet(x, y).await;
+        make_contacts_ready(x, y).await;
     }
     let bob_root = bob.identity.root_id();
     let carol_root = carol.identity.root_id();

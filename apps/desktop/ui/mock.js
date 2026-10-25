@@ -78,6 +78,7 @@ if (!window.__TAURI__) {
       owner: GRACE,
       voice: [{ id: 'vc1', name: 'workshop', participants: [] }],
       channels: [
+        { id: 'vc1', name: 'workshop', voice: true },
         { id: 'ch1', name: 'general', topic: 'Workshop chat, bookings and Saturday plans' },
         { id: 'ch2', name: 'hardware' },
         { id: 'ch3', name: 'announcements' },
@@ -210,26 +211,30 @@ if (!window.__TAURI__) {
   const roleOf = (c, user) => c.roles[user] ?? null;
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
-  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c) });
+  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null });
   const sharedServers = (user) => Object.values(servers).filter((c) => c.roles[user] && c.roles[ME]);
   const conversations = () =>
     Object.entries(dms)
       .map(([peer, items]) => {
         const last = items[items.length - 1];
-        return { peer, display_name: people[peer], last_text: last.text, last_ms: last.ms };
+        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms };
       })
       .sort((a, b) => b.last_ms - a.last_ms);
   const view = (c) => ({
     id: c.id,
     name: c.name,
     owner: c.owner,
+    icon: c.icon ?? null,
     voice_channels: c.voice ?? [],
+    // Relays the server can use for voice channels. The engine does not report these yet.
+    relays: [{ id: 'relay-eu', name: 'Relay in Europe' }, { id: 'relay-us', name: 'Relay in North America' }],
     my_role: myRole(c),
-    channels: c.channels,
+    channels: c.channels.map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', ...ch })),
     members: Object.keys(c.roles).map((r) => ({
       root_id: r,
       suffix: suffix(r),
       display_name: people[r],
+      avatar: pictures[r] ?? null,
       handle: handles[r] ?? null,
       role: c.roles[r],
       banned: c.banned.has(r),
@@ -265,10 +270,57 @@ if (!window.__TAURI__) {
     // `window.__mockNoFiles = true` simulates a backend without file sharing: the field is left out.
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
   });
-  const dmItem = (m) => ({
-    id: m.id, from: m.from, text: m.text, ms: m.ms, pending: m.pending, embeds: m.embeds ?? [], queued: Boolean(m.queued),
+  // DM and group items carry the same reply, reaction, edit and delete fields as channel items. `list` is the conversation.
+  const dmReplyRef = (list, messageId) => {
+    const orig = list.find((m) => m.id === messageId);
+    if (!orig) return null;
+    const ref = { id: orig.id, author: orig.from, author_name: people[orig.from] };
+    return orig.deleted ? { ...ref, text: null } : { ...ref, text: orig.text.slice(0, 120) };
+  };
+  const dmReactions = (m) => (m.reactions ?? []).filter((r) => r.users.length > 0).map((r) => ({
+    emoji: r.emoji, count: r.users.length, me: r.users.includes(ME), names: r.users.slice(0, 3).map((u) => people[u]),
+  }));
+  const dmItem = (m, list = []) => ({
+    id: m.id, from: m.from, text: m.deleted ? '' : m.text, ms: m.ms, pending: m.pending, embeds: m.embeds ?? [], queued: Boolean(m.queued),
+    edited: Boolean(m.edited), deleted: Boolean(m.deleted), system: m.system === true,
+    ...(window.__mockNoReactions ? {} : { reply_to: m.replyTo ? dmReplyRef(list, m.replyTo) : null, reactions: dmReactions(m) }),
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
   });
+  // The shared bodies of the dm_* and group_* commands; `list` is the DM's or the group's items.
+  const dmReplyIn = (list, prefix, messageId, text) => {
+    need(list.some((m) => m.id === messageId), 'Cannot reply: message not found');
+    const item = { id: id(`${prefix}${++seq}`), from: ME, text, ms: Date.now(), pending: false, replyTo: messageId, reactions: [] };
+    list.push(item);
+    return dmItem(item, list);
+  };
+  const dmReactIn = (list, messageId, emoji, on) => {
+    const m = list.find((x) => x.id === messageId);
+    need(m && !m.deleted, 'Cannot react: message not found');
+    m.reactions ??= [];
+    const r = m.reactions.find((x) => x.emoji === emoji);
+    if (!on) {
+      if (r) r.users = r.users.filter((u) => u !== ME);
+      m.reactions = m.reactions.filter((x) => x.users.length > 0);
+    } else if (r) {
+      if (!r.users.includes(ME)) r.users.push(ME);
+    } else {
+      m.reactions.push({ emoji, users: [ME] });
+    }
+    return null;
+  };
+  const dmEditIn = (list, messageId, text) => {
+    const m = list.find((x) => x.id === messageId);
+    need(m && m.from === ME && !m.deleted, 'You can only edit your own messages');
+    m.text = text;
+    m.edited = true;
+    return null;
+  };
+  const dmDeleteIn = (list, messageId) => {
+    const m = list.find((x) => x.id === messageId);
+    need(m && m.from === ME, 'You can only delete your own messages');
+    m.deleted = true;
+    return null;
+  };
   const PICK = [
     { path: 'C:/Users/ada/Pictures/parser-bench.png', name: 'parser-bench.png', size: 3.1 * MB, mime: 'image/png' },
     { path: 'C:/Users/ada/Documents/notes.md', name: 'notes.md', size: 12 * 1024, mime: 'text/markdown' },
@@ -303,14 +355,45 @@ if (!window.__TAURI__) {
   const need = (cond, reason) => {
     if (!cond) throw reason;
   };
+  // Profile pictures by root id. The engine sends them as WebP (or PNG) data, capped at 256 KB like the real blob.
+  const pictures = {};
+  const MAX_PICTURE = 256 * 1024;
+  const pictureFrom = (bytes) => {
+    need(atob(bytes).length <= MAX_PICTURE, 'That picture is over 256 KB');
+    return `data:image/webp;base64,${bytes}`;
+  };
 
   // The first-run flag stays set until the user completes onboarding (complete_first_run), never on export.
   let firstRunPending = window.__mockFirstRun ?? new URLSearchParams(location.search).has('firstrun');
   const handlers = {
     complete_first_run: () => { firstRunPending = false; return null; },
-    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], first_run: firstRunPending }),
+    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
+      return null;
+    },
+    set_avatar: ({ bytes }) => {
+      pictures[ME] = pictureFrom(bytes);
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    clear_avatar: () => {
+      delete pictures[ME];
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    set_community_icon: ({ communityId, bytes }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server icon');
+      c.icon = pictureFrom(bytes);
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
+    clear_community_icon: ({ communityId }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server icon');
+      c.icon = null;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
     contact_link: () => `dissent://contact/mock-${suffix(ME)}`,
@@ -330,7 +413,18 @@ if (!window.__TAURI__) {
       servers[cid] = c;
       return summary(c);
     },
-    create_invite: ({ communityId }) => `dissent://invite/mock-${communityId}`,
+    create_invite: ({ communityId }) => {
+      const c = servers[communityId];
+      const link = `dissent://invite/mock-${communityId}-${++seq}`;
+      c.invites = [...(c.invites ?? []), { id: `inv${seq}`, link }];
+      return link;
+    },
+    list_invites: ({ communityId }) => servers[communityId].invites ?? [],
+    revoke_invite: ({ communityId, inviteId }) => {
+      const c = servers[communityId];
+      c.invites = (c.invites ?? []).filter((inv) => inv.id !== inviteId);
+      return null;
+    },
     join_community: ({ invite }) => {
       throw `Mock backend cannot join "${invite.slice(0, 24)}…"`;
     },
@@ -348,6 +442,33 @@ if (!window.__TAURI__) {
       const ch = { id: `ch${++seq}`, name };
       c.channels.push(ch);
       c.msgs[ch.id] = [];
+      return ch;
+    },
+    update_channel: ({ communityId, channelId, ...patch }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can change channels');
+      const ch = c.channels.find((x) => x.id === channelId);
+      need(ch, 'No such channel');
+      for (const [key, value] of Object.entries(patch)) if (value !== undefined) ch[key] = value;
+      const voice = c.voice?.find((v) => v.id === channelId);
+      if (voice && patch.name) voice.name = patch.name;
+      return { ...ch };
+    },
+    delete_channel: ({ communityId, channelId }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can delete channels');
+      need(c.channels.some((x) => x.id === channelId), 'No such channel');
+      c.channels = c.channels.filter((x) => x.id !== channelId);
+      c.voice = c.voice?.filter((v) => v.id !== channelId);
+      delete c.msgs[channelId];
+      return null;
+    },
+    create_voice_channel: ({ communityId, name }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can create channels');
+      const ch = { id: `vc${++seq}`, name, voice: true };
+      c.channels.push(ch);
+      c.voice = [...(c.voice ?? []), { id: ch.id, name, participants: [] }];
       return ch;
     },
     channel_messages: async ({ communityId, channelId, limit }) => {
@@ -500,6 +621,7 @@ if (!window.__TAURI__) {
         root_id: user,
         suffix: suffix(user),
         display_name: people[user] ?? `anon·${suffix(user)}`,
+        avatar: pictures[user] ?? null,
         is_contact: Boolean(dms[user]),
         key_changed_ms: user === GRACE && !PLAIN_DM ? Date.now() - DAY : null,
         verified_ms: user === GRACE ? (PLAIN_DM ? new Date(2026, 9, 12).getTime() : Date.now() - 2 * DAY) : null,
@@ -511,7 +633,12 @@ if (!window.__TAURI__) {
     },
 
     list_conversations: () => conversations(),
-    dm_messages: ({ peer, limit }) => (dms[peer] ?? []).slice(-limit).map(dmItem),
+    dm_messages: ({ peer, limit }) => (dms[peer] ?? []).slice(-limit).map((m) => dmItem(m, dms[peer])),
+    dm_reply: ({ peer, messageId, text }) => dmReplyIn((dms[peer] ??= []), 'd', messageId, text),
+    dm_react: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, true),
+    dm_unreact: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, false),
+    dm_edit: ({ peer, messageId, text }) => dmEditIn(dms[peer] ?? [], messageId, text),
+    dm_delete: ({ peer, messageId }) => dmDeleteIn(dms[peer] ?? [], messageId),
     send_dm: ({ peer, text }) => {
       const item = { id: id(`d${++seq}`), from: ME, text, ms: Date.now(), pending: true };
       (dms[peer] ??= []).push(item);
@@ -586,7 +713,7 @@ if (!window.__TAURI__) {
     { id: id('cm2'), root_id: LINUS, author_name: 'Jonas', ms: at2(10, 4), text: 'Got it. Page 3 has the new duct size.\nLeila, you’re muted if you’re trying to talk.' },
     { id: id('cm3'), root_id: KEN, author_name: 'Omar', ms: at2(10, 5), text: 'Mic’s off on purpose, I’m on the train. Reading along here.' },
   ];
-  servers.c1.voice = [{ id: 'vc1', name: 'workshop', participants: CALL_PEOPLE.map((p) => ({ ...p })) }];
+  servers.c1.voice = [{ id: 'vc1', name: 'workshop', participants: CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p })) }];
   const callView = (scope, extra) => ({
     id: 'call1', scope, muted: false, deafened: false, camera: false, started_ms: Date.now(),
     channel_name: 'workshop', community_name: 'Riverside Makers',
@@ -629,7 +756,7 @@ if (!window.__TAURI__) {
     members: cpeers(g.members).map((m) => ({ ...m, online: ONLINE.has(m.root_id) })),
     last_text: g.items.at(-1)?.text ?? '', last_ms: g.items.at(-1)?.ms ?? 0, live_call: new URLSearchParams(location.search).has('nolive') ? null : (g.live_call ?? null),
   });
-  const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r) }));
+  const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], avatar: pictures[r] ?? null, suffix: suffix(r) }));
   const findTransfer = (transferId) => transfers.find((x) => x.id === transferId);
 
   servers.c4 = { id: 'c4', hue: 350, name: 'Kinnly', owner: LINUS, channels: [{ id: 'ch9', name: 'general' }], roles: { [LINUS]: 'owner', [ME]: 'member' }, banned: new Set(), msgs: { ch9: [] } };
@@ -692,19 +819,25 @@ if (!window.__TAURI__) {
       groups[gid] = { id: gid, name, creator: ME, members: [ME, ...peers], items: [] };
       return groupRow(groups[gid]);
     },
-    group_messages: ({ groupId }) => groups[groupId].items.map((m) => ({ ...m })),
+    group_messages: ({ groupId }) => groups[groupId].items.map((m) => dmItem(m, groups[groupId].items)),
     send_group_message: ({ groupId, text }) => {
-      const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false };
+      const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false, reactions: [] };
       groups[groupId].items.push(item);
-      return { ...item };
+      return dmItem(item, groups[groupId].items);
     },
+    group_reply: ({ groupId, messageId, text }) => dmReplyIn(groups[groupId].items, 'g', messageId, text),
+    group_react: ({ groupId, messageId, emoji }) => dmReactIn(groups[groupId].items, messageId, emoji, true),
+    group_unreact: ({ groupId, messageId, emoji }) => dmReactIn(groups[groupId].items, messageId, emoji, false),
+    group_edit: ({ groupId, messageId, text }) => dmEditIn(groups[groupId].items, messageId, text),
+    group_delete: ({ groupId, messageId }) => dmDeleteIn(groups[groupId].items, messageId),
     add_group_members: ({ groupId, peers }) => { groups[groupId].members.push(...peers); return null; },
     leave_group: ({ groupId }) => { delete groups[groupId]; return null; },
     group_invite_link: ({ groupId }) => `dissent://group/${groupId}`,
     list_contacts: () => ({
       incoming: cpeers([...incomingSet]).map((p) => ({ ...p, online: p.root_id === NADIA, shared_servers: [] })),
       outgoing: cpeers([...outgoingSet]).map((p) => ({ ...p, online: false, shared_servers: [] })),
-      contacts: cpeers([...contactSet]).map((p) => ({ ...p, online: p.root_id !== LINUS, shared_servers: ['Riverside Makers'] })),
+      // The Friends mix: Maya online (and in a call), Jonas idle, Omar Do Not Disturb, Leila offline.
+      contacts: cpeers([...contactSet]).map((p) => ({ ...p, status: MEMBER_STATUS[p.root_id], online: MEMBER_STATUS[p.root_id] !== 'offline', shared_servers: ['Riverside Makers'] })),
       blocked: [],
     }),
     send_contact_request: ({ link }) => {
@@ -735,8 +868,20 @@ if (!window.__TAURI__) {
       }, 4000);
       return { ...calls.current };
     },
-    join_call: () => {
-      calls.current = callView('channel', { route: { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' } });
+    join_call: ({ communityId, channelId }) => {
+      const c = servers[communityId];
+      const ch = c?.channels.find((x) => x.id === channelId && x.voice);
+      need(ch, 'not a voice channel');
+      // The workshop channel is the demo call, forwarded by Jonas. Other channels start with only this device.
+      const demo = channelId === 'vc1';
+      calls.current = callView('channel', {
+        channel_name: ch.name,
+        community_name: c.name,
+        participants: demo ? CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p })) : [],
+        route: demo
+          ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
+          : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
+      });
       return { ...calls.current };
     },
     leave_call: () => { calls.current = null; return null; },

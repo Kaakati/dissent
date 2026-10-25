@@ -1,8 +1,7 @@
 //! Guardian recovery and device linking over the loopback network.
 
-mod common;
 
-use common::*;
+use crate::common::*;
 use dissent_core::{start_device_link, Identity};
 use std::time::Duration;
 
@@ -39,10 +38,7 @@ async fn linked_device_posts_until_its_root_revokes_it() {
         .send_message(community, channel, "from the laptop".into())
         .await
         .expect("laptop posts");
-    eventually("bob reads the laptop's message", || {
-        has_message(&bob.engine, community, channel, "from the laptop").then_some(())
-    })
-    .await;
+    wait_seen(&bob, community, channel, "from the laptop").await;
 
     let devices = alice.engine.devices().expect("devices");
     assert!(devices.iter().any(|d| d.this_device));

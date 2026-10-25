@@ -1,6 +1,6 @@
 // Custom 30 px title bar: in-app history (Back and Forward), the context label in the middle, and the window
 // controls. The bar is a drag region. In the browser preview there is no window, so the controls do nothing.
-import { el, icon, initials, setHue } from '../ui.js';
+import { el, icon, initials, setHue, withImage } from '../ui.js';
 import { state, subscribe } from '../state.js';
 import * as actions from '../actions.js';
 
@@ -82,11 +82,11 @@ function renderTitle() {
   const title = document.getElementById('tb-title');
   let text = 'Direct Messages';
   let mark = el('span', { class: 'titlebar-icon brand' }, icon('dissent-mark'));
-  if (state.ui.page === 'contacts') { text = 'Contacts'; mark = icon('users'); }
+  if (state.ui.page === 'contacts') { text = 'Friends'; mark = icon('users'); }
   else if (state.ui.page === 'transfers') { text = 'Transfers'; mark = icon('arrow-up-down'); }
   else if (state.route.kind === 'server' && state.community) {
     text = state.community.name;
-    mark = setHue(el('span', { class: 'mini-server xs', text: initials(state.community.name) }), state.community.id);
+    mark = withImage(setHue(el('span', { class: 'mini-server xs', text: initials(state.community.name) }), state.community.id), state.community.id);
   } else if (state.route.kind === 'server') {
     text = '';
     mark = icon('server');
