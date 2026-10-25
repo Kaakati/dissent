@@ -365,12 +365,13 @@ async fn a_member_who_left_cannot_read_later_control_events() {
     .await;
 }
 
-/// A joiner whose first epoch-key fetch waits 10 s, rather than the test default of 3 s.
+/// A joiner whose first epoch-key fetch is held back for an hour, so the only thing that can start
+/// it is a member's presence beacon. The test uses that to make the joiner's fetch deterministic.
 async fn slow_joiner(name: &str) -> Peer {
     let identity = dissent_core::Identity::create(now());
     let dir = scratch(name);
     let timings = dissent_core::Timings {
-        history_first_retry: Duration::from_secs(10),
+        history_first_retry: Duration::from_secs(3600),
         ..dissent_core::test_support::fast_timings()
     };
     let (engine, events) = dissent_core::Engine::start_with_timings(
@@ -423,11 +424,12 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
         // Bob is offline, so only alice could answer for history.
         let (_, bob_dir) = stop(bob).await;
 
-        // Carol's first fetch waits 10 s, long enough for alice's shutdown to finish, so it finds nobody
-        // who can answer.
+        // Carol's first fetch is held back for an hour, so none runs while alice is down. Only alice's
+        // beacon, when she comes back, can start one.
         let carol = slow_joiner("carol").await;
         let invite = alice.engine.create_invite(id).await.expect("invite");
-        join_ready(&alice, &carol, &invite).await;
+        // Alice's own view of carol is not waited for: under load that can take longer than the delay.
+        carol.engine.join_community(&invite).await.expect("carol joins");
         // Alice goes down right after carol is admitted.
         let (_, alice_dir) = stop(alice).await;
         eventually("carol's history is locked", || {
@@ -439,8 +441,7 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
                 .map(|_| ())
         })
         .await;
-        // The first fetch has come and failed, and the next one waits longer.
-        tokio::time::sleep(Duration::from_secs(12)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(
             !has_channel(&carol.engine, id, "before-carol"),
             "with no member online, carol stays locked"
