@@ -112,7 +112,7 @@ jobs:
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
       # also holds internet.rs, which needs the public network, so it is skipped here.
       - name: Loopback networked tests
-        run: cargo test -p dissent-core --test it -- --ignored --skip internet::
+        run: "cargo test -p dissent-core --test it -- --ignored --skip internet::"
 
   changelog:
     name: Tag, changelog and draft release
