@@ -23,23 +23,26 @@ pub mod relay;
 pub mod replayer;
 pub mod state;
 #[cfg(test)]
+mod private_tests;
+#[cfg(test)]
 pub(crate) mod testutil;
 pub mod wire;
 
 pub use control::{
-    is_member_sealable, is_sealable, open_event, open_event_keyed, open_member, seal, seal_member, verify_member_tag,
-    EpochKey, EpochKeys, OpenError, SealKey, EXPORT_LABEL,
+    is_member_sealable, is_member_sealed, is_sealable, member_parts, member_sealed_payload,
+    open_event, open_event_keyed, open_member, seal, seal_member, verify_member_tag, EpochKey,
+    EpochKeys, OpenError, SealKey, CARRIER_GENERATION, EXPORT_LABEL,
 };
 pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
-pub use emoji::{normalize_emoji, EmojiError};
+pub use emoji::{normalize_emoji, normalize_trait_emoji, EmojiError};
 pub use event::{
-    ChannelId, ChannelVisibility, Event, EventBody, EventId, HistorySetting, Payload, Role,
+    ChannelId, ChannelVisibility, Event, EventBody, EventId, HistorySetting, Payload, Role, Trait,
     SealedKind,
 };
 pub use hlc::{Hlc, HlcClock};
 pub use names::{confusable, normalize_handle, skeleton, NameError};
-pub use picture::{Picture, MAX_PICTURE_BYTES};
+pub use picture::{Banner, Picture, BANNER_PRESETS, MAX_ANIMATED_BANNER_BYTES, MAX_BANNER_BYTES, MAX_PICTURE_BYTES};
 pub use relay::{valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
 pub use replayer::{ReplayStats, Replayer};
 pub use state::{replay, replay_keyed, replay_with, CommunityState, Member, MessageView, Rejection};

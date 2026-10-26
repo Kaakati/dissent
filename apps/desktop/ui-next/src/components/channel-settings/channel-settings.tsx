@@ -1,6 +1,6 @@
 // Channel settings: a full-page overlay built like Settings. Overview holds the name, slowmode and content visibility,
 // and voice channels add bitrate, user limit and relay. Permissions is not built. Invites lists the server's invites
-// with Revoke. Changes wait in a save bar until Save. Owner and admin only. Ported from ui/views/channel-settings.js.
+// with Revoke. Changes wait in a save bar until Save. Owner and admin only. Ported from the old UI's views/channel-settings.js.
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { Hash, Trash2, Volume2, X } from 'lucide-react';
 import { create } from 'zustand';
@@ -174,7 +174,7 @@ function ChannelSettingsPage({ target }: { target: Target }) {
               <p className="text-sm text-muted-foreground">Per-channel roles are not built yet, so channel permissions cannot be set here.</p>
             </Block>
           ) : null}
-          {section === 'invites' ? <Invites communityId={communityId} /> : null}
+          {section === 'invites' ? <InviteList communityId={communityId} /> : null}
           {dirty ? (
             <div role="region" aria-label="Unsaved changes" className="sticky bottom-0 mt-auto flex items-center gap-s-3 rounded-lg border border-border bg-elevated px-s-4 py-s-3">
               <span className="mr-auto text-ui font-medium text-text-strong">Careful — you have unsaved changes!</span>
@@ -322,7 +322,7 @@ function safeHost(url: string): string {
 }
 
 // The server's invites, each with Revoke. Revoking reloads the list; a failure is a toast.
-function Invites({ communityId }: { communityId: Id }) {
+export function InviteList({ communityId }: { communityId: Id }) {
   const [items, setItems] = useState<{ id: Id; link: string }[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);

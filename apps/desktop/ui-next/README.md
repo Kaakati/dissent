@@ -1,7 +1,7 @@
 # Dissent UI (React, next)
 
-The React + shadcn/ui rebuild of the desktop UI. It keeps the current design (palette, type, spacing, layout) and
-replaces the plain-module UI in `apps/desktop/ui`, which stays the shipped UI until this one reaches parity.
+The React + shadcn/ui desktop UI, and the only frontend. It keeps the design of the plain-module UI it replaced (palette,
+type, spacing, layout); that UI is removed and lives in git history.
 
 **Status: phase 2.** The foundation and the app shell are done: theme, backend layer, store, title bar, server rail,
 sidebar, user panel with the status menu, and the main and right slots. The chat pane is ported: the message list, rows,
@@ -39,7 +39,7 @@ src/
   index.css             theme: shadcn variables, Dissent tokens, @theme mapping, Poppins
   shell.css             the few shell rules utilities cannot express: app grid, presence glyphs, rail pill
   lib/
-    api.ts              every Tauri command, typed, with the names and args of apps/desktop/ui/api.js
+    api.ts              every Tauri command, typed, with the names and args of the old UI's api.js
     tauri.ts            the window.__TAURI__ shape and the current window
     store.ts            the shell store (zustand): state.js, the navigation actions and their Back/Forward history,
                         status, calls and the engine-event actions
@@ -54,8 +54,8 @@ src/
     profiles.ts         a counter the profile views re-read user_profile on, after a friend, safety or note change
     mock.ts             loads src/mock/mock.js in a browser (no-op inside the desktop app)
   mock/
-    mock.js             the browser mock backend (a copy of apps/desktop/ui/mock.js, kept until the old UI is deleted)
-    address.js          the address helpers the mock needs (a copy of apps/desktop/ui/address.js; lib/address.ts is the typed copy)
+    mock.js             the browser mock backend
+    address.js          the address helpers the mock needs (lib/address.ts is the typed copy)
     types.ts            wire types
     chat.ts             the open conversation's messages, the composer's state, loads on navigation, engine message
                         events, attachment progress (views/chat.js state, actions.js loadMessages and loadDm)
@@ -81,7 +81,7 @@ src/
     network/            the title bar's network and DHT line
     user-avatar.tsx     avatar with picture or initials, and the presence glyph
     presence.tsx        presence glyph
-    dissent-mark.tsx    the Dissent mark (from ui/icons.svg)
+    dissent-mark.tsx    the Dissent mark (from the old UI's icons.svg)
     toaster.tsx         the toast stack
 public/fonts/           Poppins (SIL OFL 1.1, OFL.txt alongside)
 ```
@@ -125,7 +125,7 @@ Do not re-run `shadcn add` over these files without re-applying the restyling.
   Cancel. A new confirmation answers the open one with `false`.
 - `openContextMenu(x, y, items, { placeAbove })` (`lib/menu.ts`) opens a menu at a point: a right click, Shift+F10 (the
   browser sends `contextmenu` to the focused row) or a button's position. `ContextMenuHost` (mounted in `App.tsx`)
-  renders it. Items are plain data (`MenuEntry`): `{ label, icon, sub, danger, disabled, onPick }`, `{ submenu }`,
+  renders it. Items are plain data (`MenuEntry`): `{ label, icon, sub, danger, disabled, onPick }`, `{ submenu }` (with `scroll` for a long one), `{ quick: [{ emoji, label, onPick }] }` (a row of emoji),
   `{ radio, checked }`, `{ slider }`, `{ header }` and `'sep'`. A menu tied to a button is a `DropdownMenu` that renders
   the same `MenuItems`.
 - Keys: arrows, Home and End, Enter, Escape, submenus on ArrowRight or hover, and the first row takes the focus. A pick
@@ -217,7 +217,7 @@ Status: **done** (ported and checked against the current UI), **partial** (the s
 | `views/dmpanel.js` | done | `components/dm/dm-panel.tsx`: banner with the contact status and More, the 80 px avatar, name and tag, mutual servers, Contact since, View full profile. Shown for direct conversations while the header toggle is on. | B |
 | `views/profile.js` | done | `components/profile/profile-card.tsx` (the card, placed by the click, Escape and outside click close it; the moderation buttons follow the engine's rules), `full-profile.tsx` (the dialog, the safety line, Copy contact link), `use-user-profile.ts`. The conversation menu's Profile item and the member click open it. | B |
 | `views/address-card.js` | done | `components/address-card.tsx`, with the QR code and the copy button (`copyText`, as before). | B |
-| `address.js` | partial | `lib/address.ts` is still the bridge copy of `ui/address.js` (ui-next-d replaces it). The profile and Friends use its helpers. | B, D |
+| `address.js` | done | `lib/address.ts` is the typed copy; `src/mock/address.js` is what the mock imports. The profile and Friends use its helpers. | B, D |
 | `qr.js` | done | `lib/qr.ts`, drawn by `components/address-card.tsx` and `components/dialogs/qr-code.tsx`. | B |
 
 ### Pages
@@ -256,7 +256,7 @@ Status: **done** (ported and checked against the current UI), **partial** (the s
 | `unread.js` | done | `lib/unread.ts`. |
 | `avatars.js` | done | `lib/images.ts`. |
 | `ui.js` | partial | `lib/identity.ts`, `components/user-avatar.tsx`, `lib/toasts.ts`, `lib/dialog.ts` (`openDialog`, `confirm`), `lib/clipboard.ts` (`copyText`). `skeletonRows` is `SkeletonRows` in `components/chat/parts.tsx`, `linkify` is `lib/text.ts`, the time labels are `lib/time.ts`. |
-| `mock.js` | shared | A copy in `src/mock/mock.js`. The old UI keeps its own copy in `apps/desktop/ui/mock.js` until it is deleted. Duplicated on purpose; keep them in step. |
+| `mock.js` | shared | `src/mock/mock.js`, the only copy. |
 | `icons.svg` | partial | Lucide icons (`lucide-react`) replace the sprite. The Dissent mark is in `dissent-mark.tsx`. |
 | `fonts/` | done | `public/fonts/`. |
 | `style.css` | partial | Tokens in `index.css`, shell rules in `shell.css`. The chat rules are in `components/chat/chat.css`, under the current UI's class names. Still to port: the dialog, settings and call rules. |
@@ -294,8 +294,7 @@ Status: **done** (ported and checked against the current UI), **partial** (the s
   never shows.
 - **Attachment cards keep the current layout**: a column, with the Pause and Cancel buttons placed over a downloading
   card. The progress fill is drawn (see the transfer progress note above).
-- **Shared with the current UI, duplicated until the old UI is deleted:** `lib/mock.ts` imports `src/mock/mock.js`, a copy of `ui/mock.js`. The mock also needs the
-  `address` helpers, a copy of `ui/address.js` in `src/mock/address.js`. Delete the old copies with `apps/desktop/ui`.
+- **The mock:** `lib/mock.ts` imports `src/mock/mock.js`. The mock also needs the `address` helpers, in `src/mock/address.js`.
 
 - **Settings and the portable gate keep the current UI's look**, with three deliberate differences. The chooser's option
   buttons lay out their text in a grid that the button centres, so the current UI's text runs past the card; here the

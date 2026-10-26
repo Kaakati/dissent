@@ -1,5 +1,5 @@
 // Last-seen markers for channels and DMs, kept in localStorage. Storage can be unavailable (private windows, blocked
-// site data), so every access is guarded and the app still works without it. Ported from ui/unread.js; the key and the
+// site data), so every access is guarded and the app still works without it. Ported from the old UI's unread.js; the key and the
 // stored shape are the same, so both UIs read one marker set.
 // Keys: `ch:<communityId>:<channelId>` and `dm:<peerRootId>`. Values: { id, ms } of the newest message seen.
 

@@ -74,6 +74,9 @@ pub enum SealedKind {
     React { target: EventId },
     /// Removes the author's reaction. The emoji is in the sealed bytes.
     Unreact { target: EventId },
+    /// A plain message whose text is sealed under the history key of its epoch, so a member who joins
+    /// later can read it when the server's history setting allows. Appended, see `docs/design/05`.
+    HistoryMessage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -225,6 +228,54 @@ pub enum Payload {
     /// Which past control content a new member is given keys for. Owner and admin only. Appended,
     /// see `control`.
     HistoryVisibility { setting: HistorySetting },
+    /// Renames the community. Owner only. The name is trimmed and at most
+    /// `state::MAX_COMMUNITY_NAME_CHARS` characters. The latest by HLC wins over the genesis name.
+    /// Sealed under the community secret, never the epoch key, so an invite holder can check it. A
+    /// client that predates it rejects it as forged. Appended, see `control`.
+    CommunityRename { name: String },
+    /// Sets or clears the community's banner: one of the preset gradients, or a 16:9 picture under
+    /// `picture::MAX_BANNER_BYTES`. Owner and admin only, like `CommunityIconSet`. Sealed, so a
+    /// client that predates it rejects it as forged. Appended, see `control`.
+    CommunityBannerSet { banner: Option<crate::picture::Banner> },
+    /// Sets the community's description and traits, as Server Settings' Server Profile shows them.
+    /// Owner and admin only. See `state::valid_profile` for the caps, which replay enforces by
+    /// rejecting the event. Sealed, like the banner. Appended, see `control`.
+    CommunityProfileSet {
+        description: String,
+        traits: Vec<Trait>,
+    },
+    /// Who may read a channel, and whether it is private. Owner and admin only, on the control channel.
+    /// The latest accepted per channel wins. Sealed under the community secret, so a client that predates
+    /// it rejects it as forged. A change that removes a reader starts a new key generation for the channel.
+    /// Appended, see `control` and `docs/design/11-private-channels.md`.
+    ChannelAccess {
+        channel: ChannelId,
+        private: bool,
+        roles: Vec<Role>,
+        members: Vec<RootId>,
+    },
+    /// A message in a private channel, as replay sees it. The kind and generation are clear, so replay checks
+    /// permission without a key. The text is sealed under the channel key of `generation`. It is only ever
+    /// written inside a carrier (`control::carry_private`), never as an outer payload, so an older client
+    /// shows it as locked. Appended.
+    PrivateSealed {
+        kind: SealedKind,
+        generation: u64,
+        ciphertext: Vec<u8>,
+    },
+    /// Sets or clears the author's profile banner: a preset gradient or a 16:9 picture, with the
+    /// same caps as a community banner. Only the author sets their own, as for `ProfileUpdate`, which
+    /// stays as it is. Sealed, so a client that predates it rejects it as forged. Appended, see
+    /// `control` and `picture`.
+    ProfileBannerSet { banner: Option<crate::picture::Banner> },
+}
+
+/// One of a community's traits: an optional emoji (empty when there is none) and a short label. See
+/// `Payload::CommunityProfileSet`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trait {
+    pub emoji: String,
+    pub label: String,
 }
 
 /// How much control history a member who joins later can read. See `Payload::HistoryVisibility`.

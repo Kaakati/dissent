@@ -103,6 +103,42 @@ impl Frame {
     }
 }
 
+impl Frame {
+    /// A preview of this frame as packed RGB, scaled down to at most `max_width` wide. The
+    /// returned size is `(width, height, pixels)`. Scaling is nearest neighbour, and the
+    /// conversion uses BT.601 limited-range coefficients, the inverse of [`from_packed_rgb`].
+    pub fn to_rgb_preview(&self, max_width: u32) -> (u32, u32, Vec<u8>) {
+        let i420 = self.to_i420();
+        let (w, h) = (i420.width as usize, i420.height as usize);
+        let scale = (w as u32).div_ceil(max_width.max(1)).max(1) as usize;
+        let (out_w, out_h) = (w / scale, h / scale);
+        let luma = i420.luma();
+        let chroma_w = w / 2;
+        let u_plane = &i420.data[w * h..w * h + chroma_w * (h / 2)];
+        let v_plane = &i420.data[w * h + chroma_w * (h / 2)..];
+        let mut rgb = Vec::with_capacity(out_w * out_h * 3);
+        for y in 0..out_h {
+            let sy = y * scale;
+            for x in 0..out_w {
+                let sx = x * scale;
+                let yy = f32::from(luma[sy * w + sx]) - 16.0;
+                let c = (sy / 2) * chroma_w + sx / 2;
+                let u = f32::from(u_plane[c]) - 128.0;
+                let v = f32::from(v_plane[c]) - 128.0;
+                let r = 1.164 * yy + 1.596 * v;
+                let g = 1.164 * yy - 0.392 * u - 0.813 * v;
+                let b = 1.164 * yy + 2.017 * u;
+                rgb.extend([clamp8(r), clamp8(g), clamp8(b)]);
+            }
+        }
+        (out_w as u32, out_h as u32, rgb)
+    }
+}
+
+fn clamp8(v: f32) -> u8 {
+    v.round().clamp(0.0, 255.0) as u8
+}
+
 /// Converts packed 8-bit RGB or RGBA pixels to I420 with BT.601 limited-range coefficients.
 ///
 /// `bytes_per_pixel` is 3 for RGB and 4 for RGBA. The alpha byte is ignored.
@@ -227,5 +263,23 @@ mod tests {
         assert_eq!(i420.pts_us(), 5);
         assert_eq!(&i420.data()[16..20], &[10, 30, 50, 70]);
         assert_eq!(&i420.data()[20..24], &[20, 40, 60, 80]);
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_keeps_the_colour_and_fits_the_width() {
+        // A solid red 64x32 picture, converted in and back out.
+        let rgb: Vec<u8> = std::iter::repeat_n([220u8, 30, 30], 64 * 32).flatten().collect();
+        let frame = from_packed_rgb(64, 32, 3, 0, &rgb).unwrap();
+        let (w, h, out) = frame.to_rgb_preview(32);
+        assert_eq!((w, h), (32, 16));
+        let [r, g, b] = [out[0], out[1], out[2]];
+        assert!((i32::from(r) - 220).abs() <= 4, "red {r}");
+        assert!((i32::from(g) - 30).abs() <= 4, "green {g}");
+        assert!((i32::from(b) - 30).abs() <= 4, "blue {b}");
     }
 }

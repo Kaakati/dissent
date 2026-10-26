@@ -6,10 +6,12 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freePort } from './cdp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const port = process.env.UI_PORT ?? '1420';
+// A free port of this run's own, unless UI_PORT names one.
+const port = process.env.UI_PORT ?? String(await freePort());
 // Each run gets its own scratch folder, so a browser left by an earlier run cannot hold a profile this run needs.
 const scratch = process.env.SCRATCH ?? join(tmpdir(), 'dissent-ui-driver', `run-${Date.now()}`);
 const outDir = join(scratch, 'ui-build');

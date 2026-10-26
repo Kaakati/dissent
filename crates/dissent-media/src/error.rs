@@ -32,6 +32,10 @@ pub enum MediaError {
     /// The audio track is not negotiated yet, or the codec is missing.
     #[error("no audio track is negotiated yet")]
     NoAudioTrack,
+    /// The call has no video media line. The peer answered it with `m=video 0`, or it was never
+    /// offered. A call without video is not an error, so callers treat this as "no video".
+    #[error("no video track is negotiated")]
+    NoVideoTrack,
     /// The underlying str0m instance has shut down.
     #[error("call is closed")]
     Closed,

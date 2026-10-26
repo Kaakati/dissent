@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dissent_core::{
     ChannelId, ChannelInfo, CommunityId, CommunitySummary, InvitePreviewView,
-    Engine, EventId, Identity, MessageItem, MeView, ModAction, NetStatusView, RootId, UserView, DmItem,
+    Engine, EventId, Identity, MessageItem, MeView, Mentions, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
 use serde::Serialize;
@@ -140,9 +140,17 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     let profile = crate::storage::profile_dir(&state.data_dir, &identity);
     std::fs::create_dir_all(&profile).map_err(err)?;
     let settings = crate::network::load(&state.data_dir);
-    let (engine, rx) = Engine::start(identity.clone(), profile, crate::node_config(&settings), state.vault.clone())
-        .await
-        .map_err(err)?;
+    let (engine, rx) = Engine::start_with_options(
+        identity.clone(),
+        profile,
+        crate::node_config(&settings),
+        state.vault.clone(),
+        dissent_core::Timings::default(),
+        crate::attachments::default_download_dir(app),
+    )
+    .await
+    .map_err(err)?;
+    crate::attachments::prepare_engine(app, &engine);
     crate::voice::prepare(&engine, &app.state::<crate::voice::Voice>());
     *state.identity.lock().map_err(err)? = identity;
     *state.engine.write().await = Some(engine);
@@ -201,7 +209,7 @@ pub async fn add_contact(state: State<'_, AppState>, link: String) -> Result<Use
 #[tauri::command]
 pub async fn user_profile(state: State<'_, AppState>, user: String) -> Result<Value, String> {
     let user: RootId = parse("user id", &user)?;
-    for_ui(&engine(&state).await?.user_profile(user))
+    for_ui(&engine(&state).await?.user_profile_full(user).await)
 }
 
 // ---- servers ----
@@ -209,6 +217,16 @@ pub async fn user_profile(state: State<'_, AppState>, user: String) -> Result<Va
 #[tauri::command]
 pub async fn list_communities(state: State<'_, AppState>) -> Result<Value, String> {
     for_ui(&engine(&state).await?.communities())
+}
+
+/// Saves this device's order of the server rail. Local to the profile; nothing is sent.
+#[tauri::command]
+pub async fn set_server_order(state: State<'_, AppState>, ids: Vec<String>) -> Result<(), String> {
+    let ids = ids
+        .iter()
+        .map(|id| parse::<CommunityId>("community id", id))
+        .collect::<Result<Vec<_>, _>>()?;
+    engine(&state).await?.set_server_order(ids).map_err(err)
 }
 
 #[tauri::command]
@@ -340,10 +358,12 @@ pub async fn send_message(
     community_id: String,
     channel_id: String,
     text: String,
+    mentions: Option<MentionsArg>,
 ) -> Result<MessageItem, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let channel: ChannelId = parse("channel id", &channel_id)?;
-    engine(&state).await?.send_message(community, channel, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.send_message_with(community, channel, text, mentions).await.map_err(err)
 }
 
 #[tauri::command]
@@ -373,6 +393,26 @@ pub async fn delete_message(
     engine(&state).await?.delete_message(community, channel, message).await.map_err(err)
 }
 
+/// Who a message mentions, as the UI sends it: user ids in base32, and whether it mentions everyone.
+#[derive(serde::Deserialize)]
+pub struct MentionsArg {
+    pub users: Vec<String>,
+    pub everyone: bool,
+}
+
+/// The mentions a send command carries. Absent means none.
+pub(crate) fn mentions_of_arg(arg: Option<MentionsArg>) -> Result<Mentions, String> {
+    let Some(arg) = arg else {
+        return Ok(Mentions::default());
+    };
+    let users = arg
+        .users
+        .iter()
+        .map(|u| parse::<RootId>("user id", u).map(|r| r.0))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Mentions { users, everyone: arg.everyone })
+}
+
 #[tauri::command]
 pub async fn send_reply(
     state: State<'_, AppState>,
@@ -380,11 +420,13 @@ pub async fn send_reply(
     channel_id: String,
     message_id: String,
     text: String,
+    mentions: Option<MentionsArg>,
 ) -> Result<MessageItem, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let channel: ChannelId = parse("channel id", &channel_id)?;
     let target: EventId = parse("message id", &message_id)?;
-    engine(&state).await?.send_reply(community, channel, target, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.send_reply_with(community, channel, target, text, mentions).await.map_err(err)
 }
 
 #[tauri::command]

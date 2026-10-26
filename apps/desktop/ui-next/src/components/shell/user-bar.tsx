@@ -1,6 +1,6 @@
 // The floating panel over the rail and the sidebar: your name and status, the mic and headphone buttons with their
 // option chevrons, and settings. Clicking your name opens the status menu (a dropdown with duration submenus).
-// Ported from ui/views/sidebar.js (renderMe) and ui/views/statusmenu.js.
+// Ported from the old UI's views/sidebar.js (renderMe) and the old UI's views/statusmenu.js.
 import type { CSSProperties } from 'react';
 import { ChevronDown, Headphones, Mic, MicOff, PhoneOff, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -172,10 +172,12 @@ export function UserBar() {
         <StatusMenu />
         {has('calls') ? (
           <>
+            {/* Each control sits flush with its options arrow, as one split button. */}
+            <div className="flex items-center">
             <Button
               variant="ghost"
               size="icon"
-              className={cn('text-text', muted && 'bg-selected text-text-strong')}
+              className={cn('rounded-r-none text-text', muted && 'bg-selected text-text-strong')}
               aria-label={muted ? 'Unmute' : 'Mute'}
               aria-pressed={muted}
               title={muted ? 'Unmute' : 'Mute'}
@@ -184,13 +186,15 @@ export function UserBar() {
             >
               {muted ? <MicOff className="size-5" /> : <Mic className="size-5" />}
             </Button>
-            <Button variant="ghost" size="icon" className="w-5 text-muted-foreground" aria-label="Microphone options" title="Microphone options" aria-haspopup="menu" onClick={(e) => void openInputMenu(e.currentTarget)}>
+            <Button variant="ghost" size="icon" className="w-4 rounded-l-none text-muted-foreground" aria-label="Microphone options" title="Microphone options" aria-haspopup="menu" onClick={(e) => void openInputMenu(e.currentTarget)}>
               <ChevronDown className="size-3.5" />
             </Button>
+            </div>
+            <div className="flex items-center">
             <Button
               variant="ghost"
               size="icon"
-              className={cn('text-text', deafened && 'bg-selected text-text-strong')}
+              className={cn('rounded-r-none text-text', deafened && 'bg-selected text-text-strong')}
               aria-label={deafened ? 'Undeafen' : 'Deafen'}
               aria-pressed={deafened}
               title={deafened ? 'Undeafen' : 'Deafen'}
@@ -199,9 +203,10 @@ export function UserBar() {
             >
               <Headphones className="size-5" />
             </Button>
-            <Button variant="ghost" size="icon" className="w-5 text-muted-foreground" aria-label="Output options" title="Output options" aria-haspopup="menu" onClick={(e) => void openOutputMenu(e.currentTarget)}>
+            <Button variant="ghost" size="icon" className="w-4 rounded-l-none text-muted-foreground" aria-label="Output options" title="Output options" aria-haspopup="menu" onClick={(e) => void openOutputMenu(e.currentTarget)}>
               <ChevronDown className="size-3.5" />
             </Button>
+            </div>
           </>
         ) : null}
         <Button variant="ghost" size="icon" className="text-text" aria-label="Settings" title="Settings" onClick={() => openSettings()}>

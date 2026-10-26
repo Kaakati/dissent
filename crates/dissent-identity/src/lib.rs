@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn address_fixed_vectors() {
-        // Shared with apps/desktop/ui/address.test.js; keep both in sync.
+        // Shared with apps/desktop/ui-next/src/mock/address.test.js; keep both in sync.
         let root = RootKey::from_seed([7; 32]).id();
         let server = CommunityKey::from_seed([7; 32]).id();
         let device = DeviceKey::from_seed([7; 32]).id();

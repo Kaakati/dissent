@@ -1,6 +1,6 @@
 // The microphone monitor of Settings › Voice: the level from dissent://mic-level, the mic test, and the meter falling to
 // silence when the mic is closed. Monitoring runs while the page is open (a call already runs the mic, and then the test
-// is refused, which is fine). Ported from the level half of ui/views/settings-voice.js.
+// is refused, which is fine). Ported from the level half of the old UI's views/settings-voice.js.
 import { useEffect, useRef, useState } from 'react';
 import { api, listenTo } from '@/lib/api';
 import { toast } from '@/lib/toasts';

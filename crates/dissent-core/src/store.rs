@@ -34,9 +34,17 @@ impl Paths {
     pub fn peer_avatars(&self) -> PathBuf {
         self.root.join("peer_avatars.bin")
     }
+    /// This device's profile banner and the banners contacts sent directly. See `profile_banners`.
+    pub fn banners(&self) -> PathBuf {
+        self.root.join("banners.bin")
+    }
     /// Decrypted pictures, one file per content hash.
     pub fn avatars_dir(&self) -> PathBuf {
         self.root.join("avatars")
+    }
+    /// Decrypted thumbnails of image attachments, one JPEG per attachment id.
+    pub fn thumbnails_dir(&self) -> PathBuf {
+        self.root.join("thumbnails")
     }
     /// Inbox service state.
     pub fn inbox(&self) -> PathBuf {
@@ -54,6 +62,10 @@ impl Paths {
     pub fn conv_acts(&self, id: &crate::groups::ConvId) -> PathBuf {
         self.root.join("conversations").join(format!("{id}.acts"))
     }
+    /// Each channel's mention read times. See `mention_reads.rs`.
+    pub fn mention_reads(&self) -> PathBuf {
+        self.root.join("mention_reads.bin")
+    }
     /// When each contact was added, and when we first saw each person. See `contact_times.rs`.
     pub fn contact_times(&self) -> PathBuf {
         self.root.join("contact_times.bin")
@@ -65,6 +77,10 @@ impl Paths {
     /// "Let people add me by address" turned off. A separate file, so the contact book keeps its layout.
     pub fn address_privacy(&self) -> PathBuf {
         self.root.join("address_privacy.bin")
+    }
+    /// "Show my friends list to my friends" turned off. A separate file, as `address_privacy` is.
+    pub fn friends_hidden(&self) -> PathBuf {
+        self.root.join("friends_hidden.bin")
     }
     /// Identity changes seen for the people we talk to, so the notice survives a restart.
     pub fn identity_changes(&self) -> PathBuf {
@@ -94,6 +110,10 @@ impl Paths {
     /// The control keys of each MLS epoch this device was in. Sealed. See `epoch_keys`.
     pub fn epoch_keys(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("epoch-keys.bin")
+    }
+    /// The history key of each epoch this device was in, sealed. See `history`.
+    pub fn history_keys(&self, id: &CommunityId) -> PathBuf {
+        self.community_dir(id).join("history-keys.bin")
     }
     pub fn community_key(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("community.key")
@@ -198,9 +218,34 @@ fn frame_records<T: Serialize>(values: &[T]) -> Result<Vec<u8>> {
     Ok(framed)
 }
 
+/// Reads every record of a log that this build can decode. A record it cannot decode, as one a newer
+/// build wrote, is logged and skipped, and its bytes stay in the file. A partly written tail is cut
+/// as in `read_records`.
+pub(crate) fn read_records_skipping<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    let frames = read_frames(path)?;
+    Ok(frames
+        .iter()
+        .filter_map(|frame| match postcard::from_bytes(frame) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "skipped a record this build cannot decode");
+                None
+            }
+        })
+        .collect())
+}
+
 /// Reads every complete record from a log. A partly written tail is ignored and cut
 /// from the file, so later appends stay aligned with the record framing.
 pub(crate) fn read_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+    read_frames(path)?
+        .iter()
+        .map(|frame| postcard::from_bytes(frame).map_err(encoding))
+        .collect()
+}
+
+/// The raw bytes of each complete record in a log, cutting a partly written tail from the file.
+fn read_frames(path: &Path) -> Result<Vec<Vec<u8>>> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
@@ -213,7 +258,7 @@ pub(crate) fn read_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
         let Some(end) = (pos + 4).checked_add(len).filter(|&end| end <= bytes.len()) else {
             break;
         };
-        out.push(postcard::from_bytes(&bytes[pos + 4..end]).map_err(encoding)?);
+        out.push(bytes[pos + 4..end].to_vec());
         pos = end;
     }
     if pos < bytes.len() {
@@ -594,6 +639,38 @@ mod tests {
             Some("second")
         );
         assert!(!dir.join("profile.tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod skipping_tests {
+    use super::*;
+
+    /// A record of the framing `append_records` writes: a big-endian length, then the bytes.
+    fn frame(bytes: &[u8]) -> Vec<u8> {
+        let mut out = (bytes.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    #[test]
+    fn a_record_this_build_cannot_decode_is_skipped_and_kept_on_disk() {
+        let dir = std::env::temp_dir().join(format!("dissent-skip-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.log");
+        // Two good (u8, u8) records around one that is too short to decode as one.
+        let mut bytes = frame(&[1, 2]);
+        bytes.extend(frame(&[9]));
+        bytes.extend(frame(&[3, 4]));
+        fs::write(&path, &bytes).unwrap();
+
+        let good: Vec<(u8, u8)> = read_records_skipping(&path).unwrap();
+        assert_eq!(good, vec![(1, 2), (3, 4)]);
+        // The skipped record is still in the file, so a later version can read it.
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // The strict reader still refuses the file, as before.
+        assert!(read_records::<(u8, u8)>(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

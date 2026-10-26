@@ -19,7 +19,7 @@ apps/seeder               headless always-on member: keeps community history ava
 apps/relay                open-source iroh relay server binary anyone can run
 apps/probe                connectivity probe: measures direct vs relayed paths, RTT and time-to-direct between two devices
 apps/push-relay           content-blind wake-up relay prototype for mobile push (UnifiedPush / APNs bridge)
-apps/desktop/src-tauri    Tauri 2 app (commands + state); apps/desktop/ui = static HTML/JS frontend
+apps/desktop/src-tauri    Tauri 2 app (commands + state); apps/desktop/ui-next = React + shadcn/ui frontend (Vite)
 ```
 
 Dependency direction: identity ← events, net, discovery ← core ← desktop. Crates never depend on tauri.
@@ -63,6 +63,7 @@ Time is `u64` milliseconds since Unix epoch everywhere.
 - A channel's id is the id of its `ChannelCreate` event.
 - Known gap: a message concurrent with its channel's `ChannelCreate` can sort before it and be rejected. Set parents to current heads to keep that window small.
 - Stored files must keep loading: `tests/it/upgrade_compat.rs` loads a v0.1.4 profile. When a release changes on-disk formats, add a new fixture from that release.
+- New event kinds go through the `SealedControl` carrier (generation `CARRIER_GENERATION`), so older clients show them as locked instead of failing to decode the batch or the events log. See `docs/design/05-encrypted-servers.md`, "Compatibility rule".
 - Keystore and DHT records are plaintext; harden before 1.0.
 - Default log filter is `info,mainline=error,mainline::rpc=off`: the Mainline DHT warns on every unresponsive stranger (Windows os error 10060/10054 on its UDP socket), and its routing table logs a false "Could not bootstrap" at startup that recovers within seconds. Dissent warns itself when the DHT stays empty after fresh nodes.
 - Tests and local multi-instance checks must set `NodeConfig.loopback_only = true` (desktop: env `DISSENT_LOOPBACK=1`). Binding all interfaces makes Windows Firewall show an admin prompt for every new exe. Run networked `#[ignore]` tests ONLY through `scripts/fwtest.sh <pkg> <test|lib> --ignored ...`, which copies the test exe to the one firewall-allowed path `target/fw/dissent-test.exe`. dissent-core's integration tests are one binary, `it` (`crates/dissent-core/tests/it/`), so e.g. `scripts/fwtest.sh dissent-core it --ignored calls::` runs the call suite and `scripts/fwtest.sh dissent-core it --ignored typing::` the typing suite. Integration tests run engines with `test_support::fast_timings()`. The production intervals live in `Timings::default()` (`crates/dissent-core/src/timings.rs`), which a unit test pins, and `Engine::start` (used by the desktop app) runs on them. Change a production interval there, not in a test.

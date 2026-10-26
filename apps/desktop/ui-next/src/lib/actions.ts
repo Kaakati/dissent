@@ -1,12 +1,12 @@
 // Actions for the dialogs, menus and the right column. Each calls the backend and then refreshes the store, as
-// ui/actions.js does. A failure becomes a toast and the action resolves to undefined (falsy), so a caller never
+// the old UI's actions.js does. A failure becomes a toast and the action resolves to undefined (falsy), so a caller never
 // throws. Views that need a change to the shell go through useShell; these are the ones that talk to the engine.
 import { api } from './api';
 import { has } from './features';
 import { refreshProfiles } from './profiles';
 import { useShell } from './store';
 import { toast } from './toasts';
-import type { CommunitySummary, GroupSummary, Id } from './types';
+import type { CommunitySummary, GroupSummary, Id, Trait } from './types';
 
 async function guarded<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try {
@@ -99,6 +99,52 @@ export const clearCommunityIcon = (communityId: Id) =>
     return true;
   });
 
+// Server Settings. A rename reloads the list too, since the rail and the switcher show the name.
+export const renameCommunity = (communityId: Id, name: string) =>
+  guarded(async () => {
+    await api.renameCommunity(communityId, name);
+    await shell().loadCommunities();
+    await shell().loadCommunity(communityId);
+    return true;
+  });
+
+export const setCommunityBanner = (communityId: Id, bytes: string) =>
+  guarded(async () => {
+    await api.setCommunityBanner(communityId, bytes);
+    await shell().loadCommunity(communityId);
+    return true;
+  });
+
+export const clearCommunityBanner = (communityId: Id) =>
+  guarded(async () => {
+    await api.clearCommunityBanner(communityId);
+    await shell().loadCommunity(communityId);
+    return true;
+  });
+
+// Server Settings' Save Changes: only the parts that changed are published, one event each, then the server reloads.
+export interface ServerProfileChanges {
+  name?: string;
+  banner?: { kind: 'image'; bytes: string } | { kind: 'gif'; gif: string; poster: string } | { kind: 'preset'; id: number } | null;
+  profile?: { description: string; traits: Trait[] };
+}
+
+export const saveServerProfile = (communityId: Id, changes: ServerProfileChanges) =>
+  guarded(async () => {
+    if (changes.name !== undefined) await api.renameCommunity(communityId, changes.name);
+    if (changes.banner !== undefined) {
+      const b = changes.banner;
+      if (b === null) await api.clearCommunityBanner(communityId);
+      else if (b.kind === 'preset') await api.setCommunityBannerPreset(communityId, b.id);
+      else if (b.kind === 'gif') await api.setCommunityBannerAnimated(communityId, b.gif, b.poster);
+      else await api.setCommunityBanner(communityId, b.bytes);
+    }
+    if (changes.profile) await api.setCommunityProfile(communityId, changes.profile.description, changes.profile.traits);
+    if (changes.name !== undefined) await shell().loadCommunities();
+    await shell().loadCommunity(communityId);
+    return true;
+  });
+
 export const claimHandle = (communityId: Id, handle: string) =>
   guarded(async () => {
     await api.claimHandle(communityId, handle);
@@ -122,7 +168,7 @@ export const addContact = (link: string) =>
 
 export const peerContactLink = (rootId: Id) => guarded(() => api.peerContactLink(rootId));
 
-// Friend requests. Each refreshes the contact lists and the conversations, as ui/actions.js contactAction does.
+// Friend requests. Each refreshes the contact lists and the conversations, as the old UI's actions.js contactAction does.
 const contactAction = (fn: () => Promise<unknown>) =>
   guarded(async () => {
     await fn();
@@ -205,12 +251,15 @@ export const pinConversation = (key: string, pinned: boolean) =>
 // Clears the unread marker. The engine is told too when it keeps read markers (the pins feature).
 export const markRead = (key: string) =>
   guarded(async () => {
-    if (has('pins')) await api.markRead(key);
+    const conversation = key.startsWith('dm:') || key.startsWith('group:');
+    if (has('pins') || conversation) await api.markRead(key);
     useShell.setState((s) => {
       const unread = new Set(s.unread);
       unread.delete(key);
       return { unread };
     });
+    // The engine's unread count for the conversation changed, so the rail and the sidebar read it again.
+    if (conversation) await useShell.getState().loadConversations();
     return true;
   });
 
@@ -258,3 +307,16 @@ export const sendFiles = (paths: string[], text: string | null, target: FileTarg
     if (has('transfers')) await shell().loadTransfers();
     return true;
   });
+
+// Settings > My identity: the profile banner is published at once, to every server and to contacts. Me reloads, and the
+// open profile cards read the new one.
+const afterProfileBanner = async () => {
+  useShell.setState({ me: await api.me() });
+  refreshProfiles();
+  return true;
+};
+export const setProfileBanner = (bytes: string) => guarded(async () => (await api.setProfileBanner(bytes), afterProfileBanner()));
+export const setProfileBannerPreset = (preset: number) => guarded(async () => (await api.setProfileBannerPreset(preset), afterProfileBanner()));
+export const setProfileBannerAnimated = (gif: string, poster: string) =>
+  guarded(async () => (await api.setProfileBannerAnimated(gif, poster), afterProfileBanner()));
+export const clearProfileBanner = () => guarded(async () => (await api.clearProfileBanner(), afterProfileBanner()));

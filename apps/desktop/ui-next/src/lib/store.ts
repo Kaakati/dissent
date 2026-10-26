@@ -1,5 +1,5 @@
-// Single source of shell state. Ported from ui/state.js and the navigation, status, call, transfer and engine-event
-// actions in ui/actions.js. Views read the store; actions below call the backend and then update it. Message lists,
+// Single source of shell state. Ported from the old UI's state.js and the navigation, status, call, transfer and engine-event
+// actions in the old UI's actions.js. Views read the store; actions below call the backend and then update it. Message lists,
 // composers and dialogs are not here yet: the batch that ports each view adds its slice.
 import { create } from 'zustand';
 import { api } from './api';
@@ -140,6 +140,7 @@ export interface ShellState {
   boot: () => Promise<void>;
   loadStatus: () => Promise<void>;
   loadCommunities: () => Promise<void>;
+  moveServer: (communityId: Id, index: number) => Promise<void>;
   loadConversations: () => Promise<void>;
   loadCommunity: (communityId: Id) => Promise<void>;
   loadContacts: () => Promise<void>;
@@ -161,6 +162,10 @@ export interface ShellState {
   setStatus: (status: StatusName, untilMs: number | null) => Promise<void>;
   toggleMuted: () => Promise<void>;
   toggleDeafened: () => Promise<void>;
+  toggleCamera: () => Promise<void>;
+  toggleScreenShare: () => Promise<void>;
+  /** The latest preview of each person's camera (`root_id`) and shared screen (`root_id:screen`). JPEG, base64. */
+  videoFrames: Record<string, { width: number; height: number; jpeg: string }>;
   leaveCall: () => Promise<void>;
 
   handleEngineEvent: (ev: EngineEvent) => Promise<void>;
@@ -227,6 +232,7 @@ export const useShell = create<ShellState>()((set, get) => ({
   transfers: [],
   transferRates: null,
   call: null,
+  videoFrames: {},
   voiceConnection: null,
   update: null,
   updateDismissed: false,
@@ -270,8 +276,32 @@ export const useShell = create<ShellState>()((set, get) => ({
     if (route.kind === 'server' && !communities.some((c) => c.id === route.communityId)) await get().openHome();
   },
 
+  // The rail's order moves at once; it is saved on this device, and a failed save puts the old order back.
+  moveServer: async (communityId, index) => {
+    const before = get().communities;
+    const from = before.findIndex((c) => c.id === communityId);
+    if (from < 0 || index < 0 || index >= before.length || index === from) return;
+    const next = [...before];
+    const [moved] = next.splice(from, 1);
+    next.splice(index, 0, moved);
+    set({ communities: next });
+    try {
+      await api.setServerOrder(next.map((c) => c.id));
+    } catch (err) {
+      set({ communities: before });
+      toast(err);
+    }
+  },
+
   loadConversations: async () => {
-    const conversations = await api.listConversations();
+    const [listed, pins] = await Promise.all([
+      api.listConversations(),
+      has('pins') ? api.pinnedConversations().catch(() => [] as string[]) : Promise.resolve([] as string[]),
+    ]);
+    // The engine keeps pins as conversation keys; pinned conversations go first, in their listed order.
+    const pinned = new Set(pins);
+    const marked: ConversationSummary[] = listed.map((c) => ({ ...c, pinned: pinned.has(convKey(c)) }));
+    const conversations = [...marked.filter((c) => c.pinned), ...marked.filter((c) => !c.pinned)];
     const { group } = get();
     set({
       conversations,
@@ -471,6 +501,26 @@ export const useShell = create<ShellState>()((set, get) => ({
     });
   },
 
+  toggleScreenShare: async () => {
+    await guard(async () => {
+      const { call } = get();
+      if (!call) return;
+      const next = !call.screen;
+      await api.setScreenShare(next);
+      set({ call: { ...call, screen: next } });
+    });
+  },
+
+  toggleCamera: async () => {
+    await guard(async () => {
+      const { call } = get();
+      if (!call) return;
+      const next = !call.camera;
+      await api.setCamera(next);
+      set({ call: { ...call, camera: next } });
+    });
+  },
+
   toggleDeafened: async () => {
     await guard(async () => {
       const { call } = get();
@@ -517,6 +567,11 @@ export const useShell = create<ShellState>()((set, get) => ({
           await get().loadConversations();
           const { route, group } = get();
           if (!(route.kind === 'home' && group?.id === ev.group_id)) set({ unread: new Set([...get().unread, `group:${ev.group_id}`]) });
+          return;
+        }
+        case 'video_frame': {
+          const key = ev.screen ? `${ev.root_id}:screen` : ev.root_id;
+          set({ videoFrames: { ...get().videoFrames, [key]: { width: ev.width, height: ev.height, jpeg: ev.jpeg } } });
           return;
         }
         case 'contacts':

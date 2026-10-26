@@ -1,5 +1,5 @@
 // The small dialogs with one field: claim a handle, a private note or nickname on a contact, and add a contact. Ported
-// from ui/views/dialogs.js (openClaimHandleDialog, openNoteDialog, openAddContactDialog).
+// from the old UI's views/dialogs.js (openClaimHandleDialog, openNoteDialog, openAddContactDialog).
 import { useState } from 'react';
 import { AtSign, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';

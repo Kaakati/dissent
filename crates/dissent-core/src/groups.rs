@@ -866,11 +866,11 @@ impl Engine {
     /// locally and is sealed once it does.
     pub async fn send_to_conversation(&self, conv: ConvId, text: String) -> Result<DmItem> {
         let text = clean_message(&text)?;
-        let embeds = self.build_embeds(&text).await;
+        let (embeds, extras) = self.build_embeds(&text).await;
         let plain = if embeds.is_empty() {
             text
         } else {
-            crate::attachments::pack_with_embeds(&text, &[], &embeds)?
+            crate::attachments::pack_all_with(&text, &[], &embeds, &[], None, &extras)?
         };
         self.send_conversation_plain(conv, plain).await
     }

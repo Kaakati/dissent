@@ -12,6 +12,128 @@ Shared contract for all agents. "Server" in the UI = "community" in code.
 6. **Direct messages** are 1:1, sent device-to-device over a direct iroh connection (QUIC/TLS end to end between devices; relays only see ciphertext). Undelivered DMs stay in an outbox and are retried.
 7. Users who share no server can still DM by exchanging a **contact link** `dissent://contact/...`.
 
+## Mentions
+
+A message in a server channel can mention people. The text stays plain `@Name`. The list of who is
+mentioned travels in the sealed payload, in a trailer extension tagged `mentions` (tag 2) with a
+postcard body `Mentions { users: Vec<[u8; 32]>, everyone: bool }`. A reader that does not know the tag
+skips it, and so does a reader whose body does not decode, so older clients show the message as text.
+
+- **Who can be mentioned.** A user counts only if they are a member of the community and not banned,
+  as the reader sees the community. Ids of other people are kept out of the message's views.
+- **`@everyone`.** It counts only when the author held the *mention everyone* permission when the
+  message was accepted. That is the owner and admins by default. The check reads the permission state
+  at that point in the replay (`MessageView.mention_all`), so a later demotion does not change a
+  message already accepted.
+- **Counts.** A channel's unread mention count is the number of messages newer than its last
+  mark-read that mention this device. Marking a channel read is local: it is stored on this device
+  (`mention_reads.bin`) and nobody else sees it.
+- **Alerts.** A mention alerts even in a muted channel, but not under Do Not Disturb. That rule is
+  in the UI.
+- **Not yet.** Direct and group messages carry no mention fields.
+
+## Server settings
+
+The owner opens **Server Settings** from the server menu. It is a full-page view with a left nav:
+Server Profile, then People (Members, Invites, Bans). There is no Roles page and no Delete Server,
+because the engine has neither yet. Members who are not the owner do not see the entry.
+
+Server Profile is a form beside a live preview card. The card is the same component the invite card
+uses. The name, banner, description and traits wait in an unsaved bar until **Save Changes**, which
+publishes one event for each part that changed. Leaving with unsaved changes shakes the bar instead
+of closing. The icon applies at once, through the existing icon flow.
+
+- **Name.** `Payload::CommunityRename { name }`, owner only. The name must already be trimmed, must not
+  be empty, and may be at most 64 characters (`MAX_COMMUNITY_NAME_CHARS`, the create dialog's limit).
+  Replay rejects anything else as `Malformed`. The rename with the highest HLC wins, as for the icon,
+  so concurrent renames converge. Until a rename is accepted, the genesis name stands, and the
+  genesis itself never changes. `Community::name()` returns the current name, so the views, the DHT
+  record and the member's own invite preview all follow it.
+- **Banner.** `Payload::CommunityBannerSet { banner: Option<Banner> }`, owner and admin, like the icon.
+  `Banner::Preset(id)` names one of ten gradients (`BANNER_PRESETS`; white, pink, red, orange, yellow,
+  purple, blue, teal, green, dark), which the UI draws (`ui-next/src/lib/banners.ts`).
+  `Banner::Image(Picture)` is a 16:9 WebP or PNG, at most 960 by 540 and 512 KB (`MAX_BANNER_BYTES`),
+  cropped in the avatar editor's banner shape. It is stored, fetched and decrypted into `avatars/`
+  like the icon. The views carry `banner` (the file) and `banner_preset`. The sidebar shows the banner
+  at the top of the channel column, with the name over it, and the banner collapses into the plain
+  header as the channel list scrolls.
+- **Profile.** `Payload::CommunityProfileSet { description, traits }`, owner and admin. The description
+  is trimmed and at most 300 characters. There are at most five traits. Each trait is a trimmed label
+  of 1 to 24 characters with an optional emoji (`state::valid_profile`). An emoji is exactly one
+  extended grapheme cluster of at most 32 scalars (`normalize_trait_emoji`), so skin tones, ZWJ
+  sequences, flags and keycaps pass, and two emoji do not.
+  Replay **rejects** a profile over any cap as `Malformed`, rather than trimming it, so every peer
+  shows the same profile or none. The engine refuses it before sending.
+- **Compatibility.** The three payloads are appended to `Payload`. They are sealed like every other
+  control payload: under the community secret, or under the epoch key with member-only control on.
+  So the outer event is the `SealedControl` or carrier form that older clients decode. A released
+  client that holds the key cannot decode the inner kind, and rejects that one event as `Forged`.
+  This is silent, and sync does not stall, so **older clients ignore these changes**. They keep the
+  genesis name and show no banner or profile. The carrier is not used for these payloads, since it is
+  for new outer variants. A rename stays under the community secret even with member-only control on,
+  like invite events, because the invite preview hands it to a joiner as proof of the name.
+- **DHT record.** After a rename, the founder's device republishes the community record with the new
+  name. It does this whether it made the rename or received it.
+- **Invite preview.** The released `SignedPreview` keeps the genesis name, which older clients check
+  against the genesis. Newer clients ask `Request::InvitePreviewFull` first. It answers with the same
+  preview plus a `PreviewExtra { rename, banner, profile }`, signed by the same device. The joiner
+  opens the rename with the invite secret and checks that the genesis owner signed it. If both hold,
+  the card shows the new name. If either fails, the card shows the genesis name. A peer that cannot
+  decode the new request answers with an error, and the joiner falls back to `InvitePreview`. The
+  card shows the banner, description and traits, and "Est. <month>" from the genesis date.
+- **Limits.** An owner who rotated to a new root cannot prove a rename this way, so invite cards show
+  the genesis name until the joiner is in. The banner and profile are not verified beyond the
+  answering member's signature, as icons are not. Once joined, the DAG decides.
+
+## Animated banners
+
+A GIF with more than one frame stays animated, as a server banner or a personal one. Avatars and
+icons stay still.
+
+- **Editor.** The crop is shown on the first frame as usual, but Apply doesn't draw it on a canvas,
+  which would keep one frame. It sends the original bytes and the crop rect to the engine
+  (`prepare_animated_banner`). The rect is in source pixels of the picture after its quarter turns.
+  The editor shows a spinner until the engine answers.
+- **Engine** (`animated_banner.rs`, in a blocking task):
+  - It decodes every frame with its delay, rotates, crops, and scales each frame to at most 960 by
+    540, keeping 16:9.
+  - It writes a GIF that loops forever (`NETSCAPE2.0`, loop count 0). The output holds only frames
+    and the loop block, so comments and other metadata in the source are dropped.
+  - It writes a still JPEG of the first frame as the poster.
+  - Limits: at most 200 frames and 2 MB. Over that, it first drops every other frame, doubling
+    the delays, then lowers the width in steps (960, 720, 540, 400, 320). If it still doesn't fit,
+    it refuses with a clear error.
+- **Payload.** `Banner::Animated { image, poster }` is appended to `Banner`. The GIF may be up to
+  2 MB (`MAX_ANIMATED_BANNER_BYTES`), and the poster is held to the still banner cap. Still images
+  keep 512 KB. An older client can't decode the new variant, so it rejects that banner event and
+  shows no banner, silently.
+- **Showing it.** The views carry `banner` (the GIF) and `banner_poster`. The UI shows the poster
+  under `prefers-reduced-motion: reduce`, and while the window doesn't have focus, so a banner
+  nobody watches doesn't animate.
+
+## Profile banners
+
+A person sets a banner in Settings › My identity, under the avatar. It uses the same presets, the
+same 16:9 crop and the same caps as a server banner: at most 960 by 540 and 512 KB. A pick is
+published at once. It shows behind the profile card, the DM panel and the full profile. With no
+banner, those keep the person's hue.
+
+- **Payload.** `Payload::ProfileBannerSet { banner: Option<Banner> }`, appended and gen-sealed like
+  `ProfileUpdate`, published to every community the person is in. Only the author sets their own,
+  since replay keys it by author. Replay rejects an unknown preset or an oversized picture as
+  `Malformed`, and the highest HLC wins. `ProfileUpdate` and the direct `SignedProfile` are unchanged.
+- **Contacts.** `Request::ProfileBanner(SignedBanner)` is an appended request, signed by the device
+  under its own domain. It goes directly to contact devices, as `Request::Profile` does for the
+  picture. It is accepted only from a contact who isn't blocked, and the newest HLC wins. A device
+  from before banners cannot decode it and answers with an error.
+- **Storage.** A picture is stored, fetched and decrypted into `<profile>/avatars` like an avatar.
+  This device's own banner and the ones contacts sent directly are kept sealed in `banners.bin`, which
+  a profile copy re-seals with the other sealed files. The views carry `banner` (the file) and
+  `banner_preset` on `MeView` and `UserView`. The newest banner from any community or the direct
+  path wins.
+- **Compatibility.** Older clients ignore it: they reject the sealed payload as forged, silently,
+  and answer the direct request with an error.
+
 ## Addresses
 
 Users, servers and devices have a short, checkable form to read out or paste, in the style of Bitcoin addresses:
@@ -28,7 +150,7 @@ Users, servers and devices have a short, checkable form to read out or paste, in
 - Adding by address works while the person allows it. Their user record is published on the Mainline DHT under their root key (`dissent-discovery`, `user_record.rs`), listing their device certs, which are verified against the address. The "Let people add me by address" switch (on by default) withdraws the record when off. Contact links keep working either way.
 - The shareable contact link is the short form, `dissent://contact/<address>`, while the record is published. The long card form (`dissent://contact/<base32>`) still parses and works, and is what is shared while the switch is off.
 - Only a device that holds the root key publishes the record. See `06-threat-model.md` for what publishing reveals.
-- Code: `crates/dissent-identity/src/address.rs` (encode, decode, prefixes), `apps/desktop/ui/address.js` (the same encoding in JavaScript; `address.test.js` checks the two agree on fixed keys).
+- Code: `crates/dissent-identity/src/address.rs` (encode, decode, prefixes), `apps/desktop/ui-next/src/mock/address.js` (the same encoding in JavaScript; `apps/desktop/ui-next/src/mock/address.test.js` checks the two agree on fixed keys).
 
 ## Already implemented (do not change unless your task says so)
 

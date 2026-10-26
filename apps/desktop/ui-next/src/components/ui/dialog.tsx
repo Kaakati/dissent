@@ -17,11 +17,11 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & { wide?: boolean; overlayClassName?: string }) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className={cn('fixed inset-0 z-50 bg-black/70', overlayClassName)} />
+      <DialogPrimitive.Overlay className={cn('fixed inset-0 z-[85] bg-black/70', overlayClassName)} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-[min(520px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-chat text-text shadow-[var(--shadow-3)] outline-none',
+          'fixed top-1/2 left-1/2 z-[85] flex max-h-[calc(100vh-32px)] w-[min(520px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-chat text-text shadow-[var(--shadow-3)] outline-none',
           wide && 'w-[min(600px,92vw)]',
           className,
         )}

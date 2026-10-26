@@ -1,4 +1,4 @@
-// Small pure helpers for names, colours and counts. Ported from ui/ui.js.
+// Small pure helpers for names, colours and counts. Ported from the old UI's ui.js.
 
 // The hue of an avatar or server is a stable hash of its id, so one person keeps one colour everywhere.
 export function hueOf(seed: string | null | undefined): number {

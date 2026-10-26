@@ -1,6 +1,6 @@
 // The rows of the Friends lists: a friend (presence, name, tag, status or call line, Message and More), a request (Accept
 // and Ignore, or Cancel) and a blocked person (Unblock). Ported from friendRow, incomingRow, outgoingRow and blockedRow in
-// ui/views/friends.js. A row opens the conversation; its buttons do not.
+// the old UI's views/friends.js. A row opens the conversation; its buttons do not.
 import type { MouseEvent, ReactNode } from 'react';
 import { EllipsisVertical, MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';

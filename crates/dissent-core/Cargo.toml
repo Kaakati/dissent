@@ -4,7 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# AV1 encoding through SVT-AV1, see dissent-video.
+svt-av1 = ["dissent-video/svt-av1"]
+# Lets the integration tests map link preview hosts to loopback servers, and allow http for them.
+test-hooks = []
+
 [dependencies]
+base64.workspace = true
+image.workspace = true
+dissent-video.workspace = true
 dissent-identity.workspace = true
 dissent-events.workspace = true
 dissent-net.workspace = true
@@ -20,6 +29,7 @@ thiserror.workspace = true
 serde.workspace = true
 postcard.workspace = true
 blake3.workspace = true
+chacha20poly1305.workspace = true
 rand.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -30,5 +40,7 @@ url.workspace = true
 n0-future.workspace = true
 
 [dev-dependencies]
+dissent-core = { path = ".", features = ["test-hooks"] }
 iroh-relay = { workspace = true, features = ["test-utils"] }
 noq-proto.workspace = true
+image.workspace = true

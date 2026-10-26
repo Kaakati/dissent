@@ -102,7 +102,7 @@ async fn storage_seeder_serves_history_and_is_never_in_the_group() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn seeder_refuses_member_sealed_events_without_a_valid_tag() {
-    use dissent_events::{ChannelId, Event, EventBody, Hlc, Payload, SignedEvent};
+    use dissent_events::{ChannelId, Event, EventBody, Hlc, SignedEvent};
 
     crate::testutil::bounded(async {
         let alice = Node::named("alice").await;
@@ -163,11 +163,7 @@ async fn seeder_refuses_member_sealed_events_without_a_valid_tag() {
                 wall_ms: crate::engine::now_ms(),
                 counter: 0,
             },
-            payload: Payload::MemberSealedControl {
-                epoch: 0,
-                ciphertext: vec![7; 64],
-                tag: [0; 32],
-            },
+            payload: dissent_events::member_sealed_payload(0, vec![7; 64], [0; 32]).unwrap(),
         };
         let forged = Event::sign(body, &alice.identity.device);
         let forged_id = forged.id;

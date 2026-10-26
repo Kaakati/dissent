@@ -10,7 +10,7 @@ use crate::store::{write_bin, write_community_key};
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
 use crate::wire::SignedAddr;
 use dissent_discovery::{CommunityRecord, Invite, InviteLink, ShortInvite};
-use dissent_events::{ChannelId, Payload, SignedEvent};
+use dissent_events::{ChannelId, HistorySetting, Payload, SignedEvent};
 use dissent_identity::{CommunityId, CommunityKey, DeviceId, Genesis};
 use dissent_net::{PeerAddr, TopicId, TopicReceiver, TopicSender};
 use std::sync::{Arc, PoisonError};
@@ -70,6 +70,9 @@ impl Engine {
         )
         .await?;
 
+        // New servers start with "since joined": a joiner sees only messages from after it joined. Owners can
+        // switch to "all" later. Servers created before this change keep their replayed setting.
+        self.set_history_visibility(id, HistorySetting::SinceJoin).await?;
         self.spawn_publish_records();
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
@@ -429,6 +432,7 @@ impl Engine {
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
+        self.prune_thumbnails();
         self.emit(EngineEvent::CommunitiesChanged);
         Ok(())
     }

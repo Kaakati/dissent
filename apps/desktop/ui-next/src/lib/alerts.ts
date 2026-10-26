@@ -1,6 +1,7 @@
 // New-message alerts: the notification sound and the desktop notification, decided by one rule. Ported from the alert
-// half of ui/actions.js (shouldAlert, alertFor, alertForChannelMessage, alertForDm, alertForGroup) and the notification
+// half of the old UI's actions.js (shouldAlert, alertFor, alertForChannelMessage, alertForDm, alertForGroup) and the notification
 // click (openNotifiedConversation).
+import { has } from './features';
 import { api } from './api';
 import { isMuted } from './mutes';
 import { showOsNotification } from './osnotify';
@@ -19,22 +20,17 @@ interface AlertMessage {
   mentions?: boolean; // channel messages only
 }
 
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-// True when the text @-mentions one of the names, as a whole word and ignoring case.
-function mentions(text: string, names: (string | null | undefined)[]): boolean {
-  return names.some((name) => name && new RegExp(`@${escapeRegExp(name)}(?![\\p{L}\\p{N}_])`, 'iu').test(text));
-}
-
-// One decision for the sound and the desktop notification. Muted, own, ignored, closed and channel messages without an
-// @mention never do, and neither does Do Not Disturb.
+// One decision for the sound and the desktop notification. Muted, own, ignored and closed conversations never do, and
+// neither does Do Not Disturb. A channel message alerts when the server's notification setting says so (the engine
+// decides that before this runs), and a mention alerts through a channel mute, as a DM does.
 function shouldAlert(msg: AlertMessage): boolean {
   const s = useShell.getState();
   const me = s.me;
-  if (isMuted(msg.key)) return false;
+  // A mention alerts even in a muted channel, the same as a DM; nothing alerts under Do Not Disturb.
+  if (isMuted(msg.key) && !(msg.kind === 'channel' && msg.mentions)) return false;
   if (!me || msg.from === me.root_id || s.ignored.includes(msg.from)) return false;
   if (s.status.status === 'dnd') return false;
-  if (msg.kind === 'channel') return Boolean(msg.mentions);
+  if (msg.kind === 'channel') return true;
   return s.conversations.some((c) => convKey(c) === msg.key); // a closed conversation is no longer listed
 }
 
@@ -55,10 +51,14 @@ function alertFor(msg: AlertMessage): void {
 export async function alertForChannelMessage(ev: { community_id: Id; channel_id: Id }): Promise<void> {
   const [latest] = (await api.channelMessages(ev.community_id, ev.channel_id, 1)) as ChannelMessage[];
   const me = useShell.getState().me;
-  if (!latest || !me || !latest.text?.includes('@')) return;
+  if (!latest || !me) return;
+  const mentioned = has('mentions') && latest.mentions_me === true;
+  const byName = mentioned && (latest.mentions?.some((m) => m.id === me.root_id) ?? false);
+  // Without the server_prefs capability only a mention alerts, as it did before server preferences existed.
+  const alerts = has('server_prefs') ? await api.serverAlerts(ev.community_id, mentioned, byName) : mentioned;
+  if (!alerts) return;
   const cached = useShell.getState().community;
   const community = cached?.id === ev.community_id ? cached : await api.communityView(ev.community_id);
-  const handle = community.members?.find((m) => m.root_id === me.root_id)?.handle;
   const channel = community.channels?.find((c) => c.id === ev.channel_id);
   alertFor({
     kind: 'channel',
@@ -67,7 +67,7 @@ export async function alertForChannelMessage(ev: { community_id: Id; channel_id:
     sender: latest.author_name,
     where: channel ? `#${channel.name}` : '',
     text: latest.text,
-    mentions: mentions(latest.text, [me.display_name, handle]),
+    mentions: mentioned,
   });
 }
 

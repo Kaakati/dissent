@@ -18,6 +18,38 @@ fn other_party(me: &RootId, meta: &ConvMeta) -> Option<RootId> {
     meta.members.iter().copied().find(|m| m != me)
 }
 
+/// The most unread messages one conversation counts. The rail shows 99+ past this.
+pub const UNREAD_CAP: u32 = 100;
+
+/// Unread messages: those from someone other than `me`, after `since_ms`, that are not deleted. Each
+/// message is (author, time in ms, deleted). Counting stops at `UNREAD_CAP`.
+pub(crate) fn count_unread(me: &RootId, since_ms: u64, messages: impl Iterator<Item = (RootId, u64, bool)>) -> u32 {
+    messages
+        .filter(|(from, ms, deleted)| *from != *me && *ms > since_ms && !*deleted)
+        .take(UNREAD_CAP as usize)
+        .count() as u32
+}
+
+/// The unread count of a conversation for this device. A 1:1 DM also counts its plaintext messages
+/// from before sealing.
+fn unread_of(w: &World, meta: &ConvMeta, peer: Option<RootId>) -> u32 {
+    let key = match peer {
+        Some(p) => format!("dm:{p}"),
+        None => format!("group:{}", meta.id),
+    };
+    let since = crate::local::read_marker_in(w, &key).unwrap_or(0);
+    let acts = w.conv_acts.get(&meta.id).map_or(&[][..], Vec::as_slice);
+    let msgs = w.conv_msgs.get(&meta.id).map_or(&[][..], Vec::as_slice);
+    let deleted = crate::conv_actions::deleted_messages(acts, msgs);
+    let sealed = msgs.iter().map(|m| (m.from, m.hlc.wall_ms, deleted.contains(&m.id)));
+    let legacy = peer
+        .and_then(|p| w.dms.get(&p))
+        .into_iter()
+        .flatten()
+        .map(|sd| (sd.dm.body.from, sd.dm.body.hlc.wall_ms, false));
+    count_unread(&w.me, since, sealed.chain(legacy))
+}
+
 /// The summary of a conversation. The last text comes from its sealed messages, or from the
 /// plaintext log when the conversation is a 1:1 DM that still has old messages.
 pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
@@ -70,6 +102,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         live_call: None,
         contact_since_ms: peer.and_then(|p| w.contact_times.since.get(&p).copied()),
         first_seen_ms: peer.and_then(|p| w.contact_times.first_seen.get(&p).copied()),
+        unread: unread_of(w, meta, peer),
     }
 }
 
@@ -194,5 +227,36 @@ impl Engine {
             guard.conv_book.save(&guard.paths)?;
         }
         Ok(conv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn who(byte: u8) -> RootId {
+        RootId([byte; 32])
+    }
+
+    #[test]
+    fn only_others_messages_after_the_marker_count() {
+        let me = who(1);
+        let messages = vec![
+            (who(2), 10, false), // before the marker
+            (who(1), 20, false), // mine
+            (who(2), 30, false), // at the marker: already read
+            (who(2), 40, true),  // deleted
+            (who(2), 50, false),
+            (who(3), 60, false),
+        ];
+        assert_eq!(count_unread(&me, 30, messages.clone().into_iter()), 2);
+        assert_eq!(count_unread(&me, 0, messages.into_iter()), 4);
+    }
+
+    #[test]
+    fn the_count_stops_at_the_cap() {
+        let me = who(1);
+        let messages = (1..=250u64).map(|ms| (who(2), ms, false));
+        assert_eq!(count_unread(&me, 0, messages), UNREAD_CAP);
     }
 }

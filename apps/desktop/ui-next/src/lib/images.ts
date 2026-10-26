@@ -1,6 +1,6 @@
 // Profile pictures and server icons. The engine sends `avatar` on people (keyed by root_id, or peer on a conversation)
 // and `icon` on servers (keyed by id). Each is a URL the webview can load, or null. Every API response passes through
-// noteImages(), so a component looks an image up by the id it already has. Ported from ui/avatars.js.
+// noteImages(), so a component looks an image up by the id it already has. Ported from the old UI's avatars.js.
 
 const images = new Map<string, string>(); // id -> src
 const decoded = new Map<string, HTMLImageElement>(); // src -> image, kept so a re-render does not decode again

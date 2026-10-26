@@ -62,6 +62,11 @@ pub(crate) struct Overlay {
     reactions: HashMap<[u8; 32], Vec<(String, BTreeSet<RootId>)>>,
 }
 
+/// The messages that a conversation's stored actions delete.
+pub(crate) fn deleted_messages(acts: &[ConvAct], msgs: &[ConvMsg]) -> std::collections::BTreeSet<[u8; 32]> {
+    Overlay::build(acts, msgs).deleted
+}
+
 impl Overlay {
     /// Applies `acts` in HLC order to `msgs`. An edit or a delete counts only from the target's author.
     fn build(acts: &[ConvAct], msgs: &[ConvMsg]) -> Self {
@@ -190,7 +195,7 @@ impl Engine {
             from: m.from.to_string(),
             text: if deleted { String::new() } else { crate::attachments::text_of(text) },
             attachments: if deleted { Vec::new() } else { w.attachment_views(text) },
-            embeds: if deleted { Vec::new() } else { crate::attachments::embeds_of(text) },
+            embeds: if deleted { Vec::new() } else { crate::attachments::embed_views(&w.paths, text) },
             ms: m.hlc.wall_ms,
             pending: delivery == "sending",
             delivery: delivery.to_string(),

@@ -17,8 +17,9 @@ async fn capabilities_list_the_implemented_surfaces() {
     for name in ["contacts", "groups", "transfers", "embeds"] {
         assert!(caps.contains(&name), "{name} must be reported");
     }
+    assert!(caps.contains(&"mentions"), "mentions are built and must be reported");
     assert!(!caps.contains(&"topics"), "channel topics are not built and must not be reported");
-    assert!(!caps.contains(&"multi_source"), "per-source progress is not reported, so multi_source stays off");
+    assert!(caps.contains(&"multi_source"), "per-source bytes and verified pieces are reported");
     finish(vec![alice]).await;
     }).await;
 }

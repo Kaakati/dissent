@@ -1,6 +1,7 @@
 // Minimal CDP helper for headless Edge (the drivers' only browser dependency): launch, evaluate, real input events, screenshots.
 import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 
 // The drivers run a headless Chromium-based browser. CHROME_PATH (or EDGE) names it; without either, Edge on Windows and
 // google-chrome on Linux (the CI runners have it).
@@ -9,7 +10,22 @@ const BROWSER = process.env.CHROME_PATH ?? process.env.EDGE ?? (process.platform
   : 'google-chrome');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function launch({ url, width = 1600, height = 1000, port = 9778, profile }) {
+// A TCP port that nothing is listening on right now. Runs by different agents share the machine, so each picks its own
+// instead of a fixed one, and a run never attaches to another run's browser.
+export function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+export async function launch({ url, width = 1600, height = 1000, profile }) {
+  const port = await freePort();
   rmSync(profile, { recursive: true, force: true });
   mkdirSync(profile, { recursive: true });
   // Linux runners start Chrome as a non-root user without a sandbox setup, so the sandbox is switched off there.
@@ -93,7 +109,7 @@ export async function launch({ url, width = 1600, height = 1000, port = 9778, pr
     await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
     await sleep(300);
   }
-  // The next launch reuses the debugging port, so wait for this browser to release it.
+  // The browser's port is this run's own, so there is nothing for a later launch to wait on.
   const close = async () => { ws.close(); browser.kill(); await sleep(1500); };
   return { send, ev, press, typeText, hover, click, moveAway, screenshot, resize, close, consoleErrors, sleep };
 }

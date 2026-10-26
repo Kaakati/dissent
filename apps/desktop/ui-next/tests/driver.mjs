@@ -9,7 +9,7 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch } from './cdp.mjs';
-import { addressOf } from '../src/mock/address.js';
+import { addressOf, base32Encode } from '../src/mock/address.js';
 import { typingParts } from '../src/lib/typing-words.ts';
 
 const UI_PORT = process.env.UI_PORT ?? '1420';
@@ -241,10 +241,12 @@ check('unmuting removes the muted mark', (await ev(`!${rowByText('Maya')}?.query
 // A server this user owns, so the owner-only controls show: created here, as the old driver does.
 await clickRail('Create or join a server');
 await sleep(300);
-await ev(`document.querySelector('[role="dialog"] input[aria-label="Server name"]').focus()`);
+await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
 await typeText('Settings test');
-await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent === 'Create server').click()`);
+await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent.trim() === 'Create').click()`);
 await sleep(900);
+check('the new owned server is on the rail right after it is created', await ev(`[...document.querySelectorAll('button[data-server-id]')].some((b) => b.getAttribute('aria-label') === 'Settings test')`) === true, await ev(`[...document.querySelectorAll('button[data-server-id]')].map((b) => b.getAttribute('aria-label')).join(' | ') + ' || dialogs: ' + document.querySelectorAll('[role=dialog]').length + ' || toast: ' + [...document.querySelectorAll('[role=alert], [data-toast]')].map(n => n.textContent).join(' ')`));
+
 await clickRail('Settings test');
 await sleep(500);
 await ev(`document.querySelector('button[aria-label="Create channel"]').click()`);
@@ -268,6 +270,7 @@ await sleep(300);
 check('Escape closes Create Channel', (await openDialogs()) === 0);
 
 // ---- 11. Channel settings: hover actions, the overlay, save, invites and delete ----
+
 await clickRail('Settings test');
 await sleep(500);
 const generalPos = await ev(`(() => { const b = ${rowByText('general')}; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
@@ -360,6 +363,207 @@ await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((b)
 await sleep(700);
 check('the deleted channel leaves the sidebar and the overlay closes', (await ev(`!${rowByText('hello-world')} && !document.querySelector('[aria-label="Channel settings"]')`)) === true);
 
+// ---- 11b. Server Settings: the owner's entry, Server Profile with its live preview, the unsaved bar, the banner presets
+// and upload, the traits and the description, the sidebar banner, and no entry for members ----
+const SS = '[role="dialog"][aria-label="Server settings"]';
+const ssButton = (text) => `[...document.querySelectorAll('${SS} button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)})`;
+const ssBar = () => ev(`!!document.querySelector('${SS} [aria-label="Unsaved changes"]')`);
+const fill = async (selector, text) => {
+  await ev(`(() => { const i = document.querySelector(${JSON.stringify(selector)}); i.focus(); i.select(); })()`);
+  await typeText(text);
+};
+const saveChanges = async () => {
+  await ev(`${ssButton('Save Changes')}.click()`);
+  await sleep(800);
+};
+
+await clickRail('Settings test');
+await sleep(500);
+check('SS0 with no banner the plain header shows the server name', (await ev(`document.querySelector('${SIDEBAR} [data-server-top]')?.dataset.serverTop === 'plain' && document.querySelector('${SIDEBAR} [data-server-name]')?.textContent === 'Settings test'`)) === true);
+
+await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
+await sleep(250);
+check('SS1 the owner\'s server menu offers Server Settings first', (await menuItems())[0]?.startsWith('Server Settings'), JSON.stringify(await menuItems()));
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await sleep(400);
+check('SS2 Server Settings opens on Server Profile', (await ev(`document.querySelector('${SS} h1')?.textContent`)) === 'Server Profile');
+check('SS3 the nav lists Server Profile, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Members', 'Invites', 'Bans']));
+check('SS4 the form holds Name, Server Icon, Banner, Traits, Message history and Description', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} section h2')].map((n) => n.textContent))`)) === JSON.stringify(['Name', 'Server Icon', 'Banner', 'Traits', 'Message history', 'Description']));
+check('SS5 the name field holds the name, stops at 64, and nothing is unsaved', (await ev(`(() => { const i = document.querySelector('${SS} input[aria-label="Server Name"]'); return i.value === 'Settings test' && i.maxLength === 64; })()`)) === true && !(await ssBar()));
+check('SS6 the icon block offers Change Server Icon', (await ev(`!!${ssButton('Change Server Icon')}`)) === true);
+
+// The unsaved bar, the live preview and Reset.
+await fill(`${SS} input[aria-label="Server Name"]`, 'Scratch name');
+check('SS7 an edit shows the unsaved bar with Reset and Save Changes', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} [aria-label="Unsaved changes"] button')].map((b) => b.textContent.trim()))`)) === JSON.stringify(['Reset', 'Save Changes']) && (await ev(`document.querySelector('${SS} [aria-label="Unsaved changes"]').textContent.includes('Careful — you have unsaved changes!')`)) === true);
+check('SS8 the preview card follows the name as it is typed', (await ev(`document.querySelector('${SS} [data-server-card] [data-card-name]')?.textContent`)) === 'Scratch name');
+await press('Escape');
+await sleep(300);
+check('SS9 leaving with unsaved changes shakes the bar and keeps the page open', (await ev(`!!document.querySelector('${SS}') && !!document.querySelector('${SS} [aria-label="Unsaved changes"][data-shake]')`)) === true);
+await ev(`${ssButton('Reset')}.click()`);
+await sleep(200);
+check('SS10 Reset puts the saved name back and hides the bar', (await ev(`document.querySelector('${SS} input[aria-label="Server Name"]').value === 'Settings test'`)) === true && !(await ssBar()));
+
+// Banner presets: ten swatches and an upload tile; a pick rings the swatch and shows in the preview.
+check('SS11 the banner grid has ten presets and an Upload Image tile', (await ev(`document.querySelectorAll('${SS} [data-banner-swatch]').length === 10 && !!document.querySelector('${SS} [data-banner-upload]')`)) === true);
+await ev(`document.querySelector('${SS} [data-banner-swatch="6"]').click()`);
+await sleep(200);
+check('SS12 a picked preset is checked and fills the preview banner', (await ev(`(() => { const s = document.querySelector('${SS} [data-banner-swatch="6"]'); const p = document.querySelector('${SS} [data-card-banner]'); return s.getAttribute('aria-checked') === 'true' && p.dataset.cardBanner === 'preset' && p.style.background === s.style.background; })()`)) === true);
+
+// Traits: five slots, no more. A slot takes an emoji from the picker and a label, and shows as a chip in the preview.
+check('SS13 there are exactly five trait slots, with a smiley placeholder', (await ev(`document.querySelectorAll('${SS} [data-trait-slot]').length === 5 && !!document.querySelector('${SS} [data-trait-slot="0"] button svg')`)) === true);
+await ev(`document.querySelector('${SS} [data-trait-slot="0"] button').click()`);
+await sleep(300);
+check('SS14 the trait emoji opens the emoji picker above the page', (await ev(`(() => { const p = document.querySelector('.emoji-picker[aria-label="Trait emoji"]'); if (!p) return false; const r = p.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && p.contains(hit); })()`)) === true);
+const pickedEmoji = await ev(`(() => { const b = document.querySelector('.emoji-picker .emoji-cell'); const e = b.textContent; b.click(); return e; })()`);
+await sleep(200);
+await fill(`${SS} input[aria-label="Trait 1 label"]`, 'Woodwork');
+check('SS15 a trait shows as a chip in the preview', (await ev(`document.querySelector('${SS} [data-card-traits]')?.textContent`)) === `${pickedEmoji}Woodwork`, String(await ev(`document.querySelector('${SS} [data-card-traits]')?.textContent ?? null`)));
+check('SS16 a trait label stops at 24 characters', (await ev(`document.querySelector('${SS} input[aria-label="Trait 1 label"]').maxLength`)) === 24);
+// The emoji is optional: a label alone is a trait. An emoji with no label is not, and marks its slot.
+await fill(`${SS} input[aria-label="Trait 2 label"]`, 'Label only');
+check('SS16a a trait with a label and no emoji shows as a chip', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} [data-card-traits] li')].map((n) => n.textContent))`)) === JSON.stringify([`${pickedEmoji}Woodwork`, 'Label only']));
+await ev(`document.querySelector('${SS} [data-trait-slot="2"] button').click()`);
+await sleep(300);
+await ev(`document.querySelector('.emoji-picker .emoji-cell').click()`);
+await sleep(200);
+// Whether the element `selector` names is what a click at its centre would hit, so nothing covers it.
+const topmost = (selector) => ev(`(() => { const n = [...document.querySelectorAll(${JSON.stringify(selector)})].at(-1); if (!n) return 'missing'; const r = n.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && n.contains(hit) ? true : (hit ? hit.tagName + '.' + String(hit.className).slice(0, 60) : 'nothing'); })()`);
+check('SS16b an emoji with no label marks its slot', (await ev(`document.querySelector('${SS} [data-trait-slot="2"]').getAttribute('aria-invalid')`)) === 'true');
+// Save refuses the unlabelled emoji with a toast, which must show above the page.
+await ev(`${ssButton('Save Changes')}.click()`);
+await sleep(400);
+const toastOnTop = await topmost('[role="status"]');
+check('SS16d a toast shows above Server Settings', toastOnTop === true, String(toastOnTop));
+await ev(`document.querySelector('${SS} [data-trait-slot="2"] button').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))`);
+await sleep(200);
+check('SS16c right-click clears a trait emoji', (await ev(`!document.querySelector('${SS} [data-trait-slot="2"]').hasAttribute('aria-invalid') && !!document.querySelector('${SS} [data-trait-slot="2"] button svg')`)) === true);
+
+// The description counts its characters against 300.
+check('SS17 the description counter starts at 0/300', (await ev(`document.querySelector('${SS} [data-description-count]').textContent`)) === '0/300');
+await fill(`${SS} textarea[aria-label="Description"]`, 'We make things.');
+check('SS18 the counter follows the text, and the field stops at 300', (await ev(`document.querySelector('${SS} [data-description-count]').textContent === '15/300' && document.querySelector('${SS} textarea[aria-label="Description"]').maxLength === 300`)) === true);
+check('SS19 the preview shows the description', (await ev(`document.querySelector('${SS} [data-card-description]')?.textContent`)) === 'We make things.');
+await saveChanges();
+check('SS20 Save Changes publishes and hides the bar', !(await ssBar()) && (await ev(`document.querySelector('${SS} [data-banner-swatch="6"]').getAttribute('aria-checked')`)) === 'true');
+check('SS20a the saved traits come back from the server view and fill the preview', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} [data-card-traits] li')].map((n) => n.textContent))`)) === JSON.stringify([`${pickedEmoji}Woodwork`, 'Label only']) && (await ev(`document.querySelector('${SS} input[aria-label="Trait 2 label"]').value`)) === 'Label only');
+await sleep(400);
+await b.screenshot(`${SCRATCH}/shots/server-profile.png`);
+check('SS21 the sidebar shows the banner with the name over it, in white', (await ev(`(() => { const top = document.querySelector('${SIDEBAR} [data-server-top="banner"]'); if (!top) return false; const name = top.querySelector('[data-server-name]'); const r = top.getBoundingClientRect(); return name.textContent === 'Settings test' && Math.abs(r.width / r.height - 16 / 9) < 0.05 && getComputedStyle(name.parentElement).color === 'rgb(255, 255, 255)'; })()`)) === true);
+
+// An uploaded banner: the crop is 16:9 and the picture is 960 by 540.
+await ev(`(() => { const native = HTMLInputElement.prototype.click; window.__nativeInputClick = native; HTMLInputElement.prototype.click = function () { if (this.type === 'file') window.__pickerInput = this; else native.call(this); }; })()`);
+await ev(`document.querySelector('${SS} [data-banner-upload]').click()`);
+await sleep(200);
+await ev(`(async () => {
+  const blob = await (await fetch('app-icon-96.png')).blob();
+  const dt = new DataTransfer();
+  dt.items.add(new File([blob], 'wide.png', { type: 'image/png' }));
+  window.__pickerInput.files = dt.files;
+  window.__pickerInput.dispatchEvent(new Event('change'));
+})()`);
+await sleep(700);
+const maskShape = await ev(`(() => { const r = document.querySelector('[data-crop-mask]')?.getBoundingClientRect(); return r ? r.width / r.height : 0; })()`);
+check('SS22 the banner crop is 16:9', Math.abs(maskShape - 16 / 9) < 0.05, String(maskShape));
+const cropOnTop = await topmost('[data-slot="dialog-content"]');
+check('SS22a the banner crop dialog opens above Server Settings', cropOnTop === true, String(cropOnTop));
+await ev(`document.querySelector('[data-crop-stage]').focus()`);
+await press('Enter');
+await sleep(900);
+// Change Server Icon opens the same crop dialog, also above the page. Escape cancels it and keeps the page.
+await ev(`${ssButton('Change Server Icon')}.click()`);
+await sleep(200);
+await ev(`(async () => {
+  const blob = await (await fetch('app-icon-96.png')).blob();
+  const dt = new DataTransfer();
+  dt.items.add(new File([blob], 'icon.png', { type: 'image/png' }));
+  window.__pickerInput.files = dt.files;
+  window.__pickerInput.dispatchEvent(new Event('change'));
+})()`);
+await sleep(700);
+const iconCropOnTop = await topmost('[data-slot="dialog-content"]');
+check('SS23a the icon crop dialog opens above Server Settings', iconCropOnTop === true, String(iconCropOnTop));
+await press('Escape');
+await sleep(300);
+check('SS23b Escape cancels the icon crop and keeps Server Settings open', (await ev(`!document.querySelector('[data-slot="dialog-content"]') && !!document.querySelector('${SS}')`)) === true);
+const uploadSize = await ev(`(async () => { const t = document.querySelector('${SS} [data-banner-upload]'); const url = t.style.backgroundImage.slice(5, -2); const img = new Image(); img.src = url; await img.decode(); return [img.naturalWidth, img.naturalHeight, t.getAttribute('aria-checked'), url.slice(0, 5)]; })()`);
+// The draft is shown from a blob: URL. The app's CSP allows blob: and asset: images, not data: ones.
+check('SS23 the upload is a 960 by 540 picture from a blob URL, selected and unsaved', uploadSize?.join('x') === '960x540xtruexblob:' && (await ssBar()), String(uploadSize));
+// An animated GIF banner keeps its animation: the editor sends the GIF to the engine with the crop instead of drawing
+// one frame on a canvas, and the draft shows the looping GIF.
+const LOOP_GIF = 'R0lGODlhQAAkAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAQAAkAAAITwABCBxIsKDBgwgTKlzIsKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihxJsqTJkyhTqlzJsqXLlzBjypxJs6bNmzhz6tzJs6fPn0CDCh2qMSAAIfkEAQoAAQAsAAAAAEAAJACBAMgAAAAAAAAAAAAACE8AAQgcSLCgwYMIEypcyLChw4cQI0qcSLGixYsYM2rcyLGjx48gQ4ocSbKkyZMoU6pcybKly5cwY8qcSbOmzZs4c+rcybOnz59AgwodqjEgACH5BAEKAAEALAAAAABAACQAgQAA/wAAAAAAAAAAAAhPAAEIHEiwoMGDCBMqXMiwocOHECNKnEixosWLGDNq3Mixo8ePIEOKHEmypMmTKFOqXMmypcuXMGPKnEmzps2bOHPq3Mmzp8+fQIMKHaoxIAA7';
+await ev(`document.querySelector('${SS} [data-banner-upload]').click()`);
+await sleep(200);
+await ev(`(() => {
+  const bytes = Uint8Array.from(atob(${JSON.stringify(LOOP_GIF)}), (c) => c.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], 'loop.gif', { type: 'image/gif' }));
+  window.__pickerInput.files = dt.files;
+  window.__pickerInput.dispatchEvent(new Event('change'));
+})()`);
+await sleep(700);
+check('SS23c an animated GIF opens the 16:9 crop', Math.abs((await ev(`(() => { const r = document.querySelector('[data-crop-mask]').getBoundingClientRect(); return r.width / r.height; })()`)) - 16 / 9) < 0.05);
+await ev(`document.querySelector('[data-crop-stage]').focus()`);
+await press('Enter');
+for (let i = 0; i < 30 && (await ev(`!!document.querySelector('[data-crop-stage]')`)); i++) await sleep(100);
+const gifDraft = await ev(`(async () => { const t = document.querySelector('${SS} [data-banner-upload]'); const url = t.style.backgroundImage.slice(5, -2); const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer()); let frames = 0; for (let i = 0; i + 2 < bytes.length; i++) if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9 && bytes[i + 2] === 0x04) frames++; return [t.hasAttribute('data-banner-animated'), String.fromCharCode(...bytes.slice(0, 4)), frames].join(' '); })()`);
+check('SS23d the draft is the animated GIF, all its frames kept', gifDraft === 'true GIF8 3', String(gifDraft));
+await ev(`HTMLInputElement.prototype.click = window.__nativeInputClick`);
+await saveChanges();
+check('SS24a the saved animated banner loops in the sidebar', (await ev(`getComputedStyle(document.querySelector('${SIDEBAR} [data-server-banner]')).backgroundImage.includes('image/gif')`)) === true);
+await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+await sleep(400);
+check('SS24b under reduced motion the sidebar shows the still poster frame', (await ev(`getComputedStyle(document.querySelector('${SIDEBAR} [data-server-banner]')).backgroundImage.includes('image/jpeg')`)) === true, String(await ev(`getComputedStyle(document.querySelector('${SIDEBAR} [data-server-banner]')).backgroundImage.slice(0, 40)`)));
+await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+await sleep(300);
+check('SS24 a saved upload shows in the preview and the sidebar', (await ev(`document.querySelector('${SS} [data-card-banner]').dataset.cardBanner === 'image' && !!document.querySelector('${SIDEBAR} [data-server-top="banner"]')`)) === true && !(await ssBar()));
+// The banner as members see it, above the channel list. Then back into Server Settings to remove it.
+await press('Escape');
+await sleep(400);
+await b.screenshot(`${SCRATCH}/shots/sidebar-banner.png`);
+
+await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
+await sleep(250);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await sleep(400);
+await ev(`${ssButton('Remove Banner')}.click()`);
+await saveChanges();
+check('SS25 Remove Banner, saved, brings the plain header back', (await ev(`document.querySelector('${SIDEBAR} [data-server-top]')?.dataset.serverTop`)) === 'plain');
+
+// A rename reaches the rail and the sidebar, trimmed; then the name goes back.
+await fill(`${SS} input[aria-label="Server Name"]`, '  Renamed test  ');
+await saveChanges();
+check('SS26 Save renames the server in the sidebar and the rail, trimmed', (await ev(`!!document.querySelector('button[aria-label="Renamed test menu"]') && !!document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Renamed test"]')`)) === true);
+await fill(`${SS} input[aria-label="Server Name"]`, 'Settings test');
+await saveChanges();
+await press('Escape');
+await sleep(300);
+
+check('SS27 Escape closes Server Settings once nothing is unsaved', (await ev(`!document.querySelector('${SS}') && !!document.querySelector('button[aria-label="Settings test menu"]')`)) === true);
+
+// An invite link in a message shows the same card, with the preview's banner, description and traits.
+await ev(`document.querySelector('button[aria-label="Create channel"]').click()`);
+await sleep(300);
+await ev(`document.querySelector('[role="dialog"] input[aria-label="Channel name"]').focus()`);
+await typeText('cards');
+await press('Enter');
+await sleep(700);
+await ev(`${rowByText('cards')}?.click()`);
+await sleep(500);
+await ev(`document.querySelector('textarea[aria-label="Message"]').focus()`);
+await typeText('Join us: dissent://invite/mock-rustaceans');
+await press('Enter');
+await sleep(1500);
+check('SS27a the invite card shows the server\'s banner, description and traits', (await ev(`(() => { const c = [...document.querySelectorAll('main [data-server-card]')].at(-1); if (!c) return 'no card'; return [c.querySelector('[data-card-banner]').dataset.cardBanner, c.querySelector('[data-card-description]')?.textContent, [...c.querySelectorAll('[data-card-traits] li')].map((n) => n.textContent).join('|')].join(' / '); })()`)) === 'preset / Systems programmers sharing crates, questions and the occasional crab. / 🦀Rust|🛠️Tooling', String(await ev(`[...document.querySelectorAll('main [data-server-card]')].length`)));
+
+// A member of Riverside Makers gets no Server Settings.
+await clickRail('Riverside Makers');
+await sleep(600);
+await pointerClick(`document.querySelector('button[aria-label="Riverside Makers menu"]')`);
+await sleep(250);
+check('SS28 a member\'s server menu has no Server Settings', !(await menuItems()).some((l) => l.startsWith('Server Settings')), JSON.stringify(await menuItems()));
+await press('Escape');
+await sleep(200);
+
 // ---- F. Transfers page: tabs and row actions by key, auto-accept, the network line, the sidebar badge ----
 await ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim().startsWith('Transfers'))?.click()`);
 for (let i = 0; i < 40 && !(await ev(`!!document.querySelector('[role="table"][aria-label="Transfers"]')`)); i++) await sleep(150);
@@ -404,6 +608,16 @@ check('F6 Escape closes the network tooltip', (await ev(`document.querySelectorA
 // The sidebar badge counts the active, paused and waiting transfers.
 const transfersLinkF = await ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim().startsWith('Transfers'))?.textContent ?? ''`);
 check('F7 sidebar Transfers link shows the active count', /\d+ active/.test(transfersLinkF), transfersLinkF.trim());
+
+// The download folder starts at the OS Downloads folder. Reset to default is offered only once the user picks a folder.
+const storageAside = `document.querySelector('aside[aria-label="Storage"]')`;
+check('the default download folder shows the OS Downloads path, with no reset', (await ev(`${storageAside}?.textContent.includes('C:/Users/ada/Downloads') && !${storageAside}.textContent.includes('Reset to default')`)) === true);
+await ev(`[...${storageAside}.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Change').click()`);
+await sleep(300);
+check('a picked folder shows its path and offers Reset to default', (await ev(`${storageAside}.textContent.includes('/Downloads/Dissent') && [...${storageAside}.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Reset to default')`)) === true);
+await ev(`[...${storageAside}.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Reset to default').click()`);
+await sleep(300);
+check('Reset to default goes back to the OS Downloads folder', (await ev(`${storageAside}.textContent.includes('C:/Users/ada/Downloads') && !${storageAside}.textContent.includes('/Dissent') && ![...${storageAside}.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Reset to default')`)) === true);
 
 // ---- 12. Settings shortcut: Ctrl+, opens Settings ----
 await press(',', 2);
@@ -542,11 +756,10 @@ await rightClickMsg('Bring the ply on Saturday?');
 await sleep(300);
 const theirMenu = await shownMenuItems();
 check('right-click on a message opens the message menu', theirMenu.length > 0 && theirMenu.some(l => l.startsWith('Reply')), JSON.stringify(theirMenu));
-check('the menu on their message offers reaction, reply, copy text and copy ID', ['Add reaction', 'Reply', 'Copy text', 'Copy message ID'].every(p => theirMenu.some(l => l.startsWith(p))), JSON.stringify(theirMenu));
+check('the menu on their message offers reaction, reply, copy text and copy ID', ['Add Reaction', 'Reply', 'Copy Text', 'Copy message ID'].every(p => theirMenu.some(l => l.startsWith(p))), JSON.stringify(theirMenu));
 check('Delete is not offered on a message that is not yours', !theirMenu.some(l => l.startsWith('Delete')) && !theirMenu.some(l => l.startsWith('Edit')), JSON.stringify(theirMenu));
-await clickMenuItem('Add reaction');
-await sleep(300);
-await ev(`[...document.querySelectorAll('.emoji-cell')].find(c => c.textContent === '👍').click()`);
+// The quick reactions lead the message menu: 👍 is one of them, so it is picked from there.
+await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find(m => m.textContent.trim() === '👍').click()`);
 await sleep(500);
 const dmPill = await ev(`[...document.querySelectorAll('.msg')].find(m => m.querySelector('.body')?.textContent.includes('Bring the ply'))?.querySelector('.reaction.mine')?.textContent ?? null`);
 check('a DM message takes a reaction from the menu', dmPill === '👍1', `pill ${dmPill}`);
@@ -567,8 +780,8 @@ check('a DM reply shows the preview of the message it answers', (await ev(`[...d
 await rightClickMsg('Yes, reading it now.');
 await sleep(300);
 const ownMenu = await shownMenuItems();
-check('Delete and Edit are offered on your own message', ownMenu.some(l => l.startsWith('Delete message')) && ownMenu.some(l => l.startsWith('Edit message')), JSON.stringify(ownMenu));
-await clickMenuItem('Delete message');
+check('Delete and Edit are offered on your own message', ownMenu.some(l => l.startsWith('Delete Message')) && ownMenu.some(l => l.startsWith('Edit Message')), JSON.stringify(ownMenu));
+await clickMenuItem('Delete Message');
 await sleep(300);
 const confirmText = await ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`);
 check('Delete asks "Delete message? This can\'t be undone."', confirmText.includes("Delete message? This can't be undone."), confirmText);
@@ -577,7 +790,7 @@ await sleep(300);
 check('Cancel keeps the message', (await ev(`[...document.querySelectorAll('.msg .body')].some(b => b.textContent.includes('Yes, reading it now.'))`)) === true);
 await rightClickMsg('Yes, reading it now.');
 await sleep(300);
-await clickMenuItem('Delete message');
+await clickMenuItem('Delete Message');
 await sleep(300);
 await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find(b => b.textContent === 'Delete').click()`);
 await sleep(600);
@@ -591,14 +804,14 @@ check('Shift+F10 on a focused message opens the menu', (await ev(`!!document.que
 await press('Escape');
 await sleep(200);
 
-// Shift+click on Delete message skips the confirm.
+// Shift+click on Delete Message skips the confirm.
 await rightClickMsg('All the photos from Saturday.');
 await sleep(300);
-const shiftAt = await ev(`(() => { const r = [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find(m => m.textContent.trim().startsWith('Delete message')).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+const shiftAt = await ev(`(() => { const r = [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find(m => m.textContent.trim().startsWith('Delete Message')).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
 await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: shiftAt.x, y: shiftAt.y, button: 'left', clickCount: 1, modifiers: 8 });
 await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: shiftAt.x, y: shiftAt.y, button: 'left', clickCount: 1, modifiers: 8 });
 await sleep(600);
-check('Shift+click on Delete message skips the confirm', (await ev(`!document.querySelector('[role="alertdialog"]') && [...document.querySelectorAll('.msg .body.deleted')].length >= 2`)) === true);
+check('Shift+click on Delete Message skips the confirm', (await ev(`!document.querySelector('[role="alertdialog"]') && [...document.querySelectorAll('.msg .body.deleted')].length >= 2`)) === true);
 
 // ---- C5. Spoiler and age-restricted channels: spoiler text and media blur until clicked; an age gate asks once ----
 // (ported from keyboard-driver.mjs section 7k; the mock sets the visibility, as the old driver does)
@@ -657,15 +870,28 @@ await ev(`(() => { const b = [...document.querySelectorAll('.att-card button[ari
 await sleep(700);
 const hasDownloading = await ev(`!!document.querySelector('.att-card.downloading .att-name-text')`);
 if (hasDownloading) {
+  check('a download from several providers says how many on the card', (await ev(`[...document.querySelectorAll('.att-card.downloading .att-sources')].some((n) => n.textContent === 'From 3 sources')`)) === true);
   await ev(`document.querySelector('.att-card.downloading .att-name-text').click()`);
   await sleep(400);
   check('a downloading file name opens its transfer details in the right column', (await ev(`!!document.querySelector('button[aria-label="Close transfer details"]')`)) === true);
+  check('the transfer details name the sources and count the verified pieces', (await ev(`(() => { const t = document.body.textContent; return t.includes('Downloading from 3 sources') && /[0-9]+ of [0-9]+ pieces verified/.test(t); })()`)) === true);
   await ev(`document.querySelector('button[aria-label="Close transfer details"]').click()`);
   await sleep(300);
   check('closing the transfer details gives the right column back to the members', (await ev(`!document.querySelector('button[aria-label="Close transfer details"]') && /Members/.test(document.querySelector('aside[aria-label="Right column"], aside:last-of-type')?.textContent ?? document.body.textContent)`)) === true);
 } else {
   check('a downloading file is in the Riverside channel to test the details', false, 'no .att-card.downloading in the mock');
 }
+
+// ---- C7. A picture's preview: the sender's thumbnail in a rounded box, sized like an embed; a click starts the full download ----
+await send('Page.navigate', { url: `${BASE}/` });
+await sleep(2200);
+await clickRail('Riverside Makers');
+await sleep(900);
+const preview = JSON.parse(await ev(`JSON.stringify((() => { const b = document.querySelector('.att-preview-btn'); if (!b) return null; const r = b.getBoundingClientRect(); const img = b.querySelector('img'); return { label: b.getAttribute('aria-label'), w: r.width, h: r.height, loaded: !!img && img.complete && img.naturalWidth > 0 }; })())`) ?? 'null');
+check('a picture shows the sender thumbnail, sized like an embed', preview !== null && preview.label === 'Download enclosure.png' && preview.loaded && preview.w <= 400 && preview.h <= 300 && Math.abs(preview.w / preview.h - 1.6) < 0.05, JSON.stringify(preview));
+await ev(`document.querySelector('.att-preview-btn').click()`);
+await sleep(700);
+check('a click on the preview starts the full download', (await ev(`!!document.querySelector('button[aria-label="Downloading enclosure.png"]') && document.querySelector('.att-preview-btn')?.disabled === true`)) === true);
 
 // ==== chat sections (batch A) end ====
 // ---- 13. Console ----
@@ -685,6 +911,122 @@ await sleep(300);
 const afterEmoji = await ev(`document.querySelector('textarea[aria-label="Message"]').value`);
 check('a picked emoji lands between the text before and after the caret', afterEmoji.length > beforeEmoji.length && afterEmoji.startsWith('a') && afterEmoji.endsWith('b'), JSON.stringify(afterEmoji));
 await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.value = ''; t.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+
+// ---- Mentions: the @ autocomplete and the pick, the highlight, the pills, the badges, and @everyone without the permission ----
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware')).click()`);
+await sleep(700);
+check('the hardware channel row shows its mention count', (await ev(`!!document.querySelector('aside[aria-label="Channels and conversations"] [aria-label="1 mentions"]')`)) === true);
+check('the server rail badge sums the mentions of the server', (await ev(`!!document.querySelector('button[aria-label="Riverside Makers"]').closest('.rail-item').querySelector('[aria-label="2 mentions"]')`)) === true);
+check('a message that mentions you is highlighted', (await ev(`[...document.querySelectorAll('article.msg.mention')].some((a) => a.textContent.includes('the 3 mm ply is in the rack'))`)) === true);
+check('the mention is a pill that names you', (await ev(`[...document.querySelectorAll('article.msg .mention-pill')].some((p) => p.textContent === '@Sami')`)) === true);
+await ev(`[...document.querySelectorAll('article.msg .mention-pill')].find((p) => p.textContent === '@Sami').click()`);
+await sleep(300);
+check('clicking a mention pill opens the profile card', (await ev(`!!document.querySelector('[role="dialog"][aria-label="User profile"]')`)) === true);
+await press('Escape');
+await sleep(300);
+
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('general')).click()`);
+await sleep(700);
+check('an admin @everyone is highlighted for every member', (await ev(`[...document.querySelectorAll('article.msg.mention')].some((a) => a.textContent.includes('the laser is free from 5 pm'))`)) === true);
+check('a plain member @everyone is highlighted for nobody', (await ev(`![...document.querySelectorAll('article.msg.mention')].some((a) => a.textContent.includes('who is in for Saturday'))`)) === true);
+check('@everyone is a pill only where it is valid', (await ev(`[...document.querySelectorAll('article.msg .mention-pill')].filter((p) => p.textContent === '@everyone').length === 1`)) === true);
+
+// The autocomplete: "@" opens the members, typing filters them, Enter picks, Escape closes. @everyone is not offered
+// without the permission, which the viewer (a member here) does not hold.
+// The composer is typed into with real input, so React sees the change (a value set from script does not reach it).
+const composer = async (value) => {
+  await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); t.select(); })()`);
+  if (value) {
+    await typeText(value);
+  } else {
+    await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+  }
+  await sleep(200);
+};
+const optionLabels = () => ev(`[...document.querySelectorAll('[role="listbox"][aria-label="Mention a member"] [role="option"]')].map((o) => o.textContent.trim())`);
+await composer('hi @');
+await sleep(250);
+const everyoneOffered = (await optionLabels()) ?? [];
+check('typing @ opens the member autocomplete', everyoneOffered.length >= 2, JSON.stringify(everyoneOffered));
+check('@everyone is not offered to a member without the permission', !everyoneOffered.some((l) => l.startsWith('everyone')), JSON.stringify(everyoneOffered));
+await composer('hi @Ma');
+await sleep(250);
+const filtered = (await optionLabels()) ?? [];
+check('the autocomplete filters the members as you type', filtered.length > 0 && filtered.every((l) => /ma/i.test(l)), JSON.stringify(filtered));
+await press('ArrowDown');
+await press('ArrowUp');
+await press('Enter');
+await sleep(250);
+const picked = await ev(`document.querySelector('textarea[aria-label="Message"]').value`);
+check('Enter picks the highlighted member and inserts @Name at the caret', picked.startsWith('hi @') && picked.endsWith(' ') && (await optionLabels() ?? []).length === 0, JSON.stringify(picked));
+await composer('hi @Ma');
+await sleep(200);
+await press('Escape');
+await sleep(200);
+check('Escape closes the autocomplete and keeps the text', (await ev(`!document.querySelector('[role="listbox"][aria-label="Mention a member"]') && document.querySelector('textarea[aria-label="Message"]').value === 'hi @Ma'`)) === true);
+await composer('');
+
+// ---- Server rail menu and Create Server: a member's menu, an owner's menu and Server Settings, and a server created with an icon ----
+// The reloads earlier in this run drop servers made in it, so the owned server is made again here when it is missing.
+if (!(await ev(`[...document.querySelectorAll('button[data-server-id]')].some((b) => b.getAttribute('aria-label') === 'Settings test')`))) {
+  await clickRail('Create or join a server');
+  await sleep(300);
+  await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
+  await typeText('Settings test');
+  await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent.trim() === 'Create').click()`);
+  await sleep(900);
+}
+const railMenuItems = (name) => ev(`(() => { const b = document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']'); if (!b) return false; const r = b.getBoundingClientRect(); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 20 })); return true; })()`);
+await railMenuItems('Riverside Makers');
+await sleep(500);
+const memberMenu = (await menuItems()) ?? [];
+check('a member sees Mark As Read, Invite to Server and Leave Server on the rail menu', ['Mark As Read', 'Invite to Server', 'Leave Server'].every((t) => memberMenu.some((l) => l.startsWith(t))), JSON.stringify(memberMenu));
+check('a member does not see Create Channel or Server Settings on the rail menu', !memberMenu.some((l) => l.startsWith('Create Channel') || l.startsWith('Server Settings')), JSON.stringify(memberMenu));
+await press('Escape');
+await sleep(250);
+
+// The mock keeps servers in memory, and this run navigates (which reloads it), so this block makes the server it needs.
+await ev(`document.querySelector('button[aria-label="Create or join a server"]').click()`);
+await sleep(500);
+await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
+await typeText('Rail test');
+await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent.trim() === 'Create').click()`);
+await sleep(1200);
+const ownerRailShown = await railMenuItems('Rail test');
+check('the owned server is on the rail', ownerRailShown === true, await ev(`[...document.querySelectorAll('button[data-server-id]')].map((b) => b.getAttribute('aria-label')).join(' | ')`));
+await sleep(500);
+const ownerMenu = (await menuItems()) ?? [];
+check('an owner sees Server Settings and Create Channel on the rail menu', ownerMenu.some((l) => l.startsWith('Server Settings')) && ownerMenu.some((l) => l.startsWith('Create Channel')), JSON.stringify(ownerMenu));
+check('an owner does not see Leave Server on the rail menu', !ownerMenu.some((l) => l.startsWith('Leave Server')), JSON.stringify(ownerMenu));
+// Server Settings > Members opens the page at Members.
+await ev(`(() => { const m = [...document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.startsWith('Server Settings')); m?.focus(); })()`);
+await press('ArrowRight');
+await sleep(300);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((x) => x.textContent.trim() === 'Members')?.click()`);
+await sleep(700);
+check('Server Settings > Members opens the page at Members', (await ev(`[...document.querySelectorAll('h1')].some((n) => n.textContent === 'Members')`)) === true);
+await press('Escape');
+await sleep(300);
+
+// Create Server: the name is prefilled with the user's name and selected; the icon goes through the crop editor and shows.
+await ev(`document.querySelector('button[aria-label="Create or join a server"]').click()`);
+await sleep(500);
+check('Customize Your Server shows the prefilled name', (await ev(`document.querySelector('[role="dialog"] input[aria-label="Server Name"]')?.value === "Sami's server"`)) === true);
+// The file picker is replaced by a generated image, so the crop editor opens as it does for a picked file.
+await ev(`(() => { const orig = HTMLInputElement.prototype.click; HTMLInputElement.prototype.click = function () { if (this.type !== 'file') return orig.call(this); HTMLInputElement.prototype.click = orig; const c = document.createElement('canvas'); c.width = 96; c.height = 96; const g = c.getContext('2d'); g.fillStyle = '#e0483a'; g.fillRect(0, 0, 96, 96); const input = this; c.toBlob((blob) => { const dt = new DataTransfer(); dt.items.add(new File([blob], 'icon.png', { type: 'image/png' })); input.files = dt.files; input.dispatchEvent(new Event('change')); }, 'image/png'); }; document.querySelector('[role="dialog"] button[aria-label="Upload a server icon"]').click(); })()`);
+await sleep(1200);
+await ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Apply')?.click()`);
+await sleep(1200);
+check('the chosen icon shows in the tile', (await ev(`!!document.querySelector('[role="dialog"] button[aria-label="Change server icon"] img')`)) === true);
+await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
+await typeText('Icon test');
+await sleep(200);
+await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((x) => x.textContent.trim() === 'Create')?.click()`);
+await sleep(1500);
+check('a server created with an icon shows the icon on the rail', (await ev(`!!document.querySelector('button[aria-label="Icon test"] img')`)) === true);
 
 noConsoleErrors('core', consoleErrors);
 
@@ -796,7 +1138,15 @@ check('the DM profile panel is open in the right column', (await b.ev(`document.
 check('the DM panel avatar is 80 px with a presence glyph', (await b.ev(`(() => { const r = document.querySelector('${RIGHT} [role="img"][aria-label="Online"]'); return !!r && Math.round(r.parentElement.getBoundingClientRect().width) === 80; })()`)) === true);
 const mutualText = await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Servers?$/.test(n.textContent.trim()))?.textContent.trim() ?? null`);
 check('the mutual servers line reads "N Mutual Servers"', /^\d+ Mutual Servers?$/.test(mutualText ?? ''), String(mutualText));
-check('the panel shows no mutual friends or contacts line', (await b.ev(`!/mutual (friend|contact)/i.test(document.querySelector('${RIGHT}').textContent)`)) === true);
+const friendsText = await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Friends?$/.test(n.getAttribute('aria-label') ?? ''))?.getAttribute('aria-label') ?? null`);
+check('the mutual friends count reads "N Mutual Friends"', /^\d+ Mutual Friends?$/.test(friendsText ?? ''), String(friendsText));
+const friendCount = Number((friendsText ?? '0').split(' ')[0]);
+const friendsToggle = `[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Friends?$/.test(n.getAttribute('aria-label') ?? ''))`;
+await b.ev(`${friendsToggle}.click()`);
+await sleep(200);
+check('clicking the mutual friends count lists them', (await b.ev(`document.querySelectorAll('${RIGHT} ul li').length === ${friendCount}`)) === true, `count ${friendCount}`);
+await b.ev(`${friendsToggle}.click()`);
+await sleep(200);
 const mutualCount = Number((mutualText ?? '0').split(' ')[0]);
 await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Servers?$/.test(n.textContent.trim())).click()`);
 await sleep(200);
@@ -835,6 +1185,8 @@ check('clicking a member opens the profile card', !!card && card.text.includes('
 check('the card is 300 px and inside the window', !!card && card.width === 300 && card.inside, JSON.stringify(card && { width: card.width, inside: card.inside }));
 check('the card shows the address tag and the mutual servers line', !!card && card.text.includes('·') && /mutual server|No mutual servers/.test(card.text));
 check('the card has Message, Verify safety number and the role line for Maya', !!card && card.text.includes('Message') && card.text.includes('Verify safety number'));
+// Maya set the Teal preset as her profile banner (in the mock), so her card shows it instead of her hue.
+check('the card shows the person\'s banner preset', (await b.ev(`getComputedStyle(document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]')).backgroundImage.includes('rgb(142, 232, 220)')`)) === true, String(await b.ev(`getComputedStyle(document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]') ?? document.body).backgroundImage.slice(0, 80)`)));
 await b.press('Escape');
 await sleep(300);
 check('Esc closes the card', (await b.ev(`!document.querySelector('[role="dialog"][aria-label="User profile"]')`)) === true);
@@ -879,6 +1231,14 @@ check('the address switch is on by default', (await b.ev(`${toggleSel}.checked`)
 await b.ev(`${toggleSel}.click()`);
 await sleep(300);
 check('switching it off sticks', (await b.ev(`${toggleSel}.checked`)) === false);
+const friendsSel = `document.querySelector('input[aria-label="Show my friends list to my friends"]')`;
+check('the friends list switch is on by default', (await b.ev(`${friendsSel}.checked`)) === true);
+await b.ev(`${friendsSel}.click()`);
+await sleep(300);
+check('switching the friends list off sticks', (await b.ev(`${friendsSel}.checked`)) === false);
+await b.ev(`${friendsSel}.click()`);
+await sleep(300);
+check('switching the friends list back on sticks', (await b.ev(`${friendsSel}.checked`)) === true);
 await b.ev(`${toggleSel}.click()`);
 await sleep(300);
 check('switching it back on sticks', (await b.ev(`${toggleSel}.checked`)) === true);
@@ -961,9 +1321,9 @@ await sleep(600);
 check('C3 Join opens the call pane in place of the lobby', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && !document.querySelector('section[aria-label="Get ready to join"]')`)) === true);
 check('C3 the call pane has the call chat', (await b.ev(`!!document.querySelector('section[aria-label="Call chat"]')`)) === true);
 check('C3 the group call chat shows the messages of the group the call is in', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
-check('C3 the camera and screen share slots are disabled and say Coming soon', (await b.ev(`['Camera, coming soon', 'Share screen, coming soon'].every((l) => { const n = document.querySelector('button[aria-label="' + l + '"]'); return n && n.disabled; })`)) === true);
+check('C3 the camera button is live and the screen share slot is disabled and says Coming soon', (await b.ev(`(() => { const cam = document.querySelector('button[aria-label="Turn camera on"]'); const share = document.querySelector('button[aria-label="Share screen, coming soon"]'); return Boolean(cam) && !cam.disabled && Boolean(share) && share.disabled; })()`)) === true);
 check('C3 the header says how many are in the call', (await b.ev(`document.body.textContent.includes('in call') && document.body.textContent.includes('End-to-end encrypted')`)) === true);
-check('C3 the camera and share slots are aria-disabled with the Coming soon tooltip', (await b.ev(`['Camera, coming soon', 'Share screen, coming soon'].every((l) => { const n = document.querySelector('button[aria-label="' + l + '"]'); return n && n.getAttribute('aria-disabled') === 'true' && n.title === 'Coming soon'; })`)) === true);
+check('C3 the share slot is aria-disabled with the Coming soon tooltip', (await b.ev(`(() => { const n = document.querySelector('button[aria-label="Share screen, coming soon"]'); return Boolean(n) && n.getAttribute('aria-disabled') === 'true' && n.title === 'Coming soon'; })()`)) === true);
 check('C3 the call header has the overflow menu and the search box', (await b.ev(`!!document.querySelector('button[aria-label="More group actions"]') && !!document.querySelector('input[aria-label="Search messages"]')`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-call-group.png`);
 
@@ -1262,6 +1622,63 @@ check('E20 Remove avatar falls back to the initials', (await b.ev(`!document.que
 await pressEsc(b);
 check('E21 Esc closes Settings after the avatar work', (await b.ev(`!document.querySelector('[data-settings-page]')`)) === true);
 
+// The profile banner, under the avatar in My identity: a preset applies at once and shows on your own card; an upload
+// crops at 16:9 above the page and replaces it; Remove Banner falls back to your hue.
+const ownCardBanner = async () => {
+  await b.ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
+  await sleep(800);
+  await b.ev(`[...document.querySelectorAll('aside[aria-label="Members"] button, [aria-label="Member list"] button, aside button')].find(n => n.textContent.includes('Sami'))?.click()`);
+  await sleep(600);
+  const bg = await b.ev(`(() => { const n = document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]'); return n ? getComputedStyle(n).backgroundImage : null; })()`);
+  await pressEsc(b);
+  await sleep(300);
+  return bg;
+};
+const openIdentity = async () => {
+  await b.press(',', 2);
+  await sleep(400);
+};
+await openIdentity();
+check('E21a My identity has a Banner section with ten presets and an upload', (await b.ev(`(() => { const s = [...document.querySelectorAll('[data-settings-page] section')].find(n => n.querySelector('h2')?.textContent === 'Banner'); return !!s && s.querySelectorAll('[data-banner-swatch]').length === 10 && !!s.querySelector('[data-banner-upload]'); })()`)) === true);
+await b.ev(`document.querySelector('[data-settings-page] [data-banner-swatch="4"]').click()`);
+await sleep(500);
+check('E21b a preset is checked at once', (await b.ev(`document.querySelector('[data-settings-page] [data-banner-swatch="4"]').getAttribute('aria-checked')`)) === 'true');
+await pressEsc(b);
+await sleep(300);
+const presetBg = await ownCardBanner();
+check('E21c the preset shows on your own profile card', String(presetBg).includes('rgb(251, 229, 138)'), String(presetBg).slice(0, 80));
+await openIdentity();
+await b.ev(`document.querySelector('[data-settings-page] [data-banner-upload]').click()`);
+await sleep(200);
+await b.ev(`(async () => {
+  const blob = await (await fetch('app-icon-96.png')).blob();
+  const dt = new DataTransfer();
+  dt.items.add(new File([blob], 'wide.png', { type: 'image/png' }));
+  window.__pickerInput.files = dt.files;
+  window.__pickerInput.dispatchEvent(new Event('change'));
+})()`);
+await sleep(700);
+const profileCropOnTop = await b.ev(`(() => { const n = document.querySelector('[data-slot="dialog-content"]'); if (!n) return 'missing'; const r = n.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && n.contains(hit); })()`);
+check('E21d the banner crop opens above Settings', profileCropOnTop === true, String(profileCropOnTop));
+const profileMask = await b.ev(`(() => { const r = document.querySelector('[data-crop-mask]').getBoundingClientRect(); return r.width / r.height; })()`);
+check('E21e the profile banner crop is 16:9', Math.abs(profileMask - 16 / 9) < 0.05, String(profileMask));
+await b.ev(`document.querySelector('[data-crop-stage]').focus()`);
+await pressEnter(b);
+await sleep(900);
+check('E21f an upload is checked once applied', (await b.ev(`document.querySelector('[data-settings-page] [data-banner-upload]').getAttribute('aria-checked')`)) === 'true');
+await pressEsc(b);
+await sleep(300);
+const imageBg = await ownCardBanner();
+check('E21g the upload shows on your own profile card', String(imageBg).startsWith('url('), String(imageBg).slice(0, 40));
+await openIdentity();
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Remove Banner').click()`);
+await sleep(500);
+check('E21h Remove Banner unchecks everything', (await b.ev(`document.querySelectorAll('[data-settings-page] [aria-checked="true"][data-banner-swatch], [data-settings-page] [aria-checked="true"][data-banner-upload]').length`)) === 0);
+await pressEsc(b);
+await sleep(300);
+const hueBg = await ownCardBanner();
+check('E21i with no banner your card falls back to your hue', String(hueBg).includes('oklch') || (String(hueBg).includes('linear-gradient') && !String(hueBg).includes('url(')), String(hueBg).slice(0, 60));
+
 // Settings pages: Network shows the status table; Updates checks the mock release; Sounds disables its controls.
 await b.press(',', 2);
 await sleep(400);
@@ -1345,11 +1762,609 @@ await chooser.close();
 await b.close();
 }
 
+async function section_rail() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9779, profile: `${SCRATCH}/rail-next-profile` });
+const { send, ev } = b;
+await sleep(800);
+// Real key presses with Alt and Shift held: modifiers Alt=1, Shift=8.
+const pressKey = async (key, vk, modifiers) => {
+  const base = { key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(250);
+};
+// ---- F. The server rail's order: a drag moves a server, Alt+Shift+Up and Down move the focused one, and the order survives a reload ----
+await ev(`localStorage.removeItem('dissent-mock-rail-order')`);
+await send('Page.navigate', { url: `${BASE}/` });
+await sleep(2200);
+const RAIL = 'nav[aria-label="Servers and direct messages"]';
+const railNames = () => ev(`[...document.querySelectorAll('${RAIL} button[data-server-id]')].map((b) => b.getAttribute('aria-label'))`);
+const railPoint = (name) => ev(`(() => { const r = document.querySelector('${RAIL} button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+const before = await railNames();
+check('the rail has at least three servers for the order checks', before.length >= 3, JSON.stringify(before));
+if (before.length >= 3) {
+  const [first, second, third] = before;
+  const p0 = await railPoint(first);
+  const p1 = await railPoint(second);
+  // Press the first server, move the pointer below the second server's middle, and release there.
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: p0.x, y: p0.y, button: 'left', clickCount: 1, buttons: 1 });
+  for (const y of [p0.y + 10, p1.y + 12]) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p0.x, y, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p0.x, y: p1.y + 12, button: 'left', clickCount: 1, buttons: 0 });
+  await sleep(400);
+  const dragged = await railNames();
+  check('dragging a server below the next one moves it into that place', dragged[0] === second && dragged[1] === first && dragged[2] === third, JSON.stringify(dragged));
+  check('a drag does not open the server it moved', (await ev(`!document.querySelector('${RAIL} button[aria-current="page"][data-server-id]')`)) === true);
+
+  await send('Page.navigate', { url: `${BASE}/` });
+  await sleep(2200);
+  check('the dragged order survives a reload', JSON.stringify((await railNames()).slice(0, 2)) === JSON.stringify([second, first]), JSON.stringify(await railNames()));
+
+  // Alt+Shift+Down on the focused server moves it one place down, and announces the new position.
+  await ev(`document.querySelector('${RAIL} button[aria-label=' + JSON.stringify(${JSON.stringify(second)}) + ']').focus()`);
+  await pressKey('ArrowDown', 40, 9);
+  await sleep(300);
+  const moved = await railNames();
+  check('Alt+Shift+Down moves the focused server one place down', moved[0] === first && moved[1] === second, JSON.stringify(moved));
+  const note = await ev(`document.querySelector('${RAIL} [role="status"]')?.textContent ?? ''`);
+  check('the keyboard move is announced with its new position', note === `Moved ${second} to position 2 of ${moved.length}`, note);
+  check('focus stays on the moved server', (await ev(`document.activeElement?.getAttribute('aria-label') === ${JSON.stringify(second)}`)) === true);
+  await ev(`localStorage.removeItem('dissent-mock-rail-order')`);
+  await send('Page.navigate', { url: `${BASE}/` });
+  await sleep(2200);
+}
+
+await b.close();
+}
+
+// The mentions capability is not reported (an engine before it): nothing mention-related shows, and the composer does not
+// open the autocomplete or send a mention argument. The same fixtures as the mentions checks, without the capability.
+async function section_nomentions() {
+const b = await launch({ url: `${BASE}/?nomentions`, width: 1600, height: 1000, port: 9781, profile: `${SCRATCH}/nomentions-next-profile` });
+const { ev } = b;
+await sleep(1200);
+await ev(`[...document.querySelectorAll('button[aria-label="Riverside Makers"]')][0]?.click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware'))?.click()`);
+await sleep(700);
+check('without the mentions capability no mention pill, highlight or badge shows', (await ev(`document.querySelectorAll('.mention-pill, article.msg.mention, [aria-label$=" mentions"]').length === 0`)) === true);
+check('the message text is still shown without the pills', (await ev(`[...document.querySelectorAll('article.msg')].some((a) => a.textContent.includes('the 3 mm ply is in the rack'))`)) === true);
+await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); })()`);
+await b.typeText('hi @');
+await sleep(300);
+check('without the capability typing @ does not open the autocomplete', (await ev(`!document.querySelector('[role="listbox"][aria-label="Mention a member"]')`)) === true);
+await b.close();
+}
+
+// ---- P. Link previews: the card shows the site, the title and the picture, with the site's colour on its bar, the picture at most 400 px wide and the
+// description in three lines; the first link in a message asks once in the composer, and "Not now" sends the message without turning previews on. ----
+async function section_previews() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9782, profile: `${SCRATCH}/previews-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const pressEnter = async () => {
+  const base = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'char', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(400);
+};
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya'))?.click()`);
+await sleep(700);
+
+const card = await ev(`(() => {
+  const a = document.querySelector('article.embed');
+  if (!a) return null;
+  const img = a.querySelector('img.embed-img');
+  const r = img?.getBoundingClientRect();
+  return {
+    accent: a.style.getPropertyValue('--embed-accent'),
+    site: a.querySelector('.embed-site')?.textContent ?? '',
+    title: a.querySelector('.embed-title')?.textContent ?? '',
+    titleHref: a.querySelector('.embed-title')?.getAttribute('href') ?? '',
+    pictureLinked: !!a.querySelector('a.embed-picture[href]'),
+    w: r ? Math.round(r.width) : 0,
+    h: r ? Math.round(r.height) : 0,
+    clamp: getComputedStyle(a.querySelector('.embed-desc') ?? a).getPropertyValue('-webkit-line-clamp'),
+  };
+})()`);
+check('a link preview shows its site, its title as a link, and its picture as a link', card !== null && card.site === 'GitHub' && card.title.length > 0 && card.titleHref.startsWith('https://') && card.pictureLinked && card.w > 0, JSON.stringify(card));
+check("the card's bar takes the site's theme colour", card?.accent === '#2b6cb0', JSON.stringify(card));
+check('the picture is at most 400 px wide and keeps its aspect ratio', card !== null && card.w <= 400 && card.w > 0 && Math.abs(card.w / card.h - 432 / 168) < 0.05, JSON.stringify(card));
+check('the description is clamped to three lines', card?.clamp === '3', JSON.stringify(card));
+
+// The first link asks once, in the composer. The text waits until the answer; "Not now" sends it and turns nothing on.
+await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); })()`);
+await send('Input.insertText', { text: 'see https://example.com/first' });
+await sleep(250);
+await pressEnter();
+check('the first link in a message asks about previews in the composer', (await ev(`!!document.querySelector('[role="group"][aria-label="Link previews"]')`)) === true);
+check('the question says the site sees the IP address', (await ev(`document.querySelector('[role="group"][aria-label="Link previews"]')?.textContent.includes('the site sees your IP address') ?? false`)) === true);
+check('the text waits in the box until the question is answered', (await ev(`document.querySelector('textarea[aria-label="Message"]').value`)) === 'see https://example.com/first');
+await ev(`[...document.querySelectorAll('[role="group"][aria-label="Link previews"] button')].find((x) => x.textContent === 'Not now')?.click()`);
+await sleep(600);
+check('Not now sends the message and closes the question', (await ev(`!document.querySelector('[role="group"][aria-label="Link previews"]') && [...document.querySelectorAll('article.msg')].some((a) => a.textContent.includes('see https://example.com/first'))`)) === true);
+await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); })()`);
+await send('Input.insertText', { text: 'and https://example.com/second' });
+await sleep(250);
+await pressEnter();
+check('the question is asked once: the next link goes straight out', (await ev(`!document.querySelector('[role="group"][aria-label="Link previews"]') && [...document.querySelectorAll('article.msg')].some((a) => a.textContent.includes('and https://example.com/second'))`)) === true);
+await b.close();
+}
+
+// ---- M. Markdown in messages: each form renders as its element; a masked link shows its address and a link to another site
+// asks first; a spoiler reveals when pressed; code and raw HTML are not read as markup. ----
+async function section_markdown() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9783, profile: `${SCRATCH}/markdown-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+await ev(`[...document.querySelectorAll('button[aria-label="Riverside Makers"]')][0]?.click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('general'))?.click()`);
+await sleep(700);
+const row = `[...document.querySelectorAll('article.msg')].find((a) => a.textContent.includes('Heading one'))`;
+const all = (sel) => ev(`(() => { const r = ${row}; return r ? [...r.querySelectorAll(${JSON.stringify(sel)})].map((n) => n.textContent) : null; })()`);
+const attrs = (sel, name) => ev(`(() => { const r = ${row}; return r ? [...r.querySelectorAll(${JSON.stringify(sel)})].map((n) => n.getAttribute(${JSON.stringify(name)})) : null; })()`);
+
+check('the demo message is in the general channel', (await ev(`!!${row}`)) === true);
+const strongs = await all('strong');
+const strongEms = await all('strong em');
+check('bold text is strong, and bold italic nests em inside strong', strongs.includes('Bold') && strongEms.includes('both'));
+const ems = await all('em');
+check('* and _ both give italic', ems.includes('italic') && ems.includes('also italic'));
+check('__ gives underline', (await all('u')).includes('underlined'));
+check('~~ gives strikethrough', (await all('s')).includes('struck'));
+check('three hash marks give headings one, two and three', (await all('.md-h1')).includes('Heading one') && (await all('.md-h2')).includes('Heading two') && (await all('.md-h3')).includes('Heading three'));
+check('-# gives subtext and > gives a block quote', (await all('.md-subtext')).includes('a subtext line') && (await all('.md-quote')).some((t) => t.includes('a quoted line')));
+check('nested indent gives a list inside a list item', (await ev(`(() => { const r = ${row}; return !!r && [...r.querySelectorAll('ul.md-list li ul.md-list li')].some((n) => n.textContent.includes('nested item')); })()`)) === true);
+check('1. gives an ordered list item', (await ev(`(() => { const r = ${row}; return !!r && [...r.querySelectorAll('ol.md-list li')].some((n) => n.textContent.includes('ordered one')); })()`)) === true);
+check('inline code is code and keeps its stars', (await all('code.md-code')).includes('inline *code*'));
+check('a fenced block shows its language and its text as code', (await all('.md-codelang')).includes('rust') && (await all('.md-codeblock pre code')).some((t) => t.includes('fn main() {}')), JSON.stringify([await all('.md-codelang'), await all('.md-codeblock pre code')]));
+await sleep(1200);
+check('a fenced block is coloured once its language loads', (await ev(`(() => { const r = ${row}; return !!r && [...r.querySelectorAll('.md-codeblock .hljs-keyword')].some((n) => n.textContent === 'fn'); })()`)) === true);
+check('a spoiler is hidden until pressed', (await ev(`(() => { const s = ${row}?.querySelector('.md-spoiler'); return !!s && s.textContent === 'a secret' && !s.classList.contains('revealed') && s.getAttribute('aria-label') === 'Spoiler. Press to reveal'; })()`)) === true);
+await ev(`${row}.querySelector('.md-spoiler').click()`);
+await sleep(200);
+check('pressing a spoiler reveals it', (await ev(`${row}.querySelector('.md-spoiler').classList.contains('revealed')`)) === true);
+check('a masked link shows its label as a link to its address', (await all('a.md-link')).includes('the docs') && (await attrs('a.md-link', 'href')).includes('https://docs.example.com/guide'));
+check('a masked link shows its address on hover', (await attrs('a.md-link', 'title')).includes('https://docs.example.com/guide'));
+check('a bare link is still a link', (await attrs('a.md-link', 'href')).includes('https://example.com/page'));
+check('escaped stars show as text, not as italic', (await ev(`(() => { const r = ${row}; return !!r && r.textContent.includes('*escaped stars*') && ![...r.querySelectorAll('em')].some((n) => n.textContent.includes('escaped')); })()`)) === true);
+check('raw HTML in a message is text, never an element', (await ev(`(() => { const r = ${row}; return !!r && r.textContent.includes('<b>raw html</b>') && !r.querySelector('b'); })()`)) === true);
+check('a link whose label names another site shows its real address on hover', (await attrs('a.md-link', 'title')).includes('https://evil.example.org/phish'));
+await ev(`${row}.querySelector('a[title="https://evil.example.org/phish"]').click()`);
+await sleep(400);
+check('clicking it asks before it opens', (await ev(`document.body.textContent.includes('This link says github.com but goes to evil.example.org. Open it?')`)) === true);
+await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+await sleep(300);
+// The composer's formatting shortcuts wrap the selected text: Ctrl+B, Ctrl+I, Ctrl+U and Ctrl+Shift+X.
+const composer = 'textarea[aria-label="Message"]';
+const chord = async (key, vk, modifiers) => {
+  const base = { key, code: `Key${key.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(250);
+};
+const selectAll = () => ev(`(() => { const t = document.querySelector(${JSON.stringify(composer)}); t.focus(); t.setSelectionRange(0, t.value.length); })()`);
+const wrapped = async (word, key, vk, modifiers) => {
+  await selectAll();
+  await send('Input.insertText', { text: word });
+  await selectAll();
+  await chord(key, vk, modifiers);
+  return ev(`document.querySelector(${JSON.stringify(composer)}).value`);
+};
+check('Ctrl+B wraps the selected text in bold markers', (await wrapped('bold', 'b', 66, 2)) === '**bold**');
+check('Ctrl+I wraps the selected text in italic markers', (await wrapped('italic', 'i', 73, 2)) === '*italic*');
+check('Ctrl+U wraps the selected text in underline markers', (await wrapped('under', 'u', 85, 2)) === '__under__');
+check('Ctrl+Shift+X wraps the selected text in strikethrough markers', (await wrapped('strike', 'X', 88, 10)) === '~~strike~~');
+await selectAll();
+await send('Input.insertText', { text: '' });
+await b.close();
+}
+
+// ---- N. The message menu: the items each message offers (own or someone else's), the quick reactions and the emoji
+// submenu, Forward, the message link and its Jump, Bookmark with Saved Messages, Pin, Mark Unread, a reminder that
+// fires, and Shift+F10. ----
+async function section_messages() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9784, profile: `${SCRATCH}/messages-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+await ev(`[...document.querySelectorAll('button[aria-label="Riverside Makers"]')][0]?.click()`);
+await sleep(600);
+const openGeneral = async () => {
+  await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('general'))?.click()`);
+  await sleep(700);
+};
+await openGeneral();
+const clickSidebar = async (label) => {
+  await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes(${JSON.stringify(label)}))?.click()`);
+  await sleep(600);
+};
+const rowByText = (text) => `[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((b) => b.textContent.includes(${JSON.stringify(text)}))`;
+
+const keyDown = async (key, code, vk, modifiers = 0, text = undefined) => {
+  const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, text });
+  if (text) await send('Input.dispatchKeyEvent', { type: 'char', ...base, text });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(250);
+};
+const escape = () => keyDown('Escape', 'Escape', 27);
+const goHome = async () => { await ev(`document.querySelector('button[aria-label="Direct messages"]')?.click()`); await sleep(700); };
+
+// A message's element, by a text it holds. The first match in the list.
+const MSG = (text) => `[...document.querySelectorAll('article.msg')].find((a) => a.textContent.includes(${JSON.stringify(text)}))`;
+const menuTexts = () => ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+const quickEmoji = () => ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"][aria-label][title]')].map((n) => n.textContent.trim())`);
+const toastTexts = () => ev(`[...document.querySelectorAll('[role="status"]')].map((n) => n.textContent).join('|')`);
+const reactionsOf = (text) => ev(`(() => { const r = ${MSG(text)}; return r ? [...r.querySelectorAll('.reaction')].map((x) => x.getAttribute('aria-label') + (x.classList.contains('mine') ? ' [mine]' : '')) : []; })()`);
+
+// Right click on a message's element (the menu opens after two lookups, so the wait is longer than a click's).
+const openMenuOn = async (msgExpr) => {
+  await ev(`(() => { const row = ${msgExpr}; if (!row) return false; const r = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); return true; })()`);
+  await sleep(450);
+};
+// Clicks the first menu row (top level or an open submenu) whose text includes `label`.
+const clickMenuItem = (label) => ev(`(() => { const n = [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((x) => x.textContent.includes(${JSON.stringify(label)})); if (!n) return false; n.click(); return true; })()`);
+// Focuses a row that opens a submenu and presses ArrowRight, as a keyboard user does.
+const openSub = async (label) => {
+  await ev(`(() => { const n = [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((x) => x.textContent.includes(${JSON.stringify(label)})); n?.focus(); return !!n; })()`);
+  await keyDown('ArrowRight', 'ArrowRight', 39);
+  await sleep(250);
+};
+// Types into the composer and sends it.
+const typeSend = async (text) => {
+  await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); })()`);
+  await send('Input.insertText', { text });
+  await sleep(200);
+  await keyDown('Enter', 'Enter', 13, 0, '\r');
+  await sleep(600);
+};
+
+const OWN_TEXT = 'Menu check mine';
+const OTHER_TEXT = 'Welcome to Riverside';
+await typeSend(OWN_TEXT);
+const ownId = await ev(`${MSG(OWN_TEXT)}?.dataset.id ?? null`);
+const welcomeId = await ev(`${MSG(OTHER_TEXT)}?.dataset.id ?? null`);
+check('the own and the other test messages are in the channel', Boolean(ownId) && Boolean(welcomeId), `own ${ownId} other ${welcomeId}`);
+
+// ---- what a message offers: your own message ----
+await openMenuOn(MSG(OWN_TEXT));
+const own = await menuTexts();
+const ownWanted = ['Add Reaction', 'Reply', 'Edit Message', 'Forward', 'Copy Text', 'Pin Message', 'Bookmark Message', 'Create Reminder', 'Mark Unread', 'Copy Message Link', 'Speak Message', 'Delete Message'];
+check('own message offers every item of the menu', ownWanted.every((l) => own.some((t) => t.includes(l))), `missing: ${ownWanted.filter((l) => !own.some((t) => t.includes(l))).join(', ')}`);
+const quickOwn = await quickEmoji();
+check('the quick reactions row shows four emoji', quickOwn.length === 4 && quickOwn.every((e) => /\p{Extended_Pictographic}/u.test(e)), JSON.stringify(quickOwn));
+await clickMenuItem('Copy Text');
+await sleep(400);
+check('Copy Text confirms with a toast', (await toastTexts()).includes('Text copied'));
+
+// ---- someone else's message ----
+await openMenuOn(MSG(OTHER_TEXT));
+const other = await menuTexts();
+check('someone else\'s message has no Edit Message', !other.some((t) => t.includes('Edit Message')));
+const otherWanted = ['Add Reaction', 'Reply', 'Forward', 'Copy Text', 'Pin Message', 'Bookmark Message', 'Create Reminder', 'Mark Unread', 'Copy Message Link', 'Speak Message'];
+check('someone else\'s message offers the same items but Edit', otherWanted.every((l) => other.some((t) => t.includes(l))), `missing: ${otherWanted.filter((l) => !other.some((t) => t.includes(l))).join(', ')}`);
+check('someone else\'s message shows the same four quick reactions', (await quickEmoji()).length === 4);
+
+// ---- quick reactions toggle: on, then off ----
+const firstQuick = await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"][aria-label][title]')][0].textContent.trim()`);
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"][aria-label][title]')][0].click()`);
+await sleep(700);
+check('a quick reaction adds the reaction, as ours', (await reactionsOf(OTHER_TEXT)).some((s) => s.startsWith(firstQuick) && s.endsWith('[mine]')), `${firstQuick}: ${JSON.stringify(await reactionsOf(OTHER_TEXT))}`);
+await openMenuOn(MSG(OTHER_TEXT));
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"][aria-label][title]')][0].click()`);
+await sleep(700);
+check('the same quick reaction removes it again', !(await reactionsOf(OTHER_TEXT)).some((s) => s.startsWith(firstQuick) && s.includes('[mine]')));
+
+// ---- Add Reaction: the emoji by shortcode, then More ----
+await openMenuOn(MSG(OTHER_TEXT));
+await openSub('Add Reaction');
+const emojiSub = await menuTexts();
+check('Add Reaction lists the emoji by shortcode, then More', emojiSub.some((t) => t.includes(':thumbsup:')) && emojiSub.some((t) => t.includes('More')));
+await clickMenuItem(':thumbsup:');
+await sleep(700);
+check('a shortcode in the submenu adds that reaction', (await reactionsOf(OTHER_TEXT)).some((s) => s.startsWith('👍') && s.includes('[mine]')));
+
+// ---- Forward: the dialog says attachments are not forwarded, and sends a quote ----
+await openMenuOn(MSG(OTHER_TEXT));
+await clickMenuItem('Forward');
+await sleep(500);
+check('Forward opens its dialog', (await ev(`[...document.querySelectorAll('[role="dialog"] h2')].some((h) => h.textContent.trim() === 'Forward Message')`)) === true);
+check('the dialog says attachments are not forwarded', (await ev(`document.querySelector('[role="dialog"]')?.textContent.includes('Attachments are not forwarded.') ?? false`)) === true);
+await ev(`(() => { const n = [...document.querySelectorAll('[role="dialog"] button')].find((x) => x.textContent.includes('Riverside Makers · #general')); n?.click(); })()`);
+await sleep(900);
+const quoted = await ev(`(() => { const r = ${MSG('Forwarded from')}; return r ? [...r.querySelectorAll('blockquote')].map((q) => q.textContent.trim()) : null; })()`);
+check('Forward sends "Forwarded from" and the original quoted', Array.isArray(quoted) && quoted.some((t) => t.includes(OTHER_TEXT)), JSON.stringify(quoted));
+check('the dialog closes after the send', (await ev(`document.querySelectorAll('[role="dialog"]').length`)) === 0);
+
+// ---- Copy Message Link, then a message with that link shows Jump to message ----
+await ev(`(() => { window.__copied = []; navigator.clipboard.writeText = async (t) => { window.__copied.push(t); }; })()`);
+await openMenuOn(MSG(OWN_TEXT));
+await clickMenuItem('Copy Message Link');
+await sleep(400);
+const copied = await ev(`window.__copied?.[0] ?? null`);
+check('Copy Message Link copies dissent://message/<community>/<channel>/<id>', typeof copied === 'string' && new RegExp(`^dissent://message/[^/]+/[^/]+/${ownId}$`).test(copied), String(copied));
+await typeSend(copied);
+check('a message with a message link offers Jump to message', (await ev(`[...(${MSG(copied)})?.querySelectorAll('button') ?? []].some((x) => x.textContent === 'Jump to message')`)) === true);
+await ev(`(() => { const r = ${MSG(copied)}; [...r.querySelectorAll('button')].find((x) => x.textContent === 'Jump to message')?.click(); })()`);
+await sleep(900);
+check('Jump to message scrolls to the linked message and focuses it', (await ev(`document.activeElement?.dataset.id ?? null`)) === ownId);
+
+// ---- Bookmark Message, Saved Messages, Jump and Remove ----
+await openMenuOn(MSG(OTHER_TEXT));
+await clickMenuItem('Bookmark Message');
+await sleep(500);
+check('Bookmark Message confirms with a toast', (await toastTexts()).includes('Message saved'));
+await goHome();
+await clickSidebar('Saved Messages');
+const savedHtml = await ev(`document.querySelector('ul[aria-label="Saved messages"]')?.textContent ?? ''`);
+check('Saved Messages lists the bookmarked message', savedHtml.includes(OTHER_TEXT), savedHtml.slice(0, 120));
+await ev(`(() => { const li = [...document.querySelectorAll('ul[aria-label="Saved messages"] li')].find((l) => l.textContent.includes(${JSON.stringify(OTHER_TEXT)})); [...li.querySelectorAll('button')].find((x) => x.textContent === 'Jump')?.click(); })()`);
+await sleep(1000);
+check('Jump opens the channel and focuses the message', (await ev(`!document.querySelector('ul[aria-label="Saved messages"]') && document.activeElement?.dataset.id === ${JSON.stringify(welcomeId)}`)) === true);
+await openMenuOn(MSG(OTHER_TEXT));
+check('a saved message offers Remove Bookmark', (await menuTexts()).some((t) => t.includes('Remove Bookmark')));
+await clickMenuItem('Remove Bookmark');
+await sleep(500);
+check('Remove Bookmark confirms with a toast', (await toastTexts()).includes('Bookmark removed'));
+
+// ---- Pin: channels only, Pin then Unpin ----
+await openMenuOn(MSG(OWN_TEXT));
+await clickMenuItem('Pin Message');
+await sleep(500);
+check('Pin Message confirms with a toast', (await toastTexts()).includes('Message pinned'));
+await openMenuOn(MSG(OWN_TEXT));
+check('a pinned message offers Unpin Message', (await menuTexts()).some((t) => t.includes('Unpin Message')));
+await clickMenuItem('Unpin Message');
+await sleep(500);
+check('Unpin Message confirms with a toast', (await toastTexts()).includes('Message unpinned'));
+
+// ---- a direct message: no Pin Message, but Forward and Bookmark ----
+await goHome(); await ev(`${rowByText('Maya')}?.click()`);
+await sleep(900);
+await openMenuOn(`document.querySelector('article.msg')`);
+const dm = await menuTexts();
+check('a direct message has no Pin Message, and offers Forward and Bookmark', !dm.some((t) => t.includes('Pin Message')) && dm.some((t) => t.includes('Forward')) && dm.some((t) => t.includes('Bookmark Message')), JSON.stringify(dm));
+await escape();
+await ev(`[...document.querySelectorAll('button[aria-label="Riverside Makers"]')][0]?.click()`);
+await sleep(600);
+await openGeneral();
+
+// ---- Mark Unread confirms ----
+await openMenuOn(MSG(OWN_TEXT));
+await clickMenuItem('Mark Unread');
+await sleep(500);
+check('Mark Unread confirms with a toast', (await toastTexts()).includes('Marked unread'));
+
+// ---- Create Reminder: the submenu, the confirm, and the reminder firing: a toast with Jump that opens the message ----
+await openMenuOn(MSG(OTHER_TEXT));
+await openSub('Create Reminder');
+const times = await menuTexts();
+check('Create Reminder offers the four times', ['In 20 Minutes', 'In 1 Hour', 'In 3 Hours', 'Tomorrow'].every((l) => times.some((t) => t.includes(l))), JSON.stringify(times));
+await clickMenuItem('In 1 Hour');
+await sleep(500);
+check('a reminder is confirmed with its time', (await toastTexts()).includes('Reminder set for'));
+await goHome();
+await clickSidebar('Friends');
+const fired = await ev(`window.__mockFireReminder('reminder-1')`);
+await sleep(600);
+check('the reminder fires as a toast with a Jump button', fired === true && (await toastTexts()).includes('Reminder: ') && (await ev(`[...document.querySelectorAll('[role="status"] button')].some((x) => x.textContent === 'Jump')`)) === true);
+await ev(`[...document.querySelectorAll('[role="status"] button')].find((x) => x.textContent === 'Jump')?.click()`);
+await sleep(1000);
+check('the reminder\'s Jump opens its message', (await ev(`document.activeElement?.dataset.id ?? null`)) === welcomeId);
+
+// ---- Shift+F10 on a focused message opens the same menu ----
+await ev(`(() => { const r = ${MSG(OWN_TEXT)}; r.focus(); })()`);
+await keyDown('F10', 'F10', 121, 8);
+await sleep(450);
+check('Shift+F10 on a focused message opens its menu', (await menuTexts()).some((t) => t.includes('Reply')));
+await escape();
+
+noConsoleErrors('messages', b.consoleErrors);
+await b.close();
+}
+
+// ---- Server preferences: the rail menu's Mute Server, Notification Settings and Hide Muted Channels ----
+// The mock logs each alert decision (window.__mockAlertLog), so the checks read what the UI would alert on.
+async function section_serverprefs() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9781, profile: `${SCRATCH}/serverprefs-next-profile` });
+const { send, ev } = b;
+await sleep(800);
+const openRailMenu = (name) => ev(`(() => { const b = document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']'); if (!b) return false; const r = b.getBoundingClientRect(); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return true; })()`);
+const menuNames = async () => (await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`)) ?? [];
+const pick = (prefix) => ev(`(() => { const n = [...document.querySelectorAll('[role^="menuitem"]')].find((n) => n.textContent.trim().startsWith(${JSON.stringify(prefix)})); if (!n) return false; n.click(); return true; })()`);
+const closeMenus = async () => { await ev(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(250); };
+const alertsSince = (from) => ev(`(window.__mockAlertLog ?? []).slice(${from})`);
+const alertCount = async () => (await ev(`(window.__mockAlertLog ?? []).length`)) ?? 0;
+// The mock's owner of Riverside Makers, who posts in it: its id is the name's base32 bytes, as the mock makes them.
+const GRACE = base32Encode(new TextEncoder().encode('k3f9q2xagrace')).padEnd(52, 'a').slice(0, 52);
+
+// An owned server, for the owner's menu.
+await ev(`document.querySelector('button[aria-label="Create or join a server"]').click()`);
+await sleep(500);
+await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
+await send('Input.insertText', { text: 'Prefs test' });
+await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent.trim() === 'Create').click()`);
+await sleep(1200);
+await openRailMenu('Prefs test');
+await sleep(400);
+const ownerItems = await menuNames();
+check('an owner sees Mute Server, Notification Settings and Hide Muted Channels', ['Mute Server', 'Notification Settings', 'Hide Muted Channels'].every((t) => ownerItems.some((l) => l.startsWith(t))), JSON.stringify(ownerItems));
+await closeMenus();
+
+// A member (Riverside Makers is not owned here) sees the same three items, with the default choice as the subtitle.
+await openRailMenu('Riverside Makers');
+await sleep(400);
+const memberItems = await menuNames();
+check('a member sees Mute Server, Notification Settings and Hide Muted Channels', ['Mute Server', 'Notification Settings', 'Hide Muted Channels'].every((t) => memberItems.some((l) => l.startsWith(t))), JSON.stringify(memberItems));
+check('Notification Settings shows Only @mentions by default', memberItems.some((l) => l.startsWith('Notification Settings') && l.includes('Only @mentions')), JSON.stringify(memberItems));
+await closeMenus();
+
+// Only @mentions: a plain message does not alert, and a mention does.
+let from = await alertCount();
+await ev(`window.__mockPost('c1', 'ch1', '${GRACE}', 'A plain message for the alert check')`);
+await sleep(700);
+const plain = await alertsSince(from);
+check('Only @mentions does not alert on a plain message', plain.length === 1 && plain[0].alerts === false, JSON.stringify(plain));
+from = await alertCount();
+await ev(`window.__mockPost('c1', 'ch1', '${GRACE}', 'A mention for the alert check', true)`);
+await sleep(700);
+const mention = await alertsSince(from);
+check('Only @mentions alerts on a mention', mention.length === 1 && mention[0].alerts === true && mention[0].byName === true, JSON.stringify(mention));
+
+// Nothing silences a mention; All Messages alerts a plain message.
+await openRailMenu('Riverside Makers');
+await sleep(400);
+await pick('Notification Settings');
+await sleep(300);
+await pick('Nothing');
+await sleep(400);
+from = await alertCount();
+await ev(`window.__mockPost('c1', 'ch1', '${GRACE}', 'A mention while nothing alerts', true)`);
+await sleep(700);
+const silenced = await alertsSince(from);
+check('Nothing silences a mention', silenced.length === 1 && silenced[0].alerts === false, JSON.stringify(silenced));
+await openRailMenu('Riverside Makers');
+await sleep(400);
+await pick('Notification Settings');
+await sleep(300);
+await pick('All Messages');
+await sleep(400);
+from = await alertCount();
+await ev(`window.__mockPost('c1', 'ch1', '${GRACE}', 'A plain message while all messages alert')`);
+await sleep(700);
+const all = await alertsSince(from);
+check('All Messages alerts a plain message', all.length === 1 && all[0].alerts === true, JSON.stringify(all));
+
+// A timed mute: its end time shows as the subtitle.
+await openRailMenu('Riverside Makers');
+await sleep(400);
+await pick('Mute Server');
+await sleep(300);
+await pick('For 1 Hour');
+await sleep(500);
+await openRailMenu('Riverside Makers');
+await sleep(400);
+const muted = await menuNames();
+check('a timed mute shows its end time under Mute Server', muted.some((l) => /^Mute Server.*Muted until \d{2}:\d{2}/.test(l)), JSON.stringify(muted));
+await closeMenus();
+
+// Hide Muted Channels: a muted channel leaves the sidebar, and the open channel stays. The mute is saved before a reload.
+await ev(`localStorage.setItem('dissent.muted.v1', JSON.stringify({ 'ch:c1:ch2': null }))`);
+await send('Page.navigate', { url: `${BASE}/` });
+await sleep(2000);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+// A channel row's text is its name and, when it has one, its unread count ("general1").
+const hasChannel = (name) => ev(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim().startsWith(${JSON.stringify(name)}))`);
+check('a muted channel is listed before Hide Muted Channels is on', (await hasChannel('hardware')) === true);
+await openRailMenu('Riverside Makers');
+await sleep(400);
+await pick('Hide Muted Channels');
+await sleep(500);
+check('Hide Muted Channels hides the muted channel', (await hasChannel('hardware')) === false);
+check('Hide Muted Channels keeps the other channels', (await hasChannel('general')) === true);
+await openRailMenu('Riverside Makers');
+await sleep(400);
+const hideChecked = await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Hide Muted Channels'))?.getAttribute('aria-checked')`);
+check('the Hide Muted Channels item shows it is on', hideChecked === 'true', String(hideChecked));
+await closeMenus();
+
+// A timed mute runs out on its own: the rail's unread dot is hidden while the mute lasts and returns when it ends, with no
+// click in between. The mock shortens the 15-minute mute to 1 s. announcements is not open, so its message leaves Riverside unread.
+await ev(`window.__mockMuteMs = 1000`);
+await ev(`window.__mockPost('c1', 'ch3', '${GRACE}', 'A message that leaves Riverside unread')`);
+await sleep(700);
+const dotOf = (name) => ev(`!!document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']').closest('.rail-item').classList.contains('unread')`);
+check('a server with an unread message shows the unread dot', (await dotOf('Riverside Makers')) === true);
+await openRailMenu('Riverside Makers');
+await sleep(400);
+await pick('Mute Server');
+await sleep(300);
+await pick('For 15 Minutes');
+await sleep(400);
+check('a muted server shows no unread dot', (await dotOf('Riverside Makers')) === false);
+await sleep(1600);
+check('the unread dot returns when the mute runs out, with no interaction', (await dotOf('Riverside Makers')) === true);
+await ev(`delete window.__mockMuteMs`);
+
+await b.close();
+}
+
+// ---- Unread direct messages on the rail: an avatar per unread conversation with its count, a click opens it and it leaves,
+// more than five show a "+N" that opens Home, and a muted conversation is not on the rail. The mock counts unread messages
+// from others after its start, as the engine does. ----
+async function section_unreaddms() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9783, profile: `${SCRATCH}/unreaddms-next-profile` });
+const { send, ev } = b;
+await sleep(800);
+// The mock's ids are the name's base32 bytes, padded to 52 characters.
+const mockId = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
+const LINUS = mockId('w8r2d6nblinus');
+const GRACE = mockId('k3f9q2xagrace');
+const KEN = mockId('h5t7c3vyken');
+const RADIA = mockId('e4j9m1sqradia');
+const RANA = mockId('rana-z6q1e8jd');
+const NADIA = mockId('nadia-c5v8m1wk');
+const YUSUF = mockId('yusuf-r3j6t0pb');
+const post = (peer, text) => ev(`window.__mockDm('${peer}', ${JSON.stringify(text)})`);
+const railLabels = async () => (await ev(`[...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] button')].map((n) => n.getAttribute('aria-label'))`)) ?? [];
+const railClick = (label) => ev(`(() => { const n = [...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] button')].find((n) => n.getAttribute('aria-label') === ${JSON.stringify(label)}); if (!n) return false; n.click(); return true; })()`);
+
+await post(LINUS, 'First unread message');
+await sleep(800);
+let labels = await railLabels();
+check('an unread DM appears on the rail with its count', labels.includes('Jonas, 1 unread message'), JSON.stringify(labels));
+await post(LINUS, 'Second unread message');
+await sleep(800);
+labels = await railLabels();
+check('the count on the rail goes up with each unread message', labels.includes('Jonas, 2 unread messages'), JSON.stringify(labels));
+
+await railClick('Jonas, 2 unread messages');
+await sleep(900);
+check('clicking the avatar opens that DM', (await ev(`!!document.querySelector('button[aria-current="true"][title="Jonas"]')`)) === true);
+labels = await railLabels();
+check('a DM that is read leaves the rail', !labels.some((l) => l.startsWith('Jonas,')), JSON.stringify(labels));
+
+// Six unread conversations: five avatars and a "+1" that opens Home.
+for (const peer of [GRACE, KEN, RADIA, RANA, NADIA, YUSUF]) await post(peer, 'Unread for the overflow check');
+await sleep(900);
+labels = await railLabels();
+check('five unread conversations show and the rest become a +N', labels.filter((l) => l.includes('unread message')).length === 5 && labels.includes('1 more unread conversation'), JSON.stringify(labels));
+check('the rail section is labelled Unread direct messages', (await ev(`!!document.querySelector('[role="group"][aria-label="Unread direct messages"]')`)) === true);
+await railClick('1 more unread conversation');
+await sleep(700);
+check('the +N opens Home', (await ev(`document.querySelector('button[aria-label="Direct messages"]')?.getAttribute('aria-current')`)) === 'page');
+
+// A muted conversation is not on the rail. The mute is saved before a reload, as the mute check reads it at start.
+await ev(`localStorage.setItem('dissent.muted.v1', JSON.stringify({ 'dm:${KEN}': null }))`);
+await send('Page.navigate', { url: `${BASE}/` });
+await sleep(2000);
+await post(KEN, 'A muted conversation');
+await post(GRACE, 'A conversation that is not muted');
+await sleep(900);
+labels = await railLabels();
+check('a muted conversation is not on the rail', !labels.some((l) => l.startsWith('Omar,')), JSON.stringify(labels));
+check('an unmuted conversation still is', labels.includes('Maya, 1 unread message'), JSON.stringify(labels));
+
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
   ['calls', section_calls],
   ['startup', section_startup],
+  ['rail', section_rail],
+  ['previews', section_previews],
+  ['markdown', section_markdown],
+  ['messages', section_messages],
+  ['nomentions', section_nomentions],
+  ['serverprefs', section_serverprefs],
+  ['unreaddms', section_unreaddms],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

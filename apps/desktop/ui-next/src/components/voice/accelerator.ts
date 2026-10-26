@@ -1,5 +1,5 @@
 // Push to talk keys as accelerators, such as Control+KeyV (the form voice_settings stores). Ported from
-// ui/views/settings-voice.js (keyLabel, the binder's key handling).
+// the old UI's views/settings-voice.js (keyLabel, the binder's key handling).
 const MODIFIERS = new Set([
   'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight', 'OSLeft', 'OSRight', 'CapsLock',
 ]);

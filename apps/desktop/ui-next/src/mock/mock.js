@@ -9,6 +9,13 @@ if (!window.__TAURI__) {
   // Mock IDs must be valid base32 (addresses are made from them). The name's bytes are base32-encoded, so
   // distinct names stay distinct: message ids like d1 and d10 must not collapse onto one id.
   const id = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
+  const mockPins = new Set(); // conversation keys pinned with pin_conversation
+  // Saved messages, reminders and channel pins, kept for this page's session (the core keeps them on disk).
+  const mockPinnedIds = new Set();
+  let mockBookmarks = [];
+  let mockReminders = [];
+  let mockReminderSeq = 0;
+  const refKey = (r) => `${r.community ?? ''}|${r.channel ?? ''}|${r.peer ?? ''}|${r.message_id}`;
   const MIN = 60 * 1000;
   const DAY = 24 * 60 * MIN;
   const now = Date.now();
@@ -19,11 +26,14 @@ if (!window.__TAURI__) {
   const KEN = id('h5t7c3vyken');
   const RANA = id('rana-z6q1e8jd');
   const RADIA = id('e4j9m1sqradia');
-  const people = { [ME]: 'Sami', [GRACE]: 'Maya', [LINUS]: 'Jonas', [KEN]: 'Omar', [RADIA]: 'Leila', [RANA]: 'Rana' };
+  const NADIA = id('nadia-c5v8m1wk');
+  const YUSUF = id('yusuf-r3j6t0pb');
+  const people = { [ME]: 'Sami', [GRACE]: 'Maya', [LINUS]: 'Jonas', [KEN]: 'Omar', [RADIA]: 'Leila', [RANA]: 'Rana', [NADIA]: 'Nadia', [YUSUF]: 'Yusuf' };
   const handles = { [ME]: 'sami', [GRACE]: 'maya', [LINUS]: 'jonas', [KEN]: 'omar', [RADIA]: 'leila', [RANA]: 'rana' };
   const suffix = (root) => root.slice(0, 8);
   // "Let people add me by address" (on by default). Off makes our own address not found.
   let addressDiscoveryOn = true;
+  let friendsSharedOn = true;
   // Adding by address: a known person adds at once; a bad or wrong-kind address is refused as the backend does.
   const byAddress = (text) => {
     const found = parseAddressInput(text);
@@ -45,6 +55,9 @@ if (!window.__TAURI__) {
   const generalMessages = [
     msg(3, 300, GRACE, 'Welcome to Riverside Makers. Read the pinned rules before posting, please.'),
     msg(3, 296, GRACE, 'Booking sheet for the laser is pinned in #announcements.'),
+    // Mentions (the engine resolves them): an admin's @everyone is valid, a plain member's is only text.
+    { ...msg(0, 50, LINUS, '@everyone the laser is free from 5 pm, bring your own ply.'), mentions: [], mentions_me: true, mentions_everyone: true },
+    { ...msg(0, 40, RADIA, '@everyone who is in for Saturday?'), mentions: [], mentions_me: false, mentions_everyone: false },
     msg(3, 180, LINUS, 'Anyone booked the laser cutter for Saturday?'),
     msg(2, 600, KEN, 'Yes, 10:00 works for me. I can bring the spare birch ply.'),
     msg(2, 598, KEN, 'The extraction fan is fixed too, so the room stays clear.'),
@@ -59,6 +72,24 @@ if (!window.__TAURI__) {
     msg(0, 86, LINUS, 'I will swap the nozzle on Friday.'),
     msg(0, 20, ME, 'Thanks. The enclosure photos are in the attachments.'),
     msg(0, 4, GRACE, 'Thanks all. The walkthrough video is in the attachments.'),
+  // Every markdown form in one message, for the markdown checks in the driver. The text is what the wire carries.
+  msg(0, 1, KEN, [
+    '**Bold**, *italic*, _also italic_, __underlined__, ~~struck~~, ***both*** and ||a secret||.',
+    '# Heading one',
+    '## Heading two',
+    '### Heading three',
+    '-# a subtext line',
+    '> a quoted line',
+    '- first item',
+    '  - nested item',
+    '1. ordered one',
+    '`inline *code*` and [the docs](https://docs.example.com/guide) and https://example.com/page',
+    '[github.com](https://evil.example.org/phish) goes somewhere else',
+    '\\*escaped stars\\* and <b>raw html</b>',
+    '```rust',
+    'fn main() {}',
+    '```',
+  ].join('\n')),
   ];
   // Sample replies and reactions on #general.
   generalMessages[5].replyTo = generalMessages[3].id; // Sami answers Omar's "Yes, 10:00 works"
@@ -105,6 +136,7 @@ if (!window.__TAURI__) {
         ch2: [
           msg(1, 300, RADIA, 'Drawings for the new mount are in the hardware folder.'),
           msg(1, 298, GRACE, 'Thanks, I will check the tolerances on the 3 mm ply.'),
+          { ...msg(0, 20, GRACE, `@${people[ME]} the 3 mm ply is in the rack.`), mentions: [{ id: ME, display_name: people[ME] }], mentions_me: true, mentions_everyone: false },
           // FilesServer board: one file per state, all in #hardware.
           { ...msg(0, 492, GRACE, 'Updated enclosure drawings for the CNC.'), attachments: [att('cnc-enclosure-v3.pdf', 24.6 * MB, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/cnc-enclosure-v3.pdf', verified: true })] },
           { ...msg(0, 482, LINUS, 'Walkthrough video of the new dust extraction.'), attachments: [att('workshop-walkthrough.mp4', 86.4 * MB, 'video/mp4', 'downloading', {
@@ -176,6 +208,14 @@ if (!window.__TAURI__) {
   generalMessages[0].attachments = [att('rules.pdf', 180 * 1024, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/rules.pdf' })];
   generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
+  // The folder the user picked in the mock. Null is the default, which follows the OS Downloads folder.
+  let pickedDownloadDir = null;
+  const transferSettings = () => ({
+    max_accept_bytes: 10 * GB,
+    download_dir: pickedDownloadDir ?? 'C:/Users/ada/Downloads',
+    download_dir_is_default: pickedDownloadDir === null,
+    auto_accept_bytes: 25 * MB,
+  });
   generalMessages[13].attachments = [
     att('print-jobs.zip', 24 * MB, 'application/zip'),
     att('workshop-photos.zip', 12.4 * GB, 'application/zip', 'too_large'),
@@ -184,11 +224,12 @@ if (!window.__TAURI__) {
   ];
   // A message Sami sent while nobody else in the channel was online (Part 6.8, channels).
   generalMessages.push({ ...msg(0, 2, ME, 'Counting me in. I will bring the soldering kits.'), queued: true });
-  generalMessages[15].attachments = [att('enclosure.png', 1.1 * MB, 'image/png')];
+  // A picture with the sender's thumbnail already here, so its preview shows before the full file is downloaded.
+  generalMessages[15].attachments = [att('enclosure.png', 1.1 * MB, 'image/png', 'available', { thumb: { state: 'downloaded', path: mockImage(320, 200, 210, 'enclosure'), width: 320, height: 200 } })];
 
   const dms = {
     [GRACE]: [
-      { id: id(`d${++seq}`), from: GRACE, text: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(1, 420), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay') }] },
+      { id: id(`d${++seq}`), from: GRACE, text: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(1, 420), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay'), image_w: 432, image_h: 168, theme: '#2b6cb0' }] },
       { id: id(`d${++seq}`), from: GRACE, text: 'Can you look at the laser booking sheet when you get a minute?', ms: at(1, 400), pending: false },
       { id: id(`d${++seq}`), from: ME, text: 'Yes, reading it now.', ms: at(1, 380), pending: false },
       { id: id(`d${++seq}`), from: GRACE, text: 'Bring the ply on Saturday?', ms: at(0, 40), pending: false, attachments: [att('booking-sheet.png', 640 * 1024, 'image/png', 'downloaded', { local_path: mockImage(640, 420, 330, 'booking sheet') }), att('notes.md', 12 * 1024, 'text/markdown', 'failed'), att('laser-rates.pdf', 2.4 * MB, 'application/pdf')] },
@@ -199,7 +240,7 @@ if (!window.__TAURI__) {
       })] },
     ],
     [LINUS]: [
-      { id: id(`d${++seq}`), from: LINUS, text: 'Have a look at the relay code: https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(2, 120), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay') }] },
+      { id: id(`d${++seq}`), from: LINUS, text: 'Have a look at the relay code: https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(2, 120), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay'), image_w: 432, image_h: 168, theme: '#2b6cb0' }] },
     ],
   };
 
@@ -229,7 +270,24 @@ if (!window.__TAURI__) {
   const roleOf = (c, user) => c.roles[user] ?? null;
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
-  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null });
+  // Mentions of the viewer in a server, summed over its channels (the rail's badge).
+  const mentionsIn = (c, channelId) => (c.msgs[channelId] ?? []).filter((m) => m.mentions_me).length;
+  const mentionTotal = (c) => c.channels.reduce((n, ch) => n + mentionsIn(c, ch.id), 0);
+  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null, mentions: mentionTotal(c) });
+  const RAIL_ORDER_KEY = 'dissent-mock-rail-order';
+  // Link previews are this device's setting; the mock keeps them for the page's life.
+  const linkPreviews = { on: false, prompted: false };
+  // The saved rail order first; communities not in it keep their default (name) order after the saved ones.
+  const orderedServers = () => {
+    let saved = [];
+    try {
+      saved = JSON.parse(localStorage.getItem(RAIL_ORDER_KEY) ?? '[]');
+    } catch {
+      saved = [];
+    }
+    const rank = (id) => (saved.includes(id) ? saved.indexOf(id) : Number.MAX_SAFE_INTEGER);
+    return Object.values(servers).map(summary).sort((a, b) => rank(a.id) - rank(b.id) || a.name.localeCompare(b.name));
+  };
   // Invite previews: any link previews the Rustaceans server, Riverside Makers when it names "member", or a closed server
   // when it names "revoked" or "expired". Joining the Rustaceans server makes its preview already_member.
   const INVITE_SERVER = 'inv-rustaceans';
@@ -240,6 +298,10 @@ if (!window.__TAURI__) {
       community: id,
       name: { c1: servers.c1.name, 'inv-closed': 'Old Workshop' }[id] ?? 'Rustaceans',
       icon: null,
+      banner: id === 'c1' ? (servers.c1.banner ?? null) : null,
+      banner_preset: id === 'c1' ? (servers.c1.banner_preset ?? null) : 6,
+      description: id === 'c1' ? (servers.c1.description ?? '') : 'Systems programmers sharing crates, questions and the occasional crab.',
+      traits: id === 'c1' ? (servers.c1.traits ?? []) : [{ emoji: '🦀', label: 'Rust' }, { emoji: '🛠️', label: 'Tooling' }],
       member_count: 12,
       online_count: 3,
       created_ms: 1767225600000,
@@ -248,11 +310,18 @@ if (!window.__TAURI__) {
     };
   };
   const sharedServers = (user) => Object.values(servers).filter((c) => c.roles[user] && c.roles[ME]);
+  // A conversation's read marker. Messages from before the mock started count as read, as do the ones marked read since.
+  const mockStart = Date.now();
+  const readAt = {};
+  const readMs = (key) => readAt[key] ?? mockStart;
   const conversations = () =>
     Object.entries(dms)
       .map(([peer, items]) => {
         const last = items[items.length - 1];
-        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms };
+        const since = readMs(`dm:${peer}`);
+        // Like the engine's count: messages from others after the marker, not deleted, up to 100.
+        const unread = items.filter((m) => m.from !== ME && m.ms > since && !m.deleted).length;
+        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100) };
       })
       .sort((a, b) => b.last_ms - a.last_ms);
   const view = (c) => ({
@@ -260,11 +329,19 @@ if (!window.__TAURI__) {
     name: c.name,
     owner: c.owner,
     icon: c.icon ?? null,
+    banner: c.banner ?? null,
+    banner_preset: c.banner_preset ?? null,
+    banner_poster: c.banner_poster ?? null,
+    description: c.description ?? '',
+    traits: c.traits ?? [],
+    created_ms: c.created_ms ?? 1767225600000,
     voice_channels: c.voice ?? [],
     // Relays the server can use for voice channels. The engine does not report these yet.
     relays: ['https://relay-eu.riverside.example', 'https://relay-us.riverside.example'],
     my_role: myRole(c),
-    channels: c.channels.map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', ...ch })),
+    // The mention-everyone permission: owners and admins hold it by default.
+    can_mention_everyone: ['owner', 'admin'].includes(myRole(c)),
+    channels: c.channels.map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', mentions: mentionsIn(c, ch.id), ...ch })),
     members: Object.keys(c.roles).map((r) => ({
       root_id: r,
       suffix: suffix(r),
@@ -293,6 +370,9 @@ if (!window.__TAURI__) {
     ms: m.ms,
     edited: m.edited,
     deleted: m.deleted,
+    mentions: m.mentions ?? [],
+    mentions_me: Boolean(m.mentions_me),
+    mentions_everyone: Boolean(m.mentions_everyone),
     ...(window.__mockNoReactions ? {} : {
       reply_to: m.replyTo ? replyRef(c, channelId, m.replyTo) : null,
       reactions: m.reactions.map((r) => ({
@@ -393,6 +473,8 @@ if (!window.__TAURI__) {
   // Profile pictures by root id. The engine sends them as WebP (or PNG) data, capped at 256 KB like the real blob.
   const pictures = {};
   const MAX_PICTURE = 256 * 1024;
+  // Profile banners by root: { banner: url or null, preset: id or null }. Maya has a preset, so a card shows one.
+  const profileBanners = { [GRACE]: { banner: null, preset: 7 } };
   const pictureFrom = (bytes) => {
     need(atob(bytes).length <= MAX_PICTURE, 'That picture is over 256 KB');
     return `data:image/webp;base64,${bytes}`;
@@ -410,6 +492,14 @@ if (!window.__TAURI__) {
   let choice = params.get('choice');
   const installedProfile = params.get('installed') !== '0';
   let locked = Boolean(unlockParam);
+  // Each server's preferences, as set_server_prefs saved them. The engine's rule for alerts is mirrored in server_alerts.
+  const serverPrefs = {};
+  const DEFAULT_SERVER_PREFS = { muted_until: null, notify: 'mentions', suppress_everyone: false, hide_muted_channels: false };
+  const prefsNow = (communityId) => {
+    const p = { ...DEFAULT_SERVER_PREFS, ...serverPrefs[communityId] };
+    if (p.muted_until !== null && p.muted_until <= Date.now()) p.muted_until = null;
+    return p;
+  };
   const handlers = {
     complete_first_run: () => { firstRunPending = false; return null; },
     vault_status: () => ({ chooser, locked: locked && !chooser, new_profile: unlockParam === 'new' || choice === 'link' || choice === 'copy', choice, installed_profile: installedProfile }),
@@ -434,7 +524,7 @@ if (!window.__TAURI__) {
       return null;
     },
     open_release_page: () => null,
-    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, first_run: firstRunPending }),
+    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, banner: profileBanners[ME]?.banner ?? null, banner_preset: profileBanners[ME]?.preset ?? null, banner_poster: profileBanners[ME]?.poster ?? null, first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
       return null;
@@ -446,6 +536,23 @@ if (!window.__TAURI__) {
     },
     clear_avatar: () => {
       delete pictures[ME];
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    // Profile banners: a 16:9 picture or a preset id, shown behind the profile card, the DM panel and the full profile.
+    set_profile_banner: ({ bytes }) => {
+      profileBanners[ME] = { banner: pictureFrom(bytes), preset: null };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    set_profile_banner_preset: ({ preset }) => {
+      need(Number.isInteger(preset) && preset >= 0 && preset < 10, 'a banner preset is below 10');
+      profileBanners[ME] = { banner: null, preset };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    clear_profile_banner: () => {
+      delete profileBanners[ME];
       emitTo('dissent://avatar-changed', { root_id: ME });
       return null;
     },
@@ -463,9 +570,87 @@ if (!window.__TAURI__) {
       emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
+    // Server Settings. Renaming is the owner's alone; the banner follows the icon's rule.
+    rename_community: ({ communityId, name }) => {
+      const c = servers[communityId];
+      need(myRole(c) === 'owner', 'NoPermission');
+      const clean = String(name).trim();
+      need(clean, 'server name must not be empty');
+      need([...clean].length <= 64, 'server name is longer than 64 characters');
+      c.name = clean;
+      return null;
+    },
+    set_community_banner: ({ communityId, bytes }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server banner');
+      c.banner = pictureFrom(bytes);
+      c.banner_poster = null;
+      c.banner_preset = null;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
+    clear_community_banner: ({ communityId }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server banner');
+      c.banner = null;
+      c.banner_poster = null;
+      c.banner_preset = null;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
+    // Animated banners. The engine re-encodes the GIF; the mock keeps the bytes and draws the poster from frame one.
+    prepare_animated_banner: async ({ bytes, crop }) => {
+      need(atob(bytes).startsWith('GIF8'), 'animated banner: the file is not a GIF');
+      need(crop.w > 0 && crop.h > 0, 'animated banner: the crop is empty');
+      const blob = new Blob([Uint8Array.from(atob(bytes), (c) => c.charCodeAt(0))], { type: 'image/gif' });
+      const frame = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 90;
+      canvas.getContext('2d').drawImage(frame, 0, 0, 160, 90);
+      return { gif: bytes, poster: canvas.toDataURL('image/jpeg', 0.85).split(',')[1] };
+    },
+    set_community_banner_animated: ({ communityId, gif, poster }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server banner');
+      c.banner = `data:image/gif;base64,${gif}`;
+      c.banner_poster = `data:image/jpeg;base64,${poster}`;
+      c.banner_preset = null;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
+    set_profile_banner_animated: ({ gif, poster }) => {
+      profileBanners[ME] = { banner: `data:image/gif;base64,${gif}`, poster: `data:image/jpeg;base64,${poster}`, preset: null };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    set_community_banner_preset: ({ communityId, preset }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server banner');
+      need(Number.isInteger(preset) && preset >= 0 && preset < 10, 'a banner preset is below 10');
+      c.banner = null;
+      c.banner_poster = null;
+      c.banner_preset = preset;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
+    set_community_profile: ({ communityId, description, traits }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server profile');
+      const text = String(description).trim();
+      need([...text].length <= 300, 'a description is at most 300 characters');
+      need(traits.length <= 5, 'at most 5 traits');
+      need(traits.every((t) => t.label.trim() && [...t.label.trim()].length <= 24), 'a trait is an optional emoji and a label of up to 24 characters');
+      c.description = text;
+      c.traits = traits.map((t) => ({ emoji: t.emoji, label: t.label.trim() }));
+      emitTo('dissent://avatar-changed', { community_id: communityId });
+      return null;
+    },
     contact_link: () => (addressDiscoveryOn ? `dissent://contact/${addressOf('user', ME)}` : `dissent://contact/mock-${suffix(ME)}`),
     address_discovery: () => addressDiscoveryOn,
     set_address_discovery: ({ on }) => { addressDiscoveryOn = on; return on; },
+    friends_shared: () => friendsSharedOn,
+    set_friends_shared: ({ on }) => { friendsSharedOn = on; return on; },
     add_contact: ({ link }) => {
       const known = byAddress(link);
       if (known) {
@@ -479,7 +664,26 @@ if (!window.__TAURI__) {
       return { root_id: root, suffix: suffix(root), display_name: 'Newcomer', is_contact: true, handles: [], mutual_communities: [] };
     },
 
-    list_communities: () => Object.values(servers).map(summary),
+    list_communities: () => orderedServers(),
+    link_previews: () => linkPreviews.on,
+    set_link_previews: ({ on }) => {
+      linkPreviews.on = Boolean(on);
+      return null;
+    },
+    link_preview_prompted: () => linkPreviews.prompted,
+    mark_link_preview_prompted: () => {
+      linkPreviews.prompted = true;
+      return null;
+    },
+    set_server_order: ({ ids }) => {
+      // This device's own rail order: kept in localStorage, so a reload keeps it.
+      try {
+        localStorage.setItem(RAIL_ORDER_KEY, JSON.stringify(ids.filter((id) => servers[id])));
+      } catch {
+        // Storage can be unavailable; the order then lasts until the reload.
+      }
+      return null;
+    },
     create_community: ({ name }) => {
       const cid = `c${++seq}`;
       const chid = `ch${++seq}`;
@@ -658,7 +862,7 @@ if (!window.__TAURI__) {
       a.state = 'downloading';
       a.progress = step / 5;
       a.sources = communityId
-        ? [{ display_name: 'Maya', route: 'direct', rate_bps: 4 * MB }, { display_name: 'Jonas', route: 'relay', rate_bps: 1.2 * MB }, { display_name: 'Seeder', route: 'seeder', rate_bps: 2 * MB }]
+        ? [{ display_name: 'Maya', route: 'direct', rate_bps: 4 * MB }, { display_name: 'Jonas', route: 'direct', rate_bps: 1.2 * MB }, { display_name: 'Seeder', route: 'direct', rate_bps: 2 * MB }]
         : [{ display_name: people[GRACE], route: 'direct', rate_bps: 3 * MB }];
       a.pieces = { total: 24, verified: Math.round(step / 5 * 24) };
       refreshFor(communityId, m); // the card reads sources from the reloaded message
@@ -720,6 +924,9 @@ if (!window.__TAURI__) {
         suffix: suffix(user),
         display_name: people[user] ?? `anon·${suffix(user)}`,
         avatar: pictures[user] ?? null,
+        banner: profileBanners[user]?.banner ?? null,
+        banner_poster: profileBanners[user]?.poster ?? null,
+        banner_preset: profileBanners[user]?.preset ?? null,
         is_contact: Boolean(dms[user]),
         key_changed_ms: user === GRACE && !PLAIN_DM ? Date.now() - DAY : null,
         verified_ms: user === GRACE ? (PLAIN_DM ? new Date(2026, 9, 12).getTime() : Date.now() - 2 * DAY) : null,
@@ -727,6 +934,9 @@ if (!window.__TAURI__) {
         first_seen_ms: at(120, 0),
         handles: shared.map((c) => ({ community_id: c.id, community_name: c.name, handle: handles[user] ?? null })),
         mutual_communities: shared.map((c) => ({ id: c.id, name: c.name })),
+        mutual_friends: user === GRACE && friendsSharedOn
+          ? [LINUS, RADIA].map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r), avatar: null }))
+          : [],
       };
     },
 
@@ -772,10 +982,8 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs'];
   const ignoredSet = new Set();
-  const NADIA = id('nadia-c5v8m1wk');
-  const YUSUF = id('yusuf-r3j6t0pb');
   const KARIM = id('karim-n2w5d8fx');
   Object.assign(people, { [NADIA]: 'Nadia', [YUSUF]: 'Yusuf', [KARIM]: 'Karim' });
   Object.assign(handles, { [NADIA]: 'nadia', [YUSUF]: 'yusuf', [KARIM]: 'karim' });
@@ -872,6 +1080,14 @@ if (!window.__TAURI__) {
   const announceTyping = () => typingWatched.forEach((target) => emitTo('dissent://typing-changed', { target, names: typingNames() }));
   const setTypers = (n) => { typers = n; announceTyping(); };
   window.__mockTypers = (n) => { typingManual = true; setTypers(n); };
+  // The driver fires a reminder by hand: the core does it when the reminder's time comes.
+  window.__mockFireReminder = (id) => {
+    const reminder = mockReminders.find((r) => r.id === id);
+    if (!reminder) return false;
+    mockReminders = mockReminders.filter((r) => r.id !== id);
+    emit({ kind: 'reminder_due', reminder });
+    return true;
+  };
   setInterval(() => {
     if (typingManual) return;
     typingStep = (typingStep + 1) % TYPING_CYCLE.length;
@@ -885,7 +1101,8 @@ if (!window.__TAURI__) {
   });
 
   Object.assign(handlers, {
-    capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES]),
+    // `?nomentions` and `?noserverprefs` are the engine before those capabilities: every other feature is still reported.
+    capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES].filter((f) => !(f === 'mentions' && new URLSearchParams(location.search).has('nomentions')) && !(f === 'server_prefs' && new URLSearchParams(location.search).has('noserverprefs')))),
     // Desktop notifications: the native plugin shows them in the app. The browser preview only logs them.
     'plugin:notification|notify': ({ options }) => { console.info('[mock] desktop notification', options); return null; },
     // Your status. set_status emits dissent://status-changed the way the engine will; a timed status reverts to online.
@@ -1025,9 +1242,24 @@ if (!window.__TAURI__) {
     store_stats: () => ({ used_bytes: 1.4 * 1024 ** 3, files: 6, budget_bytes: 10 * 1024 ** 3, shared_bytes: 0.6 * 1024 ** 3, downloaded_bytes: 0.5 * 1024 ** 3, partial_bytes: 0.1 * 1024 ** 3 }),
     join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
     join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
+    get_server_prefs: ({ communityId }) => prefsNow(communityId),
+    // `window.__mockMuteMs` shortens a timed mute, so the driver can watch one run out.
+    set_server_prefs: ({ communityId, prefs }) => {
+      const timed = prefs.muted_until !== null && prefs.muted_until < 2 ** 63;
+      serverPrefs[communityId] = { ...prefs, muted_until: timed && window.__mockMuteMs ? Date.now() + window.__mockMuteMs : prefs.muted_until };
+      return null;
+    },
+    // Every decision is logged, so the driver can check what alerts without a sound card or an OS notification.
+    server_alerts: ({ communityId, mentioned, byName }) => {
+      const p = prefsNow(communityId);
+      const alerts = p.notify !== 'nothing' && (mentioned ? byName || !p.suppress_everyone : p.notify === 'all' && p.muted_until === null);
+      (window.__mockAlertLog ??= []).push({ communityId, mentioned, byName, alerts });
+      return alerts;
+    },
     set_muted: ({ muted }) => { if (calls.current) calls.current.muted = muted; return null; },
     set_deafened: ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; return null; },
     set_camera: ({ on }) => { if (calls.current) calls.current.camera = on; return null; },
+    set_screen_share: ({ on }) => { if (calls.current) calls.current.screen = on; return null; },
     send_call_message: ({ text }) => {
       if (calls.current) calls.current.messages.push({ id: id(`cm${++seq}`), root_id: ME, author_name: 'Sami', ms: Date.now(), text });
       return null;
@@ -1038,9 +1270,16 @@ if (!window.__TAURI__) {
     cancel_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'failed'; return null; },
     retry_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'active'; return null; },
     remove_transfer: ({ transferId }) => { const i = transfers.findIndex((x) => x.id === transferId); if (i >= 0) transfers.splice(i, 1); return null; },
-    transfer_settings: () => ({ max_accept_bytes: 10 * GB, download_dir: 'C:/Users/ada/Downloads/Dissent', auto_accept_bytes: 25 * MB }),
+    transfer_settings: () => transferSettings(),
     set_transfer_settings: ({ settings }) => settings,
-    pick_download_dir: () => 'C:/Users/ada/Downloads/Dissent',
+    pick_download_dir: () => {
+      pickedDownloadDir = 'C:/Users/ada/Downloads/Dissent';
+      return transferSettings();
+    },
+    reset_download_dir: () => {
+      pickedDownloadDir = null;
+      return transferSettings();
+    },
     list_guardians: () => ({ threshold: guardianState.threshold, guardians: guardianState.guardians.map((g) => ({ ...g })) }),
     sign_guardians: ({ guardians, threshold }) => {
       need(threshold >= 1 && threshold <= guardians.length, 'The threshold must be between 1 and the number of guardians');
@@ -1058,12 +1297,40 @@ if (!window.__TAURI__) {
     mark_safety_verified: () => null,
     approve_device: ({ link }) => { need(link.startsWith('dissent://'), 'Not a device link'); return 'dissent://grant/mock-' + suffix(ME); },
     finish_device_link: () => null,
-    pinned_conversations: () => [],
+    pinned_conversations: () => [...mockPins],
     read_markers: () => ({}),
-    pin_message: () => null,
-    pinned_messages: () => [],
-    pin_conversation: () => null,
-    mark_read: () => null,
+    pin_message: ({ messageId, pinned }) => {
+      if (pinned) mockPinnedIds.add(messageId);
+      else mockPinnedIds.delete(messageId);
+      return null;
+    },
+    pinned_messages: ({ communityId, channelId }) => {
+      const c = servers[communityId];
+      return (c?.msgs[channelId] ?? []).filter((m) => mockPinnedIds.has(m.id)).map((m) => messageItem(c, channelId, m));
+    },
+    add_bookmark: ({ message }) => {
+      const key = refKey(message);
+      if (!mockBookmarks.some((b) => b.key === key)) mockBookmarks.push({ key, message: { ...message }, saved_ms: Date.now() });
+      return null;
+    },
+    remove_bookmark: ({ key }) => {
+      mockBookmarks = mockBookmarks.filter((b) => b.key !== key);
+      return null;
+    },
+    list_bookmarks: () => mockBookmarks.map((b) => ({ ...b, message: { ...b.message } })),
+    add_reminder: ({ message, atMs }) => {
+      const reminder = { id: `reminder-${++mockReminderSeq}`, at_ms: atMs, message: { ...message } };
+      mockReminders.push(reminder);
+      return reminder;
+    },
+    list_reminders: () => mockReminders.map((r) => ({ ...r })),
+    remove_reminder: ({ id }) => {
+      mockReminders = mockReminders.filter((r) => r.id !== id);
+      return null;
+    },
+    mark_unread: () => null,
+    pin_conversation: ({ key, pinned }) => { if (pinned) mockPins.add(key); else mockPins.delete(key); return null; },
+    mark_read: ({ key }) => { readAt[key] = Date.now(); return null; },
   });
 
   Object.assign(dms, {
@@ -1094,8 +1361,9 @@ if (!window.__TAURI__) {
       : { call_id: 'call-maya', scope: 'dm', peer: GRACE, name: 'Maya', caller: { root_id: GRACE, display_name: 'Maya' }, verified: true, in_call: 1, total: 2, members_in: [] };
     emitTo('dissent://call-ringing', payload);
   };
-  window.__mockPost = (communityId, channelId, author, text) => {
-    const m = { ...msg(0, 0, author, text), ms: Date.now() };
+  // `mentionsMe` makes the message mention this device by name, as the mentions fixtures do.
+  window.__mockPost = (communityId, channelId, author, text, mentionsMe = false) => {
+    const m = { ...msg(0, 0, author, text), ms: Date.now(), mentions_me: mentionsMe, mentions: mentionsMe ? [{ id: ME, display_name: people[ME] }] : [] };
     servers[communityId].msgs[channelId].push(m);
     emit({ kind: 'message', community_id: communityId, channel_id: channelId });
   };

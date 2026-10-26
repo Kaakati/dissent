@@ -63,7 +63,6 @@ pub(crate) fn received(sender: u64, stamped: &[u8]) -> Result<ReceivedFrame> {
 }
 
 // Returns the payload of a decrypted, stamped frame, without the stamp.
-#[cfg(test)]
 pub(crate) fn payload_of_stamp(stamped: &[u8]) -> Result<&[u8]> {
     split(stamped).map(|(_, _, _, payload)| payload)
 }

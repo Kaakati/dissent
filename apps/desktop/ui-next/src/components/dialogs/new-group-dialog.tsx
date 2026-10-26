@@ -1,7 +1,7 @@
 // Create a group: pick at least three contacts, see them as chips, name the group, then create it. The footer button
 // says how many people the group will have, counting me. `preselect` people (the DM's person, from "Add friends to
 // group") start picked and join the list when they are not a contact yet. Ported from openNewGroupDialog in
-// ui/views/dialogs.js.
+// the old UI's views/dialogs.js.
 import { useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';

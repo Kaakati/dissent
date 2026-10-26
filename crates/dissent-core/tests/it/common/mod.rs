@@ -101,6 +101,37 @@ pub async fn peer(name: &str) -> Peer {
     p
 }
 
+/// A peer whose presence beacons come only every 60 s. A status change that a peer sees within a
+/// few seconds can then only have come from the change itself, not from a periodic beacon.
+pub async fn peer_slow_beacons(name: &str) -> Peer {
+    let dir = scratch(name);
+    let identity = Identity::create(now());
+    let timings = dissent_core::Timings {
+        beacon_every: Duration::from_secs(60),
+        presence_window: Duration::from_secs(120),
+        ..dissent_core::test_support::fast_timings()
+    };
+    let (engine, events) = Engine::start_with_timings(
+        identity.clone(),
+        dir.clone(),
+        offline_on(0),
+        dissent_core::test_support::vault_for(&dir),
+        timings,
+    )
+    .await
+    .expect("engine starts");
+    engine
+        .set_display_name(name.to_string())
+        .await
+        .expect("name set");
+    Peer {
+        engine,
+        identity,
+        dir,
+        _events: events,
+    }
+}
+
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

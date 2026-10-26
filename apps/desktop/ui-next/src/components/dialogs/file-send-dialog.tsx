@@ -1,6 +1,6 @@
 // Share a file (the FileSend board). Opens after the native picker; the targets are the open channel (with the seeder
 // choice) and the open direct conversation or another member, peer to peer. The copy is honest: files stay with the
-// people who receive them, and the limit is 10 GB. Ported from openFileSendDialog in ui/views/dialogs.js.
+// people who receive them, and the limit is 10 GB. Ported from openFileSendDialog in the old UI's views/dialogs.js.
 import { useState } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';

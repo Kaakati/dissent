@@ -17,6 +17,7 @@ import type {
   Embed,
   GroupSummary,
   Id,
+  MentionRef,
   Reaction,
   ReplyRef,
 } from '@/lib/types';
@@ -29,11 +30,16 @@ export interface ViewItem {
   ms: number;
   edited: boolean;
   deleted: boolean;
+  locked: boolean;
+  beforeJoin: boolean;
   own: boolean;
   pending: boolean;
   queued: boolean;
   system: boolean; // a membership line in a group
   replyTo: ReplyRef | null;
+  mentions: MentionRef[];
+  mentionsMe: boolean; // the message is highlighted for the viewer
+  mentionsEveryone: boolean; // @everyone is a valid pill in the text
   reactions: Reaction[] | null;
   attachments: Attachment[] | null;
   embeds: Embed[];
@@ -82,6 +88,8 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       ms: Number(m.ms),
       edited: Boolean(m.edited),
       deleted: Boolean(m.deleted),
+      locked: Boolean(m.locked),
+      beforeJoin: Boolean(m.before_join),
       own: m.author === me?.root_id,
       pending: false,
       queued: Boolean(m.queued),
@@ -90,6 +98,9 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       reactions: Array.isArray(m.reactions) ? m.reactions : null,
       attachments: Array.isArray(m.attachments) ? m.attachments : null,
       embeds: Array.isArray(m.embeds) ? m.embeds : [],
+      mentions: Array.isArray(m.mentions) ? m.mentions : [],
+      mentionsMe: m.mentions_me === true,
+      mentionsEveryone: m.mentions_everyone === true,
     }));
     return {
       target,
@@ -119,6 +130,8 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       ms: Number(m.ms),
       edited: Boolean(m.edited),
       deleted: Boolean(m.deleted),
+      locked: false,
+      beforeJoin: false,
       own,
       pending: Boolean(m.pending),
       queued: Boolean(m.queued),
@@ -127,6 +140,9 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       reactions: Array.isArray(m.reactions) ? m.reactions : null,
       attachments: Array.isArray(m.attachments) ? m.attachments : null,
       embeds: Array.isArray(m.embeds) ? m.embeds : [],
+      mentions: Array.isArray(m.mentions) ? m.mentions : [],
+      mentionsMe: m.mentions_me === true,
+      mentionsEveryone: m.mentions_everyone === true,
     };
   });
   return {

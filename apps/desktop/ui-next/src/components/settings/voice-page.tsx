@@ -1,4 +1,4 @@
-// Settings › Voice (ui/views/settings-voice.js): the devices, the volumes, the mic test with its level meter, the input
+// Settings › Voice (the old UI's views/settings-voice.js): the devices, the volumes, the mic test with its level meter, the input
 // profile, the sensitivity, push to talk, and the Custom profile's processing and automatic gain control. A change
 // applies on the next audio tick. While this page is open the mic runs, so its meter moves; leaving the page stops it.
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';

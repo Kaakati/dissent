@@ -1,27 +1,45 @@
-// Profile pictures and server icons. A picked file opens "Edit Image", where the picture is panned and zoomed under a
-// mask. Apply draws the crop onto a 256 px canvas and encodes it, so no original bytes (EXIF included) leave the app.
-// Ported from views/avatar.js. chooseImage() is shared with the server icon dialog.
+// Profile pictures, server icons and server banners. A picked file opens "Edit Image", where the picture is panned and
+// zoomed under a mask. Apply draws the crop onto a canvas (256 px square, or 960 x 540 for a banner) and encodes it, so
+// no original bytes (EXIF included) leave the app. Ported from views/avatar.js. chooseImage() is shared with the server
+// icon dialog and Server Settings.
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import { Image as ImageIcon, RotateCw } from 'lucide-react';
+import { Image as ImageIcon, Loader2, RotateCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { api } from '@/lib/api';
 import { openDialog } from '@/lib/dialog';
 import { toast } from '@/lib/toasts';
 import { cn } from '@/lib/utils';
 
 const TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const MAX_FILE = 10 * 1024 * 1024;
-const MAX_OUTPUT = 256 * 1024;
-const OUT = 256; // exported side, px
-const MASK = 0.8; // mask side as a share of the stage; matches the mask's inset of 10%
+const MASK = 0.8; // mask width as a share of the stage; matches the mask's inset of 10%
 const MAX_ZOOM = 5; // the closest zoom, as a multiple of the zoom that just covers the mask
 const PAN_STEP = 8; // px per arrow key; Shift moves four times as far
 const ZOOM_STEP = 1.1;
 
-export type CropShape = 'circle' | 'rounded';
+export type CropShape = 'circle' | 'rounded' | 'banner';
 
-// Opens a file picker. `onApply(base64)` gets the finished 256 px picture, once the user applies a crop.
-// shape: 'circle' for people, 'rounded' for servers.
-export function chooseImage({ shape, onApply }: { shape: CropShape; onApply: (base64: string) => unknown }): void {
+// The exported size of each shape, and the most it may weigh. The engine refuses anything larger.
+const OUTPUT: Record<CropShape, { w: number; h: number; maxBytes: number }> = {
+  circle: { w: 256, h: 256, maxBytes: 256 * 1024 },
+  rounded: { w: 256, h: 256, maxBytes: 256 * 1024 },
+  banner: { w: 960, h: 540, maxBytes: 512 * 1024 },
+};
+
+// The mask in stage px: MASK of the stage wide, and as tall as the shape's aspect makes it.
+const maskOf = (side: number, shape: CropShape) => {
+  const w = side * MASK;
+  return { w, h: (w * OUTPUT[shape].h) / OUTPUT[shape].w };
+};
+
+// What Apply hands back: the finished picture as base64, and for an animated GIF banner, its still poster frame too.
+// An animated banner is not drawn on a canvas, which keeps one frame: the engine crops and loops it (see
+// `animated_banner` in dissent-core), while the editor shows a spinner.
+export type ApplyImage = (base64: string, animated?: { poster: string }) => unknown;
+
+// Opens a file picker. `onApply` gets the finished picture, once the user applies a crop.
+// shape: 'circle' for people, 'rounded' for server icons, 'banner' for the 16:9 server banner.
+export function chooseImage({ shape, onApply }: { shape: CropShape; onApply: ApplyImage }): void {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = TYPES.join(',');
@@ -32,7 +50,17 @@ export function chooseImage({ shape, onApply }: { shape: CropShape; onApply: (ba
   input.click();
 }
 
-function acceptFile(file: File, shape: CropShape, onApply: (base64: string) => unknown): void {
+// Whether a GIF has more than one frame: each frame of an animation has its own graphic control extension.
+export function isAnimatedGif(bytes: Uint8Array): boolean {
+  if (bytes[0] !== 0x47 || bytes[1] !== 0x49 || bytes[2] !== 0x46) return false;
+  let controls = 0;
+  for (let i = 0; i + 2 < bytes.length; i++) {
+    if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9 && bytes[i + 2] === 0x04 && ++controls > 1) return true;
+  }
+  return false;
+}
+
+function acceptFile(file: File, shape: CropShape, onApply: ApplyImage): void {
   if (!TYPES.includes(file.type)) {
     toast('Pick a PNG, JPEG, WebP or GIF image');
     return;
@@ -44,13 +72,16 @@ function acceptFile(file: File, shape: CropShape, onApply: (base64: string) => u
   const url = URL.createObjectURL(file);
   const picture = new Image();
   picture.src = url;
-  picture.decode().then(
-    () => {
+  const animated = shape === 'banner' && file.type === 'image/gif'
+    ? file.arrayBuffer().then((buf) => (isAnimatedGif(new Uint8Array(buf)) ? new Uint8Array(buf) : null))
+    : Promise.resolve(null);
+  Promise.all([picture.decode(), animated]).then(
+    ([, gif]) => {
       openDialog({
         title: 'Edit Image',
         className: 'avatar-dialog',
         onClose: () => URL.revokeObjectURL(url),
-        content: (close) => <CropEditor picture={picture} url={url} shape={shape} onApply={onApply} close={close} />,
+        content: (close) => <CropEditor picture={picture} url={url} shape={shape} gif={gif} onApply={onApply} close={close} />,
       });
     },
     () => {
@@ -67,20 +98,26 @@ interface Crop {
   y: number;
 }
 
-// The smallest scale at which the picture still covers the mask. Rotation does not change it.
-const fitOf = (side: number, picture: HTMLImageElement): number =>
-  side ? (side * MASK) / Math.min(picture.naturalWidth, picture.naturalHeight) : 0;
+// The picture's width and height on screen axes, once turned.
+const turnedSize = (picture: HTMLImageElement, rot: number) =>
+  rot % 2 === 1 ? { w: picture.naturalHeight, h: picture.naturalWidth } : { w: picture.naturalWidth, h: picture.naturalHeight };
+
+// The smallest scale at which the picture still covers the mask. For a square mask rotation does not change it.
+const fitOf = (side: number, picture: HTMLImageElement, shape: CropShape, rot = 0): number => {
+  if (!side) return 0;
+  const mask = maskOf(side, shape);
+  const size = turnedSize(picture, rot);
+  return Math.max(mask.w / size.w, mask.h / size.h);
+};
 
 // Pan and zoom are clamped so the mask is always covered by the picture.
-function clampCrop(c: Crop, side: number, picture: HTMLImageElement): Crop {
-  const fit = fitOf(side, picture);
-  const turned = c.rot % 2 === 1;
-  const naturalW = turned ? picture.naturalHeight : picture.naturalWidth;
-  const naturalH = turned ? picture.naturalWidth : picture.naturalHeight;
-  const mask = side * MASK;
+function clampCrop(c: Crop, side: number, picture: HTMLImageElement, shape: CropShape): Crop {
+  const fit = fitOf(side, picture, shape, c.rot);
+  const size = turnedSize(picture, c.rot);
+  const mask = maskOf(side, shape);
   const scale = Math.min(fit * MAX_ZOOM, Math.max(fit, c.scale));
-  const maxX = Math.max(0, (naturalW * scale - mask) / 2);
-  const maxY = Math.max(0, (naturalH * scale - mask) / 2);
+  const maxX = Math.max(0, (size.w * scale - mask.w) / 2);
+  const maxY = Math.max(0, (size.h * scale - mask.h) / 2);
   return { ...c, scale, x: Math.min(maxX, Math.max(-maxX, c.x)), y: Math.min(maxY, Math.max(-maxY, c.y)) };
 }
 
@@ -88,13 +125,15 @@ function CropEditor({
   picture,
   url,
   shape,
+  gif,
   onApply,
   close,
 }: {
   picture: HTMLImageElement;
   url: string;
   shape: CropShape;
-  onApply: (base64: string) => unknown;
+  gif: Uint8Array | null; // the original bytes of an animated GIF banner, which the engine re-encodes
+  onApply: ApplyImage;
   close: () => void;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -104,10 +143,12 @@ function CropEditor({
   const [crop, setCrop] = useState<Crop>({ rot: 0, scale: 0, x: 0, y: 0 });
   const [busy, setBusy] = useState(false);
 
-  const fit = fitOf(side, picture);
+  const fit = fitOf(side, picture, shape, crop.rot);
+  const out = OUTPUT[shape];
   // Until the first change the crop sits at the fit scale.
   const current: Crop = { ...crop, scale: crop.scale || fit };
-  const change = (fn: (c: Crop) => Crop) => setCrop((c) => clampCrop(fn({ ...c, scale: c.scale || fitOf(side, picture) }), side, picture));
+  const change = (fn: (c: Crop) => Crop) =>
+    setCrop((c) => clampCrop(fn({ ...c, scale: c.scale || fitOf(side, picture, shape, c.rot) }), side, picture, shape));
   const zoomBy = (factor: number) => change((c) => ({ ...c, scale: c.scale * factor }));
   const rotate = () => change((c) => ({ ...c, rot: (c.rot + 1) % 4 }));
   const pan = (dx: number, dy: number) => change((c) => ({ ...c, x: c.x + dx, y: c.y + dy }));
@@ -130,11 +171,13 @@ function CropEditor({
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      setCrop((c) => clampCrop({ ...c, scale: (c.scale || fitOf(side, picture)) * Math.exp(-e.deltaY * 0.0015) }, side, picture));
+      setCrop((c) =>
+        clampCrop({ ...c, scale: (c.scale || fitOf(side, picture, shape, c.rot)) * Math.exp(-e.deltaY * 0.0015) }, side, picture, shape),
+      );
     };
     stage.addEventListener('wheel', onWheel, { passive: false });
     return () => stage.removeEventListener('wheel', onWheel);
-  }, [side, picture]);
+  }, [side, picture, shape]);
 
   // ---- pointer: drag to pan, two fingers to zoom ----
   const gap = () => {
@@ -185,21 +228,21 @@ function CropEditor({
     }
   };
 
-  // ---- export: draw the crop at 256 px, then encode WebP at 0.85 with PNG as the fallback ----
+  // ---- export: draw the crop at the shape's size, then encode WebP at 0.85 with PNG as the fallback ----
   const encode = (type: string, quality?: number) =>
     new Promise<Blob | null>((resolve) => {
       const canvas = document.createElement('canvas');
-      canvas.width = OUT;
-      canvas.height = OUT;
+      canvas.width = out.w;
+      canvas.height = out.h;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         resolve(null);
         return;
       }
-      const k = OUT / (side * MASK);
+      const k = out.w / maskOf(side, shape).w;
       ctx.imageSmoothingQuality = 'high';
       // The picture's centre sits (x, y) from the mask centre, which is the canvas centre.
-      ctx.translate(OUT / 2 + current.x * k, OUT / 2 + current.y * k);
+      ctx.translate(out.w / 2 + current.x * k, out.h / 2 + current.y * k);
       ctx.rotate((current.rot * Math.PI) / 2);
       ctx.scale(current.scale * k, current.scale * k);
       ctx.drawImage(picture, -picture.naturalWidth / 2, -picture.naturalHeight / 2);
@@ -209,16 +252,40 @@ function CropEditor({
     const webp = await encode('image/webp', 0.85);
     return webp?.type === 'image/webp' ? webp : encode('image/png');
   };
+  // The crop in source pixels of the turned picture: where the mask sits over it, at its natural size.
+  const cropRect = () => {
+    const size = turnedSize(picture, current.rot);
+    const mask = maskOf(side, shape);
+    const w = Math.round(mask.w / current.scale);
+    const h = Math.round(mask.h / current.scale);
+    const x = Math.round(size.w / 2 - current.x / current.scale - w / 2);
+    const y = Math.round(size.h / 2 - current.y / current.scale - h / 2);
+    return { x: Math.max(0, x), y: Math.max(0, y), w: Math.max(1, w), h: Math.max(1, h), rot: current.rot };
+  };
+  const applyAnimated = async (bytes: Uint8Array) => {
+    try {
+      const prepared = await api.prepareAnimatedBanner(base64(bytes.slice().buffer), cropRect());
+      close();
+      await onApply(prepared.gif, { poster: prepared.poster });
+    } catch (err) {
+      toast(err);
+      setBusy(false);
+    }
+  };
   const apply = async () => {
     if (busy) return;
     setBusy(true);
+    if (gif) {
+      await applyAnimated(gif);
+      return;
+    }
     const blob = await exportCrop();
     if (!blob) {
       setBusy(false);
       return;
     }
-    if (blob.size > MAX_OUTPUT) {
-      toast('This crop is over 256 KB after compression. Try a simpler picture or a tighter crop.');
+    if (blob.size > out.maxBytes) {
+      toast(`This crop is over ${out.maxBytes / 1024} KB after compression. Try a simpler picture or a tighter crop.`);
       setBusy(false);
       return;
     }
@@ -226,7 +293,7 @@ function CropEditor({
     await onApply(base64(await blob.arrayBuffer()));
   };
 
-  const reset = () => setCrop(clampCrop({ rot: 0, x: 0, y: 0, scale: fit }, side, picture));
+  const reset = () => setCrop(clampCrop({ rot: 0, x: 0, y: 0, scale: fitOf(side, picture, shape) }, side, picture, shape));
   const zoomValue = fit ? Math.round((Math.log(current.scale / fit) / Math.log(MAX_ZOOM)) * 1000) : 0;
 
   return (
@@ -262,7 +329,13 @@ function CropEditor({
         </svg>
         <div
           data-crop-mask
-          className={cn('pointer-events-none absolute inset-[10%] border-3 border-white', shape === 'rounded' ? 'rounded-[33%]' : 'rounded-full')}
+          className={cn(
+            'pointer-events-none absolute inset-x-[10%] border-3 border-white',
+            shape === 'circle' && 'rounded-full',
+            shape === 'rounded' && 'rounded-[33%]',
+            shape === 'banner' && 'rounded-lg',
+          )}
+          style={{ top: `${maskTop(shape)}%`, bottom: `${maskTop(shape)}%` }}
         />
       </div>
 
@@ -290,21 +363,35 @@ function CropEditor({
         <Button variant="outline" onClick={close}>
           Cancel
         </Button>
-        <Button disabled={busy} onClick={() => void apply()}>
-          Apply
+        <Button disabled={busy} aria-busy={busy || undefined} onClick={() => void apply()}>
+          {busy && gif ? (
+            <>
+              <Loader2 className="animate-spin" aria-hidden="true" />
+              Encoding…
+            </>
+          ) : (
+            'Apply'
+          )}
         </Button>
       </div>
     </div>
   );
 }
 
+// How far the mask sits from the top (and bottom) of the stage, in percent. 10 for a square mask; a banner's mask is
+// as wide but shorter, so it sits lower.
+function maskTop(shape: CropShape): number {
+  return 50 - (MASK * 50 * OUTPUT[shape].h) / OUTPUT[shape].w;
+}
+
 // The dim layer with the mask cut out (even-odd), in a 100 x 100 box that matches the stage. The mask is 80% of the
-// stage, from 10 to 90; a server icon's corners have a radius of 33% of it.
+// stage wide, from 10 to 90; a server icon's corners have a radius of 33% of it, a banner's a small one.
 function maskPath(shape: CropShape): string {
-  const r = 80 * 0.33;
-  const hole = shape === 'rounded'
-    ? `M${10 + r} 10H${90 - r}A${r} ${r} 0 0 1 90 ${10 + r}V${90 - r}A${r} ${r} 0 0 1 ${90 - r} 90H${10 + r}A${r} ${r} 0 0 1 10 ${90 - r}V${10 + r}A${r} ${r} 0 0 1 ${10 + r} 10Z`
-    : 'M10 50a40 40 0 1 0 80 0a40 40 0 1 0-80 0Z';
+  const top = maskTop(shape);
+  const bottom = 100 - top;
+  const rect = (r: number) =>
+    `M${10 + r} ${top}H${90 - r}A${r} ${r} 0 0 1 90 ${top + r}V${bottom - r}A${r} ${r} 0 0 1 ${90 - r} ${bottom}H${10 + r}A${r} ${r} 0 0 1 10 ${bottom - r}V${top + r}A${r} ${r} 0 0 1 ${10 + r} ${top}Z`;
+  const hole = shape === 'circle' ? 'M10 50a40 40 0 1 0 80 0a40 40 0 1 0-80 0Z' : rect(shape === 'rounded' ? 80 * 0.33 : 2);
   return `M0 0H100V100H0Z ${hole}`;
 }
 

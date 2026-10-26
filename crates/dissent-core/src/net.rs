@@ -15,7 +15,7 @@ use crate::typing::TypingTarget;
 use crate::views::EngineEvent;
 use crate::wire::{GossipMsg, decode_gossip};
 use crate::world::World;
-use dissent_events::{open_event, Payload, SealKey, SealedKind, SignedDm, SignedEvent};
+use dissent_events::{open_event_keyed, Payload, SealKey, SealedKind, SignedDm, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicReceiver};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +31,8 @@ pub(crate) struct ControlEffects {
     emitted: Vec<EngineEvent>,
     relay_sets: Vec<Vec<String>>,
     pictures: Vec<crate::avatars::PictureFetch>,
+    /// An accepted `CommunityRename`, so the founder republishes the record.
+    renamed: bool,
 }
 
 /// Collects what the accepted `events` ask of the engine: a notice for each, the relays a
@@ -49,7 +51,8 @@ pub(crate) fn control_effects(
 ) -> ControlEffects {
     let mut fx = ControlEffects::default();
     for se in events {
-        let Ok(ev) = open_event(&se.event, c.ring()) else {
+        // Both rings, so a member-sealed event has its effects too.
+        let Ok(ev) = open_event_keyed(&se.event, c.ring(), c.epoch_ring()) else {
             continue;
         };
         if let Payload::SetRelays { relays } = &ev.body.payload {
@@ -58,6 +61,7 @@ pub(crate) fn control_effects(
         if let Some(fetch) = crate::avatars::picture_fetch_for(community, c, ev.body.author, &ev.body.payload) {
             fx.pictures.push(fetch);
         }
+        fx.renamed |= matches!(ev.body.payload, Payload::CommunityRename { .. });
         if let Payload::KeyRotation(rot) = &ev.body.payload {
             let (old, new) = (rot.request.old_root, rot.request.new_root);
             if c.is_member(&new)
@@ -162,7 +166,7 @@ impl Engine {
                 debug!(community = %community, "dropping event stamped too far ahead of our clock");
                 continue;
             }
-            if storage_here && matches!(se.event.body.payload, Payload::MemberSealedControl { .. }) {
+            if storage_here && dissent_events::is_member_sealed(&se.event.body.payload) {
                 match dissent_events::verify_member_tag(&writes, &se.event.body) {
                     Ok(()) => {}
                     Err(dissent_events::OpenError::NoKey) => {
@@ -201,7 +205,11 @@ impl Engine {
         for se in &fresh {
             if matches!(
                 se.event.body.payload,
-                Payload::Message { .. } | Payload::Sealed { kind: SealedKind::Message, .. }
+                Payload::Message { .. }
+                    | Payload::Sealed {
+                        kind: SealedKind::Message | SealedKind::HistoryMessage,
+                        ..
+                    }
             ) {
                 let target = TypingTarget::Channel {
                     community,
@@ -239,7 +247,13 @@ impl Engine {
             let engine = self.clone();
             self.spawn_task(async move { engine.adopt_relays(&relays).await });
         }
+        if fx.renamed {
+            self.after_rename();
+        }
         for fetch in fx.pictures {
+            if let Some(poster) = fetch.poster {
+                self.fetch_picture(fetch.owner, poster, fetch.roots.clone());
+            }
             match fetch.picture {
                 Some(picture) => self.fetch_picture(fetch.owner, picture, fetch.roots),
                 None => self.emit_owner(fetch.owner),
@@ -330,6 +344,9 @@ impl Engine {
                 }
             }
             Request::Fetch { community, ids } => Response::Events(self.events_for(community, &ids)),
+            Request::FetchRaw { community, ids } => Response::EventsRaw(
+                self.events_for(community, &ids).iter().map(|se| se.encode()).collect(),
+            ),
             Request::MlsJoin { community, from } => {
                 self.handle_mls_join(conn_from, community, from).await
             }
@@ -350,6 +367,16 @@ impl Engine {
                 token,
                 invite_id,
             } => self.answer_invite_preview(conn_from, community, token, invite_id),
+            Request::InvitePreviewFull {
+                community,
+                token,
+                invite_id,
+            } => self.answer_invite_preview_full(conn_from, community, token, invite_id),
+            Request::Friends => self.serve_friends(conn_from),
+            Request::HistoryKeys { community } => self.serve_history_keys(conn_from, community),
+            Request::HistorySupport => Response::HistorySupport(
+                self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }
@@ -381,6 +408,11 @@ impl Engine {
             Request::Profile(sp) => match self.accept_profile(*sp) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile: {e}")),
+            },
+            Request::ProfileSync(sp) => self.answer_profile_sync(conn_from, *sp),
+            Request::ProfileBanner(sb) => match self.accept_profile_banner(*sb) {
+                Ok(()) => Response::Ack,
+                Err(e) => Response::Error(format!("invalid profile banner: {e}")),
             },
             Request::Typing(st) => match self.accept_typing(None, *st) {
                 Ok(()) => Response::Ack,

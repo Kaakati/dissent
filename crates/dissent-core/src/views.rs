@@ -13,6 +13,12 @@ pub struct MeView {
     pub display_name: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// Path of the profile banner's picture on this device, when the banner is one. See `profile_banners`.
+    pub banner: Option<String>,
+    /// Path of an animated banner's still frame, shown under reduced motion.
+    pub banner_poster: Option<String>,
+    /// The preset gradient the profile banner is, when it is one.
+    pub banner_preset: Option<u8>,
     /// True until the recovery phrase has been shown on a fresh device. See `capabilities`.
     pub first_run: bool,
 }
@@ -26,6 +32,10 @@ pub struct CommunitySummary {
     pub my_role: String,
     /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
     pub icon: Option<String>,
+    /// Unread mentions of me in the community's text channels, since each was last marked read.
+    pub mentions: u32,
+    /// Whether this device's user may mention everyone here: the owner and admins.
+    pub can_mention_everyone: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,6 +46,18 @@ pub struct CommunityView {
     pub my_role: String,
     /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
     pub icon: Option<String>,
+    /// Path of the decrypted banner on this device, once fetched. `None` when there is none yet.
+    pub banner: Option<String>,
+    /// Path of an animated banner's still frame, shown under reduced motion.
+    pub banner_poster: Option<String>,
+    /// The preset gradient the banner is, when it is one. The UI draws presets itself.
+    pub banner_preset: Option<u8>,
+    /// The description from Server Settings, empty when there is none.
+    pub description: String,
+    /// The traits from Server Settings, at most five.
+    pub traits: Vec<dissent_events::Trait>,
+    /// When the community was created, in ms since the Unix epoch, from its genesis.
+    pub created_ms: u64,
     pub channels: Vec<ChannelInfo>,
     pub members: Vec<MemberInfo>,
     /// Relays the community asks members to use, from its latest `SetRelays`.
@@ -43,12 +65,16 @@ pub struct CommunityView {
     /// Whether control events are member-sealed, so storage members cannot read them. See
     /// `Engine::set_member_only`.
     pub member_only: bool,
+    /// Who a joiner can read past messages of: `since_join` or `all`. See `set_history_visibility`.
+    pub history: String,
     /// Whether some events stay unreadable here until a member sends the key for their epoch. The
     /// UI shows "Waiting for a member to unlock history" while it is set.
     pub history_locked: bool,
     /// Each voice channel with the people in its call, as far as this device has heard. Includes
     /// people who are not in the call themselves.
     pub voice_channels: Vec<VoiceChannelView>,
+    /// Whether this device's user may mention everyone here: the owner and admins.
+    pub can_mention_everyone: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -65,6 +91,8 @@ pub struct ChannelInfo {
     pub user_limit: u32,
     /// The relay URL, or empty for automatic.
     pub relay: String,
+    /// Unread mentions of me in this channel, since it was last marked read. Zero for voice channels.
+    pub mentions: u32,
 }
 
 impl ChannelInfo {
@@ -82,6 +110,7 @@ impl ChannelInfo {
             bitrate_kbps: settings.bitrate_kbps,
             user_limit: settings.user_limit,
             relay: settings.relay.clone(),
+            mentions: 0,
         }
     }
 }
@@ -143,6 +172,9 @@ pub struct MessageItem {
     /// True when the text is encrypted and this device holds no key for it, for example a message
     /// from before this device joined. `text` is empty then.
     pub locked: bool,
+    /// True when `locked` and the message was sent before this device joined. The UI says so, and that
+    /// the server's history setting decides what joiners read.
+    pub before_join: bool,
     /// The message this one replies to, if any.
     pub reply_to: Option<ReplyPreview>,
     /// Reactions in the order each emoji first got one. Empty when there are none.
@@ -150,7 +182,21 @@ pub struct MessageItem {
     /// Files in the message, with their state on this device.
     pub attachments: Vec<crate::attachments::AttachmentView>,
     /// Link previews the sender made.
-    pub embeds: Vec<crate::previews::Embed>,
+    pub embeds: Vec<crate::previews::EmbedView>,
+    /// True when this message mentions me, by name or with `@everyone` the sender could use. Only
+    /// members are counted, see `mentions`.
+    pub mentions_me: bool,
+    /// The people this message mentions who are members of the channel's community, resolved to names.
+    pub mentions: Vec<MentionView>,
+    /// True when the message's `@everyone` counts: the author could mention everyone when it was accepted.
+    pub mentions_everyone: bool,
+}
+
+/// A person a message mentions, for the mention pill.
+#[derive(Clone, Debug, Serialize)]
+pub struct MentionView {
+    pub id: String,
+    pub display_name: String,
 }
 
 /// A short view of the message a reply points at.
@@ -184,9 +230,18 @@ pub struct UserView {
     pub display_name: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// Path of the profile banner's picture on this device, once fetched, when the banner is one.
+    pub banner: Option<String>,
+    /// Path of an animated banner's still frame, shown under reduced motion.
+    pub banner_poster: Option<String>,
+    /// The preset gradient the profile banner is, when it is one. Neither set: the hue colour.
+    pub banner_preset: Option<u8>,
     pub is_contact: bool,
     pub handles: Vec<HandleView>,
     pub mutual_communities: Vec<CommunityRef>,
+    /// Our contacts that they also have, when they share their list with us. Filled by
+    /// `Engine::user_profile_full`; empty otherwise.
+    pub mutual_friends: Vec<crate::friends::FriendView>,
     /// When this person last changed identity, in milliseconds. `None` if they never did.
     pub identity_changed_ms: Option<u64>,
     /// When the key changed and was not yet compared with the safety number. `None` once verified.
@@ -255,6 +310,9 @@ pub struct ConversationSummary {
     pub contact_since_ms: Option<u64>,
     /// When this device first saw the other party, in milliseconds. `None` for a group.
     pub first_seen_ms: Option<u64>,
+    /// Unread messages from others since the conversation was last marked read, counted up to 100.
+    /// Computed when the summary is built, never stored.
+    pub unread: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -275,7 +333,7 @@ pub struct DmItem {
     /// Files in the message.
     pub attachments: Vec<crate::attachments::AttachmentView>,
     /// Link previews the sender made.
-    pub embeds: Vec<crate::previews::Embed>,
+    pub embeds: Vec<crate::previews::EmbedView>,
     /// The message this one replies to, if any. See `conv_actions.rs`.
     pub reply_to: Option<ReplyPreview>,
     /// Reactions in the order each emoji first got one. Empty when there are none.
@@ -305,6 +363,8 @@ pub enum EngineEvent {
     GroupJoinRequest { conversation: String, user: String },
     /// A download or upload moved. Matches `dissent://transfers`.
     TransfersChanged,
+    /// An attachment's thumbnail arrived. The UI re-reads the open conversation, without an alert.
+    AttachmentChanged { message_id: String, attachment_id: String },
     /// A file for an attachment moved. `progress` is `0..1`.
     AttachmentProgress {
         message_id: String,
@@ -341,6 +401,18 @@ pub enum EngineEvent {
     PresenceChanged { user: String },
     /// Who is typing in `target` changed: someone started, stopped, sent, or timed out.
     TypingChanged { target: crate::typing::TypingTarget },
+    /// A preview of a camera or a shared screen, from this device or a peer. `jpeg` is a JPEG of
+    /// the picture, base64 encoded. `root_id` names the person, so the window can place the tile.
+    VideoFrame {
+        sender: u64,
+        root_id: String,
+        screen: bool,
+        width: u32,
+        height: u32,
+        jpeg: String,
+    },
+    /// A reminder's time has come. It is removed from the list as it fires. Appended, see `saved`.
+    ReminderDue { reminder: crate::saved::Reminder },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.

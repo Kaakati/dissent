@@ -1,4 +1,4 @@
-// The call pane (ui/views/call.js): the header of the call, and in the main column the route banner, the participants in a
+// The call pane (the old UI's views/call.js): the header of the call, and in the main column the route banner, the participants in a
 // grid with their speaking rings, the controls, and the call chat below. The camera and screen share are disabled slots
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
 import { useEffect, useState, type ReactNode } from 'react';
@@ -12,7 +12,7 @@ import { callConversationOf, conversationKey, loadCallChat, useCallChat } from '
 import { hueOf } from '@/lib/identity';
 import { clockLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
-import type { CallMessage, CallState, VoiceParticipant } from '@/lib/types';
+import type { CallMessage, CallState, Id, VoiceParticipant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import './call.css';
 
@@ -66,11 +66,18 @@ export function CallBody() {
 function CallStage({ call }: { call: CallState }) {
   const toggleMuted = useShell((s) => s.toggleMuted);
   const toggleDeafened = useShell((s) => s.toggleDeafened);
+  const toggleCamera = useShell((s) => s.toggleCamera);
   const leaveCall = useShell((s) => s.leaveCall);
+  const me = useShell((s) => s.me);
+  const ownPreviews = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
+  const ownScreen = useShell((s) => (me ? s.videoFrames[`${me.root_id}:screen`] : undefined));
   return (
     <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_96px] overflow-hidden rounded-lg bg-ink" aria-label="Call">
       <RouteBanner call={call} />
       <div className="grid min-h-0 grid-cols-3 auto-rows-[minmax(0,1fr)] gap-s-3 p-s-3">
+        {me && (call.camera || call.screen) ? (
+          <SelfTile name={me.display_name} rootId={me.root_id} preview={call.screen ? ownScreen ?? ownPreviews : ownPreviews} />
+        ) : null}
         {call.participants.map((p) => (
           <Tile key={p.root_id} person={p} />
         ))}
@@ -90,7 +97,11 @@ function CallStage({ call }: { call: CallState }) {
         >
           <Headphones className="size-7" />
         </ControlButton>
-        <ControlButton label="Camera, coming soon" disabled>
+        <ControlButton
+          label={call.camera ? 'Turn camera off' : 'Turn camera on'}
+          pressed={Boolean(call.camera)}
+          onClick={() => void toggleCamera()}
+        >
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
         </ControlButton>
         <ControlButton label="Share screen, coming soon" disabled>
@@ -140,13 +151,34 @@ function RouteBanner({ call }: { call: CallState }) {
 }
 
 // One participant: a large avatar on the hue of their id, with the speaking ring, the mute flag and the forwarder tag.
+// A person's camera or screen, drawn from the latest preview the engine sent: a JPEG, base64 encoded.
+function VideoImage({ preview, label }: { preview: { jpeg: string }; label: string }) {
+  return <img src={`data:image/jpeg;base64,${preview.jpeg}`} alt={label} className="absolute inset-0 size-full object-contain" />;
+}
+
+// This device's own tile. It shows the shared screen when there is one, else the camera.
+function SelfTile({ name, rootId, preview }: { name: string; rootId: Id; preview?: { jpeg: string } }) {
+  return (
+    <div className="relative grid place-items-center overflow-hidden rounded-lg" style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(rootId)})` }}>
+      {preview ? <VideoImage preview={preview} label="Your video" /> : <UserAvatar name={name} seed={rootId} size="xl" className="size-24 text-[31px]" />}
+      <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
+        {`${name} (you)`}
+      </span>
+    </div>
+  );
+}
+
 function Tile({ person }: { person: VoiceParticipant }) {
+  const camera = useShell((s) => s.videoFrames[person.root_id]);
+  const screen = useShell((s) => s.videoFrames[`${person.root_id}:screen`]);
+  const preview = screen ?? camera;
   return (
     <div
       className={cn('relative grid place-items-center overflow-hidden rounded-lg', person.speaking && 'shadow-[inset_0_0_0_3px_var(--success)]')}
       style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(person.root_id)})` }}
     >
-      <UserAvatar name={person.display_name} seed={person.root_id} size="xl" className="size-24 text-[31px]" />
+      {preview ? <VideoImage preview={preview} label={`${person.display_name}'s video`} /> : null}
+      {preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" className="size-24 text-[31px]" />}
       <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
         {person.muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}
         <span>{person.display_name}</span>
@@ -271,7 +303,7 @@ function CallMessageRow({ message }: { message: CallMessage }) {
 }
 
 // The right column during a channel call: who forwards the call and who is the backup, when the engine names them, the
-// quality, and the encryption (ui/views/call.js callDetailsNodes). Each section is there only when its field is.
+// quality, and the encryption (the old UI's views/call.js callDetailsNodes). Each section is there only when its field is.
 export function CallDetails() {
   const call = useShell((s) => s.call);
   if (!call) return null;

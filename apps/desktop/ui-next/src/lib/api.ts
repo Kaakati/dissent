@@ -1,6 +1,7 @@
 import { noteImages } from './images';
 import type {
   AudioDevices,
+  Bookmark,
   Capabilities,
   CallState,
   ChannelView,
@@ -13,10 +14,14 @@ import type {
   GuardianList,
   Id,
   InvitePreview,
+  MessageRef,
   Me,
   NetStatus,
+  ServerPrefs,
   NetworkSettings,
   StoreStats,
+  Trait,
+  Reminder,
   TransferItem,
   TransferRates,
   TransferSettings,
@@ -31,7 +36,7 @@ import type {
 import type { Unlisten } from './tauri';
 
 // Every Tauri command the UI calls, in one place. Args are camelCase (Tauri maps them to snake_case params). Names and
-// argument shapes match apps/desktop/ui/api.js, so the two UIs can run against the same backend and mock.
+// argument shapes match the old UI's api.js, so the two UIs can run against the same backend and mock.
 // Commands marked "not in the engine yet" are the contracts in docs/design/07-visual-system.md, Part 6. The UI calls
 // them only after `capabilities` reports the feature.
 // Return types are narrowed where a ported view reads the result. Other results are `unknown` until that view is ported.
@@ -63,6 +68,7 @@ export interface ChannelPatch {
 
 export interface SendFileOptions {
   seed?: boolean;
+  mentions?: { users: Id[]; everyone: boolean };
 }
 
 export const api = {
@@ -72,13 +78,36 @@ export const api = {
   // Profile picture and server icon: `bytes` is the 256 px WebP or PNG as base64.
   setAvatar: (bytes: string) => call<void>('set_avatar', { bytes }),
   clearAvatar: () => call<void>('clear_avatar'),
+  // Profile banner: a 16:9 WebP or PNG as base64 (at most 960 x 540), or a preset id.
+  setProfileBanner: (bytes: string) => call<void>('set_profile_banner', { bytes }),
+  setProfileBannerPreset: (preset: number) => call<void>('set_profile_banner_preset', { preset }),
+  clearProfileBanner: () => call<void>('clear_profile_banner'),
   setCommunityIcon: (communityId: Id, bytes: string) => call<void>('set_community_icon', { communityId, bytes }),
   clearCommunityIcon: (communityId: Id) => call<void>('clear_community_icon', { communityId }),
+  // Server Settings: the owner renames; owners and admins set the banner (a 16:9 WebP or PNG as base64, or a preset id)
+  // and the profile (a description and up to five traits).
+  renameCommunity: (communityId: Id, name: string) => call<void>('rename_community', { communityId, name }),
+  // An animated GIF banner: the engine crops, scales and loops it off the UI thread, then it is set like a picture.
+  prepareAnimatedBanner: (bytes: string, crop: { x: number; y: number; w: number; h: number; rot: number }) =>
+    call<{ gif: string; poster: string }>('prepare_animated_banner', { bytes, crop }),
+  setCommunityBannerAnimated: (communityId: Id, gif: string, poster: string) =>
+    call<void>('set_community_banner_animated', { communityId, gif, poster }),
+  setProfileBannerAnimated: (gif: string, poster: string) => call<void>('set_profile_banner_animated', { gif, poster }),
+  setCommunityBannerPreset: (communityId: Id, preset: number) => call<void>('set_community_banner_preset', { communityId, preset }),
+  setCommunityProfile: (communityId: Id, description: string, traits: Trait[]) =>
+    call<void>('set_community_profile', { communityId, description, traits }),
+  setCommunityBanner: (communityId: Id, bytes: string) => call<void>('set_community_banner', { communityId, bytes }),
+  clearCommunityBanner: (communityId: Id) => call<void>('clear_community_banner', { communityId }),
   contactLink: () => call<string>('contact_link'),
+  linkPreviews: () => call<boolean>('link_previews'),
+  setLinkPreviews: (on: boolean) => call<void>('set_link_previews', { on }),
+  linkPreviewPrompted: () => call<boolean>('link_preview_prompted'),
+  markLinkPreviewPrompted: () => call<void>('mark_link_preview_prompted'),
   addContact: (link: string) => call<unknown>('add_contact', { link }),
 
   // ---- servers ----
   listCommunities: () => call<CommunitySummary[]>('list_communities'),
+  setServerOrder: (ids: Id[]) => call<void>('set_server_order', { ids }),
   createCommunity: (name: string) => call<unknown>('create_community', { name }),
   createInvite: (communityId: Id) => call<unknown>('create_invite', { communityId }),
   joinCommunity: (invite: string) => call<unknown>('join_community', { invite }),
@@ -95,7 +124,9 @@ export const api = {
   revokeInvite: (communityId: Id, inviteId: Id) => call<void>('revoke_invite', { communityId, inviteId }),
   channelMessages: (communityId: Id, channelId: Id, limit: number) =>
     call<unknown[]>('channel_messages', { communityId, channelId, limit }),
-  sendMessage: (communityId: Id, channelId: Id, text: string) => call<unknown>('send_message', { communityId, channelId, text }),
+  // mentions is sent only when the text mentions someone (see lib/mentions.ts mentionArg).
+  sendMessage: (communityId: Id, channelId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('send_message', mentions ? { communityId, channelId, text, mentions } : { communityId, channelId, text }),
 
   // ---- typing indicators ----
   typing: (target: TypingTarget) => call<void>('typing', { target }),
@@ -107,8 +138,12 @@ export const api = {
     call<unknown>('edit_message', { communityId, channelId, messageId, text }),
   deleteMessage: (communityId: Id, channelId: Id, messageId: Id) =>
     call<void>('delete_message', { communityId, channelId, messageId }),
-  sendReply: (communityId: Id, channelId: Id, messageId: Id, text: string) =>
-    call<unknown>('send_reply', { communityId, channelId, messageId, text }),
+  sendReply: (communityId: Id, channelId: Id, messageId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('send_reply', mentions ? { communityId, channelId, messageId, text, mentions } : { communityId, channelId, messageId, text }),
+  markMentionsRead: (communityId: Id, channelId: Id) => call<void>('mark_mentions_read', { communityId, channelId }),
+  getServerPrefs: (communityId: Id) => call<ServerPrefs>('get_server_prefs', { communityId }),
+  setServerPrefs: (communityId: Id, prefs: ServerPrefs) => call<void>('set_server_prefs', { communityId, prefs }),
+  serverAlerts: (communityId: Id, mentioned: boolean, byName: boolean) => call<boolean>('server_alerts', { communityId, mentioned, byName }),
   react: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
     call<void>('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
@@ -130,11 +165,11 @@ export const api = {
   pickFiles: () => call<string[]>('pick_files'),
   // `seed` keeps an encrypted copy on the community seeder (servers only). Defaults to true on the engine side.
   sendFiles: (communityId: Id, channelId: Id, paths: string[], text: string, opts: SendFileOptions = {}) =>
-    call<unknown>('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true }),
+    call<unknown>('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true, ...(opts.mentions ? { mentions: opts.mentions } : {}) }),
   sendDmFiles: (peer: Id, paths: string[], text: string) => call<unknown>('send_dm_files', { peer, paths, text }),
   downloadAttachment: (communityId: Id | null, messageId: Id, attachmentId: Id) =>
     call<unknown>('download_attachment', { communityId, messageId, attachmentId }),
-  // Both accept only a path inside the app's downloads directory.
+  // Both accept only a file Dissent saved, in whichever download folder it used.
   openAttachment: (path: string) => call<void>('open_attachment', { path }),
   revealAttachment: (path: string) => call<void>('reveal_attachment', { path }),
 
@@ -181,6 +216,8 @@ export const api = {
   sendContactRequest: (link: string) => call<unknown>('send_contact_request', { link }),
   addressDiscovery: () => call<boolean>('address_discovery'),
   setAddressDiscovery: (on: boolean) => call<void>('set_address_discovery', { on }),
+  friendsShared: () => call<boolean>('friends_shared'),
+  setFriendsShared: (on: boolean) => call<boolean>('set_friends_shared', { on }),
   acceptContact: (rootId: Id) => call<void>('accept_contact', { rootId }),
   declineContact: (rootId: Id) => call<void>('decline_contact', { rootId }),
   cancelContactRequest: (rootId: Id) => call<void>('cancel_contact_request', { rootId }),
@@ -209,6 +246,7 @@ export const api = {
   setMuted: (muted: boolean) => call<void>('set_muted', { muted }),
   setDeafened: (deafened: boolean) => call<void>('set_deafened', { deafened }),
   setCamera: (on: boolean) => call<void>('set_camera', { on }),
+  setScreenShare: (on: boolean) => call<void>('set_screen_share', { on }),
   sendCallMessage: (text: string) => call<unknown>('send_call_message', { text }),
   acceptCall: (callId: string) => call<unknown>('accept_call', { callId }),
   declineCall: (callId: string) => call<void>('decline_call', { callId }),
@@ -232,7 +270,8 @@ export const api = {
   removeTransfer: (transferId: Id) => call<void>('remove_transfer', { transferId }),
   transferSettings: () => call<TransferSettings>('transfer_settings'),
   setTransferSettings: (settings: TransferSettings) => call<void>('set_transfer_settings', { settings }),
-  pickDownloadDir: () => call<string | null>('pick_download_dir'),
+  pickDownloadDir: () => call<TransferSettings>('pick_download_dir'),
+  resetDownloadDir: () => call<TransferSettings>('reset_download_dir'),
 
   // ---- recovery guardians and devices ----
   listGuardians: () => call<GuardianList>('list_guardians'),
@@ -253,6 +292,15 @@ export const api = {
   readMarkers: () => call<Record<string, unknown>>('read_markers'),
   approveDevice: (link: string) => call<unknown>('approve_device', { link }),
   finishDeviceLink: (grant: string) => call<unknown>('finish_device_link', { grant }),
+
+  // ---- saved messages, reminders and unread markers ----
+  addBookmark: (message: MessageRef) => call<void>('add_bookmark', { message }),
+  removeBookmark: (key: string) => call<void>('remove_bookmark', { key }),
+  listBookmarks: () => call<Bookmark[]>('list_bookmarks'),
+  addReminder: (message: MessageRef, atMs: number) => call<Reminder>('add_reminder', { message, atMs }),
+  listReminders: () => call<Reminder[]>('list_reminders'),
+  removeReminder: (id: Id) => call<void>('remove_reminder', { id }),
+  markUnread: (key: string, beforeMs: number) => call<void>('mark_unread', { key, beforeMs }),
 
   // ---- your own status; untilMs is epoch milliseconds, or null for no end ----
   getStatus: () => call<UserStatus>('get_status'),

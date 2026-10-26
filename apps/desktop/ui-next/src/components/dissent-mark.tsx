@@ -1,6 +1,6 @@
 import type { SVGProps } from 'react';
 
-// The Dissent mark from the icon sprite (ui/icons.svg, i-dissent-mark). Drawn in currentColor.
+// The Dissent mark from the icon sprite (the old UI's icons.svg, i-dissent-mark). Drawn in currentColor.
 export function DissentMark(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="192.5 189 870 870" fill="currentColor" aria-hidden="true" focusable="false" {...props}>

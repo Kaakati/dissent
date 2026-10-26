@@ -10,26 +10,38 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind, Mid, Pt};
+use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use crate::auth::{
     forget_into, frame_hash, is_digest, learn_into, Auth, FrameSigner, LinkConfig, RxState, Step,
 };
-use dissent_identity::DeviceCert;
 use crate::bwe::BandwidthEstimator;
 use crate::e2ee::{
-    epoch_lsb, peek_counter, redundancy_for, SframeReceiver, SframeSender, DEFAULT_LEVEL,
-    EPOCH_GRACE,
+    epoch_lsb, peek_counter, peek_sender, redundancy_for, SframeReceiver, SframeSender,
+    DEFAULT_LEVEL, EPOCH_GRACE,
 };
 use crate::error::{MediaError, Result};
-use crate::frame::{received, ReceivedFrame};
+use crate::frame::{payload_of_stamp, received, ReceivedFrame};
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::{PacketTransport, UdpTransport};
+use crate::video::{
+    carry, nal_of, stream_key, uncarry, RawFrame, RawVideo, VideoFrame, VideoGate,
+    VideoMeta, VideoReplay,
+};
+use dissent_identity::DeviceCert;
+
+/// Shortest gap between two keyframe requests from one side.
+const PLI_RETRY: Duration = Duration::from_millis(200);
+
+/// The bitrate str0m's bandwidth estimate starts from, in kbps. Video is sized to it until the
+/// first estimate arrives.
+const BWE_INITIAL_KBPS: u64 = 1_000;
 
 /// How often str0m reports peer and media statistics.
 const STATS_INTERVAL: Duration = Duration::from_millis(500);
@@ -71,6 +83,23 @@ pub struct CallStats {
 struct Keys {
     tx: SframeSender,
     rx: SframeReceiver,
+    sender_id: u64,
+    /// Video frames use their own key, see [`MediaKey::video`].
+    video_tx: SframeSender,
+    video_rx: SframeReceiver,
+}
+
+impl Keys {
+    fn new(key: MediaKey, sender_id: u64, epoch: u64) -> Result<Self> {
+        let video = key.video();
+        Ok(Self {
+            tx: SframeSender::new(&key, sender_id, epoch)?,
+            rx: SframeReceiver::new(key, epoch),
+            sender_id,
+            video_tx: SframeSender::new(&video, sender_id, epoch)?,
+            video_rx: SframeReceiver::new(video, epoch),
+        })
+    }
 }
 
 /// One side of a 1:1 call.
@@ -88,6 +117,21 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     state: Arc<Mutex<RxState>>,
     pending_offer: Option<SdpPendingOffer>,
     audio_mid: Option<Mid>,
+    /// The video line this side offered. It becomes `video_mid` once the answer keeps it.
+    offered_video_mid: Option<Mid>,
+    /// Set once the peer keeps the video line. Stays unset for `m=video 0`.
+    video_mid: Option<Mid>,
+    video_inbox: VecDeque<VideoFrame>,
+    video_raw_inbox: VecDeque<RawVideo>,
+    video_gate: VideoGate,
+    /// When this side last asked for a keyframe, to keep the requests a sane rate.
+    last_pli: Option<Instant>,
+    /// Set when the peer asks this side for a keyframe, see [`Call::take_keyframe_request`].
+    keyframe_requested: bool,
+    video_replay: VideoReplay,
+    /// The latest bandwidth estimate from str0m, in kbps, and the callback that hears it.
+    video_available_kbps: Option<u32>,
+    video_available_cb: Option<Box<dyn FnMut(u32) + Send>>,
     started: Instant,
     timeout: Instant,
     inbox: VecDeque<ReceivedFrame>,
@@ -111,11 +155,15 @@ const _: fn() = || {
 const MTU_MIN: usize = 576;
 /// Largest MTU str0m accepts as a target.
 const MTU_MAX: usize = 1500;
+/// Bytes a packet adds around its RTP payload: the RTP header and extensions, and the SRTP tag.
+const RTP_OVERHEAD: usize = 128;
 
 fn new_rtc(start: Instant, max_datagram: Option<usize>) -> Result<Rtc> {
     let mut config = Rtc::builder()
         .clear_codecs()
         .enable_opus(true, false)
+        .enable_h264(true)
+        .enable_bwe(Some(Bitrate::kbps(BWE_INITIAL_KBPS)))
         .set_stats_interval(Some(STATS_INTERVAL));
     if let Some(max) = max_datagram {
         if !(MTU_MIN..=MTU_MAX).contains(&max) {
@@ -123,7 +171,11 @@ fn new_rtc(start: Instant, max_datagram: Option<usize>) -> Result<Rtc> {
                 "transport datagram size is outside the MTU range",
             ));
         }
-        config = config.set_mtu(max..=max);
+        // str0m's MTU is the RTP payload limit. The SRTP tag and the RTP header and extensions sit
+        // on top of it, so the datagram limit is kept for them. Without the margin a full-size
+        // video packet is too big for the transport, and the call drops the peer.
+        let mtu = max.saturating_sub(RTP_OVERHEAD).max(MTU_MIN);
+        config = config.set_mtu(mtu..=mtu);
     }
     Ok(config.build(start))
 }
@@ -185,10 +237,7 @@ impl<T: PacketTransport> Call<T> {
         epoch: u64,
         link: LinkConfig,
     ) -> Result<(Self, Signal)> {
-        let keys = Some(Keys {
-            tx: SframeSender::new(&key, sender_id, epoch)?,
-            rx: SframeReceiver::new(key, epoch),
-        });
+        let keys = Some(Keys::new(key, sender_id, epoch)?);
         let signer = Self::signer_for(&link, sender_id, epoch);
         link.state
             .lock()
@@ -207,10 +256,7 @@ impl<T: PacketTransport> Call<T> {
         offer: Signal,
         link: LinkConfig,
     ) -> Result<(Self, Signal)> {
-        let keys = Some(Keys {
-            tx: SframeSender::new(&key, sender_id, epoch)?,
-            rx: SframeReceiver::new(key, epoch),
-        });
+        let keys = Some(Keys::new(key, sender_id, epoch)?);
         let signer = Self::signer_for(&link, sender_id, epoch);
         link.state
             .lock()
@@ -271,6 +317,9 @@ impl<T: PacketTransport> Call<T> {
 
         let mut changes = rtc.sdp_api();
         let mid = changes.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
+        // Every offer carries a video line. A peer without video answers `m=video 0`, which
+        // means no video, not failure.
+        let video = changes.add_media(MediaKind::Video, Direction::SendRecv, None, None, None);
         let (offer, pending) = changes
             .apply()
             .ok_or(MediaError::BadState("nothing to offer"))?;
@@ -278,6 +327,7 @@ impl<T: PacketTransport> Call<T> {
         let mut call = Self::from_parts(rtc, transport, keys, signer, state);
         call.pending_offer = Some(pending);
         call.audio_mid = Some(mid);
+        call.offered_video_mid = Some(video);
         Ok((call, Signal::Offer(offer.to_sdp_string())))
     }
 
@@ -325,6 +375,16 @@ impl<T: PacketTransport> Call<T> {
             state,
             pending_offer: None,
             audio_mid: None,
+            offered_video_mid: None,
+            video_mid: None,
+            video_inbox: VecDeque::new(),
+            video_raw_inbox: VecDeque::new(),
+            video_gate: VideoGate::default(),
+            last_pli: None,
+            keyframe_requested: false,
+            video_replay: VideoReplay::default(),
+            video_available_kbps: None,
+            video_available_cb: None,
             started: now,
             timeout: now,
             inbox: VecDeque::new(),
@@ -349,6 +409,10 @@ impl<T: PacketTransport> Call<T> {
                     .take()
                     .ok_or(MediaError::BadState("no pending offer to answer"))?;
                 self.rtc.sdp_api().accept_answer(pending, answer)?;
+                // An answer that rejects the video line (`m=video 0`) leaves the call audio-only.
+                self.video_mid = self
+                    .offered_video_mid
+                    .filter(|mid| self.rtc.media(*mid).is_some_and(|m| !m.disabled()));
                 Ok(())
             }
             Signal::Candidate(text) => {
@@ -445,7 +509,11 @@ impl<T: PacketTransport> Call<T> {
             .keys
             .as_mut()
             .ok_or(MediaError::BadState("a keyless call cannot rotate keys"))?;
+        let video = key.video();
         keys.rx.rotate(key, epoch, now, EPOCH_GRACE)?;
+        keys.video_rx
+            .rotate(video.clone(), epoch, now, EPOCH_GRACE)?;
+        keys.video_tx = keys.video_tx.rekeyed(&video, keys.sender_id, epoch)?;
         // Digests of the new epoch are accepted from now on. The old one keeps its grace period.
         self.state
             .lock()
@@ -479,6 +547,228 @@ impl<T: PacketTransport> Call<T> {
             self.write_raw(digest).await?;
         }
         Ok(())
+    }
+
+    /// Whether the peer answered the video line with media. False for `m=video 0`, which means
+    /// the call is audio-only.
+    pub fn has_video(&self) -> bool {
+        self.video_mid.is_some()
+    }
+
+    /// The latest available bandwidth from str0m's estimate, in kbps. `None` until the first
+    /// estimate arrives, which needs BWE on and sustained traffic.
+    pub fn video_available_kbps(&self) -> Option<u32> {
+        self.video_available_kbps
+    }
+
+    /// Registers the callback that hears each new bandwidth estimate, in kbps. The video budget
+    /// is the estimate minus the audio reservation, see `VideoAdapter::update`.
+    pub fn on_video_available(&mut self, callback: impl FnMut(u32) + Send + 'static) {
+        self.video_available_cb = Some(Box::new(callback));
+    }
+
+    /// Sends one encoded video frame of the stream described by `meta`. Each stream numbers its
+    /// frames from 0. Fails with [`MediaError::NoVideoTrack`] when the peer has no video line.
+    pub async fn send_video(&mut self, frame: &[u8], meta: VideoMeta) -> Result<()> {
+        if self.video_mid.is_none() {
+            return Err(MediaError::NoVideoTrack);
+        }
+        let keys = self
+            .keys
+            .as_mut()
+            .ok_or(MediaError::BadState("a keyless call cannot encrypt"))?;
+        let ciphertext = keys.video_tx.encrypt(frame, None, DEFAULT_LEVEL)?;
+        self.send_video_ciphertext(&ciphertext, meta).await
+    }
+
+    /// Sends a frame that the caller already encrypted with this call's video key. A mesh or a
+    /// participant encrypts once and sends the same ciphertext on each link.
+    pub(crate) async fn send_video_ciphertext(&mut self, ciphertext: &[u8], meta: VideoMeta) -> Result<()> {
+        if self.video_mid.is_none() {
+            return Err(MediaError::NoVideoTrack);
+        }
+        let nal = carry(meta, ciphertext);
+        self.write_video(nal).await
+    }
+
+    /// Waits for the next decrypted video frame.
+    ///
+    /// Returns `Ok(None)` once the call has closed. Frames that fail decryption or replay checks
+    /// are counted in [`CallStats::frames_undecryptable`] and are not returned. Cancel-safe.
+    pub async fn next_video_frame(&mut self) -> Result<Option<VideoFrame>> {
+        loop {
+            if let Some(frame) = self.video_inbox.pop_front() {
+                return Ok(Some(frame));
+            }
+            if !self.rtc.is_alive() {
+                return Ok(None);
+            }
+            if self.video_gate.waiting() {
+                self.request_keyframe_throttled();
+            }
+            self.drain().await?;
+            if self.video_inbox.is_empty() {
+                self.pump_once().await?;
+            }
+        }
+    }
+
+    /// Waits for the next frame a keyless call received, audio or video, exactly as it arrived,
+    /// so a forwarder can route it without a key. Cancel-safe.
+    pub(crate) async fn next_raw_any(&mut self) -> Result<Option<RawFrame>> {
+        loop {
+            if let Some(frame) = self.raw_inbox.pop_front() {
+                return Ok(Some(RawFrame::Audio(frame)));
+            }
+            if let Some(video) = self.video_raw_inbox.pop_front() {
+                return Ok(Some(RawFrame::Video(video)));
+            }
+            if !self.rtc.is_alive() {
+                return Ok(None);
+            }
+            self.drain().await?;
+            if self.raw_inbox.is_empty() && self.video_raw_inbox.is_empty() {
+                self.pump_once().await?;
+            }
+        }
+    }
+
+    /// Whether the peer has asked for a keyframe since the last call. The caller should answer
+    /// with `send_video(..., keyframe: true)`.
+    pub fn take_keyframe_request(&mut self) -> bool {
+        std::mem::take(&mut self.keyframe_requested)
+    }
+
+    /// Asks the peer for a keyframe now, without the throttle that incoming gaps use.
+    pub fn request_keyframe(&mut self) -> Result<()> {
+        let Some(mid) = self.video_mid else {
+            return Err(MediaError::NoVideoTrack);
+        };
+        if let Some(mut writer) = self.rtc.writer(mid) {
+            if writer.is_request_keyframe_possible(KeyframeRequestKind::Pli) {
+                writer.request_keyframe(None, KeyframeRequestKind::Pli)?;
+            }
+        }
+        self.last_pli = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Asks for a keyframe, at most once per [`PLI_RETRY`].
+    fn request_keyframe_throttled(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_pli
+            .is_some_and(|t| now.duration_since(t) < PLI_RETRY)
+        {
+            return;
+        }
+        if let Err(e) = self.request_keyframe() {
+            tracing::debug!(error = %e, "could not ask for a keyframe");
+        }
+    }
+
+    /// Sends a carrier NAL that a forwarder received, unchanged.
+    pub(crate) async fn send_raw_video(&mut self, nal: &[u8]) -> Result<()> {
+        if self.video_mid.is_none() {
+            return Err(MediaError::NoVideoTrack);
+        }
+        self.write_video(nal.to_vec()).await
+    }
+
+    /// Writes one carrier NAL on the video track.
+    async fn write_video(&mut self, nal: Vec<u8>) -> Result<()> {
+        let mid = self.video_mid.ok_or(MediaError::NoVideoTrack)?;
+        let media_time = self.started.elapsed().into();
+        let writer = self.rtc.writer(mid).ok_or(MediaError::NoVideoTrack)?;
+        // Pick the payload type from the writer's own list, which holds what the peer accepted.
+        let pt = writer
+            .payload_params()
+            .filter(|p| p.spec().codec == Codec::H264)
+            .find(|p| p.resend().is_some())
+            .or_else(|| writer.payload_params().find(|p| p.spec().codec == Codec::H264))
+            .map(|p| p.pt())
+            .ok_or(MediaError::NoVideoTrack)?;
+        writer.write(pt, Instant::now(), media_time, nal)?;
+        self.drain().await
+    }
+
+    /// Handles one carrier NAL from the video line. A keyless call gates it by its clear header
+    /// and queues it for its forwarder. A keyed call decrypts it, drops replays, gates it, and
+    /// queues the frame.
+    fn on_video(&mut self, delivered: &[u8]) {
+        let nal = match nal_of(delivered) {
+            Ok(nal) => nal,
+            Err(e) => {
+                tracing::debug!(error = %e, "dropped a malformed video frame");
+                return;
+            }
+        };
+        let (header, ciphertext) = match uncarry(nal) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "dropped a malformed video frame");
+                return;
+            }
+        };
+        if self.keys.is_none() {
+            let Some(sender) = peek_sender(&ciphertext) else {
+                return;
+            };
+            let stream = stream_key(sender, header.screen);
+            let admit = self
+                .video_gate
+                .admit(stream, header.frame_id, header.keyframe);
+            if admit.need_keyframe {
+                self.request_keyframe_throttled();
+            }
+            if admit.deliver {
+                self.video_raw_inbox.push_back(RawVideo {
+                    nal: nal.to_vec(),
+                    sender,
+                    screen: header.screen,
+                    keyframe: header.keyframe,
+                });
+            }
+            return;
+        }
+        let opened = match self.keys.as_ref() {
+            Some(keys) => keys.video_rx.open(&ciphertext, Instant::now()),
+            None => return,
+        };
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(e) => {
+                self.stats.frames_undecryptable += 1;
+                tracing::debug!(error = %e, "dropped an undecryptable video frame");
+                return;
+            }
+        };
+        if !self.video_replay.accept(opened.sender, opened.counter) {
+            self.stats.frames_replayed += 1;
+            return;
+        }
+        let admit = self.video_gate.admit(
+            stream_key(opened.sender, header.screen),
+            header.frame_id,
+            header.keyframe,
+        );
+        if admit.need_keyframe {
+            self.request_keyframe_throttled();
+        }
+        if !admit.deliver {
+            return;
+        }
+        match payload_of_stamp(&opened.plaintext) {
+            Ok(payload) => self.video_inbox.push_back(VideoFrame {
+                sender: opened.sender,
+                frame_id: header.frame_id,
+                keyframe: header.keyframe,
+                codec: header.codec,
+                screen: header.screen,
+                payload: payload.to_vec(),
+            }),
+            Err(e) => tracing::debug!(error = %e, "dropped a malformed video payload"),
+        }
     }
 
     /// Writes one payload on the audio track, without counting it as a frame.
@@ -519,22 +809,6 @@ impl<T: PacketTransport> Call<T> {
             }
             self.drain().await?;
             if self.inbox.is_empty() {
-                self.pump_once().await?;
-            }
-        }
-    }
-
-    /// Waits for the next encrypted frame, exactly as it arrived, for a keyless call. Cancel-safe.
-    pub(crate) async fn next_raw(&mut self) -> Result<Option<Vec<u8>>> {
-        loop {
-            if let Some(frame) = self.raw_inbox.pop_front() {
-                return Ok(Some(frame));
-            }
-            if !self.rtc.is_alive() {
-                return Ok(None);
-            }
-            self.drain().await?;
-            if self.raw_inbox.is_empty() {
                 self.pump_once().await?;
             }
         }
@@ -654,7 +928,25 @@ impl<T: PacketTransport> Call<T> {
             Event::MediaAdded(added) if matches!(added.kind, MediaKind::Audio) => {
                 self.audio_mid = Some(added.mid);
             }
+            Event::MediaAdded(added) if matches!(added.kind, MediaKind::Video) => {
+                if self.rtc.media(added.mid).is_some_and(|m| !m.disabled()) {
+                    self.video_mid = Some(added.mid);
+                }
+            }
+            Event::MediaData(data) if Some(data.mid) == self.video_mid => {
+                self.on_video(&data.data);
+            }
             Event::MediaData(data) => self.on_media(&data.data),
+            Event::KeyframeRequest(req) if Some(req.mid) == self.video_mid => {
+                self.keyframe_requested = true;
+            }
+            Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
+                let kbps = (estimate.as_u64() / 1_000) as u32;
+                self.video_available_kbps = Some(kbps);
+                if let Some(callback) = self.video_available_cb.as_mut() {
+                    callback(kbps);
+                }
+            }
             Event::PeerStats(stats) => {
                 if let Some(rtt) = stats.rtt {
                     let rtt_ms = rtt.as_secs_f64() * 1000.0;

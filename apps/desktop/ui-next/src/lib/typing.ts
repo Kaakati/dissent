@@ -1,6 +1,6 @@
 // The typing signals the composer sends. The engine throttles and expires them too; this throttle only keeps keystrokes
 // cheap. The names on screen come from the shell store (`typing`, filled by dissent://typing-changed). Ported from
-// ui/typing.js.
+// the old UI's typing.js.
 import { api } from './api';
 import type { ChatTarget, TypingTarget } from './types';
 

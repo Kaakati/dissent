@@ -11,6 +11,7 @@ members = [
     "crates/dissent-files",
     "crates/dissent-audio",
     "crates/dissent-video",
+    "crates/svt-av1-sys",
     "apps/seeder",
     "apps/relay",
     "apps/probe",
@@ -35,6 +36,7 @@ dissent-mls = { path = "crates/dissent-mls" }
 dissent-media = { path = "crates/dissent-media" }
 dissent-audio = { path = "crates/dissent-audio" }
 dissent-video = { path = "crates/dissent-video" }
+svt-av1-sys = { path = "crates/svt-av1-sys" }
 
 anyhow = "1"
 thiserror = "2"
@@ -76,6 +78,7 @@ n0-future = "0.3"
 negentropy = "0.5"
 unicode-security = "0.1"
 unicode-normalization = "0.1"
+unicode-segmentation = "1.12"
 idna = "1"
 hickory-resolver = { version = "0.25", features = ["tokio"] }
 clap = { version = "4", features = ["derive"] }
@@ -103,13 +106,15 @@ ringbuf = "0.5"
 bytes = "1"
 fs4 = "1"
 # AV1 encoder: SVT-AV1 built from source. Needs git, a C compiler and nasm (see docs/design/04-calls.md).
-shiguredo_svt_av1 = { version = "2026.2", features = ["source-build"] }
+bindgen = "0.72"
+cmake = "0.1"
+shiguredo_cmake = "4.4"
 # H.264 fallback. The crate bundles OpenH264 source and compiles it with cc.
 openh264 = "0.9"
 rav1d = { version = "1", default-features = false, features = ["bitdepth_8"] }
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
 xcap = "0.9"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 [profile.dev]
 # Line tables are enough for backtraces and stepping, and they link much faster than full debuginfo.

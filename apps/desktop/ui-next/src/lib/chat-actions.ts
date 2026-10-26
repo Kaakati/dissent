@@ -1,10 +1,11 @@
 // The chat's actions: sends, edits, deletes, reactions, file sends and attachment actions. Each calls the engine for the
 // conversation it is in (a channel, a direct conversation or a group), then reloads that conversation. A failure is a
-// toast and the action resolves to false, so a caller never throws. Ported from the message parts of ui/actions.js.
+// toast and the action resolves to false, so a caller never throws. Ported from the message parts of the old UI's actions.js.
 import { api } from './api';
 import { confirm } from './dialog';
 import { has } from './features';
 import { markOpenRead, reloadOpen } from './chat';
+import { noteReaction } from './quick-reactions';
 import { extOf, isExecutable } from './attachments';
 import { useShell } from './store';
 import { toast } from './toasts';
@@ -30,17 +31,17 @@ async function run(fn: () => Promise<unknown>, { read = true, lists = false }: {
 }
 
 // Sends a text message to the conversation.
-export function sendMessage(target: ChatTarget, text: string): Promise<boolean> {
+export function sendMessage(target: ChatTarget, text: string, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
   switch (target.kind) {
-    case 'channel': return run(() => api.sendMessage(target.communityId, target.channelId, text));
+    case 'channel': return run(() => api.sendMessage(target.communityId, target.channelId, text, mentions));
     case 'dm': return run(() => api.sendDm(target.peer, text), { lists: true });
     case 'group': return run(() => api.sendGroupMessage(target.groupId, text), { lists: true });
   }
 }
 
-export function sendReply(target: ChatTarget, messageId: Id, text: string): Promise<boolean> {
+export function sendReply(target: ChatTarget, messageId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
   switch (target.kind) {
-    case 'channel': return run(() => api.sendReply(target.communityId, target.channelId, messageId, text));
+    case 'channel': return run(() => api.sendReply(target.communityId, target.channelId, messageId, text, mentions));
     case 'dm': return run(() => api.dmReply(target.peer, messageId, text), { lists: true });
     case 'group': return run(() => api.groupReply(target.groupId, messageId, text), { lists: true });
   }
@@ -64,6 +65,7 @@ export function deleteMessage(target: ChatTarget, messageId: Id): Promise<boolea
 
 // Adds the reaction, or removes it when `mine` says this user already reacted with it.
 export function toggleReaction(target: ChatTarget, messageId: Id, emoji: string, mine: boolean): Promise<boolean> {
+  if (!mine) noteReaction(emoji); // the quick row of the message menu counts what the viewer adds
   switch (target.kind) {
     case 'channel':
       return run(() => (mine ? api.unreact(target.communityId, target.channelId, messageId, emoji) : api.react(target.communityId, target.channelId, messageId, emoji)), { read: false });
@@ -76,10 +78,10 @@ export function toggleReaction(target: ChatTarget, messageId: Id, emoji: string,
 
 // Sends files with an optional caption. A channel gets them with the seeder's choice; a direct conversation or a group
 // gets them through the direct file path, as the current UI does.
-export function sendFiles(target: ChatTarget, paths: string[], text: string | null): Promise<boolean> {
+export function sendFiles(target: ChatTarget, paths: string[], text: string | null, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
   return run(
     async () => {
-      if (target.kind === 'channel') await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: true });
+      if (target.kind === 'channel') await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: true, mentions });
       else await api.sendDmFiles(target.kind === 'dm' ? target.peer : target.groupId, paths, text ?? '');
       if (has('transfers')) await useShell.getState().loadTransfers();
     },

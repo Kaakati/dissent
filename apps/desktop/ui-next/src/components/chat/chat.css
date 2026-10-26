@@ -1,5 +1,5 @@
 /* The chat pane: header, message list, composer, attachments, embeds, reactions and the emoji picker. The rules and class
-   names are the ones in apps/desktop/ui/style.css (the messages, composer, attachment and embed sections), so the markup
+   names are the ones in the old UI's style.css (the messages, composer, attachment and embed sections), so the markup
    of both UIs reads the same to the keyboard driver and the screenshot checks. Values come from the Dissent tokens. */
 
 /* ---- header ---- */
@@ -76,6 +76,28 @@
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .body a { color: var(--link); }
 .body.deleted, .pending-note { color: var(--muted-foreground); font-style: italic; }
+/* Markdown in messages (components/chat/markdown.tsx). Colours are the tokens the rest of the chat uses. */
+.body .md-p { margin: 0; }
+.body > * + * { margin-top: 2px; }
+.md-h1 { font: 700 1.4em / 1.3 var(--font); }
+.md-h2 { font: 700 1.2em / 1.3 var(--font); }
+.md-h3 { font: 600 1.05em / 1.3 var(--font); }
+.md-subtext { font-size: var(--fs-meta); color: var(--muted-foreground); }
+.md-quote { margin: 2px 0; padding-left: 10px; border-left: 4px solid var(--border); color: var(--muted-foreground); }
+.md-list { margin: 0; padding-left: 1.5em; }
+.md-link { color: var(--link); }
+.md-code { font-family: ui-monospace, monospace; font-size: 0.92em; padding: 0 4px; border-radius: 4px; background: var(--sidebar); }
+.md-codeblock { margin: 4px 0; border-radius: var(--r-1); background: var(--sidebar); overflow: hidden; }
+.md-codelang { padding: 4px 12px 0; font-size: var(--fs-meta); color: var(--muted-foreground); }
+.md-codeblock .hljs-keyword, .md-codeblock .hljs-selector-tag, .md-codeblock .hljs-built_in, .md-codeblock .hljs-type { color: var(--accent-text); }
+.md-codeblock .hljs-string, .md-codeblock .hljs-attr-value, .md-codeblock .hljs-addition { color: var(--color-success-text); }
+.md-codeblock .hljs-number, .md-codeblock .hljs-literal, .md-codeblock .hljs-symbol, .md-codeblock .hljs-bullet { color: var(--color-warn); }
+.md-codeblock .hljs-title, .md-codeblock .hljs-title.function_, .md-codeblock .hljs-section, .md-codeblock .hljs-name { color: var(--link); }
+.md-codeblock .hljs-comment, .md-codeblock .hljs-quote, .md-codeblock .hljs-meta { color: var(--muted-foreground); font-style: italic; }
+.md-codeblock .hljs-deletion, .md-codeblock .hljs-variable, .md-codeblock .hljs-tag { color: var(--danger-text); }
+.md-codeblock pre { margin: 0; padding: 8px 12px; overflow-x: auto; white-space: pre; font: 0.92em / 1.5 ui-monospace, monospace; color: var(--text); }
+.md-spoiler { border-radius: 3px; background: var(--ink); color: transparent; cursor: pointer; }
+.md-spoiler.revealed { background: transparent; color: inherit; cursor: auto; }
 .pending-note { font: italic var(--fs-meta) / var(--lh-meta) var(--font); display: inline-flex; align-items: center; gap: var(--s-1); }
 .pending-note > svg { width: var(--icon-sm); height: var(--icon-sm); }
 .edited { font: var(--fs-meta) / var(--lh-meta) var(--font); color: var(--muted-foreground); }
@@ -185,7 +207,7 @@
 .msg:hover .reaction.add, .msg:focus-within .reaction.add { opacity: 1; }
 
 /* the reaction picker: a popover beside its button */
-.emoji-picker { position: fixed; z-index: 35; width: 304px; padding: var(--s-2); background: var(--ink); border-radius: var(--r-2); box-shadow: var(--shadow-2); }
+.emoji-picker { position: fixed; z-index: 80; width: 304px; padding: var(--s-2); background: var(--ink); border-radius: var(--r-2); box-shadow: var(--shadow-2); }
 .emoji-search { width: 100%; height: var(--hit); min-height: 0; margin-bottom: var(--s-2); padding: 0 var(--s-2); background: var(--input); color: var(--text-strong); border: 1px solid var(--input-border); border-radius: var(--r-1); font: var(--fs-sm) / var(--lh-sm) var(--font); outline: none; }
 .emoji-grid { display: grid; grid-template-columns: repeat(8, 36px); }
 .emoji-cell { width: 36px; height: 36px; padding: 0; border: 0; border-radius: var(--r-1); background: none; font: 21px / 1 var(--emoji); cursor: pointer; }
@@ -212,6 +234,11 @@
 .att-image { position: relative; width: fit-content; max-width: 100%; }
 .att-image-btn { display: inline-block; padding: 0; border: 0; border-radius: var(--r-2); background: var(--rail); overflow: hidden; vertical-align: top; cursor: pointer; }
 .att-image img { display: block; width: auto; height: auto; max-width: 400px; max-height: 300px; }
+.att-preview { position: relative; width: fit-content; max-width: 100%; margin: 0; }
+.att-preview-btn { display: block; max-width: 100%; padding: 0; border: 0; border-radius: var(--r-2); background: var(--rail); overflow: hidden; cursor: pointer; }
+.att-preview-btn:disabled { cursor: progress; }
+.att-preview-btn img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.att-preview-meta { margin-top: 4px; }
 .att-lock { display: inline-grid; place-items: center; color: var(--muted-foreground); }
 .att-lock svg { width: 12px; height: 12px; }
 .att-image .att-lock { position: absolute; right: var(--s-2); bottom: var(--s-2); width: 20px; height: 20px; border-radius: var(--r-1); background: rgb(17 18 20 / .7); color: var(--text); pointer-events: none; }
@@ -238,11 +265,13 @@
 
 /* ---- rich link embeds (data from the sender's sealed message, images from the local asset path only) ---- */
 .embeds { display: flex; flex-direction: column; gap: var(--s-1); margin-top: var(--s-1); }
-.embed { max-width: 432px; display: grid; gap: var(--s-2); padding: 12px var(--s-4) var(--s-4) var(--s-3); background: var(--sidebar); border-radius: var(--r-1); box-shadow: inset 4px 0 0 var(--rail); }
+.embed { max-width: 432px; display: grid; gap: var(--s-2); padding: 12px var(--s-4) var(--s-4) var(--s-3); background: var(--sidebar); border-radius: var(--r-1); box-shadow: inset 4px 0 0 var(--embed-accent, var(--border)); }
 .embed-site { color: var(--text); font: var(--fs-meta) / var(--lh-meta) var(--font); }
 .embed-title { color: var(--link); font: 600 var(--fs-body) / var(--lh-body) var(--font); overflow-wrap: anywhere; }
-.embed-desc { color: var(--text); font: var(--fs-ui) / var(--lh-ui) var(--font); }
-.embed-img { display: block; width: 100%; max-height: 168px; object-fit: cover; border-radius: var(--r-1); background: var(--ink); }
+.embed-desc { color: var(--text); font: var(--fs-ui) / var(--lh-ui) var(--font); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.embed-picture { display: block; max-width: 100%; border-radius: var(--r-1); }
+.embed-img { display: block; width: 100%; max-width: 400px; height: auto; border-radius: var(--r-1); background: var(--ink); }
+.preview-ask { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-2); margin: 0 var(--s-3) var(--s-2); padding: var(--s-2) var(--s-3); background: var(--sidebar); border-radius: var(--r-1); color: var(--text); font: var(--fs-ui) / var(--lh-ui) var(--font); }
 .rich-card { max-width: 432px; display: grid; gap: 8px; padding: 12px 16px; background: var(--sidebar); border-radius: var(--r-1); box-shadow: inset 4px 0 0 var(--rail); }
 .rich-title { color: var(--text-strong); font: 600 var(--fs-body) / var(--lh-body) var(--font); }
 .rich-chip { justify-self: start; height: 24px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: var(--r-1); background: var(--elevated); color: var(--muted-foreground); font: 500 var(--fs-ui) / var(--lh-ui) var(--font); }
@@ -279,3 +308,9 @@ html[data-density="compact"] .skel-lines { padding-top: 0; gap: var(--s-1); }
   .typing-dots i { animation: none; opacity: .7; }
   .msg.flash::after { animation: none; }
 }
+
+/* ---- mentions: a message that mentions you, or a valid @everyone, is tinted with an accent bar; a mention is a pill ---- */
+.msg.mention { background: var(--accent-tint-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.mention-pill { display: inline; padding: 0 3px; border: 0; border-radius: 4px; background: var(--accent-tint-soft); color: var(--accent-text); font: inherit; font-weight: 500; cursor: pointer; }
+.mention-pill:hover { background: rgb(210 69 47 / 0.3); }
+.mention-pill:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

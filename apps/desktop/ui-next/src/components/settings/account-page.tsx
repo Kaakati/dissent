@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Image as ImageIcon, KeyRound, Trash2 } from 'lucide-react';
 import { AddressCard } from '@/components/address-card';
+import { BannerPicker } from '@/components/banner-picker';
 import { chooseImage } from '@/components/settings/avatar-editor';
 import { Block, Hint, ROW } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
@@ -14,6 +15,8 @@ import { api } from '@/lib/api';
 import { confirm } from '@/lib/dialog';
 import { imageOf } from '@/lib/images';
 import { toast } from '@/lib/toasts';
+import { clearProfileBanner, setProfileBanner, setProfileBannerAnimated, setProfileBannerPreset } from '@/lib/actions';
+import { bannerOf } from '@/lib/banners';
 import { useShell } from '@/lib/store';
 
 // Profile picture: the avatar, with change and remove beside it.
@@ -42,6 +45,22 @@ function AvatarSection() {
           ) : null}
         </div>
       </div>
+    </Block>
+  );
+}
+
+// The profile banner, under the avatar: the presets and an upload, as for a server. A pick is published at once.
+function BannerSection() {
+  const me = useShell((s) => s.me);
+  return (
+    <Block title="Banner" className="max-w-[440px]">
+      <BannerPicker
+        value={bannerOf(me?.banner, me?.banner_preset, me?.banner_poster)}
+        onPreset={(id) => void setProfileBannerPreset(id)}
+        onUpload={(bytes, animated) => (animated ? setProfileBannerAnimated(bytes, animated.poster) : setProfileBanner(bytes))}
+        onRemove={() => void clearProfileBanner()}
+      />
+      <Hint>Shown behind your profile card, in DMs and on your full profile. A 16:9 picture of up to 512 KB, a looping GIF of up to 2 MB, or a colour.</Hint>
     </Block>
   );
 }
@@ -134,6 +153,7 @@ export function AccountPage() {
   return (
     <div className="flex flex-col">
       {has('avatars') ? <AvatarSection /> : null}
+      {has('avatars') ? <BannerSection /> : null}
       <DisplayName />
       <Block title="Identity">
         <AddressCard kind="user" id={me?.root_id} label="User address" qr />

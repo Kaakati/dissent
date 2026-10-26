@@ -20,9 +20,11 @@ use crate::frame::ReceivedFrame;
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
+use crate::video::{VideoFrame, VideoMeta};
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
 type FrameOut = Result<Option<ReceivedFrame>>;
+type VideoOut = Result<Option<VideoFrame>>;
 
 /// The audio mesh of one participant.
 ///
@@ -37,6 +39,7 @@ pub struct Mesh<T: PacketTransport> {
     key: MediaKey,
     epoch: u64,
     tx: SframeSender,
+    video_tx: SframeSender,
     calls: BTreeMap<u64, Call<T>>,
     link: LinkConfig,
 }
@@ -46,8 +49,10 @@ impl<T: PacketTransport> Mesh<T> {
     /// member index.
     pub fn new(key: MediaKey, my_sender_id: u64) -> Result<Self> {
         let tx = SframeSender::new(&key, my_sender_id, 0)?;
+        let video_tx = SframeSender::new(&key.video(), my_sender_id, 0)?;
         Ok(Self {
             my_id: my_sender_id,
+            video_tx,
             key,
             epoch: 0,
             tx,
@@ -141,11 +146,15 @@ impl<T: PacketTransport> Mesh<T> {
             ));
         }
         let tx = self.tx.rekeyed(&new_key, self.my_id, new_epoch)?;
+        let video_tx = self
+            .video_tx
+            .rekeyed(&new_key.video(), self.my_id, new_epoch)?;
         let now = Instant::now();
         for call in self.calls.values_mut() {
             call.rotate_keys(new_key.clone(), new_epoch, now)?;
         }
         self.tx = tx;
+        self.video_tx = video_tx;
         self.key = new_key;
         self.epoch = new_epoch;
         Ok(())
@@ -232,6 +241,73 @@ impl<T: PacketTransport> Mesh<T> {
         Ok(())
     }
 
+    /// Sends one encoded video frame to every peer. It is encrypted once, with the video key,
+    /// and every peer gets the same ciphertext. A peer without video is skipped.
+    pub async fn send_video(&mut self, frame: &[u8], meta: VideoMeta) -> Result<()> {
+        if self.calls.is_empty() {
+            return Ok(());
+        }
+        let ciphertext = self.video_tx.encrypt(frame, None, DEFAULT_LEVEL)?;
+        let mut failed = Vec::new();
+        for (peer, call) in self.calls.iter_mut() {
+            match call.send_video_ciphertext(&ciphertext, meta).await {
+                Ok(()) | Err(MediaError::NoVideoTrack) | Err(MediaError::NotConnected) => {}
+                Err(e) => {
+                    tracing::debug!(peer, error = %e, "dropping peer after a video send failure");
+                    failed.push(*peer);
+                }
+            }
+        }
+        for peer in failed {
+            self.calls.remove(&peer);
+        }
+        Ok(())
+    }
+
+    /// Whether any peer has asked for a keyframe since the last call. Answer with
+    /// `send_video(..., keyframe: true)`.
+    pub fn take_keyframe_request(&mut self) -> bool {
+        self.calls
+            .values_mut()
+            .fold(false, |asked, call| call.take_keyframe_request() | asked)
+    }
+
+    /// Waits for the next video frame from any peer. Returns `Ok(None)` when no peers are left.
+    /// Cancel-safe.
+    pub async fn next_video_frame(&mut self) -> Result<Option<VideoFrame>> {
+        loop {
+            if self.calls.is_empty() {
+                return Ok(None);
+            }
+            let (peer, outcome) = {
+                let mut futs: Vec<(u64, Boxed<'_, VideoOut>)> = self
+                    .calls
+                    .iter_mut()
+                    .map(|(peer, call)| (*peer, Box::pin(call.next_video_frame()) as Boxed<'_, VideoOut>))
+                    .collect();
+                poll_fn(|cx| {
+                    for (peer, fut) in futs.iter_mut() {
+                        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+                            return Poll::Ready((*peer, out));
+                        }
+                    }
+                    Poll::Pending
+                })
+                .await
+            };
+            match outcome {
+                Ok(Some(frame)) => return Ok(Some(frame)),
+                Ok(None) => {
+                    self.calls.remove(&peer);
+                }
+                Err(e) => {
+                    tracing::debug!(peer, error = %e, "dropping peer after a video receive failure");
+                    self.calls.remove(&peer);
+                }
+            }
+        }
+    }
+
     /// Waits for the next frame from any peer and returns `(sender id, plaintext)`.
     ///
     /// Returns `Ok(None)` when no peers are left. A peer whose call closes or fails is dropped
@@ -281,6 +357,13 @@ impl<T: PacketTransport> Mesh<T> {
     }
 
     /// The counters of each peer's call, keyed by peer id.
+    /// The smallest bandwidth estimate among the peers, in kbps. A video budget must fit the
+    /// slowest link, because one encoder sends the same frames to every peer. `None` until any
+    /// peer has an estimate.
+    pub fn video_available_kbps(&self) -> Option<u32> {
+        self.calls.values().filter_map(Call::video_available_kbps).min()
+    }
+
     pub fn stats(&self) -> BTreeMap<u64, CallStats> {
         self.calls
             .iter()

@@ -212,6 +212,7 @@ impl Engine {
             w.install_epochs(community)
         };
         self.perform_effects(fx);
+        self.record_history_key(community);
     }
 
     /// The epoch key a control event is sealed under while member-only control is on, with its
@@ -349,14 +350,11 @@ impl Engine {
     /// down, since shutdown aborts this task.
     pub(crate) async fn fetch_epoch_history_until_answered(&self, community: CommunityId) {
         let first = self.inner.timings.history_first_retry;
+        // The first attempt is a plain timer. A beacon that arrives before it does not start an attempt,
+        // so an attempt can only follow a failure that a member's return then answers.
+        tokio::time::sleep(first).await;
         let mut wait = first;
         loop {
-            let seen = self.inner.member_seen.notified();
-            tokio::pin!(seen);
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => wait = (wait * 2).min(HISTORY_RETRY_CAP),
-                _ = &mut seen => wait = first,
-            }
             let Some(still_locked) = self.read().communities.get(&community).map(|c| {
                 c.state()
                     .rejected
@@ -372,6 +370,13 @@ impl Engine {
                 return;
             }
             debug!(community = %community, "no member answered for epoch keys yet; will retry");
+            // After a failure, wait for the next attempt, or for a member to be seen, whichever is first.
+            let seen = self.inner.member_seen.notified();
+            tokio::pin!(seen);
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => wait = (wait * 2).min(HISTORY_RETRY_CAP),
+                _ = &mut seen => wait = first,
+            }
         }
     }
 
@@ -491,6 +496,14 @@ impl Engine {
         community: CommunityId,
         setting: HistorySetting,
     ) -> Result<()> {
+        // Gated like the switch: a member device that predates this setting cannot read the events.
+        let status = self.member_only_status(community).await?;
+        if !status.can_enable {
+            return Err(CoreError::Invalid(format!(
+                "{} member device(s) need to update",
+                status.waiting
+            )));
+        }
         self.author_publish(
             community,
             ChannelId::CONTROL,

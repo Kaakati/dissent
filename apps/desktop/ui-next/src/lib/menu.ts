@@ -1,11 +1,13 @@
 // The menu model shared by every menu in the app. Items are plain data, so a builder can return them and the menu
-// components render them with the shadcn DropdownMenu. Ported from ui/views/contextmenu.js.
+// components render them with the shadcn DropdownMenu. Ported from the old UI's views/contextmenu.js.
 //
 //   { label, icon, leading, sub, danger, disabled, onPick }   an item; onPick gets the click (Shift+click skips a confirm)
 //   { label, submenu: [...] }                                 an item that opens a submenu beside its row
 //   { label, radio: true, checked }                           a radio row, with the mark on the right
+//   { label, checkbox: true, checked }                        a checkbox row, with the box on the right
 //   { slider: { label, min, max, step, value, format, onInput, onChange } }   a range row; Left and Right change it
 //   { header: 'text' }                                        a heading that the keys skip
+//   { quick: [{ emoji, label, onPick }] }                     a row of emoji buttons, one menu row each
 //   'sep'                                                     a separator
 //   null, false, undefined                                    nothing (so a builder can write `cond ? item : null`)
 import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
@@ -20,9 +22,15 @@ export interface MenuItem {
   danger?: boolean;
   disabled?: boolean;
   radio?: boolean;
+  checkbox?: boolean;
   checked?: boolean;
   submenu?: MenuEntry[];
+  scroll?: boolean; // a submenu that is longer than the window scrolls
   onPick?: (e: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>) => void;
+}
+
+export interface MenuQuick {
+  quick: { emoji: string; label: string; onPick: () => void }[];
 }
 
 export interface MenuHeader {
@@ -42,7 +50,7 @@ export interface MenuSlider {
   };
 }
 
-export type MenuEntry = MenuItem | MenuHeader | MenuSlider | 'sep' | null | undefined | false;
+export type MenuEntry = MenuItem | MenuHeader | MenuSlider | MenuQuick | 'sep' | null | undefined | false;
 
 export interface OpenMenu {
   id: number;

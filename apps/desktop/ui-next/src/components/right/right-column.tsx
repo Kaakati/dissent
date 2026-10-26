@@ -1,6 +1,6 @@
 // The right column. It shows the Friends page's Active Now, the server member list, the member list of an open group, the
 // DM profile panel, or nothing; the current UI's call details and lobby come with their batches. Ported from
-// ui/views/right.js and ui/views/members.js. The shell's grid follows `mode` (see App.tsx and shell.css).
+// the old UI's views/right.js and the old UI's views/members.js. The shell's grid follows `mode` (see App.tsx and shell.css).
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';

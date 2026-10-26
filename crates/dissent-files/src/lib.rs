@@ -9,12 +9,19 @@ mod error;
 mod file_ref;
 mod name;
 mod store;
+mod tally;
+mod thumbnail;
 
 pub use crypt::{chunk_count, cipher_len, decrypt, encrypt, FileKey, CHUNK_SIZE, MAX_PLAINTEXT};
 pub use error::{FilesError, Result};
 pub use file_ref::FileRef;
 pub use iroh_blobs::BlobsProtocol;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
+pub use tally::{pieces_of, SourceCount, PIECE_BYTES};
+pub use thumbnail::{
+    is_preview_image, is_thumbnail, make_preview_image, make_thumbnail, Thumbnail, PREVIEW_IMAGE_MAX_BYTES,
+    PREVIEW_IMAGE_SIDE, THUMB_LONG_SIDE, THUMB_MAX_BYTES, THUMB_SOURCE_MAX,
+};
 pub use store::{
     Files, Input, MirrorPolicy, Timeouts, DEFAULT_GC_INTERVAL, DEFAULT_PARTIAL_TTL, DISK_MARGIN,
     MAX_BYTES_INPUT, MAX_FILE_SIZE,

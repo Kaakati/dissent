@@ -157,6 +157,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.sha }}
+          submodules: true
       # SVT-AV1's git clone and CMake build go past the 260-character Windows path limit.
       - name: Enable long paths (Windows)
         if: runner.os == 'Windows'

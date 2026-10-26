@@ -1,8 +1,8 @@
 // The second column. Home: a find box, quick links and direct messages. A server: its name, quick links, text
 // channels and voice channels with the people in them. Controls whose views are not ported yet are shown disabled.
-// Ported from ui/views/sidebar.js.
-import type { ReactNode } from 'react';
-import { ArrowUpDown, BellOff, ChevronDown, Hash, Headphones, Link as LinkIcon, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
+// Ported from the old UI's views/sidebar.js.
+import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Headphones, Link as LinkIcon, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
 import { openChannelSettings } from '@/components/channel-settings/channel-settings';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
@@ -15,10 +15,13 @@ import { ServerMenu } from '@/components/menus/server-menu';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { UserAvatar } from '@/components/user-avatar';
+import { bannerBackground, bannerOf, bannersStill, subscribeBannerMotion } from '@/lib/banners';
 import { has } from '@/lib/features';
+import { markdownPlain } from '@/lib/markdown';
 import { plural } from '@/lib/identity';
 import { useMutes } from '@/lib/mutes';
-import { convKey, useShell } from '@/lib/store';
+import { DEFAULT_PREFS, useServerPrefs } from '@/lib/server-prefs';
+import { channelKey, convKey, useShell } from '@/lib/store';
 import type { CommunityView, ConversationSummary, GroupSummary, Id, Presence, VoiceParticipant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -104,33 +107,80 @@ function HomeTop() {
   );
 }
 
-function ServerTop({ community }: { community: CommunityView }) {
+const HEADER_PX = 56;
+
+// The server name with its menu. With a banner, the banner fills the top of the column at 16:9 with the name over it,
+// and it collapses into the plain header as the channel list scrolls, as Discord does. Without one, the plain header.
+function ServerTop({ community, scrollTop }: { community: CommunityView; scrollTop: number }) {
+  useSyncExternalStore(subscribeBannerMotion, bannersStill);
+  const background = bannerBackground(bannerOf(community.banner, community.banner_preset, community.banner_poster));
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const measure = () => setWidth(node.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const full = (width * 9) / 16;
+  const height = background && width ? Math.max(HEADER_PX, full - scrollTop) : HEADER_PX;
+  // 1 with the banner open, 0 once it has collapsed into the header.
+  const open = background && full > HEADER_PX ? (height - HEADER_PX) / (full - HEADER_PX) : 0;
+  const onBanner = open > 0.35;
   return (
-    <div className="flex h-14 shrink-0 items-center px-s-2 shadow-[inset_0_-1px_0_var(--border)]">
-      <ServerMenu community={community}>
-        <button
-          type="button"
-          aria-haspopup="menu"
-          aria-label={`${community.name} menu`}
-          className="flex h-10 w-full items-center justify-between gap-s-2 rounded-lg px-s-2 text-body font-semibold text-text-strong hover:bg-hover"
-        >
-          <span className="min-w-0 truncate" title={community.name}>{community.name}</span>
-          <ChevronDown className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-        </button>
-      </ServerMenu>
+    <div
+      ref={ref}
+      data-server-top={background ? 'banner' : 'plain'}
+      className="relative shrink-0 overflow-hidden shadow-[inset_0_-1px_0_var(--border)]"
+      style={{ height: background && !width ? undefined : height, aspectRatio: background && !width ? '16 / 9' : undefined }}
+    >
+      {background ? (
+        <>
+          <div data-server-banner className="absolute inset-0" style={{ background, opacity: open }} aria-hidden="true" />
+          <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/55 to-transparent" style={{ opacity: open }} aria-hidden="true" />
+        </>
+      ) : null}
+      <div className="relative flex h-14 items-center px-s-2">
+        <ServerMenu community={community}>
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-label={`${community.name} menu`}
+            className={cn(
+              'flex h-10 w-full items-center justify-between gap-s-2 rounded-lg px-s-2 text-body font-semibold',
+              onBanner ? 'text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)] hover:bg-black/20' : 'text-text-strong hover:bg-hover',
+            )}
+          >
+            <span data-server-name className="min-w-0 truncate" title={community.name}>{community.name}</span>
+            <ChevronDown className={cn('size-4 shrink-0', onBanner ? 'text-white' : 'text-muted-foreground')} aria-hidden="true" />
+          </button>
+        </ServerMenu>
+      </div>
     </div>
   );
 }
 
 // ---- Home: direct messages ----
 
-// Two small avatars, one over the other, for a group conversation. Sized as the current UI's stack avatar.
-function GroupAvatar({ conv }: { conv: GroupSummary }) {
+// Two small avatars, one over the other, for a group conversation. Sized as the current UI's stack avatar. The rail's
+// large one is a 48 px circle over the rail's colour.
+export function GroupAvatar({ conv, large = false }: { conv: GroupSummary; large?: boolean }) {
   const [a, b] = conv.members.slice(0, 2);
+  const part = large ? 'size-7 text-[9px]' : 'size-5 text-[7px]';
   return (
-    <span className="relative size-8 shrink-0">
-      {a ? <UserAvatar name={a.display_name} seed={a.root_id} size="xs" className="absolute top-0 left-0 size-5 text-[7px]" /> : null}
-      {b ? <UserAvatar name={b.display_name} seed={b.root_id} size="xs" className="absolute right-0 bottom-0 size-5 text-[7px] shadow-[0_0_0_2px_var(--sidebar)]" /> : null}
+    <span className={cn('relative shrink-0', large ? 'size-12' : 'size-8')}>
+      {a ? <UserAvatar name={a.display_name} seed={a.root_id} size="xs" className={cn('absolute top-0 left-0', part)} /> : null}
+      {b ? (
+        <UserAvatar
+          name={b.display_name}
+          seed={b.root_id}
+          size="xs"
+          className={cn('absolute right-0 bottom-0', part, large ? 'shadow-[0_0_0_2px_var(--rail)]' : 'shadow-[0_0_0_2px_var(--sidebar)]')}
+        />
+      ) : null}
     </span>
   );
 }
@@ -142,6 +192,7 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
   const unreadSet = useShell((s) => s.unread);
   const openConversation = useShell((s) => s.openConversation);
   const muted = useMutes((s) => convKey(conv) in s.mutes);
+  const count = conv.unread ?? 0;
 
   const id = conv.kind === 'group' ? conv.id : conv.peer;
   const active = route.kind === 'home' && !page && peer === id;
@@ -155,7 +206,7 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
     ? (live.scope === 'dm' ? 'In a call with you' : `Call · ${live.participants?.length ?? 0} in`)
     : conv.kind === 'group'
       ? plural(conv.members.length, 'member')
-      : ((presence && PRESENCE_TEXT[presence]) ?? conv.last_text ?? '');
+      : ((presence && PRESENCE_TEXT[presence]) ?? (conv.last_text === undefined ? undefined : markdownPlain(conv.last_text)) ?? '');
 
   return (
     <button
@@ -177,6 +228,11 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
           <span className={cn('truncate text-meta leading-4 font-normal text-muted-foreground', live && 'text-success-text')}>{sub}</span>
         ) : null}
       </span>
+      {count > 0 && !active && !muted ? (
+        <span aria-label={`${count} unread`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-accent px-1 text-tiny leading-none font-bold text-white">
+          {count > 99 ? '99+' : count}
+        </span>
+      ) : null}
       {conv.pinned ? <Pin className="ml-auto size-4 shrink-0 text-muted-foreground" aria-label="Pinned" /> : null}
       {muted ? <BellOff className={cn('size-4 shrink-0 text-muted-foreground', !conv.pinned && 'ml-auto')} aria-label="Muted" /> : null}
     </button>
@@ -216,6 +272,7 @@ function HomeList() {
           extra={activeTransfers ? <ActiveBadge count={activeTransfers} /> : null}
         />
       ) : null}
+      <QuickLink icon={<Bookmark />} label="Saved Messages" onClick={() => void openPage('saved')} active={page === 'saved'} />
       <Separator className="my-s-2" />
       <SectionHead
         title="Direct messages"
@@ -281,7 +338,11 @@ function ServerList({ community }: { community: CommunityView }) {
   const openPage = useShell((s) => s.openPage);
   const activeTransfers = transfers.filter((t) => ['active', 'paused', 'waiting'].includes(t.state)).length;
   const canManage = community.my_role === 'owner' || community.my_role === 'admin';
-  const text = community.channels.filter((c) => !c.voice);
+  const prefs = useServerPrefs((s) => s.prefs[community.id]) ?? DEFAULT_PREFS;
+  const mutes = useMutes((s) => s.mutes);
+  // Hide Muted Channels hides a muted text channel, except the one open now, so the user keeps their place. As the DM
+  // rows do, a timed mute that has run out is still listed until a check removes it.
+  const text = community.channels.filter((c) => !c.voice && !(prefs.hide_muted_channels && channelKey(community.id, c.id) in mutes && c.id !== channelId));
   return (
     <>
       <QuickLink icon={<UserPlus />} label="Invite people" onClick={() => openInviteDialog(community.id)} />
@@ -315,6 +376,9 @@ function ServerList({ community }: { community: CommunityView }) {
               {isUnread ? <UnreadDot /> : null}
               <Hash className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate" title={`#${ch.name}`}>{ch.name}</span>
+              {has('mentions') && ch.mentions ? (
+                <span aria-label={`${ch.mentions} mentions`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-danger px-1 text-[10px] leading-none font-bold text-white">{ch.mentions}</span>
+              ) : null}
             </button>
             {canManage ? <ChannelActions communityId={community.id} channelId={ch.id} /> : null}
             </div>
@@ -416,12 +480,22 @@ function SkeletonRows() {
 export function Sidebar() {
   const route = useShell((s) => s.route);
   const community = useShell((s) => s.community);
+  // The channel list's scroll, which collapses a server banner. A new server starts at the top.
+  const [scrollTop, setScrollTop] = useState(0);
+  const [scrolledFor, setScrolledFor] = useState(community?.id);
+  if (scrolledFor !== community?.id) {
+    setScrolledFor(community?.id);
+    setScrollTop(0);
+  }
   return (
     <aside aria-label="Channels and conversations" className="flex min-h-0 flex-col overflow-hidden border-l border-divider bg-sidebar">
       {route.kind === 'home' ? <HomeTop /> : null}
-      {route.kind === 'server' && community ? <ServerTop community={community} /> : null}
+      {route.kind === 'server' && community ? <ServerTop community={community} scrollTop={scrollTop} /> : null}
       {route.kind === 'server' && !community ? <div className="h-14 shrink-0 px-s-2 pt-4"><span className="block h-6 w-[70%] rounded-sm bg-elevated" /></div> : null}
-      <div className="dissent-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2">
+      <div
+        className="dissent-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2"
+        onScroll={route.kind === 'server' ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
+      >
         {route.kind === 'home' ? <HomeList /> : null}
         {route.kind === 'server' && community ? <ServerList community={community} /> : null}
         {route.kind === 'server' && !community ? <SkeletonRows /> : null}

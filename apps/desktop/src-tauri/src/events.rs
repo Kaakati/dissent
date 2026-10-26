@@ -31,6 +31,8 @@ async fn ui_payload(app: &AppHandle, event: &EngineEvent) -> Value {
             }
         }
         EngineEvent::ContactRequest { .. } | EngineEvent::ContactsChanged => json!({ "kind": "contacts" }),
+        // The UI reloads its conversations and the open server's members on this kind.
+        EngineEvent::PresenceChanged { .. } => json!({ "kind": "presence" }),
         other => serde_json::to_value(other).unwrap_or(Value::Null),
     }
 }
@@ -96,6 +98,12 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                 Ok(event) => {
                     if let EngineEvent::IncomingCall { call_id, from, conv, .. } = &event {
                         emit_ringing(&app, call_id, from, conv.as_deref()).await;
+                    }
+                    if matches!(event, EngineEvent::TransfersChanged) {
+                        // Before the UI hears of it, so a finished picture can be shown the moment it arrives.
+                        if let Some(engine) = app.state::<AppState>().engine.read().await.clone() {
+                            crate::attachments::allow_saved(&app, &engine.saved_files());
+                        }
                     }
                     let call_changed = matches!(event, EngineEvent::CallUpdated);
                     let payload = ui_payload(&app, &event).await;

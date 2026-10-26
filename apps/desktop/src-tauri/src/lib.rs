@@ -6,12 +6,15 @@ mod tray;
 mod updates;
 mod attachments;
 mod avatar_cmds;
+mod server_prefs_cmds;
+mod server_settings_cmds;
 mod voice;
 mod voice_settings;
 mod mic_test;
 mod transfers_cmds;
 mod part6;
 mod contacts_cmds;
+mod saved_cmds;
 mod conv_cmds;
 mod status_cmds;
 mod typing_cmds;
@@ -82,6 +85,7 @@ pub fn run() {
             commands::add_contact,
             commands::user_profile,
             commands::list_communities,
+            commands::set_server_order,
             commands::create_community,
             commands::create_invite,
             commands::join_community,
@@ -117,6 +121,7 @@ pub fn run() {
             transfers_cmds::set_transfer_settings,
             transfers_cmds::store_stats,
             transfers_cmds::pick_download_dir,
+            transfers_cmds::reset_download_dir,
             transfers_cmds::send_files,
             transfers_cmds::send_dm_files,
             transfers_cmds::list_transfers,
@@ -136,11 +141,22 @@ pub fn run() {
             transfers_cmds::pending_group_joins,
             transfers_cmds::link_previews,
             transfers_cmds::set_link_previews,
+            transfers_cmds::link_preview_prompted,
+            transfers_cmds::mark_link_preview_prompted,
             contacts_cmds::pinned_conversations,
+            saved_cmds::add_bookmark,
+            saved_cmds::remove_bookmark,
+            saved_cmds::list_bookmarks,
+            saved_cmds::add_reminder,
+            saved_cmds::list_reminders,
+            saved_cmds::remove_reminder,
+            saved_cmds::mark_unread,
             contacts_cmds::list_contacts,
             contacts_cmds::send_contact_request,
             contacts_cmds::address_discovery,
             contacts_cmds::set_address_discovery,
+            contacts_cmds::friends_shared,
+            contacts_cmds::set_friends_shared,
             contacts_cmds::accept_contact,
             contacts_cmds::decline_contact,
             contacts_cmds::cancel_contact_request,
@@ -179,8 +195,22 @@ pub fn run() {
             status_cmds::record_activity,
             avatar_cmds::set_avatar,
             avatar_cmds::clear_avatar,
+            avatar_cmds::set_profile_banner,
+            avatar_cmds::set_profile_banner_preset,
+            avatar_cmds::clear_profile_banner,
             avatar_cmds::set_community_icon,
             avatar_cmds::clear_community_icon,
+            server_prefs_cmds::get_server_prefs,
+            server_prefs_cmds::set_server_prefs,
+            server_prefs_cmds::server_alerts,
+            server_settings_cmds::rename_community,
+            server_settings_cmds::set_community_banner,
+            server_settings_cmds::clear_community_banner,
+            server_settings_cmds::set_community_banner_preset,
+            server_settings_cmds::set_community_profile,
+            server_settings_cmds::prepare_animated_banner,
+            server_settings_cmds::set_community_banner_animated,
+            server_settings_cmds::set_profile_banner_animated,
             commands::get_network_settings,
             commands::safety_number,
             updates::check_update,
@@ -198,6 +228,7 @@ pub fn run() {
             part6::set_note,
             part6::pin_conversation,
             part6::mark_read,
+            part6::mark_mentions_read,
             part6::pinned_messages,
             part6::pin_message,
             part6::mark_safety_verified,
@@ -208,6 +239,7 @@ pub fn run() {
             part6::set_muted,
             part6::set_deafened,
             part6::set_camera,
+            part6::set_screen_share,
             part6::send_call_message,
             part6::accept_call,
             part6::decline_call,

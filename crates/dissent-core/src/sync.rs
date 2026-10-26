@@ -170,17 +170,7 @@ impl Engine {
         let mut pending = ids;
         while !pending.is_empty() {
             let chunk: Vec<EventId> = pending.iter().take(PAGE_ITEMS).copied().collect();
-            let req = Request::Fetch {
-                community,
-                ids: chunk.clone(),
-            };
-            let events = match self.call(peer, &req).await? {
-                Response::Events(events) => events,
-                Response::Error(reason) => {
-                    return Err(CoreError::Invalid(format!("peer refused fetch: {reason}")))
-                }
-                other => return Err(unexpected(&other)),
-            };
+            let events = self.fetch_page(community, peer, &chunk).await?;
             if events.is_empty() {
                 // The peer holds none of this chunk.
                 pending.drain(..chunk.len());
@@ -191,6 +181,30 @@ impl Engine {
             sink(events)?;
         }
         Ok(())
+    }
+
+    /// One page of events. Asks with `FetchRaw`, so an event this build cannot decode is skipped rather
+    /// than failing the page. A peer that predates `FetchRaw` gets `Fetch`.
+    async fn fetch_page(&self, community: CommunityId, peer: DeviceId, ids: &[EventId]) -> Result<Vec<SignedEvent>> {
+        let raw = Request::FetchRaw {
+            community,
+            ids: ids.to_vec(),
+        };
+        match self.call(peer, &raw).await {
+            Ok(Response::EventsRaw(blobs)) => Ok(decode_events(&blobs)),
+            Ok(Response::Error(reason)) => Err(CoreError::Invalid(format!("peer refused fetch: {reason}"))),
+            _ => {
+                let req = Request::Fetch {
+                    community,
+                    ids: ids.to_vec(),
+                };
+                match self.call(peer, &req).await? {
+                    Response::Events(events) => Ok(events),
+                    Response::Error(reason) => Err(CoreError::Invalid(format!("peer refused fetch: {reason}"))),
+                    other => Err(unexpected(&other)),
+                }
+            }
+        }
     }
 
     /// Sends events to `peer` for it to verify and store.
@@ -241,4 +255,52 @@ impl Engine {
 
 fn to_event_ids(ids: Vec<Id>) -> Vec<EventId> {
     ids.into_iter().map(|id| EventId(id.to_bytes())).collect()
+}
+
+/// Decodes event bytes one at a time. An event this build cannot decode is logged and skipped, so an
+/// event from a newer build does not fail the page that carries it.
+pub(crate) fn decode_events(blobs: &[Vec<u8>]) -> Vec<SignedEvent> {
+    blobs
+        .iter()
+        .filter_map(|bytes| match SignedEvent::decode(bytes) {
+            Ok(se) => Some(se),
+            Err(e) => {
+                tracing::warn!(error = %e, "skipped an event this build cannot decode");
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    use dissent_events::{ChannelId, Event, EventBody, Hlc, Payload};
+    use dissent_identity::{DeviceKey, RootKey};
+
+    #[test]
+    fn a_batch_with_an_event_this_build_cannot_decode_keeps_the_rest() {
+        let root = RootKey::generate();
+        let device = DeviceKey::generate();
+        let cert = root.certify(device.id(), 0);
+        let body = EventBody {
+            community: CommunityId([7; 32]),
+            channel: ChannelId::CONTROL,
+            author: root.id(),
+            device: device.id(),
+            parents: vec![],
+            hlc: Hlc { wall_ms: 1, counter: 0 },
+            payload: Payload::Leave,
+        };
+        let good = SignedEvent {
+            event: Event::sign(body, &device),
+            cert,
+        };
+        // A blob from a newer build: not a SignedEvent this build can read.
+        let blobs = vec![vec![0xff, 0xff, 0xff], good.encode()];
+        let decoded = decode_events(&blobs);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].event.id, good.event.id);
+        assert!(decode_events(&[vec![0xff]]).is_empty());
+    }
 }

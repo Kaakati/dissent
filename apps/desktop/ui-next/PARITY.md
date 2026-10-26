@@ -1,6 +1,6 @@
 # Parity with the current UI
 
-Read-only inventory of `apps/desktop/ui` (the shipped UI) against `apps/desktop/ui-next`, for the cut-over. Status:
+Read-only inventory of the old plain-module UI (removed at the cut-over; in git history) against `apps/desktop/ui-next`. Status:
 
 - **done**: ported and in the tree. The keyboard driver (`tests/driver.mjs`) covers most of it; see "Not covered".
 - **partial**: ported with a known gap, listed under it.
@@ -9,7 +9,7 @@ Read-only inventory of `apps/desktop/ui` (the shipped UI) against `apps/desktop/
 
 Source of each row: the old file's exports and call sites, checked against the ui-next component named in the row.
 
-## Views (`apps/desktop/ui/views/`)
+## Views (the old UI's `views/`)
 
 | Old file | Status | ui-next | Gap |
 |---|---|---|---|
@@ -117,12 +117,12 @@ Source of each row: the old file's exports and call sites, checked against the u
 | `sounds.js` | done | `lib/sounds.ts`, `lib/sound-settings.ts`, `lib/calls.ts` (call sounds) |
 | `osnotify.js` | done | `lib/osnotify.ts`, `lib/alerts.ts` |
 | `qr.js` | done | `lib/qr.ts` |
-| `address.js` | partial | `lib/address.ts` is a copy of `ui/address.js`. It moves with the cut-over (see below). |
+| `address.js` | partial | `lib/address.ts` is a copy of the old UI's `address.js`. |
 | `ui.js` | done | `lib/identity.ts`, `components/user-avatar.tsx`, `lib/toasts.ts`, `lib/dialog.ts`, `lib/clipboard.ts`, `lib/text.ts`, `lib/time.ts` |
 | `icons.svg` | done | `lucide-react` icons |
 | `style.css` | partial | Tokens in `index.css`, shell rules in `shell.css`, chat in `components/chat/chat.css`, calls in `components/call/call.css`. Dialog rules are shadcn restyled, not the old class names. |
 | `fonts/` | done | `public/fonts/` |
-| `mock.js` | shared | `lib/mock.ts` loads `apps/desktop/ui/mock.js` in the browser preview and the driver |
+| `mock.js` | shared | `lib/mock.ts` loads `src/mock/mock.js` in the browser preview and the driver |
 
 ## Known gaps across the tree
 
@@ -130,7 +130,7 @@ Source of each row: the old file's exports and call sites, checked against the u
 2. Camera and screen share are disabled slots labelled "Coming soon" (video work).
 3. Done: the status menu shows the address tag.
 4. Group call matching uses `useCallRoom` (see the lobby row).
-5. Done: `lib/mock.ts` loads `src/mock/mock.js`, and `src/mock/address.js` and `lib/address.ts` are copies of `apps/desktop/ui/address.js`, so nothing here imports the old UI. The copies stay in step until `apps/desktop/ui` is removed.
+5. Done: `lib/mock.ts` loads `src/mock/mock.js`, and nothing imports the old UI.
 6. The old dialog and settings CSS classes are not all ported (the look is matched by shadcn restyling).
 7. The app logs "Applying inline style violates the following Content Security Policy directive" once per modal open. `react-style-singleton` (via Radix Dialog's scroll lock) injects a `<style>` element, which the CSP blocks. The document doesn't scroll, so the blocked lock changes nothing visible. Left as is on purpose; the CSP is not widened.
 
@@ -138,7 +138,7 @@ Source of each row: the old file's exports and call sites, checked against the u
 
 - Done: the mock and address helpers are copied into `ui-next` (`src/mock/`), and `lib/mock.ts` points at them.
 - Done: `tauri.conf.json` `frontendDist` is `ui-next/dist`, and the release workflow builds ui-next first.
-- Not done, after v0.1.6 ships on ui-next: remove `apps/desktop/ui` once nothing imports it.
+- Done: the old UI is removed (`apps/desktop/ui`), after v0.1.6 shipped on ui-next. Nothing imports it.
 
 ## Verification
 

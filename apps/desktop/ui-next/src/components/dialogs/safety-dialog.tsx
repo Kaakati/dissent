@@ -1,6 +1,6 @@
 // The safety number: the same 12 groups of five digits on both sides. Compare it in person or on a call. When the
 // peer's key has changed, an amber banner comes first, and "They match" marks the number compared. Ported from
-// openSafetyDialog in ui/views/dialogs.js.
+// openSafetyDialog in the old UI's views/dialogs.js.
 import { CircleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';

@@ -90,6 +90,23 @@ pub(crate) struct Inner {
     pub files: std::sync::Arc<dissent_files::Files>,
     /// Invite previews this device fetched, and how often each requester asked it for one.
     pub previews: crate::invite_preview::PreviewState,
+    /// Friend lists fetched from contacts, and how often each requester asked this device for ours.
+    pub friends: crate::friends::FriendsState,
+    /// Whether this device answers `HistorySupport` with yes. Off only in tests, to model an older device.
+    pub history_support: AtomicBool,
+    /// Contacts whose direct profile this run has exchanged. See `profile_sync`.
+    pub profile_synced: Mutex<std::collections::BTreeSet<RootId>>,
+    /// Set only in tests, to model a device from before `profile_sync` (v0.1.6): it neither syncs nor
+    /// answers `ProfileSync`, and takes a pushed profile only.
+    pub legacy_profiles: AtomicBool,
+    /// Whether every other member device supports history messages, as last checked, per community.
+    pub history_ready: Mutex<BTreeMap<CommunityId, crate::history::ReadyAnswer>>,
+    /// Communities with a background check of `history_ready` running.
+    pub history_checking: Mutex<BTreeSet<CommunityId>>,
+    /// Each community's history keys, read from its file once and kept in memory. See `history`.
+    pub history_keys: Mutex<BTreeMap<CommunityId, crate::history::KeyMap>>,
+    /// How many times a history keys file was read from disk. Tests check that sends do not read it.
+    pub history_file_reads: std::sync::atomic::AtomicU64,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -118,11 +135,26 @@ impl Engine {
         vault: Arc<Vault>,
         timings: Timings,
     ) -> Result<(Engine, broadcast::Receiver<EngineEvent>)> {
+        Self::start_with_options(identity, data_dir, net, vault, timings, None).await
+    }
+
+    /// `start` with the given intervals and the folder downloads go to when the user has picked none. The folder is
+    /// set before the engine joins the network, so no download can start in the profile folder by accident. `None`
+    /// means the profile's own downloads folder.
+    pub async fn start_with_options(
+        identity: Identity,
+        data_dir: PathBuf,
+        net: NodeConfig,
+        vault: Arc<Vault>,
+        timings: Timings,
+        default_download_dir: Option<PathBuf>,
+    ) -> Result<(Engine, broadcast::Receiver<EngineEvent>)> {
         let me = identity.root_id();
         let files_dir = data_dir.join("files");
         let files = std::sync::Arc::new(Self::open_files(&files_dir).await?);
         let mut world = World::load(Paths::new(data_dir), &identity, &vault)?;
         world.timings = timings;
+        world.attach.default_download_dir = default_download_dir;
         let newest_stored = world.max_hlc();
         let founded = load_founded(&world, &vault)?;
         let mls = open_mls(&identity, &world, &vault)?;
@@ -170,6 +202,14 @@ impl Engine {
             timings,
             files,
             previews: Default::default(),
+            friends: Default::default(),
+            history_support: AtomicBool::new(true),
+            profile_synced: Default::default(),
+            legacy_profiles: AtomicBool::new(false),
+            history_ready: Default::default(),
+            history_checking: Default::default(),
+            history_keys: Default::default(),
+            history_file_reads: std::sync::atomic::AtomicU64::new(0),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;
@@ -213,8 +253,10 @@ impl Engine {
         }
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::saved::reminder_clock(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::typing::typing_loop(Arc::downgrade(&engine.inner)));
+        engine.prune_thumbnails();
         Ok((engine, rx))
     }
 
@@ -250,12 +292,16 @@ impl Engine {
 
     pub fn me(&self) -> MeView {
         let w = self.read();
+        let (banner, banner_poster, banner_preset) = w.profile_banner_view(&self.inner.me);
         MeView {
             root_id: self.inner.me.to_string(),
             device_id: self.inner.identity.device_id().to_string(),
             suffix: self.inner.me.suffix(),
             display_name: w.my_name(),
             avatar: w.avatar_of(&self.inner.me),
+            banner,
+            banner_poster,
+            banner_preset,
             first_run: crate::local::first_run(&w),
         }
     }
@@ -275,12 +321,14 @@ impl Engine {
         card.map(|c| c.to_url().to_string()).unwrap_or_default()
     }
 
-    /// Every community we belong to, sorted by name.
+    /// Every community we belong to: first in the order this device saved for the server rail, then
+    /// the rest sorted by name.
     pub fn communities(&self) -> Vec<CommunitySummary> {
         let w = self.read();
         let mut out: Vec<CommunitySummary> =
             w.communities.values().map(|c| w.summary(c)).collect();
         out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        crate::rail_order::apply(&crate::rail_order::saved_order(&w), &mut out);
         out
     }
 

@@ -1,6 +1,6 @@
 // File attachments: the cards in a message, the image thumbnails of downloaded pictures, and the chips above the composer.
 // Nothing here renders user-supplied markup. Names are text, and the only image source is the backend's local path
-// converted by Tauri's asset protocol, never a URL taken from a message. Ported from ui/views/attachments.js.
+// converted by Tauri's asset protocol, never a URL taken from a message. Ported from the old UI's views/attachments.js.
 import type { ComponentType } from 'react';
 import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, RotateCcw, X } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
@@ -9,7 +9,7 @@ import { MAX_FILE_LABEL, extOf, formatSize, iconFor, isExecutable, isImage, isOv
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
-import type { Attachment, Id } from '@/lib/types';
+import type { Attachment, Id, ThumbView } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { IconBtn } from './parts';
 import type { StagedFile } from '@/lib/chat';
@@ -87,10 +87,48 @@ function CardActions({ a, communityId, messageId }: { a: Attachment; communityId
   }
 }
 
-// One attachment in a message: a picture once it is downloaded, otherwise a file card.
+// A picture's preview before the picture is downloaded: the sender's thumbnail, sized like a Discord embed (at most
+// 400 by 300, aspect kept). Clicking downloads the picture, or opens it once it is on this device.
+function ThumbPreview({ a, thumb, communityId, messageId }: { a: Attachment; thumb: ThumbView; communityId: Id | null; messageId: Id }) {
+  const name = String(a.name ?? 'file');
+  const src = thumb.state === 'downloaded' ? imageSrc(thumb.path) : null;
+  const width = Math.max(1, Number(thumb.width) || 1);
+  const height = Math.max(1, Number(thumb.height) || 1);
+  const size = { width: Math.min(400, 300 * (width / height)), aspectRatio: `${width} / ${height}` };
+  const downloading = a.state === 'downloading';
+  const onClick = a.state === 'downloaded'
+    ? () => void openAttachment(a)
+    : () => void downloadAttachment(communityId, messageId, a);
+  const label = a.state === 'downloaded' ? `Open ${name}` : downloading ? `Downloading ${name}` : `Download ${name}`;
+  return (
+    <figure className="att-preview">
+      <button
+        type="button"
+        className="att-preview-btn"
+        style={size}
+        aria-label={label}
+        title={`${name} · ${formatSize(a.size)} · End-to-end encrypted`}
+        disabled={downloading}
+        onClick={onClick}
+      >
+        {src ? <img src={src} alt={name} loading="lazy" decoding="async" draggable={false} /> : null}
+      </button>
+      <figcaption className="att-meta att-preview-meta">
+        <span className="tnum">{formatSize(a.size)}</span>
+        <LockGlyph />
+        <StateNode a={a} />
+      </figcaption>
+    </figure>
+  );
+}
+
+// One attachment in a message: a picture once it is downloaded, its preview before that, otherwise a file card.
 export function AttachmentView({ a, communityId, messageId }: { a: Attachment; communityId: Id | null; messageId: Id }) {
   const name = String(a.name ?? 'file');
   const src = isImage(a) && a.state === 'downloaded' ? imageSrc(a.local_path) : null;
+  if (!src && a.thumb && isImage(a)) {
+    return <ThumbPreview a={a} thumb={a.thumb} communityId={communityId} messageId={messageId} />;
+  }
   if (src) {
     return (
       <figure className="att-image">

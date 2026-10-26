@@ -1,14 +1,14 @@
 // One message: its gutter (avatar or time), author and time at the head of a group, the body with search marks and links,
 // the reply reference, spoiler handling, attachments, link previews, reactions, the hover actions and the inline editor.
-// Ported from ui/views/chat.js (messageRow, bodyNode, spoilerGuard, rowActions, editForm, replyRef, systemRow).
-import { Fragment, useEffect, useRef, useState, type CSSProperties } from 'react';
+// Ported from the old UI's views/chat.js (messageRow, bodyNode, spoilerGuard, rowActions, editForm, replyRef, systemRow).
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Clock, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react';
 import { UserAvatar } from '@/components/user-avatar';
 import { useChat } from '@/lib/chat';
+import { splitMentions } from '@/lib/mentions';
 import { editMessage } from '@/lib/chat-actions';
 import { has } from '@/lib/features';
 import { hueOf } from '@/lib/identity';
-import { linkParts } from '@/lib/text';
 import { clockLabel, stampLabel, whenLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
 import type { ChatTarget, ReplyRef } from '@/lib/types';
@@ -16,8 +16,11 @@ import { cn } from '@/lib/utils';
 import { AttachmentView } from './attachments';
 import { EmbedCards } from './embeds';
 import { InviteCards, bodyText, inviteLinks } from './invite-card';
+import { MessageLinks, messageLinks } from './message-link';
+import { MarkdownBody } from './markdown';
 import { canDelete, openMessageMenu, removeMessage } from './message-menu';
 import { Reactions, pickReaction } from './reactions';
+import { openProfileCard } from '@/components/profile/profile-card';
 import { IconBtn, highlight, jumpTo, spoilerGuard } from './parts';
 import type { ChatView, ViewItem } from './use-chat-view';
 
@@ -65,14 +68,42 @@ function AuthorButton({ item }: { item: ViewItem }) {
   );
 }
 
+// The plain runs of a body, with each resolved mention as a pill. A person's pill opens their profile card; @everyone is a
+// pill with no card. Search matches still show inside the plain runs.
+function mentionRuns(text: string, item: ViewItem, filter: string): ReactNode[] {
+  // Without the engine's mentions feature the text is plain, as before.
+  if (!has('mentions')) return [<Fragment key="all">{highlight(text, filter)}</Fragment>];
+  return splitMentions(text, item.mentions, item.mentionsEveryone).map((seg, i) => {
+    if (seg.ref === undefined) return <Fragment key={i}>{highlight(seg.text, filter)}</Fragment>;
+    if (seg.ref === 'everyone') return <span key={i} className="mention-pill">{seg.text}</span>;
+    const person = seg.ref;
+    return (
+      <button key={i} type="button" className="mention-pill" onClick={(e) => openProfileCard(e.clientX, e.clientY, person.id)}>
+        {seg.text}
+      </button>
+    );
+  });
+}
+
 // The message body. Deleted text is a single line. In a spoiler channel the text blurs until someone clicks it.
 function Body({ item, view, filter }: { item: ViewItem; view: ChatView; filter: string }) {
   const revealed = useChat((s) => s.revealed.has(item.id));
   if (item.deleted) return <p className="body deleted">message deleted</p>;
+  if (item.locked) {
+    return item.beforeJoin ? (
+      <p className="body text-muted-foreground" title="Sent before you joined. Whether you can read it depends on the server's history setting, and on a member who was here then being online.">
+        🔒 Sent before you joined
+      </p>
+    ) : (
+      <p className="body text-muted-foreground" title="This message's text is encrypted, and this device does not have the key yet. It shows once the key arrives.">
+        🔒 This message is waiting for a key
+      </p>
+    );
+  }
   const hidden = view.visibility === 'spoiler' && !revealed;
   const reveal = () => useChat.getState().reveal(item.id);
   return (
-    <p
+    <div
       className={cn('body', hidden && 'spoiler-hidden')}
       tabIndex={hidden ? 0 : undefined}
       role={hidden ? 'button' : undefined}
@@ -89,17 +120,9 @@ function Body({ item, view, filter }: { item: ViewItem; view: ChatView; filter: 
           : undefined
       }
     >
-      {linkParts(bodyText(item.text)).map((part, i) =>
-        part.href ? (
-          <a key={i} href={part.href} target="_blank" rel="noopener noreferrer">
-            {highlight(part.text, filter)}
-          </a>
-        ) : (
-          <Fragment key={i}>{highlight(part.text, filter)}</Fragment>
-        ),
-      )}
+      <MarkdownBody text={bodyText(item.text)} render={(run) => mentionRuns(run, item, filter)} />
       {item.edited ? <span className="edited"> (edited)</span> : null}
-    </p>
+    </div>
   );
 }
 
@@ -231,12 +254,14 @@ export function MessageRow({
     <EmbedCards embeds={item.embeds} hidden={mediaHidden} reveal={revealMedia} />
   ) : null;
   const invites = !item.deleted && inviteLinks(item.text).length ? <InviteCards text={item.text} /> : null;
+  const jumps = !item.deleted && messageLinks(item.text).length ? <MessageLinks text={item.text} /> : null;
 
   const lines = (
     <>
       {bodyOrNull}
       {cards}
       {invites}
+      {jumps}
       {files}
       {pending}
       {reactions}
@@ -245,7 +270,7 @@ export function MessageRow({
 
   return (
     <article
-      className={cn('msg', start ? 'start' : 'cont', item.pending && 'pending', item.queued && 'queued')}
+      className={cn('msg', start ? 'start' : 'cont', item.pending && 'pending', item.queued && 'queued', item.mentionsMe && has('mentions') && 'mention')}
       data-id={item.id}
       tabIndex={-1}
       onContextMenu={

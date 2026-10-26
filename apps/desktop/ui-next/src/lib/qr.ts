@@ -1,5 +1,5 @@
 /* eslint-disable */
-// @ts-nocheck -- Bridge: a verbatim copy of apps/desktop/ui/qr.js. Use qrMatrix in React; qrSvg needs the DOM.
+// @ts-nocheck -- Bridge: a verbatim copy of the old UI's qr.js. Use qrMatrix in React; qrSvg needs the DOM.
 
 // A small QR Code encoder (ISO 18004): byte mode, error correction M, versions 1 to 5, the eight masks
 // scored by penalty. Enough for an address (62 characters fit version 4). Inline, no CDN.

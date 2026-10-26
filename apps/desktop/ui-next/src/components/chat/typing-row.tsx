@@ -1,5 +1,5 @@
 // The row above the composer: who is typing. Always one height, so the list does not jump when someone starts or stops.
-// The names come from the shell store (dissent://typing-changed). Ported from ui/typing.js (paint).
+// The names come from the shell store (dissent://typing-changed). Ported from the old UI's typing.js (paint).
 import { Fragment } from 'react';
 import { typingKey, useShell } from '@/lib/store';
 import { typingParts } from '@/lib/typing-words';

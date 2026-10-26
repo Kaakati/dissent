@@ -5,6 +5,7 @@
 use dissent_events::{normalize_emoji, ChannelId, EventId, Payload, SealedKind};
 use dissent_identity::CommunityId;
 
+use crate::attachments::Mentions;
 use crate::engine::{clean_message, Engine};
 use crate::error::{CoreError, Result};
 use crate::views::MessageItem;
@@ -22,7 +23,24 @@ impl Engine {
         target: EventId,
         text: String,
     ) -> Result<MessageItem> {
+        self.send_reply_with(community, channel, target, text, Mentions::default()).await
+    }
+
+    /// Replies to `target`, mentioning the people in `mentions`. See `send_message_with`.
+    pub async fn send_reply_with(
+        &self,
+        community: CommunityId,
+        channel: ChannelId,
+        target: EventId,
+        text: String,
+        mentions: Mentions,
+    ) -> Result<MessageItem> {
         let text = clean_message(&text)?;
+        let text = if mentions.is_empty() {
+            text
+        } else {
+            crate::attachments::pack_all(&text, &[], &[], &[], Some(&mentions))?
+        };
         let (epoch, ciphertext) = self.seal(community, &text)?;
         let payload = Payload::Sealed {
             epoch,

@@ -1,5 +1,5 @@
 //! Tauri commands for files, transfers, the file store, group invites and link previews. Each one
-//! forwards to the engine method of the same concept. Argument keys match what `ui/api.js` sends,
+//! forwards to the engine method of the same concept. Argument keys match what `ui-next/src/lib/api.ts` sends,
 //! which Tauri maps from camelCase to snake_case.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::commands::{engine, err, parse, AppState};
+use crate::commands::{engine, err, mentions_of_arg, parse, AppState, MentionsArg};
 
 // ---- transfer settings and the file store ----
 
@@ -52,6 +52,13 @@ pub async fn pick_download_dir(
     engine(&state).await?.set_download_dir(Some(dir)).map_err(err)
 }
 
+/// Makes the default folder the download folder again: the OS Downloads folder, or the profile's own folder for a
+/// portable exe. Returns the settings, with the folder downloads go to now.
+#[tauri::command]
+pub async fn reset_download_dir(state: State<'_, AppState>) -> Result<TransferSettings, String> {
+    engine(&state).await?.set_download_dir(None).map_err(err)
+}
+
 #[tauri::command]
 pub async fn store_stats(state: State<'_, AppState>) -> Result<StoreStats, String> {
     engine(&state).await?.store_stats().await.map_err(err)
@@ -72,12 +79,14 @@ pub async fn send_files(
     // Files may go without a message: the UI sends null then.
     text: Option<String>,
     seed: Option<bool>,
+    mentions: Option<MentionsArg>,
 ) -> Result<MessageItem, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let channel = parse("channel id", &channel_id)?;
+    let mentions = mentions_of_arg(mentions)?;
     engine(&state)
         .await?
-        .send_files(community, channel, to_paths(paths), text.unwrap_or_default(), seed.unwrap_or(true))
+        .send_files_with(community, channel, to_paths(paths), text.unwrap_or_default(), seed.unwrap_or(true), mentions)
         .await
         .map_err(err)
 }
@@ -215,4 +224,14 @@ pub async fn link_previews(state: State<'_, AppState>) -> Result<bool, String> {
 #[tauri::command]
 pub async fn set_link_previews(state: State<'_, AppState>, on: bool) -> Result<(), String> {
     engine(&state).await?.set_link_previews(on).map_err(err)
+}
+
+#[tauri::command]
+pub async fn link_preview_prompted(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(engine(&state).await?.link_preview_prompted())
+}
+
+#[tauri::command]
+pub async fn mark_link_preview_prompted(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.mark_link_preview_prompted().map_err(err)
 }

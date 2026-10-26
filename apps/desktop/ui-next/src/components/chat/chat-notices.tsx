@@ -1,5 +1,5 @@
 // The blocks a conversation shows around its messages: the welcome at the top of a history, the key-change notice, the
-// age gate of an age-restricted channel, and the empty pane. Ported from ui/views/chat.js (welcomeNode, keyChangeBanner,
+// age gate of an age-restricted channel, and the empty pane. Ported from the old UI's views/chat.js (welcomeNode, keyChangeBanner,
 // ageGate, emptyPane).
 import { CircleAlert, Hash, MessageCircle, Shield } from 'lucide-react';
 import { openSafetyDialog } from '@/components/dialogs/safety-dialog';

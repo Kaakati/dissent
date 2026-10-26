@@ -10,6 +10,7 @@ import {
   changeDownloadDir,
   pauseTransfer,
   removeTransfer,
+  resetDownloadDir,
   resumeTransfer,
   retryTransfer,
   revealTransfer,
@@ -222,6 +223,11 @@ export function TransfersAside() {
         <Button variant="outline" className="self-start" disabled={!settings} onClick={() => void changeDownloadDir()}>
           Change
         </Button>
+        {settings && !settings.download_dir_is_default ? (
+          <Button variant="ghost" className="self-start" onClick={() => void resetDownloadDir()}>
+            Reset to default
+          </Button>
+        ) : null}
       </div>
     </aside>
   );

@@ -9,6 +9,11 @@
 //! has no group yet, so the caller picks a random key and sends it over the authenticated RPC.
 //! The call rekeys when the group epoch changes.
 
+use base64::Engine as _;
+use dissent_media::VideoCodec;
+
+use crate::call_video::{CaptureKind, Encoded, Preview, RemoteVideo, Sending};
+use dissent_media::VideoMeta;
 use crate::engine::{now_ms, Engine, Inner};
 use crate::groups::{dm_conv_id, ConvId};
 use crate::error::{CoreError, Result};
@@ -526,6 +531,12 @@ pub(crate) struct Room {
     links: AtomicUsize,
     /// True once this room has a presence clock, so that it has only one.
     clocked: AtomicBool,
+    /// This device's camera while it is on. Dropping it stops the capture thread.
+    camera: Mutex<Option<Sending>>,
+    /// This device's shared screen while it is on.
+    screen: Mutex<Option<Sending>>,
+    /// The decoders of the peers' cameras and screens.
+    remote_video: Mutex<RemoteVideo>,
 }
 
 /// An incoming direct call the user has not answered yet. No media exists until they accept.
@@ -826,6 +837,9 @@ impl Room {
             sending: AtomicBool::new(true),
             links: AtomicUsize::new(0),
             clocked: AtomicBool::new(false),
+            camera: Mutex::new(None),
+            screen: Mutex::new(None),
+            remote_video: Mutex::new(RemoteVideo::default()),
         }
     }
 
@@ -897,7 +911,7 @@ fn is_current(inner: &Inner, room: &Arc<Room>) -> bool {
 
 /// Forwarded calls. The forwarder relays between the leaves. A leaf receives from its forwarder
 /// and sends through it. A forwarder does not send its own audio yet, since it has no leaf link.
-async fn pump_forwarded(room: &Room, forwarding: &Forwarding) {
+async fn pump_forwarded(engine: &Engine, room: &Room, forwarding: &Forwarding) {
     {
         let mut sfu = forwarding.sfu.lock().await;
         if let Some(sfu) = sfu.as_mut() {
@@ -928,6 +942,146 @@ async fn pump_forwarded(room: &Room, forwarding: &Forwarding) {
             }
         }
     }
+    pump_video_leaf(engine, room, participant).await;
+}
+
+/// Fallback audio target for the budget, in kbps, before the call has measured one.
+const DEFAULT_AUDIO_KBPS: u32 = 32;
+
+/// Takes the frames that the sending captures have ready, each with whether it is a screen. A
+/// paused capture's frames are dropped, because the link cannot carry them.
+fn take_encoded(room: &Room) -> Vec<(Encoded, bool)> {
+    let mut out = Vec::new();
+    for (slot, screen) in [(&room.camera, false), (&room.screen, true)] {
+        let sending = lock(slot);
+        if let Some(sending) = sending.as_ref() {
+            while let Some(encoded) = sending.capture.try_next() {
+                if !sending.paused {
+                    out.push((encoded, screen));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Sizes every sending capture to the link's estimate, minus the audio reservation.
+fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
+    for slot in [&room.camera, &room.screen] {
+        if let Some(sending) = lock(slot).as_mut() {
+            sending.fit(available_kbps, audio_kbps);
+        }
+    }
+}
+
+/// Asks each sending capture for a keyframe, because a peer needs one.
+fn request_keyframes(room: &Room) {
+    for slot in [&room.camera, &room.screen] {
+        if let Some(sending) = lock(slot).as_ref() {
+            sending.capture.request_keyframe();
+        }
+    }
+}
+
+/// Shows this device's own camera and screen in the window, as the self tile.
+fn show_own_previews(engine: &Engine, room: &Room) {
+    let root_id = engine.inner.identity.root_id().to_string();
+    for slot in [&room.camera, &room.screen] {
+        let sending = lock(slot);
+        let Some(sending) = sending.as_ref() else {
+            continue;
+        };
+        if let Some(preview) = sending.capture.try_preview() {
+            let screen = sending.capture.kind() == CaptureKind::Screen;
+            emit_preview(engine, preview.sender, &root_id, screen, &preview);
+        }
+    }
+}
+
+/// Emits one preview as a window event, with the picture as base64 JPEG.
+fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, preview: &Preview) {
+    engine.emit(EngineEvent::VideoFrame {
+        sender,
+        root_id: root_id.to_string(),
+        screen,
+        width: preview.width,
+        height: preview.height,
+        jpeg: base64::engine::general_purpose::STANDARD.encode(&preview.jpeg),
+    });
+}
+
+/// Shows a peer's frame, and tells the window about the picture it decodes to.
+fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
+    if let Some(preview) = lock(&room.remote_video).show(frame) {
+        let root_id = lock(&room.peers)
+            .get(&preview.sender)
+            .map(|peer| peer.root.to_string())
+            .unwrap_or_default();
+        emit_preview(engine, preview.sender, &root_id, preview.screen, &preview);
+    }
+}
+
+/// Sends this device's camera and screen through the mesh, and shows the peers' frames.
+async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTransport>) {
+    let audio = mesh
+        .stats()
+        .values()
+        .map(|stats| stats.target_kbps)
+        .min()
+        .unwrap_or(DEFAULT_AUDIO_KBPS);
+    fit_sending(room, mesh.video_available_kbps(), audio);
+    for (encoded, screen) in take_encoded(room) {
+        let meta = VideoMeta {
+            frame_id: encoded.frame_id,
+            keyframe: encoded.keyframe,
+            codec: VideoCodec::H264,
+            screen,
+        };
+        if let Err(e) = mesh.send_video(&encoded.data, meta).await {
+            debug!(error = %e, "video frame not sent");
+        }
+    }
+    if mesh.take_keyframe_request() {
+        request_keyframes(room);
+    }
+    while let Ok(Ok(Some(frame))) =
+        tokio::time::timeout(Duration::from_millis(1), mesh.next_video_frame()).await
+    {
+        show_video(engine, room, &frame);
+    }
+    show_own_previews(engine, room);
+}
+
+/// Sends this device's camera and screen to its forwarder, and shows the frames the forwarder
+/// relays.
+async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Participant<CallLink>) {
+    let audio = participant
+        .link_stats()
+        .values()
+        .map(|stats| stats.target_kbps)
+        .min()
+        .unwrap_or(DEFAULT_AUDIO_KBPS);
+    fit_sending(room, participant.video_available_kbps(), audio);
+    for (encoded, screen) in take_encoded(room) {
+        let meta = VideoMeta {
+            frame_id: encoded.frame_id,
+            keyframe: encoded.keyframe,
+            codec: VideoCodec::H264,
+            screen,
+        };
+        if let Err(e) = participant.send_video(&encoded.data, meta).await {
+            debug!(error = %e, "video frame not sent");
+        }
+    }
+    if participant.take_keyframe_request() {
+        request_keyframes(room);
+    }
+    while let Ok(Ok(Some(frame))) =
+        tokio::time::timeout(Duration::from_millis(1), participant.next_video_frame()).await
+    {
+        show_video(engine, room, &frame);
+    }
+    show_own_previews(engine, room);
 }
 
 /// Runs one call: sends a synthetic frame every 20 ms, drains arriving frames, and every half
@@ -954,7 +1108,7 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
         }
         if let Some(forwarding) = room.forwarding.as_ref() {
             drop(mesh);
-            pump_forwarded(&room, forwarding).await;
+            pump_forwarded(&engine, &room, forwarding).await;
             continue;
         }
         while let Ok(Ok(Some(frame))) =
@@ -975,6 +1129,7 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
                 }
             }
         }
+        pump_video_mesh(&engine, &room, &mut mesh).await;
     }
 }
 
@@ -1639,6 +1794,7 @@ impl Engine {
                     };
                     current.mesh.lock().await.remove_peer(sid);
                     lock(&current.peers).remove(&sid);
+                    lock(&current.remote_video).forget(sid);
                     lock(&current.live).remove(&sid);
                     self.emit(EngineEvent::CallUpdated);
                     self.announce_call(&current, self.roster_of(&current));
@@ -2265,12 +2421,41 @@ impl Engine {
         Ok(())
     }
 
-    /// Video is not built yet, so turning the camera on fails. Turning it off is accepted.
+    /// Turns this device's camera on or off in the current call. Turning it on starts the capture
+    /// thread, and its frames reach the peers from the next tick of the call loop.
     pub fn set_camera(&self, on: bool) -> Result<()> {
-        self.current_or_err()?;
-        if on {
-            return Err(CoreError::Invalid("video is not built yet".into()));
+        let room = self.current_or_err()?;
+        {
+            let mut camera = lock(&room.camera);
+            if !on {
+                *camera = None;
+            } else if camera.is_none() {
+                *camera = Some(Sending::new(crate::call_video::start_camera()?));
+            }
         }
+        self.emit(EngineEvent::CallUpdated);
+        Ok(())
+    }
+
+    /// Test hook: while on, the camera is a deterministic test picture rather than a device.
+    /// Process-wide, so a test sets it before it turns the camera on.
+    pub fn use_test_camera_pattern(&self, on: bool) {
+        crate::call_video::set_test_camera_pattern(on);
+    }
+
+    /// Starts or stops sharing this device's primary screen in the current call. Windows and
+    /// macOS only, for now.
+    pub fn set_screen_share(&self, on: bool) -> Result<()> {
+        let room = self.current_or_err()?;
+        {
+            let mut screen = lock(&room.screen);
+            if !on {
+                *screen = None;
+            } else if screen.is_none() {
+                *screen = Some(Sending::new(crate::call_video::Capture::primary_screen()?));
+            }
+        }
+        self.emit(EngineEvent::CallUpdated);
         Ok(())
     }
 
@@ -2373,13 +2558,14 @@ impl Engine {
             Scope::Channel { .. } => CallScope::Channel,
             Scope::Group { .. } => CallScope::Group,
         };
+        let camera_on = lock(&room.camera).is_some();
         Some(CallView {
             id: hex(&room.id),
             scope,
             peer: room.peer.map(|p| p.to_string()),
             muted: room.is_muted(),
             deafened: room.deafened.load(Ordering::Relaxed),
-            camera: false,
+            camera: camera_on,
             started_ms: room.started_ms,
             route: route_for(topology, &participants, relayed),
             participants,

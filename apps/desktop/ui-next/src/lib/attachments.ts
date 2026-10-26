@@ -1,5 +1,5 @@
 // File rules for the composer and the message cards: size limit, names, extensions and icons. Ported from
-// ui/views/attachments.js. Nothing here renders markup; the icon is named, and the component maps it to a glyph.
+// the old UI's views/attachments.js. Nothing here renders markup; the icon is named, and the component maps it to a glyph.
 
 // The hard cap on one attachment. Every limit message is derived from it.
 export const MAX_FILE_BYTES = 10 * 1024 ** 3;

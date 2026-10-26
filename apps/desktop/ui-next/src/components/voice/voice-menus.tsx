@@ -1,4 +1,4 @@
-// The microphone and output popovers on the user bar (ui/views/voice-menus.js). Each is a context menu opened from the
+// The microphone and output popovers on the user bar (the old UI's views/voice-menus.js). Each is a context menu opened from the
 // chevron beside the mic or headphone button: a device picker with a radio row per device, the input profile, the volume,
 // and a shortcut to Settings › Voice. A headset gets headphones and a display gets a monitor; anything else gets the
 // microphone or speaker icon of its direction.

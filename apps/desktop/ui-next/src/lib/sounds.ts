@@ -1,6 +1,6 @@
 // Notification, voice and ringtone sounds. Each clip is one HTMLAudioElement, created and preloaded once and rewound for
 // every play. Playing is best effort: autoplay policies, a missing file or no audio device must never throw. Ported
-// from ui/sounds.js; the settings are in sound-settings.ts.
+// from the old UI's sounds.js; the settings are in sound-settings.ts.
 import { useSoundSettings } from './sound-settings';
 import { useShell } from './store';
 import type { CallState } from './types';

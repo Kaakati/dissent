@@ -1,5 +1,6 @@
 //! Authoring. Each local change becomes a signed event. Replay checks it before it is stored or sent.
 
+use crate::attachments::Mentions;
 use crate::engine::{clean_message, clean_name, clean_text, not_found, Engine};
 use crate::error::Result;
 use crate::store::append_records;
@@ -58,12 +59,24 @@ impl Engine {
         channel: ChannelId,
         text: String,
     ) -> Result<MessageItem> {
+        self.send_message_with(community, channel, text, Mentions::default()).await
+    }
+
+    /// Sends a message that mentions the people in `mentions`. The text stays plain; the list travels
+    /// in the sealed payload, and each reader checks it (see `World::resolve_mentions`).
+    pub async fn send_message_with(
+        &self,
+        community: CommunityId,
+        channel: ChannelId,
+        text: String,
+        mentions: Mentions,
+    ) -> Result<MessageItem> {
         let text = clean_message(&text)?;
-        let embeds = self.build_embeds(&text).await;
-        let plain = if embeds.is_empty() {
+        let (embeds, extras) = self.build_embeds(&text).await;
+        let plain = if embeds.is_empty() && mentions.is_empty() {
             text
         } else {
-            crate::attachments::pack_with_embeds(&text, &[], &embeds)?
+            crate::attachments::pack_all_with(&text, &[], &embeds, &[], Some(&mentions), &extras)?
         };
         self.send_channel_plain(community, channel, plain).await
     }
@@ -75,28 +88,56 @@ impl Engine {
         channel: ChannelId,
         plain: String,
     ) -> Result<MessageItem> {
-        let (epoch, ciphertext) = self.seal(community, &plain)?;
+        let (kind, epoch, ciphertext) = match self.history_seal(community, &plain) {
+            Some((epoch, ciphertext)) => (SealedKind::HistoryMessage, epoch, ciphertext),
+            None => {
+                let (epoch, ciphertext) = self.seal(community, &plain)?;
+                (SealedKind::Message, epoch, ciphertext)
+            }
+        };
         let ciphertext = crate::attachments::wrap_manifest(&crate::attachments::manifest_of(&plain), ciphertext)?;
         let payload = Payload::Sealed {
             epoch,
-            kind: SealedKind::Message,
+            kind,
             ciphertext,
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, plain.clone());
         let me = self.inner.me;
-        let attachments = self.read().attachment_views(&plain);
+        let (attachments, mentions_me, mentions, mentions_everyone) = {
+            let w = self.read();
+            let (me, names, everyone) = w.communities.get(&community).map_or((false, Vec::new(), false), |c| {
+                let mention_all = c
+                    .state()
+                    .messages
+                    .get(&channel)
+                    .and_then(|ms| ms.iter().find(|m| m.id == se.event.id))
+                    .is_some_and(|m| m.mention_all);
+                w.resolve_mentions(c, mention_all, &plain)
+            });
+            (w.attachment_views(&plain), me, names, everyone)
+        };
+        // One read guard for both fields. Two reads inside one expression hold two guards at once, and
+        // a queued writer makes the second read wait for the first, which never ends.
+        let (author_name, embeds) = {
+            let w = self.read();
+            (w.display_name(&me), crate::attachments::embed_views(&w.paths, &plain))
+        };
         Ok(MessageItem {
+            mentions_me,
+            mentions,
+            mentions_everyone,
             id: se.event.id.to_string(),
             author: me.to_string(),
-            author_name: self.read().display_name(&me),
+            author_name,
             text: crate::attachments::text_of(&plain),
             attachments,
-            embeds: crate::attachments::embeds_of(&plain),
+            embeds,
             ms: se.event.body.hlc.wall_ms,
             edited: false,
             deleted: false,
             locked: false,
+            before_join: false,
             reply_to: None,
             reactions: Vec::new(),
         })
@@ -129,6 +170,7 @@ impl Engine {
     ) -> Result<()> {
         let payload = Payload::Delete { target: message };
         self.author_publish(community, channel, payload).await?;
+        self.prune_thumbnails();
         Ok(())
     }
 

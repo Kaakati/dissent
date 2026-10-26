@@ -1,6 +1,6 @@
 // Voice settings and audio devices, for the user bar's popovers and Settings › Voice. One copy lives in the store. A write
 // is merged into it and sent after a short pause, so dragging a slider saves once, and saves go out in the order they
-// were made. A refused save reverts the copy to the saved one. Ported from ui/views/voice-prefs.js.
+// were made. A refused save reverts the copy to the saved one. Ported from the old UI's views/voice-prefs.js.
 import { create } from 'zustand';
 import { api } from './api';
 import { toast } from './toasts';

@@ -1,5 +1,5 @@
 // A QR code of a link, with a quiet zone, on white so it scans on the dark surface. Nothing is drawn when the link is
-// too long for a code: the link is still there to copy. Ported from qrSvg in ui/views/dialogs.js (the box is .qr-code).
+// too long for a code: the link is still there to copy. Ported from qrSvg in the old UI's views/dialogs.js (the box is .qr-code).
 import { useMemo } from 'react';
 import { qrMatrix } from '@/lib/qr';
 

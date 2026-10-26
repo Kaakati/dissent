@@ -6,7 +6,7 @@
 use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use dissent_events::{
-    open_event, CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer,
+    open_event_keyed, CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer,
     Role, SealKey, SignedEvent,
 };
 use dissent_identity::{CommunityId, Genesis, RootId};
@@ -94,8 +94,12 @@ impl Community {
         self.genesis.community
     }
 
+    /// The community's name: the latest accepted rename, or the genesis name.
     pub fn name(&self) -> &str {
-        &self.genesis.name
+        self.state()
+            .name
+            .as_ref()
+            .map_or(self.genesis.name.as_str(), |(_, name)| name.as_str())
     }
 
     /// The canonical owner. After a key rotation this is the new root, not the genesis owner.
@@ -111,6 +115,34 @@ impl Community {
     /// The keys this community's sealed control events open with.
     pub fn ring(&self) -> &[SealKey] {
         self.replayer.ring()
+    }
+
+    /// The encryption keys of the MLS epochs that open member-sealed control events.
+    pub fn epoch_ring(&self) -> &[dissent_events::EpochKey] {
+        self.replayer.epoch_ring()
+    }
+
+    /// The event as replay reads it, opened with both the secret ring and the epoch ring.
+    pub fn open<'a>(
+        &self,
+        ev: &'a dissent_events::Event,
+    ) -> std::result::Result<std::borrow::Cow<'a, dissent_events::Event>, dissent_events::OpenError> {
+        dissent_events::control::open_event_keyed(ev, self.ring(), self.replayer.epoch_ring())
+    }
+
+    /// The stored rename that set the current name, if a rename did. The invite preview hands it
+    /// to a joiner as proof of the name.
+    pub fn latest_rename(&self) -> Option<SignedEvent> {
+        let (hlc, name) = self.state().name.as_ref()?;
+        self.signed
+            .values()
+            .filter(|se| se.event.body.hlc == *hlc && !self.is_rejected(&se.event.id))
+            .find(|se| {
+                self.open(&se.event).is_ok_and(|plain| {
+                    matches!(&plain.body.payload, Payload::CommunityRename { name: n } if n == name)
+                })
+            })
+            .cloned()
     }
 
     /// Installs the keys that open sealed control events, and rebuilds the replay if they changed.
@@ -325,7 +357,7 @@ impl Community {
             if self.max_hlc.is_none_or(|max| ev.body.hlc > max) {
                 self.max_hlc = Some(ev.body.hlc);
             }
-            joined |= open_event(ev, self.replayer.ring())
+            joined |= open_event_keyed(ev, self.replayer.ring(), self.replayer.epoch_ring())
                 .is_ok_and(|plain| matches!(plain.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }));
         }
         if joined || self.rejected_ids() != rejected_before {
@@ -334,7 +366,7 @@ impl Community {
     }
 
     fn join_times_refresh(&mut self) {
-        self.join_hlc = join_times(&self.dag, self.replayer.ring(), &self.state().rejected);
+        self.join_hlc = join_times(&self.dag, self.replayer.ring(), self.replayer.epoch_ring(), &self.state().rejected);
     }
 
     fn rejected_ids(&self) -> Vec<EventId> {
@@ -343,11 +375,16 @@ impl Community {
 }
 
 /// HLC of the latest accepted Join per author.
-fn join_times(dag: &Dag, ring: &[SealKey], rejected: &[(EventId, Rejection)]) -> BTreeMap<RootId, Hlc> {
+fn join_times(
+    dag: &Dag,
+    ring: &[SealKey],
+    epochs: &[dissent_events::EpochKey],
+    rejected: &[(EventId, Rejection)],
+) -> BTreeMap<RootId, Hlc> {
     let bad: BTreeSet<EventId> = rejected.iter().map(|(id, _)| *id).collect();
     let mut out: BTreeMap<RootId, Hlc> = BTreeMap::new();
     for stored in dag.causal_order() {
-        let Ok(ev) = open_event(stored, ring) else {
+        let Ok(ev) = open_event_keyed(stored, ring, epochs) else {
             continue;
         };
         if !matches!(ev.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }) || bad.contains(&ev.id) {

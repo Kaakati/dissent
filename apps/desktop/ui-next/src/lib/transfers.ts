@@ -1,5 +1,5 @@
 // Transfer actions for the Transfers page and the file details. Each calls the backend, then reloads what the page and
-// the sidebar badge read. A failure becomes a toast and never throws. Ported from the transfers section of ui/actions.js.
+// the sidebar badge read. A failure becomes a toast and never throws. Ported from the transfers section of the old UI's actions.js.
 import { create } from 'zustand';
 import { api } from './api';
 import { has } from './features';
@@ -46,7 +46,7 @@ export const cancelTransfer = (id: Id) => run(() => api.cancelTransfer(id));
 export const retryTransfer = (id: Id) => run(() => api.retryTransfer(id));
 export const removeTransfer = (id: Id) => run(() => api.removeTransfer(id));
 
-// Opens the folder with a finished file selected. Only paths inside the downloads folder are accepted by the backend.
+// Opens the folder with a finished file selected. The backend accepts only files Dissent saved.
 export async function revealTransfer(path: string): Promise<void> {
   try {
     await api.revealAttachment(path);
@@ -55,14 +55,19 @@ export async function revealTransfer(path: string): Promise<void> {
   }
 }
 
-// Asks for a new download folder and saves it. Does nothing when the picker is cancelled.
+// Asks for a new download folder and saves it. Cancelling the picker keeps the current folder.
 export async function changeDownloadDir(): Promise<void> {
   try {
-    const dir = await api.pickDownloadDir();
-    const settings = useTransferSettings.getState().settings;
-    if (!dir || !settings) return;
-    await api.setTransferSettings({ ...settings, download_dir: dir });
-    await reload();
+    useTransferSettings.setState({ settings: await api.pickDownloadDir() });
+  } catch (err) {
+    toast(err);
+  }
+}
+
+// Goes back to the default download folder, which follows the OS Downloads folder.
+export async function resetDownloadDir(): Promise<void> {
+  try {
+    useTransferSettings.setState({ settings: await api.resetDownloadDir() });
   } catch (err) {
     toast(err);
   }

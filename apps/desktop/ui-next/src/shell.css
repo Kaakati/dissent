@@ -1,6 +1,6 @@
 /* The shell parts that utilities cannot express cleanly: the app grid (its columns follow the right column), the
    presence glyphs (each state has its own shape, so colour is never the only cue) and the rail's navigation pill.
-   Everything else in the shell is a utility class. Values are the ones in apps/desktop/ui/style.css. */
+   Everything else in the shell is a utility class. Values are the ones in the old UI's style.css. */
 
 /* In a layer below the utilities, so a utility class (a size, an offset) can still change these. */
 @layer components {
@@ -102,4 +102,26 @@ html[data-density='compact'] {
   --msg-pad: 1px;
   --avatar-msg: 28px;
   --msg-gutter: 56px;
+}
+
+/* The unread direct messages on the rail: an avatar animates in and out. Reduced motion skips the animation. */
+@media (prefers-reduced-motion: no-preference) {
+  .rail-dm-enter {
+    animation: rail-dm-in 180ms ease-out;
+  }
+  .rail-dm-leave {
+    animation: rail-dm-out 180ms ease-in forwards;
+  }
+}
+@keyframes rail-dm-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+@keyframes rail-dm-out {
+  to {
+    opacity: 0;
+    transform: scale(0.6);
+  }
 }

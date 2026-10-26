@@ -55,4 +55,7 @@ export function callOf(rootId: string): string | null {
 }
 
 // The conversation shape the row menu expects, for someone who has no conversation row yet.
-export const directOf = (p: Person): DirectSummary => ({ kind: 'dm', peer: p.root_id, display_name: p.display_name, pinned: false });
+// The friend's DM summary: the listed one when a DM exists, so its pinned state is real.
+export const directOf = (p: Person): DirectSummary =>
+  useShell.getState().conversations.find((c): c is DirectSummary => c.kind === 'dm' && c.peer === p.root_id) ??
+  { kind: 'dm', peer: p.root_id, display_name: p.display_name, pinned: false };

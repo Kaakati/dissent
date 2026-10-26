@@ -1245,3 +1245,82 @@ async fn peer_sending_more_than_declared_is_aborted() {
     assert!(matches!(err, FilesError::Fetch(_)), "{err:?}");
     assert!(!bob.downloads().exists() || fs::read_dir(bob.downloads()).unwrap().next().is_none());
 }
+
+#[tokio::test]
+async fn two_providers_each_deliver_part_of_the_file() {
+    // Carol holds a full copy and drops off once half of it has reached bob. Alice finishes the file.
+    // Both deliver bytes, the counts add up to the ciphertext, and the pieces add up too.
+    let bob = Peer::build(
+        None,
+        Some(Duration::from_millis(100)),
+        Some(timeouts(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(120),
+        )),
+    )
+    .await;
+    let alice = Peer::new().await;
+    let plain = sample(8 * MIB);
+    let src = alice.dir.path().join("split.bin");
+    fs::write(&src, &plain).unwrap();
+    let fref = alice
+        .files
+        .add(Input::Path {
+            path: src,
+            mime: "application/octet-stream".into(),
+        })
+        .await
+        .unwrap();
+    let cipher = fref.cipher_size;
+    let carol = Peer::new().await;
+    carol
+        .files
+        .mirror(
+            &carol.endpoint,
+            &[alice.addr()],
+            fref.hash,
+            cipher,
+            MirrorPolicy::default(),
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+    let (half_tx, half_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut half_tx = Some(half_tx);
+    let mut last: Vec<dissent_files::SourceCount> = Vec::new();
+    let providers = [carol.addr(), alice.addr()];
+    let downloads = bob.downloads();
+    let attempt = bob.files.fetch_tallied(
+        &bob.endpoint,
+        &providers,
+        &fref,
+        &downloads,
+        move |done, total| {
+            if done >= total / 2 {
+                if let Some(tx) = half_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        },
+        |counts| last = counts.to_vec(),
+    );
+    let carol_endpoint = carol.endpoint.clone();
+    let drop_carol = async {
+        let _ = half_rx.await;
+        carol_endpoint.close().await;
+    };
+    let (outcome, ()) = tokio::join!(attempt, drop_carol);
+    let out = outcome.expect("the second provider finishes the file");
+    assert_eq!(fs::read(out).unwrap(), plain);
+
+    assert_eq!(last.len(), 2);
+    assert!(last[0].bytes > 0, "carol delivered bytes before she dropped: {last:?}");
+    assert!(last[1].bytes > 0, "alice delivered the rest: {last:?}");
+    let bytes: u64 = last.iter().map(|c| c.bytes).sum();
+    assert!(bytes >= fref.size, "the counts sum to {bytes}, the file is {}", fref.size);
+    assert_eq!(bytes, cipher);
+    let pieces: u64 = last.iter().map(|c| c.pieces).sum();
+    assert_eq!(pieces, dissent_files::pieces_of(cipher));
+}

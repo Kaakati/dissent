@@ -1,6 +1,6 @@
 // The server icon dialog, from the server menu (owners and admins). The icon is a rounded picture on the server rail, in the
 // switcher and in invites. Change icon picks and crops a picture; Remove icon clears it. Ported from openServerIconDialog
-// in ui/views/avatar.js.
+// in the old UI's views/avatar.js.
 import { Image as ImageIcon, Trash2 } from 'lucide-react';
 import { chooseImage } from '@/components/settings/avatar-editor';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,8 @@ import { openDialog } from '@/lib/dialog';
 import { useShell } from '@/lib/store';
 import type { CommunitySummary, Id } from '@/lib/types';
 
-function IconBody({ communityId, name }: { communityId: Id; name: string }) {
+// The icon with Change icon and Remove icon. Also the icon block of Server Settings.
+export function ServerIconEditor({ communityId, name }: { communityId: Id; name: string }) {
   // Subscribing to the list makes the picture redraw once the icon has been saved and the list reloaded.
   useShell((s) => s.communities);
   const src = imageOf(communityId);
@@ -43,6 +44,6 @@ export function openServerIconDialog(community: CommunitySummary): void {
   openDialog({
     title: 'Server icon',
     sub: community.name,
-    content: () => <IconBody communityId={community.id} name={community.name} />,
+    content: () => <ServerIconEditor communityId={community.id} name={community.name} />,
   });
 }

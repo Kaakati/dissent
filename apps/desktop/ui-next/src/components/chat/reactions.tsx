@@ -1,5 +1,5 @@
 // The reactions under a message: a pill per emoji with its count, the mine state, and a button that opens the picker.
-// Ported from ui/views/chat.js (reactionsNode, whoReacted).
+// Ported from the old UI's views/chat.js (reactionsNode, whoReacted).
 import { SmilePlus } from 'lucide-react';
 import { toggleReaction } from '@/lib/chat-actions';
 import type { ChatTarget, Id, Reaction } from '@/lib/types';

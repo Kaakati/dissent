@@ -1,6 +1,7 @@
 // Desktop notifications for new messages, shown by the native notification plugin while the window is minimized or
 // unfocused. A click restores the window and opens the conversation (see alerts.ts openNotifiedConversation). Whether a
-// message alerts at all is decided by alerts.ts shouldAlert, shared with the notification sound. Ported from ui/osnotify.js.
+// message alerts at all is decided by alerts.ts shouldAlert, shared with the notification sound. Ported from the old UI's osnotify.js.
+import { markdownPlain } from './markdown';
 import { useSoundSettings } from './sound-settings';
 import { currentWindow } from './tauri';
 
@@ -36,10 +37,20 @@ export async function showOsNotification({ key, sender, where, text }: { key: st
   const who = where ? `${sender} · ${where}` : sender;
   const options = content === 'none'
     ? { title: 'Dissent', body: 'New message' }
-    : { title: who, body: content === 'sender' ? 'New message' : truncate(text) };
+    : { title: who, body: content === 'sender' ? 'New message' : truncate(markdownPlain(text)) };
   try {
     await window.__TAURI__?.core.invoke('plugin:notification|notify', { options: { ...options, extra: { conv: key } } });
   } catch {
     // The OS may refuse. The sound and the unread marker still show the message.
+  }
+}
+
+// A reminder's time came. It shows whatever the focus, since the viewer asked for it. A click arrives as `reminder:<id>`
+// (see lib/events.ts), and the reminder's message opens.
+export async function notifyReminder(id: string, title: string): Promise<void> {
+  try {
+    await window.__TAURI__?.core.invoke('plugin:notification|notify', { options: { title, body: '', extra: { conv: `reminder:${id}` } } });
+  } catch {
+    // The OS may refuse. The toast still shows the reminder.
   }
 }

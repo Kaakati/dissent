@@ -1,4 +1,4 @@
-// The dialog stack and confirm(), the React counterpart of ui/ui.js openDialog and views/dialogs.js confirmDialog.
+// The dialog stack and confirm(), the React counterpart of the old UI's ui.js openDialog and views/dialogs.js confirmDialog.
 // Open a dialog with openDialog({ title, content }); `content` is given the close function, so a form can close itself
 // after a successful action. confirm() resolves true on the action and false on Cancel, Escape or the scrim. The
 // DialogHost component (components/dialogs/dialog-host.tsx) renders whatever is open here.

@@ -9,6 +9,7 @@ aes-gcm.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 fs4.workspace = true
+image.workspace = true
 futures-lite.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true

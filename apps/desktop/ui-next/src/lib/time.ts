@@ -1,4 +1,4 @@
-// Day dividers and clock labels. 24-hour clock, relative day words for the last week. Ported from ui/ui.js.
+// Day dividers and clock labels. 24-hour clock, relative day words for the last week. Ported from the old UI's ui.js.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const startOfDay = (ms: number): number => {

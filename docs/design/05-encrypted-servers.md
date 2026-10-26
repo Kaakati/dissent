@@ -89,6 +89,28 @@ Control events (membership, roles, bans, names, channels, relays, invites, setti
 - **Enforcement.** Replay does not check the form of a control event against the switch, so a member that breaks the rule can still send a community-secret event, which storage members read. Honest devices never do. The rule is in the author path, and tests cover it.
 - **Locked history.** A device without an epoch key sees its events as `Rejection::Locked`. The view sets `history_locked`, and the UI shows "Waiting for a member to unlock history".
 
+## Compatibility rule for new control payloads
+
+Every client decodes a whole batch of events and a whole events log, so one payload kind an old client does
+not know fails the batch, stalls that peer's sync, and makes the community skip loading on restart. So:
+
+- **New control payloads go through the carrier.** The payload is `SealedControl { generation: CARRIER_GENERATION
+  (u64::MAX), ciphertext }`, where the ciphertext is a postcard `Carried { kind, body }`. An older client decodes the
+  outer event, finds no key for that generation, and shows the event as locked. The carrier's kind is what a newer
+  client reads. The member-sealed kind (`kind = 1`) is the first one.
+- **The carrier is part of the event.** Its bytes are inside the event body, so the event id and signature cover
+  them. A relay or peer cannot change the kind without breaking the signature.
+- **Old forms keep decoding.** `Payload::MemberSealedControl` is what v0.1.6 wrote. Replay still opens it, and the
+  tag check still accepts it. Nothing new writes it.
+- **Tolerant reading everywhere.** Sync asks with `FetchRaw`, which answers each event as its own bytes, and skips one
+  that does not decode, keeping the rest of the page. A peer that predates `FetchRaw` gets `Fetch`. The events log is
+  read with `read_records_skipping`, which keeps an undecodable record on disk for a later version.
+- **Settings the owner can change are gated.** `set_history_visibility` is refused while a member device cannot
+  answer the support probe, as the member-only switch is.
+
+Residual: a client that predates this rule still stalls on a payload kind added without the carrier, which is why
+new kinds must use it.
+
 ## Limits
 
 - Commits can only be applied in epoch order. A device that misses a commit fetches the missing ones through `MlsCommits` on its next sync.
@@ -96,3 +118,54 @@ Control events (membership, roles, bans, names, channels, relays, invites, setti
 - Unban does not re-add the device. The member must request `MlsJoin` again.
 - A new device of an existing member must also send `MlsJoin`.
 - Commits over about 4 KB exceed iroh-gossip's default message size. Gossip must be built with a larger `max_message_size` before commits reach peers reliably.
+
+## History messages (v0.1.7)
+
+A joiner reads the text of messages from before its join when the server's history setting allows it
+(`All`, the default; `SinceJoin` keeps them locked). MLS alone cannot give that, because a device holds
+no keys for epochs before it joined. So text gets its own key per epoch.
+
+**Key.** At each epoch a device records `history = export_secret(group, "dissent/history/v1", 32)`, next to
+its control keys, in `history_keys.bin` (sealed with the vault, one file per community). Every device in
+the epoch derives the same key.
+
+**Form.** A new sealed kind, `SealedKind::HistoryMessage`, carries the text as
+`XChaCha20-Poly1305(history key of the event's epoch, plaintext)`, with a random nonce and the associated
+data `community id ‖ epoch ‖ "dissent/history-msg/v1"`. The manifest wrapper of attachments is unchanged.
+Only plain messages use this kind. Replies, edits, reactions and their rules stay as they are.
+
+The MLS ciphertext is not sent alongside it. Keeping both would not protect the text: anyone who can read
+the history copy reads the message, so the MLS copy adds no secrecy against that reader, and it doubles the
+size. The cost is real: per-message forward secrecy within an epoch is replaced by per-epoch secrecy. A device
+that is later compromised exposes every text of each epoch it was in, not only the ones still in its ratchet.
+The threat model records this.
+
+**Serving.** `HistoryKeys { community }` returns `(epoch, key)` pairs. The rule is the same as `EpochHistory`:
+only an active person, never a storage member; `All` gives every epoch; `SinceJoin` gives epochs from the
+requester's join, and none when the responder did not see that join. A joiner asks the first three member
+devices and keeps what they send.
+
+**Default.** A server created from this version starts with `SinceJoin`: the creator emits
+`HistoryVisibility(SinceJoin)` right after its first channel, as a sealed control event. Absent means `All`, as
+before, so a server created earlier keeps the setting its replay gives. Owners can switch any server to `All` in
+Server Settings. `All` says what it costs: a new member can read past messages, and those messages are protected
+per encryption period rather than per message.
+
+**Compatibility.** A device sends `HistoryMessage` only when every other member device answers
+`HistorySupport(true)`. The answer is a flag, kept per community with the member device list it covers. The send
+path only reads that flag and never waits on a member. A community with no other member device is ready at once.
+Otherwise a missing, stale or differently-scoped answer counts as no: the message is sent in today's form, and a
+background check starts. A "yes" is kept for five minutes and a "no" for one minute, and a changed member list
+starts a new check at once. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
+joiner cannot read them. That cannot be fixed retroactively. A device on an older version that joins after the
+switch cannot read `HistoryMessage` text either. It shows as locked, and nothing crashes.
+
+**Re-opening.** When history keys arrive, stored events that are still locked are run through the unseal pass
+again, and each one that opens emits a message event, so the view refreshes without a restart.
+
+**Labels.** A locked message sent before the device's join says "Sent before you joined". Any other locked
+message says "This message is waiting for a key". The tooltip of the first names the server's history setting.
+
+**What does not change.** Member-only control, the epoch ring for control events, bans and rotations. A ban
+or a removal still rotates the epoch, so the banned device gets no keys for later epochs. Storage members
+get no history keys, since they are not in the group.

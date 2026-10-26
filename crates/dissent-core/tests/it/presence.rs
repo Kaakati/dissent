@@ -30,6 +30,56 @@ fn contact_presence(viewer: &Peer, user: RootId) -> Option<Presence> {
         .map(|c| c.status)
 }
 
+/// Alice and Bob share three servers. Alice changes status, and Bob's member list in each server shows
+/// it within two seconds. Beacons are a minute apart, so the periodic beacon cannot be the cause.
+/// Networked: run with `scripts/fwtest.sh dissent-core it --ignored presence::a_status_change`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run through scripts/fwtest.sh"]
+async fn a_status_change_reaches_every_shared_server_at_once() {
+    bounded(async {
+    let alice = peer_slow_beacons("alice").await;
+    let bob = peer_slow_beacons("bob").await;
+    let alice_root = alice.identity.root_id();
+    let mut servers = Vec::new();
+    for name in ["Rustaceans", "Makers", "Readers"] {
+        let id: CommunityId = alice
+            .engine
+            .create_community(name.into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &bob, &invite).await;
+        servers.push(id);
+    }
+    // Bob hears Alice's beacon from the joins, so every list shows her online before the change.
+    eventually("bob sees alice online in all three", || {
+        servers
+            .iter()
+            .all(|id| member_presence(&bob, *id, alice_root) == Some(Presence::Online))
+            .then_some(())
+    })
+    .await;
+
+    alice
+        .engine
+        .set_status(Status::Idle, None)
+        .expect("alice goes idle");
+    eventually_within(Duration::from_secs(2), "bob sees alice idle in all three servers", || {
+        servers
+            .iter()
+            .all(|id| member_presence(&bob, *id, alice_root) == Some(Presence::Idle))
+            .then_some(())
+    })
+    .await;
+
+    finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invisible_member_reads_as_offline_while_messaging() {
     bounded(async {

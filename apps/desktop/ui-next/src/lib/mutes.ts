@@ -1,5 +1,5 @@
 // Muted conversations: a mute lasts until a time, or until it is turned off. Kept under the same localStorage key as
-// ui/actions.js, so both UIs agree. A timed mute that has run out is removed the next time it is checked.
+// the old UI's actions.js, so both UIs agree. A timed mute that has run out is removed the next time it is checked.
 import { create } from 'zustand';
 
 const MUTE_KEY = 'dissent.muted.v1';

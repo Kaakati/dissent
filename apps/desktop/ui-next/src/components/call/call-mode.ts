@@ -1,6 +1,6 @@
 // Which call board the main column shows for the open place: the call pane (a voice channel or a direct or group call
 // this device is in), the lobby (a live call in the open conversation that this device has not joined), or nothing, so
-// the chat shows. Ported from the call checks in ui/views/chat.js (liveCallFor, callHere) and right.js.
+// the chat shows. Ported from the call checks in the old UI's views/chat.js (liveCallFor, callHere) and right.js.
 import { has } from '@/lib/features';
 import { useCallRoom, useLobby } from '@/lib/calls';
 import { useShell, type ShellState } from '@/lib/store';

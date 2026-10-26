@@ -122,6 +122,7 @@ impl Engine {
                     let engine = self.clone();
                     self.spawn_task(async move {
                         engine.fetch_epoch_history_until_answered(community).await;
+                        engine.fetch_history_keys_until_answered(community).await;
                         engine.restore_join_name(community).await;
                     });
                     return true;

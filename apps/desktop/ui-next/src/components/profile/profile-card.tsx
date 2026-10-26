@@ -1,5 +1,5 @@
 // The profile card: a compact card next to a clicked name (a member, a message, a DM), kept inside the window. One card at
-// a time; Escape and a click outside close it, and the focus goes back where it was. Ported from ui/views/profile.js.
+// a time; Escape and a click outside close it, and the focus goes back where it was. Ported from the old UI's views/profile.js.
 // ProfileCardBody is the card's content, shared with the Contacts & privacy preview (preview hides the actions).
 import { type ReactNode, useEffect, useLayoutEffect, useRef } from 'react';
 import { create } from 'zustand';
@@ -14,6 +14,7 @@ import { useShell } from '@/lib/store';
 import type { CommunityView, Presence, Role, UserProfileView } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { bannerBackground } from './banner';
+import { MutualFriendsToggle } from './mutual-friends';
 import { useUserProfile } from './use-user-profile';
 
 const ROLE_LABEL: Partial<Record<Role, string>> = { owner: 'Owner', admin: 'Admin', moderator: 'Moderator' };
@@ -133,7 +134,7 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
 
   return (
     <>
-      <div className="h-[60px]" style={{ background: bannerBackground(userId) }} />
+      <div data-profile-banner className="h-[60px]" style={{ background: bannerBackground(userId, view) }} />
       <div className="relative px-s-4 pb-s-4">
         <UserAvatar
           name={view.display_name}
@@ -156,8 +157,10 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
             </span>
           </div>
         ) : null}
-        <div className="mt-s-2 text-meta text-muted-foreground">
-          {mutual ? `${mutual} mutual server${mutual === 1 ? '' : 's'}` : 'No mutual servers'}
+        <div className="mt-s-2 flex flex-wrap items-center gap-x-s-3 text-meta text-muted-foreground">
+          <MutualFriendsToggle friends={view.mutual_friends ?? []} />
+          {view.mutual_friends?.length ? <span aria-hidden="true">•</span> : null}
+          <span>{mutual ? `${mutual} mutual server${mutual === 1 ? '' : 's'}` : 'No mutual servers'}</span>
         </div>
         {actions.length ? <div className="mt-s-3 flex flex-wrap gap-s-2">{actions}</div> : null}
       </div>

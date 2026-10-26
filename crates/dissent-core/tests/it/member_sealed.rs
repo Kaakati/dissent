@@ -365,13 +365,13 @@ async fn a_member_who_left_cannot_read_later_control_events() {
     .await;
 }
 
-/// A joiner whose first epoch-key fetch is held back for an hour, so the only thing that can start
-/// it is a member's presence beacon. The test uses that to make the joiner's fetch deterministic.
+/// A joiner whose first epoch-key fetch waits 20 s after the join, long enough for the test to take the
+/// only member down first. Its first attempt then fails, and a member's beacon starts the next.
 async fn slow_joiner(name: &str) -> Peer {
     let identity = dissent_core::Identity::create(now());
     let dir = scratch(name);
     let timings = dissent_core::Timings {
-        history_first_retry: Duration::from_secs(3600),
+        history_first_retry: Duration::from_secs(20),
         ..dissent_core::test_support::fast_timings()
     };
     let (engine, events) = dissent_core::Engine::start_with_timings(
@@ -424,14 +424,14 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
         // Bob is offline, so only alice could answer for history.
         let (_, bob_dir) = stop(bob).await;
 
-        // Carol's first fetch is held back for an hour, so none runs while alice is down. Only alice's
-        // beacon, when she comes back, can start one.
         let carol = slow_joiner("carol").await;
         let invite = alice.engine.create_invite(id).await.expect("invite");
         // Alice's own view of carol is not waited for: under load that can take longer than the delay.
         carol.engine.join_community(&invite).await.expect("carol joins");
-        // Alice goes down right after carol is admitted.
-        let (_, alice_dir) = stop(alice).await;
+        let joined = std::time::Instant::now();
+        // Carol has to hold the locked channel before alice goes down. Her history stays locked while
+        // her fetch is held back, so this wait cannot be satisfied by keys. It is satisfied once her
+        // sync has delivered the channel's event.
         eventually("carol's history is locked", || {
             carol
                 .engine
@@ -441,7 +441,10 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
                 .map(|_| ())
         })
         .await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Alice goes down once carol holds the event.
+        let (_, alice_dir) = stop(alice).await;
+        // Carol's first attempt runs once the delay has passed, while alice is still down, and fails.
+        tokio::time::sleep(Duration::from_secs(25).saturating_sub(joined.elapsed())).await;
         assert!(
             !has_channel(&carol.engine, id, "before-carol"),
             "with no member online, carol stays locked"
@@ -462,6 +465,140 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
 
         finish(vec![alice, carol]).await;
         let _ = std::fs::remove_dir_all(bob_dir);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_member_only_channel_tells_members_the_community_changed() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        alice
+            .engine
+            .set_member_only(id, true)
+            .await
+            .expect("member-only control on");
+        eventually("bob sees member-only control", || {
+            bob.engine
+                .community_view(id)
+                .ok()
+                .filter(|v| v.member_only)
+                .map(|_| ())
+        })
+        .await;
+
+        // A plain event makes bob's engine emit `CommunityUpdated`, which is what refreshes the UI. A
+        // member-sealed event has to do the same, or new channels stay unseen until something else moves.
+        let mut events = bob._events.resubscribe();
+        alice
+            .engine
+            .create_channel(id, "notified-room".into())
+            .await
+            .expect("channel");
+        eventually("bob sees the channel", || {
+            has_channel(&bob.engine, id, "notified-room").then_some(())
+        })
+        .await;
+        let id_text = id.to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut told = false;
+        while !told && std::time::Instant::now() < deadline {
+            if let Ok(Ok(dissent_core::EngineEvent::CommunityUpdated { community_id })) =
+                tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+            {
+                told = community_id == id_text;
+            }
+        }
+        assert!(told, "bob's engine tells the UI that the community changed");
+
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_server_icon_reaches_members_in_a_member_only_server() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        alice
+            .engine
+            .set_member_only(id, true)
+            .await
+            .expect("member-only control on");
+        eventually("bob sees member-only control", || {
+            bob.engine
+                .community_view(id)
+                .ok()
+                .filter(|v| v.member_only)
+                .map(|_| ())
+        })
+        .await;
+
+        // The icon event is member-sealed, so bob's picture fetch depends on its side effects running.
+        let png = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src-tauri/icons/128x128.png"
+        ))
+        .expect("the test icon");
+        alice
+            .engine
+            .set_community_icon(id, png)
+            .await
+            .expect("alice sets the icon");
+        eventually_within(Duration::from_secs(60), "bob has the icon", || {
+            bob.engine
+                .community_view(id)
+                .ok()
+                .filter(|v| v.icon.is_some())
+                .map(|_| ())
+        })
+        .await;
+
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_relay_set_in_a_member_only_server_is_adopted_by_members() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        alice
+            .engine
+            .set_member_only(id, true)
+            .await
+            .expect("member-only control on");
+        let relay = "https://relay.member-only.example.test/";
+        assert!(
+            !dissent_core::test_support::adopted_relays(&bob.engine)
+                .iter()
+                .any(|r| r.contains("member-only.example")),
+            "bob has not adopted the relay yet"
+        );
+        alice
+            .engine
+            .set_community_relays(id, vec![relay.to_string()])
+            .await
+            .expect("alice sets the relay");
+        // SetRelays is member-sealed here, so bob adopts it only if its side effects run.
+        eventually("bob adopts the relay", || {
+            dissent_core::test_support::adopted_relays(&bob.engine)
+                .iter()
+                .any(|r| r.contains("member-only.example"))
+                .then_some(())
+        })
+        .await;
+
+        finish(vec![alice, bob]).await;
     })
     .await;
 }

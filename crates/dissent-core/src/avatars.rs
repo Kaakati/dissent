@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use dissent_events::{ChannelId, Hlc, Payload, Picture, Role, MAX_PICTURE_BYTES};
+use dissent_events::{ChannelId, Hlc, Payload, Picture, Role, MAX_ANIMATED_BANNER_BYTES, MAX_PICTURE_BYTES};
 use dissent_files::{cipher_len, FileRef, Input};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId, Signature, Vault};
 use std::path::Path;
@@ -48,6 +48,8 @@ pub(crate) enum Owner {
 pub(crate) struct PictureFetch {
     pub owner: Owner,
     pub picture: Option<Picture>,
+    /// A second picture to fetch with it: an animated banner's poster frame.
+    pub poster: Option<Picture>,
     pub roots: Vec<RootId>,
 }
 
@@ -145,10 +147,15 @@ fn stem(picture: &Picture) -> String {
     hex(&picture.hash)
 }
 
-/// PNG for a PNG, WebP otherwise. The engine sends WebP, and falls back to PNG where WebP is not available.
+/// PNG for a PNG, GIF for an animated banner, JPEG for its poster frame, WebP otherwise. The UI sends
+/// WebP, and falls back to PNG where WebP is not available.
 fn extension_of(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG") {
         "png"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
     } else {
         "webp"
     }
@@ -157,7 +164,7 @@ fn extension_of(bytes: &[u8]) -> &'static str {
 /// The decrypted file for `picture`, if this device has it.
 pub(crate) fn picture_file(paths: &Paths, picture: &Picture) -> Option<String> {
     let dir = paths.avatars_dir();
-    ["webp", "png"]
+    ["webp", "png", "gif", "jpg"]
         .iter()
         .map(|ext| dir.join(format!("{}.{ext}", stem(picture))))
         .find(|path| path.is_file())
@@ -191,13 +198,29 @@ impl World {
             .and_then(|(_, picture)| picture)
             .and_then(|p| picture_file(&self.paths, &p))
     }
+
+    /// The banner of a community, if it has one this device holds.
+    pub(crate) fn banner_of(&self, c: &Community) -> Option<String> {
+        c.state()
+            .banner
+            .and_then(|(_, banner)| banner?.picture())
+            .and_then(|p| picture_file(&self.paths, &p))
+    }
+
+    /// The still frame of a community's animated banner, if this device holds it.
+    pub(crate) fn banner_poster_of(&self, c: &Community) -> Option<String> {
+        c.state()
+            .banner
+            .and_then(|(_, banner)| banner?.poster())
+            .and_then(|p| picture_file(&self.paths, &p))
+    }
 }
 
 impl Engine {
     /// Sets this device's profile picture. `bytes` is an already-cropped WebP or PNG of at most
     /// 256 KB. It goes to every community we are in, and is sent directly to our contacts.
     pub async fn set_avatar(&self, bytes: Vec<u8>) -> Result<()> {
-        let picture = self.store_picture(bytes).await?;
+        let picture = self.store_avatar_picture(bytes, MAX_PICTURE_BYTES).await?;
         {
             let mut w = self.write();
             write_sealed(&w.paths.own_avatar(), &own_vault(&self.inner.vault), &Some(picture))?;
@@ -223,7 +246,7 @@ impl Engine {
     /// Sets a community's icon. Owners and admins only. `bytes` is as for [`Engine::set_avatar`].
     pub async fn set_community_icon(&self, community: CommunityId, bytes: Vec<u8>) -> Result<()> {
         self.check_can_set_icon(community)?;
-        let picture = self.store_picture(bytes).await?;
+        let picture = self.store_avatar_picture(bytes, MAX_PICTURE_BYTES).await?;
         self.publish_icon(community, Some(picture)).await
     }
 
@@ -233,7 +256,7 @@ impl Engine {
         self.publish_icon(community, None).await
     }
 
-    fn check_can_set_icon(&self, community: CommunityId) -> Result<()> {
+    pub(crate) fn check_can_set_icon(&self, community: CommunityId) -> Result<()> {
         let me = self.inner.me;
         let w = self.read();
         let c = w
@@ -255,10 +278,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Adds a picture to the store and to this device's decrypted cache. Pictures over the cap are refused.
-    async fn store_picture(&self, bytes: Vec<u8>) -> Result<Picture> {
-        if bytes.is_empty() || bytes.len() as u64 > MAX_PICTURE_BYTES {
-            return Err(CoreError::Invalid("a picture must be at most 256 KB".into()));
+    /// Adds a picture to the store and to this device's decrypted cache. Pictures over `cap` bytes are refused.
+    pub(crate) async fn store_avatar_picture(&self, bytes: Vec<u8>, cap: u64) -> Result<Picture> {
+        if bytes.is_empty() || bytes.len() as u64 > cap {
+            return Err(CoreError::Invalid(format!("a picture must be at most {} KB", cap / 1024)));
         }
         let fref = self
             .inner
@@ -406,10 +429,12 @@ impl Engine {
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
         // The plaintext's type decides its extension, which the asset protocol uses as the MIME type.
+        // Replay already held the size the event names to its kind's cap, so a file larger than that
+        // size, or than the largest kind, is refused.
         let bytes = std::fs::read(&path)?;
-        if bytes.len() as u64 > MAX_PICTURE_BYTES {
+        if bytes.len() as u64 > picture.size.min(MAX_ANIMATED_BANNER_BYTES) {
             let _ = std::fs::remove_file(&path);
-            return Err(CoreError::Invalid("the picture is over 256 KB".into()));
+            return Err(CoreError::Invalid("the picture is larger than its event says".into()));
         }
         let named = dir.join(format!("{}.{}", stem(picture), extension_of(&bytes)));
         if named != path {
@@ -428,15 +453,28 @@ impl Engine {
                     out.push((Owner::Person(*root), *picture, vec![*root]));
                 }
             }
+            for (root, (_, banner)) in &w.banners.peers {
+                for picture in banner.map(|b| b.pictures()).unwrap_or_default() {
+                    out.push((Owner::Person(*root), picture, vec![*root]));
+                }
+            }
             for c in w.communities.values() {
+                for (root, (_, banner)) in &c.state().profile_banners {
+                    for picture in banner.map(|b| b.pictures()).unwrap_or_default() {
+                        out.push((Owner::Person(*root), picture, vec![*root]));
+                    }
+                }
                 for (root, (_, picture)) in &c.state().avatars {
                     if let Some(picture) = picture {
                         out.push((Owner::Person(*root), *picture, vec![*root]));
                     }
                 }
+                let roots: Vec<RootId> = c.state().members.keys().copied().collect();
                 if let Some((_, Some(picture))) = c.state().icon {
-                    let roots: Vec<RootId> = c.state().members.keys().copied().collect();
-                    out.push((Owner::Community(c.id()), picture, roots));
+                    out.push((Owner::Community(c.id()), picture, roots.clone()));
+                }
+                for picture in c.state().banner.and_then(|(_, b)| b).map(|b| b.pictures()).unwrap_or_default() {
+                    out.push((Owner::Community(c.id()), picture, roots.clone()));
                 }
             }
             out
@@ -471,6 +509,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
             current.then(|| PictureFetch {
                 owner: Owner::Person(author),
                 picture: *avatar,
+                poster: None,
                 roots: vec![author],
             })
         }
@@ -479,6 +518,25 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
             current.then(|| PictureFetch {
                 owner: Owner::Community(community),
                 picture: *avatar,
+                poster: None,
+                roots: c.state().members.keys().copied().collect(),
+            })
+        }
+        Payload::ProfileBannerSet { banner } => {
+            let current = c.state().profile_banners.get(&author).is_some_and(|(_, b)| b == banner);
+            current.then(|| PictureFetch {
+                owner: Owner::Person(author),
+                picture: banner.and_then(|b| b.picture()),
+                poster: banner.and_then(|b| b.poster()),
+                roots: vec![author],
+            })
+        }
+        Payload::CommunityBannerSet { banner } => {
+            let current = c.state().banner.is_some_and(|(_, p)| p == *banner);
+            current.then(|| PictureFetch {
+                owner: Owner::Community(community),
+                picture: banner.and_then(|b| b.picture()),
+                poster: banner.and_then(|b| b.poster()),
                 roots: c.state().members.keys().copied().collect(),
             })
         }
@@ -527,6 +585,8 @@ mod tests {
     fn an_extension_comes_from_the_bytes() {
         assert_eq!(extension_of(b"\x89PNG\r\n\x1a\n...."), "png");
         assert_eq!(extension_of(b"RIFF....WEBP"), "webp");
+        assert_eq!(extension_of(b"GIF89a...."), "gif");
+        assert_eq!(extension_of(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpg");
     }
 }
 

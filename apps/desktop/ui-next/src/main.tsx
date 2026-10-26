@@ -41,7 +41,7 @@ async function start(): Promise<void> {
     </StrictMode>,
   );
 
-  // Listeners go up before the first load, as ui/main.js does, so no engine event between the two is missed.
+  // Listeners go up before the first load, as the old UI's main.js does, so no engine event between the two is missed.
   startShellEvents();
   const shell = useShell.getState();
   try {

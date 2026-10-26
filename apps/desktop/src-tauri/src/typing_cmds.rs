@@ -1,4 +1,4 @@
-//! Tauri commands for typing indicators. Argument keys match `ui/api.js`. The engine emits
+//! Tauri commands for typing indicators. Argument keys match `ui-next/src/lib/api.ts`. The engine emits
 //! `TypingChanged`, and `events.rs` forwards it here as `dissent://typing-changed`.
 
 use dissent_core::{ChannelId, CommunityId, ConvId, RootId, TypingTarget};

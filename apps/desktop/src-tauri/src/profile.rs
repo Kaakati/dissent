@@ -509,15 +509,23 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     storage::migrate_legacy(&data_dir, &profile).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
     tracing::info!(dir = %profile.display(), "engine data dir");
-    attachments::allow_downloads(app, &data_dir).map_err(|e| e.to_string())?;
+    attachments::allow_thumbnails(app, &data_dir).map_err(|e| e.to_string())?;
     // The engine keeps pictures under the profile folder (`Store::avatars_dir`), not the data dir.
     avatar_cmds::allow_avatars(app, &profile).map_err(|e| e.to_string())?;
 
     let settings = network::load(&data_dir);
     let voice = voice::Voice::new(data_dir.clone());
-    let (engine, rx) = Engine::start(identity.clone(), profile, crate::node_config(&settings), vault.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    let (engine, rx) = Engine::start_with_options(
+        identity.clone(),
+        profile,
+        crate::node_config(&settings),
+        vault.clone(),
+        dissent_core::Timings::default(),
+        attachments::default_download_dir(app),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    attachments::prepare_engine(app, &engine);
     voice::prepare(&engine, &voice);
     app.manage(voice);
     voice_settings::restore_ptt(app);

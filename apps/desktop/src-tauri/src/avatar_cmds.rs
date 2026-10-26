@@ -31,6 +31,23 @@ pub async fn clear_avatar(state: State<'_, AppState>) -> Result<(), String> {
     engine(&state).await?.clear_avatar().await.map_err(err)
 }
 
+/// The profile banner: a 16:9 WebP or PNG as base64, cropped to at most 960 by 540.
+#[tauri::command]
+pub async fn set_profile_banner(state: State<'_, AppState>, bytes: String) -> Result<(), String> {
+    let bytes = decode(&bytes)?;
+    engine(&state).await?.set_profile_banner(bytes).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_profile_banner_preset(state: State<'_, AppState>, preset: u8) -> Result<(), String> {
+    engine(&state).await?.set_profile_banner_preset(preset).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn clear_profile_banner(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.clear_profile_banner().await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn set_community_icon(state: State<'_, AppState>, community_id: String, bytes: String) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
@@ -44,7 +61,8 @@ pub async fn clear_community_icon(state: State<'_, AppState>, community_id: Stri
     engine(&state).await?.clear_community_icon(community).await.map_err(err)
 }
 
-/// Serialises a view for the UI. Under `avatar` and `icon`, local picture paths become asset URLs.
+/// Serialises a view for the UI. Under `avatar`, `icon` and `banner`, local picture paths become
+/// asset URLs.
 pub fn for_ui<T: Serialize>(view: &T) -> Result<Value, String> {
     let mut value = serde_json::to_value(view).map_err(err)?;
     asset_urls(&mut value);
@@ -56,7 +74,9 @@ fn asset_urls(value: &mut Value) {
         Value::Object(map) => {
             for (key, field) in map.iter_mut() {
                 let url = match (key.as_str(), &*field) {
-                    ("avatar" | "icon", Value::String(path)) if Path::new(path).is_absolute() => Some(asset_url(path)),
+                    ("avatar" | "icon" | "banner" | "banner_poster", Value::String(path)) if Path::new(path).is_absolute() => {
+                        Some(asset_url(path))
+                    }
                     _ => None,
                 };
                 match url {

@@ -1,6 +1,7 @@
 // Renders the entries of a menu (see lib/menu.ts) with the shadcn DropdownMenu primitives, restyled to the current UI's
 // .menu-item: 32 px rows, the red highlight, danger rows in the danger text colour. Submenus open beside their row.
 import { type ReactNode, useState } from 'react';
+import { Check } from 'lucide-react';
 import {
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -9,7 +10,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from '@/components/ui/dropdown-menu';
-import { type MenuEntry, type MenuItem, type MenuSlider } from '@/lib/menu';
+import { type MenuEntry, type MenuItem, type MenuQuick, type MenuSlider } from '@/lib/menu';
 import { cn } from '@/lib/utils';
 
 const ROW = 'group min-h-8 gap-2.5 rounded-md px-s-2 py-1.5 text-ui font-medium text-text focus:bg-accent focus:text-white data-[disabled]:opacity-50';
@@ -35,10 +36,11 @@ function MenuEntryNode({ entry }: { entry: MenuEntry }) {
     return <DropdownMenuLabel className="px-s-2 py-s-2 text-ui font-medium text-text">{entry.header}</DropdownMenuLabel>;
   }
   if ('slider' in entry) return <SliderRow slider={entry.slider} />;
+  if ('quick' in entry) return <QuickRow quick={entry.quick} />;
   return <Item item={entry} />;
 }
 
-function ItemBody({ item, radio = false }: { item: MenuItem; radio?: boolean }): ReactNode {
+function ItemBody({ item, radio = false, checkbox = false }: { item: MenuItem; radio?: boolean; checkbox?: boolean }): ReactNode {
   const Icon = item.icon;
   return (
     <>
@@ -58,6 +60,14 @@ function ItemBody({ item, radio = false }: { item: MenuItem; radio?: boolean }):
           )}
         />
       ) : null}
+      {checkbox ? (
+        <span
+          aria-hidden="true"
+          className={cn('grid size-3.5 shrink-0 place-items-center rounded-sm shadow-[inset_0_0_0_2px_var(--muted-foreground)]', item.checked && 'bg-accent shadow-none')}
+        >
+          {item.checked ? <Check className="size-3 text-white" strokeWidth={3} /> : null}
+        </span>
+      ) : null}
     </>
   );
 }
@@ -69,7 +79,7 @@ function Item({ item }: { item: MenuItem }) {
         <DropdownMenuSubTrigger className={cn(ROW, item.danger && DANGER)} disabled={item.disabled}>
           <ItemBody item={item} />
         </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent className={MENU_WIDTH}>
+        <DropdownMenuSubContent className={cn(MENU_WIDTH, item.scroll && 'max-h-[min(360px,70vh)] overflow-y-auto')}>
           <MenuItems entries={item.submenu} />
         </DropdownMenuSubContent>
       </DropdownMenuSub>
@@ -77,8 +87,8 @@ function Item({ item }: { item: MenuItem }) {
   }
   return (
     <DropdownMenuItem
-      role={item.radio ? 'menuitemradio' : 'menuitem'}
-      aria-checked={item.radio ? Boolean(item.checked) : undefined}
+      role={item.radio ? 'menuitemradio' : item.checkbox ? 'menuitemcheckbox' : 'menuitem'}
+      aria-checked={item.radio || item.checkbox ? Boolean(item.checked) : undefined}
       disabled={item.disabled}
       className={cn(ROW, item.danger && DANGER)}
       // Radix closes the menu after the click. The pick runs after that, so a dialog it opens keeps the focus.
@@ -88,8 +98,28 @@ function Item({ item }: { item: MenuItem }) {
         setTimeout(() => item.onPick?.(event), 0);
       }}
     >
-      <ItemBody item={item} radio={item.radio} />
+      <ItemBody item={item} radio={item.radio} checkbox={item.checkbox} />
     </DropdownMenuItem>
+  );
+}
+
+// A row of emoji buttons. Each one is a menu item, so the arrow keys reach it; a pick closes the menu as any item does.
+function QuickRow({ quick }: { quick: MenuQuick['quick'] }) {
+  return (
+    <div role="none" className="flex gap-1 px-0.5 py-0.5">
+      {quick.map((q) => (
+        <DropdownMenuItem
+          key={q.emoji}
+          role="menuitem"
+          aria-label={q.label}
+          title={q.label}
+          className="min-h-9 flex-1 justify-center rounded-md px-0 text-[18px] focus:bg-accent"
+          onClick={() => setTimeout(q.onPick, 0)}
+        >
+          <span aria-hidden="true">{q.emoji}</span>
+        </DropdownMenuItem>
+      ))}
+    </div>
   );
 }
 

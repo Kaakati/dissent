@@ -1,6 +1,7 @@
 // The servers you share with someone: a mark with the server's picture or initials, and its name. The DM panel folds the
 // list behind a count; the full profile lists it. Mutual friends are never shown: contact lists stay private.
 import { useState } from 'react';
+import { Users } from 'lucide-react';
 import { imageOf } from '@/lib/images';
 import { hueBackground, hueOf, initials } from '@/lib/identity';
 import type { UserProfileView } from '@/lib/types';
@@ -45,8 +46,9 @@ export function MutualToggle({ servers }: { servers: Mutual[] }) {
         aria-expanded={open}
         disabled={none}
         onClick={() => setOpen((v) => !v)}
-        className={cn('h-8 self-start text-body font-semibold text-link', !none && 'hover:text-link-hover')}
+        className={cn('inline-flex h-8 items-center gap-s-2 self-start text-sm font-medium text-link', !none && 'hover:text-link-hover')}
       >
+        <Users className="size-4" aria-hidden="true" />
         {`${servers.length} Mutual Server${servers.length === 1 ? '' : 's'}`}
       </button>
       {open && !none ? <MutualList servers={servers} /> : null}

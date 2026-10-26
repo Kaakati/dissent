@@ -1,6 +1,6 @@
 //! Tauri commands for the engine surfaces in `docs/design/07-visual-system.md` part 6: calls,
 //! guardians, devices, safety numbers, notes and pins, and first run. Each command forwards to an
-//! engine method. Names and argument names are the ones `ui/api.js` calls. The UI shows a surface
+//! engine method. Names and argument names are the ones `ui-next/src/lib/api.ts` calls. The UI shows a surface
 //! only when `capabilities` lists it.
 
 use std::fmt::Display;
@@ -98,6 +98,14 @@ pub async fn pin_conversation(state: State<'_, AppState>, key: String, pinned: b
 #[tauri::command]
 pub async fn mark_read(state: State<'_, AppState>, key: String) -> Result<(), String> {
     engine(&state).await?.mark_read(key).map_err(err)
+}
+
+/// Marks a channel's mentions read: its mention count drops to zero.
+#[tauri::command]
+pub async fn mark_mentions_read(state: State<'_, AppState>, community_id: String, channel_id: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    engine(&state).await?.mark_mentions_read(community, channel).map_err(err)
 }
 
 #[tauri::command]
@@ -266,6 +274,12 @@ pub async fn set_deafened(state: State<'_, AppState>, deafened: bool) -> Result<
 #[tauri::command]
 pub async fn set_camera(state: State<'_, AppState>, on: bool) -> Result<(), String> {
     engine(&state).await?.set_camera(on).map_err(err)
+}
+
+/// Starts or stops sharing this device's primary screen in the current call.
+#[tauri::command]
+pub async fn set_screen_share(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    engine(&state).await?.set_screen_share(on).map_err(err)
 }
 
 #[tauri::command]

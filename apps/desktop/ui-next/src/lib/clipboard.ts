@@ -1,4 +1,4 @@
-// Copies text to the clipboard. Falls back to a selected textarea where the async API is refused (ui/ui.js copyText).
+// Copies text to the clipboard. Falls back to a selected textarea where the async API is refused (the old UI's ui.js copyText).
 export async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);

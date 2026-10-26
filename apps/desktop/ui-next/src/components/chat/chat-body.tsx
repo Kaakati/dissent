@@ -1,11 +1,10 @@
 // The chat pane's body: the message list, the typing row, the composer, and the drop overlay. The header is chat-header.tsx.
-// The pane shows the open conversation (see App.tsx). Ported from ui/views/chat.js (initChat, initDrop, render).
+// The pane shows the open conversation (see App.tsx). Ported from the old UI's views/chat.js (initChat, initDrop, render).
 import type { DragEvent } from 'react';
 import './chat.css';
 import { Paperclip } from 'lucide-react';
 import { MAX_FILE_LABEL } from '@/lib/attachments';
 import { useChat } from '@/lib/chat';
-import { EmojiPickerHost } from './emoji-picker';
 import { MessageList } from './message-list';
 import { needsAgeGate } from './chat-notices';
 import { Composer } from './composer';
@@ -35,7 +34,6 @@ export function ChatBody() {
       <MessageList view={view} gated={gated} />
       <TypingRow target={view?.target ?? null} />
       {view && !gated ? <Composer key={view.target.key} view={view} /> : null}
-      <EmojiPickerHost />
     </div>
   );
 }

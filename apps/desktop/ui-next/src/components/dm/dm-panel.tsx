@@ -1,10 +1,11 @@
 // The DM profile panel in the right column: a banner with the contact status and More, the 80 px avatar with presence,
 // the name and tag, the mutual servers (folded behind a count), "Contact since", and View full profile. Ported from
-// ui/views/dmpanel.js. The panel is open while the profile panel toggle (lib/right.ts) is on.
+// the old UI's views/dmpanel.js. The panel is open while the profile panel toggle (lib/right.ts) is on.
 import { Check, Clock, Ellipsis, type LucideIcon } from 'lucide-react';
 import { openConversationMenu } from '@/components/menus/conversation-menu';
 import { longDate, openFullProfile } from '@/components/profile/full-profile';
 import { bannerBackground } from '@/components/profile/banner';
+import { MutualFriendsToggle } from '@/components/profile/mutual-friends';
 import { MutualToggle } from '@/components/profile/mutual-servers';
 import { useUserProfile } from '@/components/profile/use-user-profile';
 import { UserAvatar } from '@/components/user-avatar';
@@ -56,7 +57,7 @@ export function DmPanel({ peer }: { peer: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto dissent-scroll">
-      <div className="relative h-[120px] shrink-0" style={{ background: bannerBackground(peer) }}>
+      <div data-profile-banner className="relative h-[120px] shrink-0" style={{ background: bannerBackground(peer, view) }}>
         <div className="absolute top-s-2 right-s-2 flex gap-s-2">
           {status && StatusIcon ? (
             <span role="img" aria-label={status.label} title={status.label} className="grid size-8 place-items-center rounded-full bg-black/50 text-text-strong">
@@ -80,11 +81,12 @@ export function DmPanel({ peer }: { peer: string }) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col px-s-4 pb-s-4">
         <UserAvatar name={view.display_name} seed={peer} size="xl" presence={presence} className="-mt-10 ring-[6px] ring-panel" />
-        <h3 className="mt-s-4 text-title leading-[30px] font-bold break-words text-text-strong">{view.display_name}</h3>
+        <h3 className="mt-s-4 text-[18px] leading-6 font-semibold break-words text-text-strong">{view.display_name}</h3>
         <div className="mt-1 font-mono text-sm leading-5 break-all text-muted-foreground" title={addressOf('user', peer)}>
           {`${view.display_name}·${shortOf('user', peer)}`}
         </div>
-        <div className="mt-s-2">
+        <div className="mt-s-2 flex flex-col gap-s-1">
+          <MutualFriendsToggle friends={view.mutual_friends ?? []} />
           <MutualToggle servers={view.mutual_communities} />
         </div>
         {since ? (

@@ -10,9 +10,9 @@ use std::borrow::Cow;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use dissent_identity::{CommunityId, DeviceId, RootId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{ChannelId, Error, Event, EventBody, EventId, Hlc, Payload, Result};
+use crate::{ChannelId, Error, Event, EventBody, EventId, Hlc, Payload, Result, SealedKind};
 
 const KEY_DOMAIN: &str = "dissent/control-seal/v1";
 const AAD_DOMAIN: &[u8] = b"dissent/control-aad/v1";
@@ -21,6 +21,128 @@ const MEMBER_ENC_DOMAIN: &str = "dissent/member-control-enc/v1";
 const MEMBER_WRITE_DOMAIN: &str = "dissent/member-control-write/v1";
 const TAG_DOMAIN: &[u8] = b"dissent/member-control-tag/v1";
 const NONCE_LEN: usize = 24;
+
+/// The generation a carried payload is filed under. No community secret has this generation, so a
+/// client that predates a carrier kind finds no key and shows the event as locked, rather than
+/// failing to decode it. Current clients unwrap the kind inside. See `CARRIED_MEMBER`.
+pub const CARRIER_GENERATION: u64 = u64::MAX;
+
+/// Carrier kind of a member-sealed control payload. The body is a postcard `MemberBody`.
+const CARRIED_MEMBER: u8 = 1;
+
+/// Carrier kind of a private-channel message. The body is a postcard `PrivateBody`. Replay opens no key
+/// for it, since the kind and generation are clear.
+const CARRIED_PRIVATE: u8 = 3;
+
+/// A private-channel message's clear fields and its sealed text.
+#[derive(Serialize, Deserialize)]
+struct PrivateBody {
+    kind: SealedKind,
+    generation: u64,
+    ciphertext: Vec<u8>,
+}
+
+/// The carried kind and body of a carrier payload, or `None` when the bytes are not a carrier.
+fn carried(ciphertext: &[u8]) -> Option<Carried> {
+    postcard::from_bytes(ciphertext).ok()
+}
+
+/// Wraps a private-channel message in the carrier, so an older client shows it as locked. The caller
+/// seals `ciphertext` under the channel key of `generation`. The result goes in the body before it is signed.
+pub fn carry_private(kind: SealedKind, generation: u64, ciphertext: Vec<u8>) -> Result<Payload> {
+    let body = postcard::to_allocvec(&PrivateBody {
+        kind,
+        generation,
+        ciphertext,
+    })
+    .map_err(|e| Error::Encoding(e.to_string()))?;
+    let carried = postcard::to_allocvec(&Carried {
+        kind: CARRIED_PRIVATE,
+        body,
+    })
+    .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(Payload::SealedControl {
+        generation: CARRIER_GENERATION,
+        ciphertext: carried,
+    })
+}
+
+/// Opens a carried private-channel message to its replayed form. No key is needed.
+fn open_private(ciphertext: &[u8]) -> std::result::Result<Payload, OpenError> {
+    let carried = carried(ciphertext).ok_or(OpenError::Forged)?;
+    if carried.kind != CARRIED_PRIVATE {
+        return Err(OpenError::Forged);
+    }
+    let body: PrivateBody = postcard::from_bytes(&carried.body).map_err(|_| OpenError::Forged)?;
+    Ok(Payload::PrivateSealed {
+        kind: body.kind,
+        generation: body.generation,
+        ciphertext: body.ciphertext,
+    })
+}
+
+/// A payload of a kind older clients cannot decode, wrapped so they can still decode the event.
+#[derive(Serialize, Deserialize)]
+struct Carried {
+    kind: u8,
+    body: Vec<u8>,
+}
+
+/// A member-sealed payload's fields, as carried.
+#[derive(Serialize, Deserialize)]
+struct MemberBody {
+    epoch: u64,
+    ciphertext: Vec<u8>,
+    tag: [u8; 32],
+}
+
+/// The parts of a member-sealed control payload: its epoch, ciphertext and tag. Recognises the
+/// carrier form and the form v0.1.6 wrote, so both replay.
+pub fn member_parts(payload: &Payload) -> Option<(u64, Vec<u8>, [u8; 32])> {
+    match payload {
+        Payload::MemberSealedControl {
+            epoch,
+            ciphertext,
+            tag,
+        } => Some((*epoch, ciphertext.clone(), *tag)),
+        Payload::SealedControl {
+            generation: CARRIER_GENERATION,
+            ciphertext,
+        } => {
+            let carried: Carried = postcard::from_bytes(ciphertext).ok()?;
+            if carried.kind != CARRIED_MEMBER {
+                return None;
+            }
+            let body: MemberBody = postcard::from_bytes(&carried.body).ok()?;
+            Some((body.epoch, body.ciphertext, body.tag))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a payload is a member-sealed control payload, in either form.
+pub fn is_member_sealed(payload: &Payload) -> bool {
+    member_parts(payload).is_some()
+}
+
+/// The member-sealed payload for the given fields, in the carrier form that is written now.
+pub fn member_sealed_payload(epoch: u64, ciphertext: Vec<u8>, tag: [u8; 32]) -> Result<Payload> {
+    let body = postcard::to_allocvec(&MemberBody {
+        epoch,
+        ciphertext,
+        tag,
+    })
+    .map_err(|e| Error::Encoding(e.to_string()))?;
+    let carried = postcard::to_allocvec(&Carried {
+        kind: CARRIED_MEMBER,
+        body,
+    })
+    .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(Payload::SealedControl {
+        generation: CARRIER_GENERATION,
+        ciphertext: carried,
+    })
+}
 
 /// The MLS exporter label that control keys are drawn from. The keys of epoch `e` are derived from
 /// `export(EXPORT_LABEL, e)` of the community group in that epoch.
@@ -91,18 +213,25 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::CommunityIconSet { .. }
             | Payload::MemberOnlyControl { .. }
             | Payload::HistoryVisibility { .. }
+            | Payload::CommunityRename { .. }
+            | Payload::CommunityBannerSet { .. }
+            | Payload::CommunityProfileSet { .. }
+            | Payload::ProfileBannerSet { .. }
+            | Payload::ChannelAccess { .. }
     )
 }
 
 /// Whether a control payload is sealed under the epoch key while member-only control is on. Invite
 /// events stay under the community secret, since a joiner reads them before it has a group, and
-/// the invite a `JoinVia` names must be known to check the join. Everything else in `is_sealable`
-/// goes under the epoch key.
+/// the invite a `JoinVia` names must be known to check the join. A rename stays there too: the
+/// name is shown to every invite holder anyway, and the invite preview hands the owner's rename to
+/// a joiner as proof of the name, which it opens with the invite secret. Everything else in
+/// `is_sealable` goes under the epoch key.
 pub fn is_member_sealable(payload: &Payload) -> bool {
     is_sealable(payload)
         && !matches!(
             payload,
-            Payload::InviteCreate { .. } | Payload::InviteRevoke { .. }
+            Payload::InviteCreate { .. } | Payload::InviteRevoke { .. } | Payload::CommunityRename { .. }
         )
 }
 
@@ -260,31 +389,22 @@ pub fn seal_member(keys: &EpochKeys, epoch: u64, body: &EventBody) -> Result<Pay
     let mut ciphertext = nonce.to_vec();
     ciphertext.extend(sealed);
     let tag = member_tag(&keys.write, &aad, &ciphertext);
-    Ok(Payload::MemberSealedControl {
-        epoch,
-        ciphertext,
-        tag,
-    })
+    member_sealed_payload(epoch, ciphertext, tag)
 }
 
 /// Opens a member-sealed payload with the encryption keys in `ring`. Only the key of the payload's
 /// own epoch is tried.
 pub fn open_member(ring: &[EpochKey], body: &EventBody) -> std::result::Result<Payload, OpenError> {
-    let Payload::MemberSealedControl {
-        epoch,
-        ciphertext,
-        ..
-    } = &body.payload
-    else {
+    let Some((epoch, ciphertext, _)) = member_parts(&body.payload) else {
         return Err(OpenError::Forged);
     };
     if ciphertext.len() < NONCE_LEN {
         return Err(OpenError::Forged);
     }
-    let Some((_, enc)) = ring.iter().find(|(e, _)| e == epoch) else {
+    let Some((_, enc)) = ring.iter().find(|(e, _)| *e == epoch) else {
         return Err(OpenError::NoKey);
     };
-    let aad = aad_under(MEMBER_AAD_DOMAIN, body, *epoch).map_err(|_| OpenError::Forged)?;
+    let aad = aad_under(MEMBER_AAD_DOMAIN, body, epoch).map_err(|_| OpenError::Forged)?;
     let (nonce, sealed) = ciphertext.split_at(NONCE_LEN);
     let plain = member_cipher(enc)
         .decrypt(
@@ -308,19 +428,14 @@ pub fn open_member(ring: &[EpochKey], body: &EventBody) -> std::result::Result<P
 /// rest. A tag made by anyone holding the write key passes, so this rejects junk, not forgeries
 /// by a storage member.
 pub fn verify_member_tag(ring: &[EpochKey], body: &EventBody) -> std::result::Result<(), OpenError> {
-    let Payload::MemberSealedControl {
-        epoch,
-        ciphertext,
-        tag,
-    } = &body.payload
-    else {
+    let Some((epoch, ciphertext, tag)) = member_parts(&body.payload) else {
         return Err(OpenError::Forged);
     };
-    let Some((_, write)) = ring.iter().find(|(e, _)| e == epoch) else {
+    let Some((_, write)) = ring.iter().find(|(e, _)| *e == epoch) else {
         return Err(OpenError::NoKey);
     };
-    let aad = aad_under(MEMBER_AAD_DOMAIN, body, *epoch).map_err(|_| OpenError::Forged)?;
-    if blake3::Hash::from(*tag) == blake3::Hash::from(member_tag(write, &aad, ciphertext)) {
+    let aad = aad_under(MEMBER_AAD_DOMAIN, body, epoch).map_err(|_| OpenError::Forged)?;
+    if blake3::Hash::from(tag) == blake3::Hash::from(member_tag(write, &aad, &ciphertext)) {
         Ok(())
     } else {
         Err(OpenError::Forged)
@@ -335,8 +450,18 @@ pub fn open_event_keyed<'a>(
     epochs: &[EpochKey],
 ) -> std::result::Result<Cow<'a, Event>, OpenError> {
     let payload = match &ev.body.payload {
-        Payload::SealedControl { .. } => open(ring, &ev.body)?,
+        Payload::SealedControl {
+            generation: CARRIER_GENERATION,
+            ciphertext,
+        } => match carried(ciphertext) {
+            Some(Carried { kind, .. }) if kind == CARRIED_MEMBER => open_member(epochs, &ev.body)?,
+            Some(Carried { kind, .. }) if kind == CARRIED_PRIVATE => open_private(ciphertext)?,
+            // A kind this build does not know is refused as forged, not locked, so it does not look
+            // like a key that is missing.
+            _ => return Err(OpenError::Forged),
+        },
         Payload::MemberSealedControl { .. } => open_member(epochs, &ev.body)?,
+        Payload::SealedControl { .. } => open(ring, &ev.body)?,
         _ => return Ok(Cow::Borrowed(ev)),
     };
     let mut plain = ev.clone();
@@ -694,10 +819,16 @@ mod tests {
         let u = User::new();
         let keys = epoch_keys(1);
         let ev = member_sealed(&u, &keys, 4, vec![], 1, join("alice"));
+        // Written in the carrier form: a generation no secret has, so a client without the carrier
+        // reads it as locked rather than failing to decode it.
         assert!(matches!(
             ev.body.payload,
-            Payload::MemberSealedControl { epoch: 4, .. }
+            Payload::SealedControl {
+                generation: CARRIER_GENERATION,
+                ..
+            }
         ));
+        assert_eq!(member_parts(&ev.body.payload).map(|p| p.0), Some(4));
         let plain = open_event_keyed(&ev, &[], &[(4, keys.enc)]).unwrap();
         assert_eq!(plain.body.payload, join("alice"));
         assert_eq!(plain.id, ev.id);
@@ -750,10 +881,10 @@ mod tests {
         let ev = member_sealed(&u, &keys, 0, vec![], 1, join("alice"));
         // Any change to the ciphertext breaks the tag, even when the author re-signs.
         let mut edited = ev.body.clone();
-        if let Payload::MemberSealedControl { ciphertext, .. } = &mut edited.payload {
-            let last = ciphertext.len() - 1;
-            ciphertext[last] ^= 1;
-        }
+        let (epoch, mut ciphertext, tag) = member_parts(&edited.payload).unwrap();
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 1;
+        edited.payload = member_sealed_payload(epoch, ciphertext, tag).unwrap();
         let resigned = Event::sign(edited, &u.device);
         assert_eq!(
             verify_member_tag(&[(0, keys.write)], &resigned.body).unwrap_err(),
@@ -761,9 +892,8 @@ mod tests {
         );
         // A tag of zeros is junk.
         let mut junk = ev.body.clone();
-        if let Payload::MemberSealedControl { tag, .. } = &mut junk.payload {
-            *tag = [0; 32];
-        }
+        let (epoch, ciphertext, _) = member_parts(&junk.payload).unwrap();
+        junk.payload = member_sealed_payload(epoch, ciphertext, [0; 32]).unwrap();
         assert_eq!(
             verify_member_tag(&[(0, keys.write)], &junk).unwrap_err(),
             OpenError::Forged
@@ -940,6 +1070,90 @@ mod tests {
     }
 
     #[test]
+    fn the_v0_1_6_member_form_still_opens_beside_the_carrier() {
+        let u = User::new();
+        let keys = epoch_keys(10);
+        let carried = member_sealed(&u, &keys, 3, vec![], 1, join("legacy"));
+        // Rebuild the same fields in the form v0.1.6 wrote, and sign it as an event.
+        let (epoch, ciphertext, tag) = member_parts(&carried.body.payload).unwrap();
+        let legacy = Event::sign(
+            EventBody {
+                payload: Payload::MemberSealedControl {
+                    epoch,
+                    ciphertext,
+                    tag,
+                },
+                ..carried.body.clone()
+            },
+            &u.device,
+        );
+        assert!(legacy.verify(&u.cert).is_ok());
+        let plain = open_event_keyed(&legacy, &[], &[(3, keys.enc)]).unwrap();
+        assert_eq!(plain.body.payload, join("legacy"));
+        assert!(verify_member_tag(&[(3, keys.write)], &legacy.body).is_ok());
+    }
+
+    #[test]
+    fn a_carried_event_is_locked_to_a_client_without_the_carrier() {
+        // A client that predates the carrier has no key for generation u64::MAX, so it reads the
+        // event as locked, not as a decode failure.
+        let u = User::new();
+        let keys = epoch_keys(11);
+        let ev = member_sealed(&u, &keys, 0, vec![], 1, join("hidden"));
+        assert!(ev.verify(&u.cert).is_ok());
+        let round = postcard::from_bytes::<Event>(&postcard::to_allocvec(&ev).unwrap()).unwrap();
+        assert_eq!(round.id, ev.id);
+        assert!(round.verify(&u.cert).is_ok());
+        // The generation ring cannot open it, since the carrier is not a generation.
+        assert_eq!(
+            open_event(&round, &[(CARRIER_GENERATION, keys.enc)]).unwrap_err(),
+            OpenError::NoKey
+        );
+        assert_eq!(
+            open_event_keyed(&round, &[], &[(0, epoch_keys(12).enc)]).unwrap_err(),
+            OpenError::Forged
+        );
+        assert!(open_event_keyed(&round, &[], &[(0, keys.enc)]).is_ok());
+    }
+
+    #[test]
+    fn a_private_message_opens_without_a_key_and_an_unknown_carried_kind_is_forged() {
+        let u = User::new();
+        let body = |payload: Payload| EventBody {
+            community: CommunityId([0; 32]),
+            channel: ChannelId::CONTROL,
+            author: u.id(),
+            device: u.device.id(),
+            parents: vec![],
+            hlc: at(1),
+            payload,
+        };
+        // A private message is readable as its replayed form with no key: its kind and generation are clear.
+        let private = carry_private(SealedKind::Message, 2, vec![9, 9, 9]).unwrap();
+        let ev = Event::sign(body(private), &u.device);
+        let plain = open_event_keyed(&ev, &[], &[]).unwrap();
+        assert_eq!(
+            plain.body.payload,
+            Payload::PrivateSealed {
+                kind: SealedKind::Message,
+                generation: 2,
+                ciphertext: vec![9, 9, 9],
+            }
+        );
+        // A carrier of a kind this build does not know is refused as forged, not locked.
+        let unknown = Payload::SealedControl {
+            generation: CARRIER_GENERATION,
+            ciphertext: postcard::to_allocvec(&Carried {
+                kind: 9,
+                body: vec![],
+            })
+            .unwrap(),
+        };
+        let ev = Event::sign(body(unknown), &u.device);
+        assert_eq!(open_event_keyed(&ev, &[], &[]).unwrap_err(), OpenError::Forged);
+    }
+
+    #[test]
     fn member_only_and_history_payloads_are_sealable() {
         assert!(is_sealable(&Payload::MemberOnlyControl { on: true }));
         assert!(is_sealable(&Payload::HistoryVisibility {
@@ -950,6 +1164,34 @@ mod tests {
             ciphertext: vec![],
             tag: [0; 32],
         }));
+    }
+
+    #[test]
+    fn a_rename_is_sealed_under_the_secret_and_replays() {
+        let owner = User::new();
+        let join_ev = sealed(&owner, &S0, 0, vec![], 1, join("boss"));
+        let rename = sealed(
+            &owner,
+            &S0,
+            0,
+            vec![join_ev.id],
+            2,
+            Payload::CommunityRename {
+                name: "Hidden Name".into(),
+            },
+        );
+        // Sealed under the generation, as every control payload is. A released client holding the
+        // secret cannot decode the new kind inside, and rejects that one event as forged.
+        assert!(matches!(rename.body.payload, Payload::SealedControl { generation: 0, .. }));
+        let bytes = postcard::to_allocvec(&rename).unwrap();
+        assert!(!bytes.windows(b"Hidden Name".len()).any(|w| w == b"Hidden Name"));
+        assert_eq!(open_event(&rename, &[]).unwrap_err(), OpenError::NoKey);
+        let mut dag = Dag::new();
+        dag.insert(join_ev).unwrap();
+        dag.insert(rename).unwrap();
+        let st = replay_with(owner.id(), &dag, &[(0, S0)]);
+        assert!(st.rejected.is_empty());
+        assert_eq!(st.name.map(|(_, n)| n).as_deref(), Some("Hidden Name"));
     }
 
     #[test]

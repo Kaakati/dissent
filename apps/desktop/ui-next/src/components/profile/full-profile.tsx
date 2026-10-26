@@ -1,6 +1,6 @@
 // The full profile, in a dialog: the address with its QR code, the mutual servers, the handles, and the safety number with
 // Copy contact link and Verify safety number. Opened from the DM panel's "View full profile". Ported from openFullProfile
-// in ui/views/dmpanel.js.
+// in the old UI's views/dmpanel.js.
 import { CircleCheck, Link, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { AddressCard } from '@/components/address-card';
 import { openSafetyDialog } from '@/components/dialogs/safety-dialog';
@@ -13,6 +13,7 @@ import { copyText } from '@/lib/clipboard';
 import { openDialog } from '@/lib/dialog';
 import { toast } from '@/lib/toasts';
 import type { UserProfileView } from '@/lib/types';
+import { bannerBackground } from './banner';
 import { MutualList } from './mutual-servers';
 
 // "Jul 4", the short date the safety line uses; "Jul 4, 2026", the long one "Contact since" uses.
@@ -53,6 +54,7 @@ function FullProfileBody({ peer, view, close }: { peer: string; view: UserProfil
   };
   return (
     <div className="flex flex-col gap-s-3">
+      <div data-profile-banner className="aspect-[16/5] w-full rounded-lg" style={{ background: bannerBackground(peer, view) }} />
       <p className="font-mono text-sm leading-5 break-all text-muted-foreground" title={addressOf('user', peer)}>
         {`${view.display_name}·${shortOf('user', peer)}`}
       </p>

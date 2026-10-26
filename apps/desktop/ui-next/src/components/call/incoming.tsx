@@ -1,4 +1,4 @@
-// The incoming call (ui/views/incoming.js): an alert over the current view for a ringing direct or group call. It stays
+// The incoming call (the old UI's views/incoming.js): an alert over the current view for a ringing direct or group call. It stays
 // until the user answers, declines or sends a quick reply, or the call ends elsewhere. Esc declines and Enter answers.
 // The rings pulse unless the system asks for reduced motion (call.css). Video answers wait for the camera.
 import { forwardRef, useEffect, useRef, useState } from 'react';

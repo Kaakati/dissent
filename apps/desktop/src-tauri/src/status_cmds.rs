@@ -1,5 +1,5 @@
 //! Tauri commands for this device's status: online, idle, do not disturb, or invisible. Also the
-//! auto-idle timer, which reads window input. Names and argument keys match `ui/api.js`.
+//! auto-idle timer, which reads window input. Names and argument keys match `ui-next/src/lib/api.ts`.
 //!
 //! The engine emits `StatusChanged` for every change, including an expiry, and `events.rs`
 //! forwards it as `dissent://status-changed`.

@@ -6,10 +6,10 @@ license.workspace = true
 
 [features]
 # AV1 encoding through SVT-AV1 builds from source and needs cmake, NASM and libclang. Off by default.
-svt-av1 = ["dep:shiguredo_svt_av1"]
+svt-av1 = ["dep:svt-av1-sys", "svt-av1-sys/build"]
 
 [dependencies]
-shiguredo_svt_av1 = { workspace = true, optional = true }
+svt-av1-sys = { workspace = true, optional = true }
 openh264.workspace = true
 rav1d.workspace = true
 thiserror.workspace = true

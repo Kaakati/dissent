@@ -1,5 +1,5 @@
 // A link that is made on open, with a Copy button: invite links, the contact link and a group's invite link. Ported
-// from openLinkDialog in ui/views/dialogs.js. Copy shows a check mark for a moment, as flashCopied did.
+// from openLinkDialog in the old UI's views/dialogs.js. Copy shows a check mark for a moment, as flashCopied did.
 import { type ReactNode, useEffect, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';

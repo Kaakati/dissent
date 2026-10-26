@@ -20,6 +20,12 @@ impl MediaKey {
     pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+
+    /// The key of this call's video frames. Video has its own key, so its SFrame counters never
+    /// share a (key, counter) pair with audio.
+    pub(crate) fn video(&self) -> Self {
+        Self(blake3::derive_key("dissent/media/video-sframe/v1", &self.0))
+    }
 }
 
 impl std::fmt::Debug for MediaKey {

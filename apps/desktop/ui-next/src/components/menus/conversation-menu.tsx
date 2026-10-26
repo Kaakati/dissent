@@ -1,5 +1,5 @@
 // The right-click menu on a conversation, and the New conversation menu on the Direct messages header. Items the engine
-// does not support are left out, not disabled. Ported from openConversationMenu in ui/views/sidebar.js and the
+// does not support are left out, not disabled. Ported from openConversationMenu in the old UI's views/sidebar.js and the
 // new-conversation menu there. The Start a call item comes with the calls batch.
 import type { ReactNode } from 'react';
 import { Copy, UserPlus, Users } from 'lucide-react';
@@ -48,7 +48,6 @@ export function conversationItems(conv: ConversationSummary, at: { x: number; y:
   const items: MenuEntry[] = [
     { label: 'Mark as read', disabled: !unread, onPick: () => void markRead(key) },
     'sep',
-    has('pins') ? { label: pinned ? 'Unpin' : 'Pin', onPick: () => void pinConversation(key, !pinned) } : null,
     has('pins') ? { label: pinned ? 'Remove from favorites' : 'Add to favorites', onPick: () => void pinConversation(key, !pinned) } : null,
     has('pins') ? 'sep' : null,
   ];

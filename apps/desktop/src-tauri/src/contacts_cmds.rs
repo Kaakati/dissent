@@ -1,5 +1,5 @@
 //! Tauri commands for contacts, direct conversations and group conversations. Each forwards to
-//! the engine method of the same concept. Names and argument keys match `ui/api.js`.
+//! the engine method of the same concept. Names and argument keys match `ui-next/src/lib/api.ts`.
 
 use dissent_core::{
     ConversationSummary, ConvId, DmItem, DmPolicy, RootId, UserView,
@@ -35,6 +35,18 @@ pub async fn address_discovery(state: State<'_, AppState>) -> Result<bool, Strin
 #[tauri::command]
 pub async fn set_address_discovery(state: State<'_, AppState>, on: bool) -> Result<bool, String> {
     engine(&state).await?.set_address_discovery(on).map_err(err)?;
+    Ok(on)
+}
+
+/// Whether our friends may see our contact list, for mutual friends on their profiles.
+#[tauri::command]
+pub async fn friends_shared(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(engine(&state).await?.friends_shared())
+}
+
+#[tauri::command]
+pub async fn set_friends_shared(state: State<'_, AppState>, on: bool) -> Result<bool, String> {
+    engine(&state).await?.set_friends_shared(on).map_err(err)?;
     Ok(on)
 }
 

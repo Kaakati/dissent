@@ -1,5 +1,5 @@
 // Mounted once in App. It listens for ringing calls and the engine's call endings, follows the call for the join and leave
-// sounds, and renders the incoming call. Ported from the call listeners in ui/main.js.
+// sounds, and renders the incoming call. Ported from the call listeners in the old UI's main.js.
 import { useEffect } from 'react';
 import { onEngineEvent, listenTo } from '@/lib/api';
 import { dismissRinging, ringIncoming, watchCallSounds, watchLobbyDismissal } from '@/lib/calls';

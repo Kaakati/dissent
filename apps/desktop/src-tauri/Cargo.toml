@@ -9,8 +9,10 @@ name = "dissent_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# Enabled by the Tauri CLI (tauri.conf.json build.features) so dev runs load embedded ui/ assets.
+# Enabled by the Tauri CLI (tauri.conf.json build.features) so dev runs load embedded ui-next/dist assets.
 custom-protocol = ["tauri/custom-protocol"]
+# AV1 encoding through SVT-AV1 (builds from the third_party submodule). The release build turns it on.
+svt-av1 = ["dissent-core/svt-av1"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

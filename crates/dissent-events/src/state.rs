@@ -22,7 +22,7 @@
 //! Each event goes through `check` (read only) and then `commit`. The incremental
 //! [`crate::Replayer`] uses the same two steps, so both paths agree.
 
-use crate::emoji::normalize_emoji;
+use crate::emoji::{normalize_emoji, normalize_trait_emoji};
 use crate::names::{normalize_handle, skeleton};
 use crate::control::{open_event_keyed, EpochKey, OpenError, SealKey};
 use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, HistorySetting, Hlc, Payload, Role, SealedKind};
@@ -77,12 +77,38 @@ pub struct CommunityState {
     /// The community icon, from the latest accepted `CommunityIconSet`, with its HLC. A `None`
     /// picture is a removed icon.
     pub icon: Option<(Hlc, Option<crate::Picture>)>,
+    /// The community name from the latest accepted `CommunityRename`, with its HLC. `None` keeps
+    /// the genesis name.
+    pub name: Option<(Hlc, String)>,
+    /// The community banner, from the latest accepted `CommunityBannerSet`, with its HLC. A `None`
+    /// picture is a removed banner.
+    pub banner: Option<(Hlc, Option<crate::picture::Banner>)>,
+    /// The description and traits, from the latest accepted `CommunityProfileSet`, with its HLC.
+    pub profile: Option<(Hlc, CommunityProfile)>,
+    /// Each member's profile banner, from their latest accepted `ProfileBannerSet`, with its HLC. A
+    /// `None` banner is a removed one. A newer HLC wins, as for `avatars`.
+    pub profile_banners: BTreeMap<RootId, (Hlc, Option<crate::picture::Banner>)>,
     /// Settings from the accepted `ChannelUpdate`s. A channel not listed here has the defaults.
     pub channel_settings: BTreeMap<ChannelId, ChannelSettings>,
     /// Invites by id, from `InviteCreate`.
     pub invites: BTreeMap<[u8; 16], InviteState>,
     /// Wall time of each member's last accepted post in a channel. Slowmode reads it.
     pub last_post: BTreeMap<(ChannelId, RootId), u64>,
+    /// Who may read each private channel, from its latest accepted `ChannelAccess`, with its HLC. A channel
+    /// without one is public. See `docs/design/11-private-channels.md`.
+    pub channel_access: BTreeMap<ChannelId, (Hlc, ChannelAccessSpec)>,
+    /// Key generation of each channel that has been private. It starts at 0 and moves on each accepted
+    /// change that removes a reader from a private channel.
+    pub key_generation: BTreeMap<ChannelId, u64>,
+}
+
+/// Who may read a private channel: whether it is private, and the roles and members listed. See
+/// `Payload::ChannelAccess`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAccessSpec {
+    pub private: bool,
+    pub roles: BTreeSet<Role>,
+    pub members: BTreeSet<RootId>,
 }
 
 /// What a channel's settings say. See `Payload::ChannelUpdate`.
@@ -117,6 +143,44 @@ pub const SLOWMODE_STEPS: &[u32] = &[0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1
 pub const BITRATE_RANGE: std::ops::RangeInclusive<u32> = 8..=96;
 /// Most people a voice channel's user limit may be set to.
 pub const MAX_USER_LIMIT: u32 = 99;
+/// Longest community name, in characters. Matches the create dialog's limit.
+pub const MAX_COMMUNITY_NAME_CHARS: usize = 64;
+
+/// Whether `name` is a community name as a rename must carry it: already trimmed, not empty, and
+/// at most `MAX_COMMUNITY_NAME_CHARS` characters.
+pub fn valid_community_name(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && name.chars().count() <= MAX_COMMUNITY_NAME_CHARS
+}
+
+/// Longest community description, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 300;
+/// Most traits a community shows.
+pub const MAX_TRAITS: usize = 5;
+/// Longest trait label, in characters.
+pub const MAX_TRAIT_LABEL_CHARS: usize = 24;
+
+/// Whether a profile is within its caps: a trimmed description of at most `MAX_DESCRIPTION_CHARS`,
+/// and at most `MAX_TRAITS` traits, each with an optional emoji (one grapheme, as `normalize_trait_emoji`
+/// keeps it) and a trimmed, non-empty label of at most `MAX_TRAIT_LABEL_CHARS`. Replay rejects a profile over a cap as a
+/// whole rather than trimming it, so every peer shows the same profile or none.
+pub fn valid_profile(description: &str, traits: &[crate::event::Trait]) -> bool {
+    description.trim() == description
+        && description.chars().count() <= MAX_DESCRIPTION_CHARS
+        && traits.len() <= MAX_TRAITS
+        && traits.iter().all(|t| {
+            (t.emoji.is_empty() || normalize_trait_emoji(&t.emoji).is_ok_and(|e| e == t.emoji))
+                && !t.label.is_empty()
+                && t.label.trim() == t.label
+                && t.label.chars().count() <= MAX_TRAIT_LABEL_CHARS
+        })
+}
+
+/// A community's description and traits, from the latest accepted `CommunityProfileSet`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunityProfile {
+    pub description: String,
+    pub traits: Vec<crate::event::Trait>,
+}
 
 /// An invite as the replay sees it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +222,9 @@ pub struct MessageView {
     pub reactions: BTreeMap<String, BTreeSet<RootId>>,
     /// Emoji in the order they first gained a reaction. Keeps views stable across peers.
     pub reaction_order: Vec<String>,
+    /// Whether the author could mention everyone when this message was accepted. Set once from the
+    /// permission state at that point in the replay, so a later role change does not change it.
+    pub mention_all: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +284,10 @@ fn is_post(payload: &Payload) -> bool {
         Payload::Message { .. }
             | Payload::Reply { .. }
             | Payload::Sealed {
+                kind: SealedKind::Message | SealedKind::HistoryMessage | SealedKind::Reply { .. },
+                ..
+            }
+            | Payload::PrivateSealed {
                 kind: SealedKind::Message | SealedKind::Reply { .. },
                 ..
             }
@@ -297,9 +368,15 @@ impl CommunityState {
             secret_winner: None,
             avatars: BTreeMap::new(),
             icon: None,
+            name: None,
+            banner: None,
+            profile: None,
+            profile_banners: BTreeMap::new(),
             channel_settings: BTreeMap::new(),
             invites: BTreeMap::new(),
             last_post: BTreeMap::new(),
+            channel_access: BTreeMap::new(),
+            key_generation: BTreeMap::new(),
         }
     }
 
@@ -315,6 +392,36 @@ impl CommunityState {
             cur = *next;
         }
         cur
+    }
+
+    /// Whether `user` may mention everyone in a community message: the owner and admins by default.
+    pub fn may_mention_everyone(&self, user: &RootId) -> bool {
+        self.rank(&self.canonical(user)) >= Rank::Admin
+    }
+
+    /// Whether `chan` is private, by its latest accepted `ChannelAccess`.
+    pub fn is_private(&self, chan: ChannelId) -> bool {
+        self.channel_access.get(&chan).is_some_and(|(_, spec)| spec.private)
+    }
+
+    /// Whether `user` may read `chan`. A public channel is open to everyone who can see the community.
+    /// A private one is open to the owner and admins, to members holding a listed role, and to listed
+    /// members who have not left or been banned.
+    pub fn can_read(&self, chan: ChannelId, user: RootId) -> bool {
+        let Some((_, spec)) = self.channel_access.get(&chan) else {
+            return true;
+        };
+        if !spec.private || self.rank(&user) >= Rank::Admin {
+            return true;
+        }
+        let has_role = self
+            .roles
+            .get(&user)
+            .is_some_and(|held| spec.roles.iter().any(|role| held.contains(role)));
+        has_role
+            || (spec.members.contains(&user)
+                && !self.banned.contains(&user)
+                && self.members.get(&user).is_some_and(|m| !m.left))
     }
 
     fn rank(&self, user: &RootId) -> Rank {
@@ -388,8 +495,47 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::ChannelAccess { channel, .. } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !self.channels.contains_key(channel) {
+                    return Err(Rejection::UnknownChannel);
+                }
+            }
+            Payload::PrivateSealed { kind, .. } => {
+                if !self.channels.contains_key(&chan) {
+                    return Err(Rejection::UnknownChannel);
+                }
+                // Only a private channel takes this form, and only a reader may post in it.
+                if !self.is_private(chan) {
+                    return Err(Rejection::Malformed);
+                }
+                if !self.can_read(chan, actor) {
+                    return Err(Rejection::NoPermission);
+                }
+                match kind {
+                    SealedKind::Message | SealedKind::HistoryMessage => {}
+                    SealedKind::Reply { target }
+                    | SealedKind::React { target }
+                    | SealedKind::Unreact { target } => {
+                        self.live_message(chan, target)?;
+                    }
+                    SealedKind::Edit { target } => {
+                        if self.live_message(chan, target)?.author != actor {
+                            return Err(Rejection::NotAuthorOfTarget);
+                        }
+                    }
+                }
+            }
+            // The message forms below are for public channels only. A private channel's messages take the
+            // `PrivateSealed` form, which the community secret and the epoch key cannot open.
+            Payload::Sealed { .. } | Payload::Message { .. } if self.is_private(chan) => {
+                return Err(Rejection::NoPermission);
+            }
             Payload::Sealed { kind, .. } => match kind {
-                SealedKind::Message => {
+                SealedKind::Message | SealedKind::HistoryMessage => {
                     if !self.channels.contains_key(&chan) {
                         return Err(Rejection::UnknownChannel);
                     }
@@ -638,6 +784,39 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::CommunityRename { name } => {
+                require_control(chan)?;
+                if rank < Rank::Owner {
+                    return Err(Rejection::NoPermission);
+                }
+                if !valid_community_name(name) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::CommunityBannerSet { banner } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if banner.is_some_and(|b| !b.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::CommunityProfileSet { description, traits } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if !valid_profile(description, traits) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::ProfileBannerSet { banner } => {
+                require_control(chan)?;
+                if banner.is_some_and(|b| !b.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
         }
         Ok(())
     }
@@ -646,6 +825,7 @@ impl CommunityState {
     pub(crate) fn commit(&mut self, ev: &Event) {
         let actor = ev.body.author;
         let chan = ev.body.channel;
+        let mention_all = self.may_mention_everyone(&actor);
         if is_post(&ev.body.payload) {
             let last = self.last_post.entry((chan, actor)).or_insert(0);
             *last = (*last).max(ev.body.hlc.wall_ms);
@@ -660,8 +840,50 @@ impl CommunityState {
                     self.voice_channels.insert(id);
                 }
             }
+            Payload::ChannelAccess {
+                channel,
+                private,
+                roles,
+                members,
+            } => {
+                let spec = ChannelAccessSpec {
+                    private: *private,
+                    roles: roles.iter().copied().collect(),
+                    members: members.iter().copied().collect(),
+                };
+                let newer = self
+                    .channel_access
+                    .get(channel)
+                    .is_none_or(|(hlc, _)| ev.body.hlc > *hlc);
+                if newer {
+                    // Removing a reader from a private channel starts a new key generation.
+                    if let Some((_, prev)) = self.channel_access.get(channel) {
+                        if prev.private
+                            && spec.private
+                            && (!prev.roles.is_subset(&spec.roles) || !prev.members.is_subset(&spec.members))
+                        {
+                            *self.key_generation.entry(*channel).or_default() += 1;
+                        }
+                    }
+                    self.channel_access.insert(*channel, (ev.body.hlc, spec));
+                }
+            }
+            Payload::PrivateSealed {
+                kind,
+                generation,
+                ciphertext,
+            } => {
+                // Replayed as the sealed message it is: the same bookkeeping, with the text left out.
+                let mut view = ev.clone();
+                view.body.payload = Payload::Sealed {
+                    epoch: *generation,
+                    kind: *kind,
+                    ciphertext: ciphertext.clone(),
+                };
+                self.commit(&view);
+            }
             Payload::Sealed { kind, .. } => match kind {
-                SealedKind::Message => {
+                SealedKind::Message | SealedKind::HistoryMessage => {
                     self.messages.entry(chan).or_default().push(MessageView {
                         id: ev.id,
                         author: actor,
@@ -673,6 +895,7 @@ impl CommunityState {
                         reply_to: None,
                         reactions: BTreeMap::new(),
                         reaction_order: Vec::new(),
+                        mention_all,
                     });
                 }
                 SealedKind::Reply { target } => {
@@ -687,6 +910,7 @@ impl CommunityState {
                         reply_to: Some(*target),
                         reactions: BTreeMap::new(),
                         reaction_order: Vec::new(),
+                        mention_all,
                     });
                 }
                 SealedKind::Edit { target } => {
@@ -711,6 +935,7 @@ impl CommunityState {
                     reply_to: None,
                     reactions: BTreeMap::new(),
                     reaction_order: Vec::new(),
+                    mention_all,
                 });
             }
             Payload::Edit { target, text } => {
@@ -889,6 +1114,7 @@ impl CommunityState {
                     reply_to: Some(*target),
                     reactions: BTreeMap::new(),
                     reaction_order: Vec::new(),
+                    mention_all,
                 });
             }
             Payload::React { target, emoji } => {
@@ -930,6 +1156,30 @@ impl CommunityState {
             Payload::CommunityIconSet { avatar } => {
                 if self.icon.is_none_or(|(hlc, _)| ev.body.hlc > hlc) {
                     self.icon = Some((ev.body.hlc, *avatar));
+                }
+            }
+            Payload::CommunityRename { name } => {
+                if self.name.as_ref().is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.name = Some((ev.body.hlc, name.clone()));
+                }
+            }
+            Payload::CommunityBannerSet { banner } => {
+                if self.banner.is_none_or(|(hlc, _)| ev.body.hlc > hlc) {
+                    self.banner = Some((ev.body.hlc, *banner));
+                }
+            }
+            Payload::CommunityProfileSet { description, traits } => {
+                if self.profile.as_ref().is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    let profile = CommunityProfile {
+                        description: description.clone(),
+                        traits: traits.clone(),
+                    };
+                    self.profile = Some((ev.body.hlc, profile));
+                }
+            }
+            Payload::ProfileBannerSet { banner } => {
+                if self.profile_banners.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.profile_banners.insert(actor, (ev.body.hlc, *banner));
                 }
             }
         }
@@ -2158,5 +2408,72 @@ mod reply_reaction_tests {
             assert_eq!(st.secret_generation, 1);
             assert_eq!(st.secret_winner, Some(lo), "the lowest event id wins");
         }
+    }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+    use crate::testutil::{on_channel, User};
+
+    fn chain(evs: &mut Vec<Event>, u: &User, chan: ChannelId, payload: Payload) -> EventId {
+        let parents = evs.last().map(|e| vec![e.id]).unwrap_or_default();
+        let hlc = Hlc {
+            wall_ms: evs.len() as u64,
+            counter: 0,
+        };
+        let ev = on_channel(u, chan, parents, hlc, payload);
+        let id = ev.id;
+        evs.push(ev);
+        id
+    }
+
+    fn replay_all(owner: &User, evs: &[Event]) -> CommunityState {
+        let mut dag = Dag::new();
+        for ev in evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        replay(owner.id(), &dag)
+    }
+
+    fn msg(text: &str) -> Payload {
+        Payload::Message { text: text.into() }
+    }
+
+    /// Mention-everyone belongs to the owner and admins at the point where a message is accepted. A
+    /// later demotion does not change messages already accepted.
+    #[test]
+    fn mention_everyone_follows_the_role_when_the_message_was_accepted() {
+        let (owner, admin, moderator, user) = (User::new(), User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        let general = ChannelId(
+            chain(&mut evs, &owner, ctl, Payload::ChannelCreate { name: "general".into() }).0,
+        );
+        chain(&mut evs, &owner, ctl, Payload::RoleGrant { user: admin.id(), role: Role::Admin });
+        chain(&mut evs, &owner, ctl, Payload::RoleGrant { user: moderator.id(), role: Role::Moderator });
+
+        let by_owner = chain(&mut evs, &owner, general, msg("hi all"));
+        let by_admin = chain(&mut evs, &admin, general, msg("hi all"));
+        let by_moderator = chain(&mut evs, &moderator, general, msg("hi all"));
+        let by_user = chain(&mut evs, &user, general, msg("hi all"));
+        chain(&mut evs, &owner, ctl, Payload::RoleRevoke { user: admin.id(), role: Role::Admin });
+        let after_demotion = chain(&mut evs, &admin, general, msg("hi all"));
+
+        let st = replay_all(&owner, &evs);
+        let flag = |id: EventId| {
+            st.messages[&general]
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("message {id:?} was not accepted"))
+                .mention_all
+        };
+        assert!(flag(by_owner), "the owner may mention everyone");
+        assert!(flag(by_admin), "an admin may mention everyone");
+        assert!(!flag(by_moderator), "a moderator may not");
+        assert!(!flag(by_user), "a member may not");
+        assert!(!flag(after_demotion), "a demoted admin may not, from then on");
+        assert!(st.may_mention_everyone(&owner.id()));
+        assert!(!st.may_mention_everyone(&user.id()));
     }
 }

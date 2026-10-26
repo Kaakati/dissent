@@ -26,6 +26,10 @@ use tracing::{debug, warn};
 const PRESENCE_DOMAIN: &[u8] = b"dissent/presence/v1";
 /// Longest a shutdown waits to send the offline beacon.
 pub(crate) const OFFLINE_WAIT: Duration = Duration::from_secs(2);
+/// Most direct status beacons sent at once.
+const DIRECT_BEACON_PARALLEL: usize = 16;
+/// Time allowed for one direct status beacon to be acknowledged.
+const DIRECT_BEACON_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The status a person sets for themselves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,7 +259,7 @@ impl Engine {
             });
             let engine = self.clone();
             if after.0 != Status::Invisible {
-                self.spawn_task(async move { engine.send_presence().await });
+                self.spawn_task(async move { engine.announce_status().await });
             } else if before.0 != Status::Invisible {
                 // Going invisible: one offline beacon, so peers drop us now, not when the window ends.
                 self.spawn_task(async move { engine.send_offline().await });
@@ -329,24 +333,50 @@ impl Engine {
             return;
         };
         gossip_beacon(&self.topic_senders(), &sp).await;
-        let bytes = match self.request_bytes(&Request::Presence(Box::new(sp))) {
+        // Gossip is fire-and-forget and the node closes right after, so also deliver it directly.
+        let devices = presence_devices(&self.read(), now_ms());
+        self.deliver_direct(&sp, devices).await;
+    }
+
+    /// Tells the people who can see us about a status change. Gossip reaches a community only while a
+    /// neighbour is on its topic, so the beacon also goes directly, acknowledged, to every device that
+    /// would show us online. One beacon updates every shared community at once, since presence is kept
+    /// per person and not per topic.
+    pub(crate) async fn announce_status(&self) {
+        let Some(sp) = self.beacon() else {
+            return;
+        };
+        gossip_beacon(&self.topic_senders(), &sp).await;
+        let devices = presence_devices(&self.read(), now_ms());
+        self.deliver_direct(&sp, devices).await;
+    }
+
+    /// Delivers `sp` directly to each device, acknowledged. Parallel, with at most
+    /// `DIRECT_BEACON_PARALLEL` sends at a time and `DIRECT_BEACON_TIMEOUT` for each. Best effort: a
+    /// device that cannot be reached gets the next beacon.
+    async fn deliver_direct(&self, sp: &SignedPresence, devices: Vec<DeviceId>) {
+        let bytes = match self.request_bytes(&Request::Presence(Box::new(sp.clone()))) {
             Ok(bytes) => bytes,
             Err(e) => {
-                warn!(error = %e, "could not encode our offline beacon");
+                warn!(error = %e, "could not encode our presence");
                 return;
             }
         };
-        // Gossip is fire-and-forget and the node closes right after, so also deliver it directly,
-        // acknowledged, to contacts and to the community members we have heard from recently.
-        let devices = offline_devices(&self.read(), now_ms());
         let node = self.node();
+        let slots = Arc::new(tokio::sync::Semaphore::new(DIRECT_BEACON_PARALLEL));
         let mut sends = tokio::task::JoinSet::new();
         for device in devices {
             let node = node.clone();
             let bytes = bytes.clone();
+            let slots = slots.clone();
             sends.spawn(async move {
-                if let Err(e) = node.request(device, bytes).await {
-                    debug!(device = %device, error = %e, "offline beacon not delivered directly");
+                let Ok(_slot) = slots.acquire().await else {
+                    return;
+                };
+                match tokio::time::timeout(DIRECT_BEACON_TIMEOUT, node.request(device, bytes)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => debug!(device = %device, error = %e, "presence not delivered directly"),
+                    Err(_) => debug!(device = %device, "presence not delivered directly: timed out"),
                 }
             });
         }
@@ -445,6 +475,9 @@ impl Engine {
         };
         if community.is_some() {
             self.inner.member_seen.notify_waiters();
+        } else {
+            // A contact's direct beacon: exchange profiles once this run. See `profile_sync`.
+            self.sync_profile_with(root, sp.cert.device);
         }
         if before != after {
             self.emit(EngineEvent::PresenceChanged {
@@ -485,9 +518,9 @@ pub(crate) fn beacon_devices(w: &World) -> Vec<DeviceId> {
     devices.into_iter().collect()
 }
 
-/// Where the offline beacon goes directly: every contact device, plus the devices of community
-/// members whose beacon we heard within the presence window (so they currently show us online).
-fn offline_devices(w: &World, now: u64) -> Vec<DeviceId> {
+/// Where a status beacon goes directly: every contact device, plus the devices of community members
+/// whose beacon we heard within the presence window (so they currently show us online).
+pub(crate) fn presence_devices(w: &World, now: u64) -> Vec<DeviceId> {
     let mut devices: BTreeSet<DeviceId> = beacon_devices(w).into_iter().collect();
     for (root, heard) in &w.presence {
         let fresh = now.saturating_sub(heard.received_ms) < millis(w.timings.presence_window);

@@ -1,4 +1,4 @@
-// Global keyboard shortcuts, as ui/keyboard.js has them: Ctrl/Cmd+K quick switcher, Ctrl/Cmd+, Settings, Alt+Up/Down
+// Global keyboard shortcuts, as the old UI's keyboard.js has them: Ctrl/Cmd+K quick switcher, Ctrl/Cmd+, Settings, Alt+Up/Down
 // between channels or conversations, Alt+Shift+Up/Down to the next or previous unread, Esc in a DM or group back to
 // Friends, and Up/Down through the server rail. Mounted once, in App.
 import { useEffect } from 'react';

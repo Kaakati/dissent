@@ -1,6 +1,6 @@
 // Call actions: voice channels, live direct and group calls, ringing calls, the call chat, and the sounds that follow the
 // call. Each action calls the engine and then writes the shell store, so the views only read. Ported from the calls
-// section of ui/actions.js. Failures become toasts; nothing here throws into a view.
+// section of the old UI's actions.js. Failures become toasts; nothing here throws into a view.
 import { create } from 'zustand';
 import { api } from './api';
 import { has } from './features';

@@ -20,6 +20,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::crypt::{self, cipher_len, plain_len_for_cipher, Sealed};
+use crate::tally::{Observer, SourceCount};
 use crate::error::{FilesError, Result};
 use crate::file_ref::FileRef;
 use crate::name::{sanitize_mime, sanitize_name};
@@ -321,14 +322,32 @@ impl Files {
         from: &[EndpointAddr],
         fref: &FileRef,
         dest_dir: &Path,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<PathBuf> {
+        self.fetch_tallied(endpoint, from, fref, dest_dir, progress, |_| {})
+            .await
+    }
+
+    /// Like [`Files::fetch`], and also reports what each provider delivered. `sources` gets the
+    /// counts after every change, in the order the providers were given. A provider that delivers
+    /// bytes and then fails keeps its share, and the next provider fetches the rest.
+    pub async fn fetch_tallied(
+        &self,
+        endpoint: &Endpoint,
+        from: &[EndpointAddr],
+        fref: &FileRef,
+        dest_dir: &Path,
         mut progress: impl FnMut(u64, u64),
+        mut sources: impl FnMut(&[SourceCount]) + Send,
     ) -> Result<PathBuf> {
         fref.check(self.size_limit)?;
         self.check_space(fref.cipher_size + fref.size + DISK_MARGIN)
             .await?;
         let hash = Hash::from_bytes(fref.hash);
+        let mut sink = |counts: &[SourceCount]| sources(counts);
+        let mut observer = Observer::new(fref.cipher_size, from.len(), &mut sink);
         let keep = self
-            .ensure_blob(endpoint, from, hash, fref.cipher_size, &mut progress)
+            .ensure_blob(endpoint, from, hash, fref.cipher_size, &mut progress, &mut observer)
             .await?;
         let result = self.decrypt_to_dest(hash, fref, dest_dir).await;
         drop(keep);
@@ -376,7 +395,14 @@ impl Files {
 
         let hash = Hash::from_bytes(hash);
         let keep = self
-            .ensure_blob(endpoint, from, hash, cipher_size, &mut progress)
+            .ensure_blob(
+                endpoint,
+                from,
+                hash,
+                cipher_size,
+                &mut progress,
+                &mut Observer::new(cipher_size, from.len(), &mut |_: &[SourceCount]| {}),
+            )
             .await?;
         let result = self.pin_hash(hash).await;
         drop(keep);
@@ -520,6 +546,7 @@ impl Files {
         hash: Hash,
         cipher_size: u64,
         progress: &mut impl FnMut(u64, u64),
+        observer: &mut Observer<'_>,
     ) -> Result<TempTag> {
         let hf = HashAndFormat::raw(hash);
         // Protects the blob from garbage collection while this call runs.
@@ -532,7 +559,7 @@ impl Files {
             let base = self.local_bytes(hf).await?;
             progress(base, cipher_size);
             let budget = self.timeouts.overall(cipher_size);
-            let download = self.download_providers(endpoint, from, hf, cipher_size, base, progress);
+            let download = self.download_providers(endpoint, from, hf, cipher_size, progress, observer);
             let outcome = match tokio::time::timeout(budget, download).await {
                 Ok(result) => result,
                 Err(_) => Err(FilesError::Fetch(format!(
@@ -552,6 +579,7 @@ impl Files {
             )));
         }
         progress(cipher_size, cipher_size);
+        observer.observe(cipher_size);
         Ok(keep)
     }
 
@@ -561,16 +589,23 @@ impl Files {
         from: &[EndpointAddr],
         hf: HashAndFormat,
         cipher_size: u64,
-        base: u64,
         progress: &mut impl FnMut(u64, u64),
+        observer: &mut Observer<'_>,
     ) -> Result<()> {
         if from.is_empty() {
             return Err(FilesError::NoProviders);
         }
         let mut last_error = String::from("no provider had the blob");
-        for addr in from {
+        for (index, addr) in from.iter().enumerate() {
+            // Earlier providers may have stored bytes, so this attempt starts from what is held now.
+            let base = self.local_bytes(hf).await?;
+            observer.begin(index, base);
+            let mut report = |held: u64, total: u64| {
+                observer.observe(held);
+                progress(held, total);
+            };
             match self
-                .download_from(endpoint, addr.clone(), hf, cipher_size, base, progress)
+                .download_from(endpoint, addr.clone(), hf, cipher_size, base, &mut report)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -634,7 +669,6 @@ impl Files {
         dest_dir: &Path,
     ) -> Result<PathBuf> {
         tokio::fs::create_dir_all(dest_dir).await?;
-        let target = unique_path(dest_dir, &fref.safe_name()).await;
 
         // If this future is dropped (cancelled), the blocking step sees the flag and removes the
         // partial output instead of moving it into place.
@@ -647,14 +681,14 @@ impl Files {
                 read: 0,
             },
             partial: self.staging_path(),
-            target: target.clone(),
+            dest_dir: dest_dir.to_path_buf(),
+            name: fref.safe_name(),
             key: fref.file_key(),
             size: fref.size,
             cipher_size: fref.cipher_size,
             cancelled,
         };
-        run_blocking(move || job.run()).await?;
-        Ok(target)
+        run_blocking(move || job.run()).await
     }
 
     fn staging_path(&self) -> PathBuf {
@@ -769,7 +803,8 @@ impl Drop for CancelOnDrop {
 struct DecryptJob {
     reader: StoreReader,
     partial: PathBuf,
-    target: PathBuf,
+    dest_dir: PathBuf,
+    name: String,
     key: crypt::FileKey,
     size: u64,
     cipher_size: u64,
@@ -777,12 +812,12 @@ struct DecryptJob {
 }
 
 impl DecryptJob {
-    fn run(mut self) -> Result<()> {
+    fn run(mut self) -> Result<PathBuf> {
         let outcome = self.decrypt_to_partial().and_then(|()| {
             if self.cancelled.load(Ordering::SeqCst) {
                 return Err(FilesError::Fetch("fetch was cancelled".to_owned()));
             }
-            place(&self.partial, &self.target)
+            place(&self.partial, &self.dest_dir, &self.name)
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&self.partial);
@@ -803,37 +838,38 @@ impl DecryptJob {
     }
 }
 
-/// Moves a finished staging file to its final name. Staging and destination can sit on different
-/// volumes, where a rename fails, so that case copies the file instead.
-fn place(partial: &Path, target: &Path) -> Result<()> {
-    if fs::rename(partial, target).is_ok() {
-        return Ok(());
+/// Moves a finished staging file into `dir` under a free name, and returns that path. Each candidate name is claimed
+/// with `create_new` before the move, so two downloads that finish together never take the same name. The claimed
+/// empty file is then replaced by the staging file. Staging and destination can sit on different volumes, where a
+/// rename fails, so that case copies the file instead.
+fn place(partial: &Path, dir: &Path, name: &str) -> Result<PathBuf> {
+    for candidate in candidate_names(name) {
+        let target = dir.join(candidate);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+        if fs::rename(partial, &target).is_ok() {
+            return Ok(target);
+        }
+        if let Err(e) = fs::copy(partial, &target) {
+            let _ = fs::remove_file(&target);
+            return Err(e.into());
+        }
+        fs::remove_file(partial)?;
+        return Ok(target);
     }
-    if let Err(e) = fs::copy(partial, target) {
-        let _ = fs::remove_file(target);
-        return Err(e.into());
-    }
-    fs::remove_file(partial)?;
-    Ok(())
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free name for the download").into())
 }
 
-/// Picks a free name in `dir`, adding " (n)" before the extension when needed.
-async fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let direct = dir.join(name);
-    if !tokio::fs::try_exists(&direct).await.unwrap_or(true) {
-        return direct;
-    }
+/// The names to try for `name`: the name itself, then " (1)", " (2)" and so on before the extension.
+fn candidate_names(name: &str) -> impl Iterator<Item = String> + '_ {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
         _ => (name, ""),
     };
-    for n in 1u32.. {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !tokio::fs::try_exists(&candidate).await.unwrap_or(true) {
-            return candidate;
-        }
-    }
-    unreachable!("u32 candidates exhausted")
+    (0u32..10_000).map(move |n| if n == 0 { name.to_owned() } else { format!("{stem} ({n}){ext}") })
 }
 
 fn pin_name(hash: &Hash) -> String {
@@ -872,4 +908,48 @@ where
 
 fn store_err(e: impl std::fmt::Display) -> FilesError {
     FilesError::Store(e.to_string())
+}
+
+#[cfg(test)]
+mod place_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_names_add_a_number_before_the_extension() {
+        let names: Vec<String> = candidate_names("notes.txt").take(3).collect();
+        assert_eq!(names, ["notes.txt", "notes (1).txt", "notes (2).txt"]);
+        let bare: Vec<String> = candidate_names(".profile").take(2).collect();
+        assert_eq!(bare, [".profile", ".profile (1)"]);
+    }
+
+    #[test]
+    fn files_with_one_name_that_finish_together_all_keep_their_own_copy() {
+        const DOWNLOADS: usize = 8;
+        let root = std::env::temp_dir().join(format!("dissent-place-{}-{:016x}", std::process::id(), rand::random::<u64>()));
+        let dest = root.join("Downloads");
+        fs::create_dir_all(&dest).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(DOWNLOADS));
+        let handles: Vec<_> = (0..DOWNLOADS)
+            .map(|i| {
+                let (barrier, dest) = (Arc::clone(&barrier), dest.clone());
+                let partial = root.join(format!("{i}.part"));
+                std::thread::spawn(move || {
+                    fs::write(&partial, format!("body {i}")).unwrap();
+                    barrier.wait();
+                    place(&partial, &dest, "notes.txt").unwrap()
+                })
+            })
+            .collect();
+        let paths: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let mut distinct = paths.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), DOWNLOADS, "every download got its own name");
+        let mut bodies: Vec<String> = paths.iter().map(|p| fs::read_to_string(p).unwrap()).collect();
+        bodies.sort();
+        bodies.dedup();
+        assert_eq!(bodies.len(), DOWNLOADS, "no download overwrote another");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

@@ -26,6 +26,9 @@ async fn joiner_receives_six_thousand_messages() {
             .send_message(id, general, format!("m{i}"))
             .await
             .expect("alice posts");
+        if i % 500 == 0 {
+            eprintln!("PROBE sent {i} in {:?}", started.elapsed());
+        }
     }
     eprintln!("authored 6000 messages in {:?}", started.elapsed());
 

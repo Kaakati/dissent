@@ -1,17 +1,19 @@
 //! Attachments: the native file picker, drag and drop onto the window, and opening or revealing downloaded files.
 //!
-//! Opening and revealing only work inside `<data_dir>/downloads`. Paths are resolved first (symlinks and `..`
-//! included), so a message can never make the app open an arbitrary file.
+//! Opening and revealing only work for files Dissent saved itself, in whichever download folder it used. The webview
+//! may read those files and the thumbnails, never the rest of a download folder. Paths are resolved first (symlinks
+//! and `..` included), so a message can never make the app open an arbitrary file.
 
 use std::path::{Path, PathBuf};
 
+use dissent_core::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tracing::warn;
 
-use crate::commands::AppState;
+use crate::commands::{engine, AppState};
 
 pub const EVENT_DROPPED: &str = "dissent://files-dropped";
 pub const EVENT_DRAG_OVER: &str = "dissent://drag-over";
@@ -45,20 +47,39 @@ pub fn describe(path: &Path) -> Result<PickedFile, String> {
     })
 }
 
-/// `<data_dir>/downloads`, the only folder the app opens files from.
-pub fn downloads_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("downloads")
-}
-
-/// Resolves `candidate` to its real path and checks it sits inside `downloads`. Symlinks and `..` are resolved
-/// before the check, so a link or traversal that leaves the folder is rejected.
-pub fn validate_inside(downloads: &Path, candidate: &Path) -> Result<PathBuf, String> {
-    let root = std::fs::canonicalize(downloads).map_err(|_| "no downloads folder yet".to_string())?;
+/// Resolves `candidate` to its real path and checks that Dissent saved it. `saved` holds the finished downloads as the
+/// engine recorded them, in any folder it has used. Symlinks and `..` are resolved first, so a path passes only when
+/// its real file is one Dissent saved. Another file in the same folder is refused.
+pub fn validate_saved(saved: &[PathBuf], candidate: &Path) -> Result<PathBuf, String> {
     let real = std::fs::canonicalize(candidate).map_err(|e| format!("cannot open that path: {e}"))?;
-    if !real.starts_with(&root) {
-        return Err("that path is outside the downloads folder".into());
+    if !saved.iter().any(|p| std::fs::canonicalize(p).is_ok_and(|s| s == real)) {
+        return Err("that file was not saved by Dissent".into());
     }
     Ok(real)
+}
+
+/// Lets the asset protocol read each saved download that is still on disk, and nothing else in its folder. Called at
+/// startup and on every transfer change, so a finished download can be shown.
+pub fn allow_saved(app: &AppHandle, saved: &[PathBuf]) {
+    for path in saved.iter().filter(|p| p.is_file()) {
+        if let Err(e) = app.asset_protocol_scope().allow_file(path) {
+            warn!(error = %e, path = %path.display(), "could not allow a saved download");
+        }
+    }
+}
+
+/// The folder a download goes to unless the user picked one: the OS Downloads folder. A portable exe keeps its
+/// profile's folder instead, so it does not write to the host's Downloads. `None` leaves the engine on that folder.
+pub fn default_download_dir(app: &AppHandle) -> Option<PathBuf> {
+    if crate::profile::mode() == crate::profile::Mode::Portable {
+        return None;
+    }
+    app.path().download_dir().ok()
+}
+
+/// Allows the asset protocol to read the files a freshly started engine already saved.
+pub fn prepare_engine(app: &AppHandle, engine: &Engine) {
+    allow_saved(app, &engine.saved_files());
 }
 
 /// Shows the native picker with multi-select. Cancelling gives an empty list.
@@ -75,17 +96,17 @@ pub async fn pick_files(app: AppHandle) -> Result<Vec<PickedFile>, String> {
     Ok(out)
 }
 
-/// Opens the folder that holds a downloaded file, with the file selected.
+/// Opens the folder that holds a saved download, with the file selected.
 #[tauri::command]
-pub fn reveal_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    let real = validate_inside(&downloads_dir(&state.data_dir), Path::new(&path))?;
+pub async fn reveal_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let real = validate_saved(&engine(&state).await?.saved_files(), Path::new(&path))?;
     app.opener().reveal_item_in_dir(&real).map_err(|e| e.to_string())
 }
 
-/// Opens a downloaded file with the OS default application.
+/// Opens a saved download with the OS default application.
 #[tauri::command]
-pub fn open_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    let real = validate_inside(&downloads_dir(&state.data_dir), Path::new(&path))?;
+pub async fn open_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let real = validate_saved(&engine(&state).await?.saved_files(), Path::new(&path))?;
     if !real.is_file() {
         return Err("only files can be opened".into());
     }
@@ -122,11 +143,12 @@ pub fn install(app: &AppHandle) {
     });
 }
 
-/// Creates the downloads folder and allows the asset protocol to read it, and nothing else.
-pub fn allow_downloads(app: &AppHandle, data_dir: &Path) -> tauri::Result<()> {
-    let downloads = downloads_dir(data_dir);
-    std::fs::create_dir_all(&downloads)?;
-    app.asset_protocol_scope().allow_directory(&downloads, true)?;
+/// Creates the thumbnails folder and allows the asset protocol to read it. Thumbnails are the previews of pictures in
+/// messages. They live under the data dir, apart from the downloads.
+pub fn allow_thumbnails(app: &AppHandle, data_dir: &Path) -> tauri::Result<()> {
+    let thumbnails = data_dir.join("thumbnails");
+    std::fs::create_dir_all(&thumbnails)?;
+    app.asset_protocol_scope().allow_directory(&thumbnails, true)?;
     Ok(())
 }
 
@@ -141,6 +163,11 @@ mod tests {
         dir
     }
 
+    fn file(path: &Path, body: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
     #[test]
     fn mime_comes_from_the_extension() {
         assert_eq!(mime_for(Path::new("photo.png")), "image/png");
@@ -150,43 +177,58 @@ mod tests {
     }
 
     #[test]
-    fn a_file_inside_downloads_is_accepted() {
-        let data = scratch("inside");
-        let downloads = downloads_dir(&data);
-        std::fs::create_dir_all(downloads.join("sub")).unwrap();
-        std::fs::write(downloads.join("sub/a.txt"), b"x").unwrap();
-        assert!(validate_inside(&downloads, &downloads.join("sub/a.txt")).is_ok());
-        assert!(validate_inside(&downloads, &downloads.join("sub/../sub/a.txt")).is_ok());
+    fn a_saved_file_is_accepted_in_any_folder_it_was_saved_to() {
+        let data = scratch("saved");
+        let old = data.join("old-downloads");
+        let new = data.join("Downloads");
+        file(&old.join("a.txt"), b"a");
+        file(&new.join("b.txt"), b"b");
+        let saved = vec![old.join("a.txt"), new.join("b.txt")];
+        assert!(validate_saved(&saved, &old.join("a.txt")).is_ok());
+        assert!(validate_saved(&saved, &new.join("..").join("Downloads").join("b.txt")).is_ok());
         let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
-    fn dot_dot_out_of_downloads_is_rejected() {
+    fn a_file_dissent_did_not_save_is_refused_even_inside_a_download_folder() {
+        let data = scratch("unsaved");
+        let downloads = data.join("Downloads");
+        file(&downloads.join("saved.txt"), b"a");
+        file(&downloads.join("other.txt"), b"b");
+        let saved = vec![downloads.join("saved.txt")];
+        assert!(validate_saved(&saved, &downloads.join("other.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn dot_dot_out_of_a_download_folder_to_an_unsaved_file_is_refused() {
         let data = scratch("dotdot");
-        let downloads = downloads_dir(&data);
-        std::fs::create_dir_all(&downloads).unwrap();
-        std::fs::write(data.join("secret.txt"), b"x").unwrap();
-        let escape = downloads.join("../secret.txt");
-        assert!(validate_inside(&downloads, &escape).is_err());
+        let downloads = data.join("Downloads");
+        file(&downloads.join("a.txt"), b"a");
+        file(&data.join("secret.txt"), b"x");
+        let saved = vec![downloads.join("a.txt")];
+        assert!(validate_saved(&saved, &downloads.join("..").join("secret.txt")).is_err());
         let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
-    fn a_missing_path_is_rejected() {
-        let data = scratch("missing");
-        let downloads = downloads_dir(&data);
-        std::fs::create_dir_all(&downloads).unwrap();
-        assert!(validate_inside(&downloads, &downloads.join("nope.txt")).is_err());
+    fn a_saved_file_that_was_moved_away_is_refused() {
+        let data = scratch("moved");
+        let downloads = data.join("Downloads");
+        file(&downloads.join("a.txt"), b"a");
+        let saved = vec![downloads.join("a.txt")];
+        std::fs::remove_file(downloads.join("a.txt")).unwrap();
+        assert!(validate_saved(&saved, &downloads.join("a.txt")).is_err());
         let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
-    fn a_symlink_out_of_downloads_is_rejected() {
+    fn a_symlink_to_an_unsaved_file_is_refused() {
         let data = scratch("symlink");
-        let downloads = downloads_dir(&data);
-        std::fs::create_dir_all(&downloads).unwrap();
+        let downloads = data.join("Downloads");
+        file(&downloads.join("ok.txt"), b"a");
         let outside = data.join("outside.txt");
-        std::fs::write(&outside, b"x").unwrap();
+        file(&outside, b"x");
         let link = downloads.join("link.txt");
         #[cfg(windows)]
         let made = std::os::windows::fs::symlink_file(&outside, &link);
@@ -196,7 +238,8 @@ mod tests {
             // Creating symlinks on Windows needs Developer Mode or admin rights. Skip rather than fail there.
             eprintln!("skipped: cannot create a symlink in this environment");
         } else {
-            assert!(validate_inside(&downloads, &link).is_err());
+            let saved = vec![downloads.join("ok.txt")];
+            assert!(validate_saved(&saved, &link).is_err());
         }
         let _ = std::fs::remove_dir_all(&data);
     }

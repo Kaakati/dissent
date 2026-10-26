@@ -1,5 +1,5 @@
 // Invite links: a link to join a server, and the contact link that starts a direct conversation. Ported from
-// openInviteDialog and openContactDialog in ui/views/dialogs.js.
+// openInviteDialog and openContactDialog in the old UI's views/dialogs.js.
 import { AddressCard } from '@/components/address-card';
 import { Button } from '@/components/ui/button';
 import { contactLink, createFullInvite, createInvite } from '@/lib/actions';

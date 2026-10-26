@@ -92,6 +92,13 @@ pub(crate) enum Request {
     WriteKeys { community: CommunityId },
     /// Whether the device supports member-sealed control. Appended, see `epoch_keys`.
     MemberSealedSupport { community: CommunityId },
+    /// The contacts this device shares with its contacts, for mutual friends. Answered only to an
+    /// accepted, unblocked contact. Appended, see `friends`.
+    Friends,
+    /// The history keys this device holds, for a joiner. Answered by the rule for `EpochHistory`. Appended, see `history`.
+    HistoryKeys { community: CommunityId },
+    /// Whether this device can read and write history messages. Appended, see `history`.
+    HistorySupport,
     /// The invite preview of a community, for a holder of its invite secret. `token` is the token of
     /// that secret, which the responder checks itself, since the requester is not yet a member.
     /// `invite_id` names the invite used, so the answer can say whether it is live. Appended, see
@@ -101,6 +108,28 @@ pub(crate) enum Request {
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
     },
+    /// `Fetch`, answered with each event as its own bytes, so a requester skips an event it cannot
+    /// decode instead of failing the page. Appended, see `sync::decode_events`.
+    FetchRaw {
+        community: CommunityId,
+        ids: Vec<EventId>,
+    },
+    /// `InvitePreview`, answered with the extra a rename and banner add. A responder from before
+    /// renames cannot decode it and answers with an error, and the requester asks `InvitePreview`.
+    /// Appended, see `invite_preview`. Not in `community()`, as `InvitePreview` is not.
+    InvitePreviewFull {
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    },
+    /// A profile banner, sent directly to a contact's device, as `Profile` is for the picture. A
+    /// device from before banners cannot decode it and answers with an error. Appended, see
+    /// `profile_banners`.
+    ProfileBanner(Box<crate::profile_banners::SignedBanner>),
+    /// The requester's signed profile, and a request for ours. Sent once a run to each contact, so a
+    /// picture set before the contact existed still arrives. A device from before this cannot decode
+    /// it and answers with an error. Appended, see `profile_sync`.
+    ProfileSync(Box<crate::avatars::SignedProfile>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,6 +182,22 @@ pub(crate) enum Response {
     MemberSealedSupport(bool),
     /// The signed preview for `Request::InvitePreview`. Appended, see `invite_preview`.
     InvitePreview(Box<crate::invite_preview::SignedPreview>),
+    /// The events of a `FetchRaw`, each as the bytes of its `SignedEvent`. Appended.
+    EventsRaw(Vec<Vec<u8>>),
+    /// The root ids of our contacts, or `None` when we share nothing with the requester. Appended, see
+    /// `friends`.
+    Friends(Option<Vec<dissent_identity::RootId>>),
+    /// The signed preview and extra for `Request::InvitePreviewFull`. Appended, see `invite_preview`.
+    InvitePreviewFull(Box<crate::invite_preview::SignedPreviewFull>),
+    /// The history keys the responder holds, as `(epoch, key)`. Appended, see `history`.
+    HistoryKeys(Vec<(u64, [u8; 32])>),
+    /// Whether the responder supports history messages. Appended, see `history`.
+    HistorySupport(bool),
+    /// The answer to `Request::ProfileSync`: the responder's signed profile and banner. Appended.
+    ProfileSync {
+        profile: Box<crate::avatars::SignedProfile>,
+        banner: Option<Box<crate::profile_banners::SignedBanner>>,
+    },
 }
 
 impl Request {
@@ -172,7 +217,9 @@ impl Request {
             | Request::SecretHistory { community }
             | Request::EpochHistory { community }
             | Request::WriteKeys { community }
-            | Request::MemberSealedSupport { community } => Some(*community),
+            | Request::MemberSealedSupport { community }
+            | Request::HistoryKeys { community }
+            | Request::FetchRaw { community, .. } => Some(*community),
             _ => None,
         }
     }

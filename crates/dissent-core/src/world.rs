@@ -15,7 +15,7 @@ use crate::store::{
 };
 use crate::views::{
     ChannelInfo, CommunityRef, CommunitySummary, CommunityView, HandleView, MemberInfo,
-    MessageItem, ReplyPreview, UserView,
+    MentionView, MessageItem, ReplyPreview, UserView,
 };
 use crate::wire::SignedAddr;
 use dissent_discovery::ContactCard;
@@ -59,8 +59,13 @@ pub(crate) struct World {
     pub conv_acts: BTreeMap<crate::groups::ConvId, Vec<crate::conv_actions::ConvAct>>,
     /// When each contact was added, and when this device first saw each person.
     pub contact_times: crate::contact_times::ContactTimes,
+    pub mention_reads: crate::mention_reads::MentionReads,
     /// Attachment downloads and mirror settings.
     pub attach: crate::attachments::AttachBook,
+    /// Attachments whose thumbnail is being fetched now. Not stored: a restart fetches again.
+    pub thumb_fetching: std::collections::BTreeSet<String>,
+    /// Per-provider counts of the downloads in this run. Not stored: a restart starts them again.
+    pub source_counts: BTreeMap<String, crate::attachments::LiveSources>,
     /// Inbox service state: envelopes and key packages held for our root.
     pub inbox: crate::inbox::InboxBook,
     /// This device's own status, from `status.bin`.
@@ -89,6 +94,8 @@ pub(crate) struct World {
     pub own_avatar: Option<Picture>,
     /// Pictures from contacts' direct profiles, by root, with the HLC of each.
     pub peer_avatars: BTreeMap<RootId, (Hlc, Option<Picture>)>,
+    /// This device's profile banner, and the banners contacts sent directly. See `profile_banners`.
+    pub banners: crate::profile_banners::BannerBook,
 }
 
 impl World {
@@ -119,8 +126,11 @@ impl World {
         let conv_msgs = crate::groups::load_messages(&paths, &conv_book);
         let conv_acts = crate::conv_actions::load_acts(&paths, &conv_book);
         let contact_times = crate::contact_times::ContactTimes::load(&paths)?;
+        let mention_reads = crate::mention_reads::MentionReads::load(&paths)?;
         let inbox = crate::inbox::InboxBook::load(&paths)?;
         let attach = crate::attachments::AttachBook::load(&paths)?;
+        let thumb_fetching = std::collections::BTreeSet::new();
+        let source_counts = BTreeMap::new();
         let access = crate::access::load(&paths, communities.keys().copied())?;
         for (id, c) in communities.iter_mut() {
             if let Some(keys) = access.get(id) {
@@ -143,6 +153,8 @@ impl World {
             .flatten();
         let peer_avatars = crate::avatars::read_sealed(&paths.peer_avatars(), &crate::avatars::peers_vault(vault))?
             .unwrap_or_default();
+        let banners = crate::avatars::read_sealed(&paths.banners(), &crate::avatars::peers_vault(vault))?
+            .unwrap_or_default();
         Ok(World {
             me: identity.root_id(),
             device: identity.device_id(),
@@ -159,8 +171,11 @@ impl World {
             conv_msgs,
             conv_acts,
             contact_times,
+            mention_reads,
             inbox,
             attach,
+            thumb_fetching,
+            source_counts,
             own,
             auto_idle: false,
             presence: BTreeMap::new(),
@@ -175,6 +190,7 @@ impl World {
             push_limiter: Default::default(),
             own_avatar,
             peer_avatars,
+            banners,
         })
     }
 
@@ -263,17 +279,83 @@ impl World {
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
             icon: self.icon_of(c),
+            mentions: self.community_mentions(c, crate::server_prefs::of(self, c.id()).suppress_everyone),
+            can_mention_everyone: c.state().may_mention_everyone(&self.me),
         }
     }
 
+    /// Whether a person can be mentioned in `c` as this device reads it: a member who is not banned.
+    fn can_be_mentioned(c: &Community, user: &RootId) -> bool {
+        c.is_member(user) && !c.state().banned.contains(user)
+    }
+
+    /// What a message mentions, as this device reads it. A person counts only if they can be
+    /// mentioned here. `everyone` counts only if the author could mention everyone when the message
+    /// was accepted (`mention_all`). Returns whether this device is mentioned, the people who count,
+    /// and whether `@everyone` counts.
+    pub(crate) fn resolve_mentions(&self, c: &Community, mention_all: bool, plain: &str) -> (bool, Vec<MentionView>, bool) {
+        let raw = crate::attachments::mentions_of(plain);
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for bytes in raw.users {
+            let user = RootId(bytes);
+            if !Self::can_be_mentioned(c, &user) || !seen.insert(user) {
+                continue;
+            }
+            out.push(MentionView {
+                id: user.to_string(),
+                display_name: self.display_name(&user),
+            });
+        }
+        let everyone = raw.everyone && mention_all;
+        let me = seen.contains(&self.me) || (everyone && Self::can_be_mentioned(c, &self.me));
+        (me, out, everyone)
+    }
+
+    /// Unread mentions of this device in one text channel: messages newer than its last mark-read
+    /// that mention it. With `suppress_everyone` an `@everyone` alone does not count.
+    fn mention_count(&self, c: &Community, channel: &ChannelId, suppress_everyone: bool) -> u32 {
+        let key = crate::mention_reads::key(&c.id().to_string(), &channel.to_string());
+        let since = self.mention_reads.at.get(&key).copied().unwrap_or(0);
+        let Some(msgs) = c.state().messages.get(channel) else {
+            return 0;
+        };
+        msgs.iter()
+            .filter(|m| !m.deleted && m.hlc.wall_ms > since)
+            .filter(|m| {
+                let text = if m.sealed {
+                    c.content.get(&m.id).map(|(_, t)| t.clone()).unwrap_or_default()
+                } else {
+                    m.text.clone()
+                };
+                let (me, mentions, everyone) = self.resolve_mentions(c, m.mention_all, &text);
+                let by_name = mentions.iter().any(|x| x.id == self.me.to_string());
+                me && (by_name || !suppress_everyone || !everyone)
+            })
+            .count() as u32
+    }
+
+    /// Unread mentions of this device in the community's text channels.
+    fn community_mentions(&self, c: &Community, suppress_everyone: bool) -> u32 {
+        c.state()
+            .channels
+            .keys()
+            .filter(|id| !c.state().voice_channels.contains(id))
+            .map(|id| self.mention_count(c, id, suppress_everyone))
+            .sum()
+    }
+
     pub fn community_view(&self, c: &Community) -> CommunityView {
+        let suppress_everyone = crate::server_prefs::of(self, c.id()).suppress_everyone;
         let channels = c
             .state()
             .channels
             .iter()
             .map(|(id, name)| {
                 let voice = c.state().voice_channels.contains(id);
-                ChannelInfo::new(*id, name.clone(), voice, &c.state().settings(id))
+                let mut info = ChannelInfo::new(*id, name.clone(), voice, &c.state().settings(id));
+                info.mentions = if voice { 0 } else { self.mention_count(c, id, suppress_everyone) };
+                info
             })
             .collect();
         let now = crate::engine::now_ms();
@@ -299,10 +381,21 @@ impl World {
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
             icon: self.icon_of(c),
+            can_mention_everyone: c.state().may_mention_everyone(&self.me),
+            banner: self.banner_of(c),
+            banner_poster: self.banner_poster_of(c),
+            banner_preset: crate::invite_preview::preset_of(c.state().banner.and_then(|(_, b)| b)),
+            description: c.state().profile.as_ref().map(|(_, p)| p.description.clone()).unwrap_or_default(),
+            traits: c.state().profile.as_ref().map(|(_, p)| p.traits.clone()).unwrap_or_default(),
+            created_ms: c.genesis.created_ms,
             channels,
             members,
             relays: c.state().relays.clone(),
             member_only: c.state().member_only,
+            history: match c.state().history {
+                dissent_events::HistorySetting::All => "all".to_string(),
+                dissent_events::HistorySetting::SinceJoin => "since_join".to_string(),
+            },
             // Some control events are waiting for a key this device lacks, so the history is not all
             // readable yet. A member that holds the key sends it when asked.
             history_locked: c
@@ -318,11 +411,15 @@ impl World {
     pub fn user_view(&self, user: &RootId) -> UserView {
         let shared = self.shared_with(user);
         let fields = crate::local::user_fields(self, user);
+        let (banner, banner_poster, banner_preset) = self.profile_banner_view(user);
         UserView {
             root_id: user.to_string(),
             suffix: user.suffix(),
             display_name: self.display_name(user),
             avatar: self.avatar_of(user),
+            banner,
+            banner_poster,
+            banner_preset,
             is_contact: self.is_contact(user),
             identity_changed_ms: crate::identity_watch::last_change(&self.identity_changes, user),
             key_changed_ms: fields.key_changed_ms,
@@ -341,6 +438,7 @@ impl World {
                     handle: c.handle_of(user),
                 })
                 .collect(),
+            mutual_friends: Vec::new(),
             mutual_communities: shared
                 .iter()
                 .map(|c| CommunityRef {
@@ -373,22 +471,29 @@ impl World {
                 // Sealed text is not in state. It comes from this device's content view.
                 let decrypted = c.content.get(&m.id).map(|(_, text)| text.clone());
                 let locked = m.sealed && !m.deleted && decrypted.is_none();
+                let joined_ms = c.state().members.get(&self.me).map(|member| member.joined.wall_ms);
+                let before_join = locked && joined_ms.is_some_and(|at| m.hlc.wall_ms < at);
                 let text = if m.sealed {
                     decrypted.unwrap_or_default()
                 } else {
                     m.text.clone()
                 };
+                let (mentions_me, mentions, mentions_everyone) = self.resolve_mentions(c, m.mention_all, &text);
                 MessageItem {
+                    mentions_me,
+                    mentions,
+                    mentions_everyone,
                     id: m.id.to_string(),
                     author: m.author.to_string(),
                     author_name: self.display_name(&m.author),
                     attachments: self.attachment_views(&text),
-                    embeds: crate::attachments::embeds_of(&text),
+                    embeds: crate::attachments::embed_views(&self.paths, &text),
                     text: crate::attachments::text_of(&text),
                     ms: m.hlc.wall_ms,
                     edited: m.edited,
                     deleted: m.deleted,
                     locked,
+                    before_join,
                     reply_to: m
                         .reply_to
                         .and_then(|target| self.reply_preview(c, &by_id, target)),
@@ -481,7 +586,7 @@ fn load_community(
     if genesis.community != *id {
         return Err(CoreError::Invalid("genesis belongs to another community".into()));
     }
-    let valid: Vec<SignedEvent> = read_records::<SignedEvent>(&paths.events_log(id))?
+    let valid: Vec<SignedEvent> = crate::store::read_records_skipping::<SignedEvent>(&paths.events_log(id))?
         .into_iter()
         .filter(|se| se.verify().is_ok())
         .collect();

@@ -243,7 +243,7 @@ impl Discovery {
     /// up to [`RESOLVE_ATTEMPTS`] times. A lookup from a young node can miss the record.
     pub async fn resolve(&self, id: &CommunityId, secret: &[u8; 32]) -> Result<Option<CommunityRecord>> {
         let public_key = record::dht_public_key(secret, id);
-        match self.resolve_packet(&public_key).await? {
+        match self.resolve_packet(&public_key, false).await? {
             Some(packet) => CommunityRecord::from_private_packet(&packet, id, secret).map(Some),
             None => Ok(None),
         }
@@ -253,21 +253,25 @@ impl Discovery {
     /// if the record does not verify against `id`. An empty record means not discoverable.
     pub async fn resolve_user(&self, id: &RootId) -> Result<Option<UserRecord>> {
         let public_key = user_record::dht_key(id)?;
-        match self.resolve_packet(&public_key).await? {
+        match self.resolve_packet(&public_key, true).await? {
             Some(packet) => UserRecord::from_packet(&packet, id).map(Some),
             None => Ok(None),
         }
     }
 
-    /// The newest packet stored under `public_key`. Waits for the node to warm up, and retries a
-    /// lookup that finds nothing: a lookup can end without reaching the nodes that hold the record.
-    async fn resolve_packet(&self, public_key: &PublicKey) -> Result<Option<SignedPacket>> {
+    /// A packet stored under `public_key`. Waits for the node to warm up, and retries a lookup that finds nothing:
+    /// a lookup can end without reaching the nodes that hold the record. With `newest` false the first valid packet
+    /// is returned at once, which is enough for a community record. With `newest` true the lookup runs to the end,
+    /// so a withdrawal or a newer record cannot be missed. A user record needs that, since an older record can
+    /// still list a withdrawn address.
+    async fn resolve_packet(&self, public_key: &PublicKey, newest: bool) -> Result<Option<SignedPacket>> {
         self.wait_warm().await;
         for attempt in 1..=RESOLVE_ATTEMPTS {
-            // The first valid packet is enough. Finishing the lookup can take several more seconds.
             let response = self.dht().resolve(public_key, None).await;
-            if let Some(packet) = response.first().cloned() {
-                return Ok(Some(packet));
+            if !newest {
+                if let Some(packet) = response.first().cloned() {
+                    return Ok(Some(packet));
+                }
             }
             let outcome = response.complete().await;
             match outcome.most_recent {

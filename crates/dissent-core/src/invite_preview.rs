@@ -8,7 +8,9 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use dissent_discovery::InviteLink;
-use dissent_events::Picture;
+use dissent_events::state::valid_community_name;
+use dissent_events::state::{valid_profile, CommunityProfile};
+use dissent_events::{Banner, ChannelId, Payload, Picture, SealKey, SignedEvent, Trait};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, Genesis, Signature};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,7 @@ const ASK_WAIT: Duration = Duration::from_secs(10);
 /// How long fetching the icon may take. The card shows initials when it runs out.
 const ICON_WAIT: Duration = Duration::from_secs(5);
 const SIG_DOMAIN: &[u8] = b"dissent/invite-preview/v1";
+const EXTRA_SIG_DOMAIN: &[u8] = b"dissent/invite-preview-extra/v1";
 
 /// What a member shows of a community to people holding its invite.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +111,81 @@ impl SignedPreview {
     }
 }
 
+/// What a preview adds for clients that know renames, banners and profiles. It travels beside the
+/// `SignedPreview`, whose encoding older clients decode, so that one keeps the genesis name.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewExtra {
+    /// The owner's rename that set the current name, as stored. The joiner opens it with the invite
+    /// secret and checks that the genesis owner signed it, so the owner vouches for the name, not the
+    /// answering member. See [`proven_name`].
+    pub rename: Option<SignedEvent>,
+    /// The community banner: a preset, or a picture reference. Only the answering member vouches for
+    /// it, as for the icon.
+    pub banner: Option<Banner>,
+    /// The description and traits. Only the answering member vouches for them.
+    pub profile: Option<CommunityProfile>,
+}
+
+/// A preview with its extra, both signed by the answering device. The answer to
+/// `Request::InvitePreviewFull`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignedPreviewFull {
+    pub base: SignedPreview,
+    pub extra: PreviewExtra,
+    /// The device's signature over the base signature and the extra.
+    pub sig: Signature,
+}
+
+fn extra_signing_bytes(community: &CommunityId, base: &Signature, extra: &PreviewExtra) -> Result<Vec<u8>> {
+    let mut out = EXTRA_SIG_DOMAIN.to_vec();
+    out.extend_from_slice(community.as_bytes());
+    out.extend(postcard::to_allocvec(&(base, extra)).map_err(|e| CoreError::Encoding(e.to_string()))?);
+    Ok(out)
+}
+
+impl SignedPreviewFull {
+    /// Checks the base preview, the banner's size, and the device's signature over the extra.
+    pub(crate) fn verify(&self, community: &CommunityId) -> Result<()> {
+        self.base.verify(community)?;
+        if self.extra.banner.is_some_and(|banner| !banner.is_valid()) {
+            return Err(CoreError::Invalid("invite preview: the banner is out of range".into()));
+        }
+        if self.extra.profile.as_ref().is_some_and(|p| !valid_profile(&p.description, &p.traits)) {
+            return Err(CoreError::Invalid("invite preview: the profile is over its caps".into()));
+        }
+        self.base
+            .cert
+            .device
+            .verify(&extra_signing_bytes(community, &self.base.sig, &self.extra)?, &self.sig)
+            .map_err(|_| CoreError::Invalid("invite preview: the extra's signature does not verify".into()))
+    }
+}
+
+/// The name a rename proves for the community of `genesis`: the rename must be signed by the
+/// genesis owner, on the control channel, and open under `ring` to a valid `CommunityRename`.
+/// `None` otherwise, and the genesis name stands. An owner who rotated to a new root proves nothing
+/// here, so its renames show as the genesis name until the join.
+pub(crate) fn proven_name(rename: &SignedEvent, genesis: &Genesis, ring: &[SealKey]) -> Option<String> {
+    rename.verify().ok()?;
+    let body = &rename.event.body;
+    if body.community != genesis.community || body.channel != ChannelId::CONTROL || body.author != genesis.owner {
+        return None;
+    }
+    let plain = dissent_events::open_event(&rename.event, ring).ok()?;
+    match &plain.body.payload {
+        Payload::CommunityRename { name } if valid_community_name(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// The preset id of a banner that is one.
+pub(crate) fn preset_of(banner: Option<Banner>) -> Option<u8> {
+    match banner {
+        Some(Banner::Preset(id)) => Some(id),
+        _ => None,
+    }
+}
+
 /// The preview of an invite as the UI shows it: a member's, or this device's own view when it is
 /// already in the community. JSON, with snake_case fields.
 #[derive(Clone, Debug, Serialize)]
@@ -117,6 +195,16 @@ pub struct InvitePreviewView {
     pub name: String,
     /// Path of the decrypted icon on this device. `None` when there is none yet, so show initials.
     pub icon: Option<String>,
+    /// Path of the decrypted banner on this device. `None` when there is none or it is not fetched.
+    pub banner: Option<String>,
+    /// Path of an animated banner's still frame, shown under reduced motion.
+    pub banner_poster: Option<String>,
+    /// The preset gradient the banner is, when it is one. The UI draws presets itself.
+    pub banner_preset: Option<u8>,
+    /// The community's description, empty when it has none.
+    pub description: String,
+    /// The community's traits, at most five.
+    pub traits: Vec<Trait>,
     pub member_count: u32,
     pub online_count: u32,
     /// When the community was created, in ms since the Unix epoch.
@@ -131,8 +219,11 @@ pub struct InvitePreviewView {
 /// A preview's key in the cache: the community and the invite id the requester named.
 type PreviewKey = (CommunityId, Option<[u8; 16]>);
 
+/// A verified answer: the preview, and its extra when the member sent one.
+type Answered = (SignedPreview, PreviewExtra);
+
 /// A cached preview, when it was fetched, and the peer that answered it.
-type Cached = (Instant, SignedPreview, PeerAddr);
+type Cached = (Instant, Answered, PeerAddr);
 
 /// Previews this device holds, and how often each requester has asked it. In memory only.
 #[derive(Default)]
@@ -161,7 +252,7 @@ impl PreviewState {
         true
     }
 
-    fn cached(&self, key: &PreviewKey) -> Option<(SignedPreview, PeerAddr)> {
+    fn cached(&self, key: &PreviewKey) -> Option<(Answered, PeerAddr)> {
         let cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache
             .get(key)
@@ -169,7 +260,7 @@ impl PreviewState {
             .map(|(_, signed, peer)| (signed.clone(), peer.clone()))
     }
 
-    fn remember(&self, key: PreviewKey, signed: &SignedPreview, peer: &PeerAddr) {
+    fn remember(&self, key: PreviewKey, signed: &Answered, peer: &PeerAddr) {
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache.retain(|_, (at, _, _)| at.elapsed() < CACHE_FOR);
         cache.insert(key, (Instant::now(), signed.clone(), peer.clone()));
@@ -234,6 +325,38 @@ impl Engine {
         }
     }
 
+    /// Answers a full preview request: the preview, with the extra signed beside it. Gated as
+    /// [`Engine::answer_invite_preview`] is.
+    pub(crate) fn answer_invite_preview_full(
+        &self,
+        from: DeviceId,
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    ) -> Response {
+        let base = match self.answer_invite_preview(from, community, token, invite_id) {
+            Response::InvitePreview(base) => *base,
+            other => return other,
+        };
+        let extra = {
+            let w = self.read();
+            let Some(c) = w.communities.get(&community) else {
+                return Response::Error(not_found(&community).to_string());
+            };
+            PreviewExtra {
+                rename: c.latest_rename(),
+                banner: c.state().banner.and_then(|(_, banner)| banner),
+                profile: c.state().profile.as_ref().map(|(_, p)| p.clone()),
+            }
+        };
+        let bytes = match extra_signing_bytes(&community, &base.sig, &extra) {
+            Ok(bytes) => bytes,
+            Err(e) => return Response::Error(e.to_string()),
+        };
+        let sig = self.inner.identity.device.sign(&bytes);
+        Response::InvitePreviewFull(Box::new(SignedPreviewFull { base, extra, sig }))
+    }
+
     /// This device's signed preview of `community`.
     fn signed_preview(&self, community: CommunityId, invite_id: Option<[u8; 16]>, now: u64) -> Result<SignedPreview> {
         let (genesis, preview) = {
@@ -270,13 +393,28 @@ impl Engine {
         if let Some(view) = self.own_preview(&link) {
             return Ok(view);
         }
-        let (signed, peer) = self.fetched_preview(&link).await?;
+        let ((signed, extra), peer) = self.fetched_preview(&link).await?;
         let icon = self.icon_path(signed.preview.icon, &peer).await;
+        let banner = self.icon_path(extra.banner.and_then(|b| b.picture()), &peer).await;
+        let banner_poster = self.icon_path(extra.banner.and_then(|b| b.poster()), &peer).await;
+        let profile = extra.profile.clone().unwrap_or_default();
+        // The invite holds one secret generation. A rename sealed under it proves the current name.
+        let ring = [(link.secret_generation(), link.secret())];
+        let name = extra
+            .rename
+            .as_ref()
+            .and_then(|rename| proven_name(rename, &signed.genesis, &ring))
+            .unwrap_or_else(|| signed.preview.name.clone());
         let preview = signed.preview;
         Ok(InvitePreviewView {
             community: id.to_string(),
-            name: preview.name,
+            name,
             icon,
+            banner,
+            banner_poster,
+            banner_preset: preset_of(extra.banner),
+            description: profile.description,
+            traits: profile.traits,
             member_count: preview.member_count,
             online_count: preview.online_count,
             created_ms: preview.created_ms,
@@ -292,10 +430,16 @@ impl Engine {
         let c = w.communities.get(&id)?;
         let now = now_ms();
         let (member_count, online_count) = member_counts(&w, c, now);
+        let profile = c.state().profile.as_ref().map(|(_, p)| p.clone()).unwrap_or_default();
         Some(InvitePreviewView {
             community: id.to_string(),
-            name: c.genesis.name.clone(),
-            icon: c.state().icon.and_then(|(_, picture)| picture).and_then(|p| crate::avatars::picture_file(&w.paths, &p)),
+            name: c.name().to_string(),
+            icon: w.icon_of(c),
+            banner: w.banner_of(c),
+            banner_poster: w.banner_poster_of(c),
+            banner_preset: preset_of(c.state().banner.and_then(|(_, b)| b)),
+            description: profile.description,
+            traits: profile.traits,
             member_count,
             online_count,
             created_ms: c.genesis.created_ms,
@@ -305,7 +449,7 @@ impl Engine {
     }
 
     /// A signed preview from a member, cached or fetched, and the peer that answered it.
-    async fn fetched_preview(&self, link: &InviteLink) -> Result<(SignedPreview, PeerAddr)> {
+    async fn fetched_preview(&self, link: &InviteLink) -> Result<(Answered, PeerAddr)> {
         let id = link.community();
         let key = (id, link.invite_id());
         if let Some(hit) = self.inner.previews.cached(&key) {
@@ -345,7 +489,7 @@ impl Engine {
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
         peers: &[PeerAddr],
-    ) -> Option<(SignedPreview, PeerAddr)> {
+    ) -> Option<(Answered, PeerAddr)> {
         for peer in peers {
             match self.ask_peer(id, token, invite_id, peer).await {
                 Ok(signed) => return Some((signed, peer.clone())),
@@ -355,29 +499,43 @@ impl Engine {
         None
     }
 
+    /// Asks one peer for the full preview. A peer from before renames cannot decode that request
+    /// and answers with an error, so the plain preview is asked for then.
     async fn ask_peer(
         &self,
         id: CommunityId,
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
         peer: &PeerAddr,
-    ) -> Result<SignedPreview> {
+    ) -> Result<Answered> {
+        let full = Request::InvitePreviewFull {
+            community: id,
+            token,
+            invite_id,
+        };
+        if let Response::InvitePreviewFull(signed) = self.ask_once(peer, &full).await? {
+            signed.verify(&id)?;
+            return Ok((signed.base, signed.extra));
+        }
         let req = Request::InvitePreview {
             community: id,
             token,
             invite_id,
         };
-        let reply = tokio::time::timeout(ASK_WAIT, self.call(peer.id, &req))
-            .await
-            .map_err(|_| CoreError::NotFound("the peer did not answer the invite preview in time".into()))??;
-        match reply {
+        match self.ask_once(peer, &req).await? {
             Response::InvitePreview(signed) => {
                 signed.verify(&id)?;
-                Ok(*signed)
+                Ok((*signed, PreviewExtra::default()))
             }
             Response::Refused(why) | Response::Error(why) => Err(CoreError::Rejected(why)),
             _ => Err(CoreError::Invalid("unexpected reply to an invite preview".into())),
         }
+    }
+
+    async fn ask_once(&self, peer: &PeerAddr, req: &Request) -> Result<Response> {
+        tokio::time::timeout(ASK_WAIT, self.call(peer.id, req))
+            .await
+            .map_err(|_| CoreError::NotFound("the peer did not answer the invite preview in time".into()))?
     }
 
     /// The local path of a community icon. A missing icon is fetched from `peer`, for up to

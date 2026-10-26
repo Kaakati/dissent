@@ -10,7 +10,7 @@
       "cwd": "../ui-next"
     },
     "beforeBuildCommand": {
-      "script": "npm ci && npm run build",
+      "script": "npm run build",
       "cwd": "../ui-next"
     },
     "features": [
@@ -39,6 +39,9 @@
     }
   },
   "bundle": {
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
     "active": false,
     "icon": [
       "icons/32x32.png",

@@ -28,6 +28,7 @@ mod participant;
 mod sfu;
 mod signal;
 mod transport;
+mod video;
 
 pub use auth::Auth;
 pub use bwe::{pick_layer, BandwidthEstimator, MAX_KBPS, MIN_KBPS};
@@ -46,6 +47,9 @@ pub use participant::{Failover, FailoverReason, Participant, SILENCE_TIMEOUT};
 pub use sfu::{Observer, Sfu, SfuStats};
 pub use signal::Signal;
 pub use transport::{PacketTransport, UdpTransport};
+pub use video::VideoCodec;
+pub use video::VideoMeta;
+pub use video::VideoFrame;
 
 /// Host candidate of the caller on a transport with no IP path of its own, such as iroh.
 ///

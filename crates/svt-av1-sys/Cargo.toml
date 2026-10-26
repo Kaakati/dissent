@@ -1,0 +1,18 @@
+[package]
+name = "svt-av1-sys"
+description = "Raw bindings to SVT-AV1 v4.2.0, built from the pinned third_party/SVT-AV1 submodule"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# The native library name, so the link metadata is unique in the build graph.
+links = "SvtAv1Enc"
+
+# `build` compiles SVT-AV1 and generates the bindings. Without it the crate is empty, so a plain
+# `cargo test --workspace` never needs CMake, NASM or libclang. dissent-video's `svt-av1` feature turns it on.
+[features]
+build = []
+
+[build-dependencies]
+bindgen.workspace = true
+cmake.workspace = true
+shiguredo_cmake.workspace = true

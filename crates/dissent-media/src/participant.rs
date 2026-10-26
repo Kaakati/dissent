@@ -15,13 +15,14 @@ use std::time::{Duration, Instant};
 use crate::auth::{forget_into, learn_into, Auth, LinkConfig, RxState};
 use dissent_identity::DeviceCert;
 use crate::call::{Call, CallStats};
-use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender};
+use crate::e2ee::{epoch_lsb, redundancy_for, SframeSender, DEFAULT_LEVEL};
 use crate::election::{elect, ranked, Candidate, Election, Mode, PeerId};
 use crate::error::{MediaError, Result};
 use crate::frame::ReceivedFrame;
 use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
+use crate::video::{VideoFrame, VideoMeta};
 
 /// How long the active forwarder may stay silent before the participant fails over.
 pub const SILENCE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -55,6 +56,7 @@ pub struct Failover {
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
 type FrameOut = Result<Option<ReceivedFrame>>;
+type VideoOut = Result<Option<VideoFrame>>;
 
 /// One participant of a forwarded call.
 pub struct Participant<T: PacketTransport> {
@@ -63,6 +65,7 @@ pub struct Participant<T: PacketTransport> {
     /// The epoch of `key`. Links opened from now on use it.
     epoch: u64,
     tx: SframeSender,
+    video_tx: SframeSender,
     mode: Mode,
     participants: usize,
     candidates: Vec<Candidate>,
@@ -120,11 +123,13 @@ impl<T: PacketTransport> Participant<T> {
         link: LinkConfig,
     ) -> Result<Self> {
         let tx = SframeSender::new(&media_key, my_id, 0)?;
+        let video_tx = SframeSender::new(&media_key.video(), my_id, 0)?;
         Ok(Self {
             my_id,
             key: media_key,
             epoch: 0,
             tx,
+            video_tx,
             mode,
             participants,
             candidates,
@@ -152,11 +157,15 @@ impl<T: PacketTransport> Participant<T> {
             ));
         }
         let tx = self.tx.rekeyed(&new_key, self.my_id, new_epoch)?;
+        let video_tx = self
+            .video_tx
+            .rekeyed(&new_key.video(), self.my_id, new_epoch)?;
         let now = Instant::now();
         for call in self.links.values_mut() {
             call.rotate_keys(new_key.clone(), new_epoch, now)?;
         }
         self.tx = tx;
+        self.video_tx = video_tx;
         self.key = new_key;
         self.epoch = new_epoch;
         Ok(())
@@ -277,6 +286,12 @@ impl<T: PacketTransport> Participant<T> {
     }
 
     /// The counters of each forwarder link.
+    /// The smallest bandwidth estimate among the forwarder links, in kbps. `None` until any link
+    /// has an estimate.
+    pub fn video_available_kbps(&self) -> Option<u32> {
+        self.links.values().filter_map(Call::video_available_kbps).min()
+    }
+
     pub fn link_stats(&self) -> BTreeMap<PeerId, CallStats> {
         self.links
             .iter()
@@ -327,6 +342,68 @@ impl<T: PacketTransport> Participant<T> {
                 Err(e) => {
                     tracing::debug!(sfu = active, error = %e, "forwarder send failed");
                     self.fail_over(active, FailoverReason::SendFailed);
+                }
+            }
+        }
+    }
+
+    /// Sends one encoded video frame to the active forwarder. Audio decides failover, so a video
+    /// send that fails is not retried on another forwarder. The frame is encrypted once, with
+    /// the video key.
+    pub async fn send_video(&mut self, frame: &[u8], meta: VideoMeta) -> Result<()> {
+        let ciphertext = self.video_tx.encrypt(frame, None, DEFAULT_LEVEL)?;
+        let Some(active) = self.active else {
+            return Err(MediaError::NoSfu);
+        };
+        let Some(call) = self.links.get_mut(&active) else {
+            return Ok(());
+        };
+        match call
+            .send_video_ciphertext(&ciphertext, meta)
+            .await
+        {
+            Ok(()) | Err(MediaError::NotConnected) | Err(MediaError::NoVideoTrack) => Ok(()),
+            Err(e) => {
+                tracing::debug!(sfu = active, error = %e, "forwarder video send failed");
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether the active forwarder has asked for a keyframe since the last call.
+    pub fn take_keyframe_request(&mut self) -> bool {
+        self.links
+            .values_mut()
+            .fold(false, |asked, call| call.take_keyframe_request() | asked)
+    }
+
+    /// Waits for the next video frame from any forwarder link. Returns `Ok(None)` once no link is
+    /// left. Cancel-safe.
+    pub async fn next_video_frame(&mut self) -> Result<Option<VideoFrame>> {
+        loop {
+            if self.links.is_empty() {
+                return Ok(None);
+            }
+            let (peer, outcome) = {
+                let mut futs: Vec<(PeerId, Boxed<'_, VideoOut>)> = self
+                    .links
+                    .iter_mut()
+                    .map(|(peer, call)| (*peer, Box::pin(call.next_video_frame()) as Boxed<'_, VideoOut>))
+                    .collect();
+                poll_fn(|cx| {
+                    for (peer, fut) in futs.iter_mut() {
+                        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+                            return Poll::Ready((*peer, out));
+                        }
+                    }
+                    Poll::Pending
+                })
+                .await
+            };
+            match outcome {
+                Ok(Some(frame)) => return Ok(Some(frame)),
+                Ok(None) | Err(_) => {
+                    self.links.remove(&peer);
                 }
             }
         }

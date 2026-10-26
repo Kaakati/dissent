@@ -1,6 +1,6 @@
 // The message list: date dividers, the "New messages" line, grouping of consecutive messages by author and time, the
 // notices around the history, the search filter, scroll anchoring, and the keys for moving between messages. Ported from
-// ui/views/chat.js (render, rowsFor, onListKey).
+// the old UI's views/chat.js (render, rowsFor, onListKey).
 import { useLayoutEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { Hash, MessageCircle, Search } from 'lucide-react';
 import { has } from '@/lib/features';

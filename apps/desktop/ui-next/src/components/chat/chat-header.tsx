@@ -1,6 +1,6 @@
 // The chat header: the conversation's title (a channel, a person with their verified state, or a group with its members),
 // the channel topic, the tools of a direct conversation (call, add to group, profile panel), the update button and the
-// in-chat search. Ported from ui/views/chat.js (titleNodes, toolNodes, the search box).
+// in-chat search. Ported from the old UI's views/chat.js (titleNodes, toolNodes, the search box).
 import { Ellipsis, Hash, Phone, PanelRight, Search, UsersRound } from 'lucide-react';
 import { openNewGroupDialog } from '@/components/dialogs/new-group-dialog';
 import { UpdateButton } from '@/components/settings/update-dialog';

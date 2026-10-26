@@ -36,6 +36,9 @@ pub const CAPABILITIES: &[&str] = &[
     "groups",
     "transfers",
     "embeds",
+    "multi_source",
+    "mentions",
+    "server_prefs",
 ];
 
 /// Which text a user note stores.
@@ -74,6 +77,11 @@ fn load(w: &World) -> LocalState {
         Ok(state) => state.unwrap_or_default(),
         Err(_) => LocalState::default(),
     }
+}
+
+/// When a conversation was last marked read, in milliseconds. `key` is `dm:<peer>` or `group:<id>`.
+pub(crate) fn read_marker_in(w: &World, key: &str) -> Option<u64> {
+    load(w).read_ms.get(key).copied()
 }
 
 fn verified_path(w: &World) -> PathBuf {
@@ -208,6 +216,13 @@ impl Engine {
         let now = now_ms();
         self.update_local(|s| {
             s.read_ms.insert(key, now);
+        })
+    }
+
+    /// Marks a conversation unread from `before_ms` on: messages at or after that time count as unread.
+    pub fn mark_unread(&self, key: String, before_ms: u64) -> Result<()> {
+        self.update_local(|s| {
+            s.read_ms.insert(key, before_ms.saturating_sub(1));
         })
     }
 

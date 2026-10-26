@@ -1,15 +1,16 @@
-// The open conversation's messages and the composer's state. Ported from the message parts of ui/state.js and
-// ui/actions.js (loadMessages, loadDm, openChannel, openDm, the message engine events, attachment progress).
+// The open conversation's messages and the composer's state. Ported from the message parts of the old UI's state.js and
+// the old UI's actions.js (loadMessages, loadDm, openChannel, openDm, the message engine events, attachment progress).
 // The shell store says which conversation is open; this store follows it. A change of the open conversation loads its
 // messages (see startChat), so the shell's navigation actions stay as they are.
 import { create } from 'zustand';
+import { has } from './features';
 import { api, listenTo } from './api';
 import { baseName, guessMime } from './attachments';
 import { markSeen, seenMs } from './unread';
 import { toast } from './toasts';
 import { openedTarget } from './target';
 import { typingTarget } from './typing';
-import { typingKey, useShell } from './store';
+import { convKey, typingKey, useShell } from './store';
 import type {
   Attachment,
   ChannelMessage,
@@ -160,6 +161,11 @@ function markLatestRead(key: string, items: { id: string; ms: number }[]): void 
   const last = items[items.length - 1];
   if (!last) return;
   markSeen(key, last.id, Number(last.ms));
+  // A conversation with unread messages is read in the engine too, so its count (and the rail's) clears.
+  const counted = key.startsWith('dm:') || key.startsWith('group:');
+  if (counted && useShell.getState().conversations.some((c) => convKey(c) === key && (c.unread ?? 0) > 0)) {
+    void api.markRead(key).then(() => useShell.getState().loadConversations()).catch(() => {});
+  }
   useShell.setState((s) => {
     if (!s.unread.has(key)) return {};
     const unread = new Set(s.unread);
@@ -197,6 +203,8 @@ function enter(next: ChatTarget | null): void {
     peerProfile: null, filter: '', replyTo: null, editingId: null, staged: [],
   });
   if (next.kind === 'dm') void loadPeerProfile(next.peer);
+  // Opening a channel clears its mention count, as opening it clears the unread dot.
+  if (next.kind === 'channel' && has('mentions')) void api.markMentionsRead(next.communityId, next.channelId).catch(() => {});
   // The names typing here are read once; the engine then sends each change (typing-changed).
   const shell = useShell.getState();
   const engineTarget = typingTarget(next);
@@ -246,6 +254,11 @@ export function markOpenRead(): void {
 export async function reloadForEvent(ev: EngineEvent): Promise<void> {
   const { target } = useChat.getState();
   if (!target) return;
+  if (ev.kind === 'attachment_changed') {
+    // A preview arrived. The conversation is re-read, but nothing is marked read or alerted.
+    await reloadOpen();
+    return;
+  }
   if (ev.kind === 'message' && target.kind === 'channel' && target.communityId === ev.community_id && target.channelId === ev.channel_id) {
     await reloadOpen();
     markOpenRead();

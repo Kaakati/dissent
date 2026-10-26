@@ -1,5 +1,5 @@
 // The reaction picker: a curated grid drawn with the system emoji font, a name search, arrow-key navigation. Opened with
-// openEmojiPicker(anchor, onPick); EmojiPickerHost (mounted in the chat pane) renders it. Ported from ui/views/emoji.js.
+// openEmojiPicker(anchor, onPick); EmojiPickerHost (mounted once in App, above the settings overlays) renders it. Ported from the old UI's views/emoji.js.
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { create } from 'zustand';
 import { EMOJI } from '@/lib/emoji';

@@ -158,6 +158,111 @@ Who learns what:
 The online count comes from presence beacons. It is a count, not a list, is shown to invite holders
 only, and can be stale by up to the presence window.
 
+A server's **name, banner, description and traits** (Server Settings) reveal no more than the
+genesis name and icon already do, and they reach the same people. They are sealed control events, so
+DHT nodes and outsiders see none of them. Members see all of them. Storage members see the rename,
+which stays under the community secret. They do not see a banner or profile sealed under the epoch key
+while member-only control is on. Invite holders see all of them on the card. The owner vouches for
+the name through the signed rename, which the joiner opens with the invite secret. A member cannot put
+a false name on a card: without a valid rename, the card shows the genesis name. The answering member
+can still serve an older rename, and it can **misstate the banner, description and traits** in a
+preview, as it can the icon and counts, since only its own signature covers them. Once joined, the
+DAG decides. The founder republishes the DHT record with the new name, sealed under the invite secret
+as before. An uploaded banner, like an icon, is fetched from members' devices, so those devices learn
+that someone fetched it. A preset banner is a number and fetches nothing.
+
+A **profile banner** reaches the same people as the profile picture: members of the servers the person
+is in, sealed under each community's control key, and their contacts, directly. DHT nodes and
+outsiders see neither the banner nor that it changed. A picture banner is fetched from the person's
+devices, so they learn who fetched it, as for an avatar. Only the person's own devices can set it,
+since replay keys it by author and the direct form is device-signed.
+
+## Image thumbnails: what a preview reveals
+
+A sender may attach a thumbnail to an image: a JPEG of at most 320 pixels on its long side, under
+64 KB, with EXIF and all other metadata dropped. It is stored and encrypted as its own blob, under its
+own key, and the message carries its key and hash inside the same sealed text as the file. Beyond
+the file itself, a thumbnail adds one more blob and its size to what a holder of the message can
+see, and the size tells roughly how detailed the picture is. A recipient fetches it on arrival,
+from the sender's devices, so the sender's devices learn that the recipient opened the message, as
+they already do for a file that is fetched. Seeders hold the ciphertext of the main file only, and
+do not mirror thumbnails. The sealed text, not the blob, is what the keys protect.
+
+## Mentions: what a mention reveals
+
+A mention puts the mentioned person's id into the sealed payload of the message, so only the members who
+can read the message learn who was mentioned. The id is a root key, which every member already knows
+from the member list, so a mention reveals nothing a member does not already see. What a mention
+changes is who gets an alert: a forged `@everyone` from an ordinary member is ignored, because the
+reader checks the author's permission when the message was accepted. A mentioned person's device also
+learns the message was addressed to them, as it does for a reply. Marking a channel read is kept on the
+device that marked it and is never sent to anyone.
+
+## Mutual friends: what a contact list reveals
+
+A person may share their contact list, so that a contact sees which of their own contacts they have in
+common with that person. The list is answered only over the direct connection (`Request::Friends`), and
+only to a device whose root is an accepted, unblocked contact of the person asked. Everyone else gets
+nothing, and so does an older version, which does not know the request. The viewer intersects the list
+with their own contacts on their own device, so the mutual list is never computed on anyone else's.
+
+What the list contains: root ids of contacts, and nothing else. No display names, notes, nicknames or
+communities. Names and pictures are looked up on the viewer's device from what the viewer already knows.
+
+Who learns what:
+
+- **Contacts of the sharing person:** the whole contact list, not only the overlap with the viewer. This
+  is the cost of the feature, and why it is a setting. "Show my friends list to my friends" is on by
+  default. Off sends the list to nobody, and profiles show no mutual friends line from that device.
+- **The viewer, who is also a contact:** the whole list arrives in the answer, because the answer is
+  the list, not the overlap. The app shows only the overlap, and does not show or store the rest.
+- **Strangers, server members who are not contacts, and blocked people:** nothing. The answer has no
+  list in it, so it does not show whether they are a contact.
+- **The sharing person:** learns that a contact opened their profile, because the request reaches them.
+  It is sent only between contacts.
+
+Limits and controls:
+
+- A requester may ask six times a minute per device. The viewer keeps an answer for two minutes, and
+  a "shares nothing" answer for thirty seconds, so turning the setting on or off shows soon.
+- A change to a contact list, or to the setting, is seen by viewers within those two minutes. It is not
+  pushed.
+
+Why private set intersection was not used. It would let each side learn only the overlap. We skipped it
+because:
+
+- The viewer is a contact of both people, so the overlap is already something they may know. What PSI
+  would hide is the rest of the list, and the setting is the decision about whether that is shared at all.
+- PSI needs both devices online and a round of protocol for every profile view, which costs time and
+  bandwidth on a path users open often, for a gain the setting already covers.
+- A contact who shares their list reveals it to every contact anyway. PSI would only stop a viewer from
+  seeing the rest of a list the sharer chose to show them.
+
+## History messages: what a history key exposes, and to whom
+
+A history key is the key of one epoch for message text (`docs/design/05-encrypted-servers.md`, "History
+messages"). Whoever holds an epoch's key reads every plain message sent in that epoch.
+
+- **Members of that epoch** already held it, in effect, through MLS. Nothing changes for them.
+- **A joiner** gets the keys of the epochs its server's history setting allows: all of them under `All`,
+  or those from its own join under `SinceJoin`, which is the default for new servers. It asks the first three member devices, and
+  only an active person is answered. The owner's setting decides this, as it decides control events.
+- **Storage members** are outside the group, so they hold no history keys and are never served one.
+- **Banned and removed devices** keep the keys of the epochs they were in, as before. A ban rotates the
+  epoch, and the banned device is not served the keys of later epochs. Nothing new reaches it.
+- **The member who answers** learns which joiner asked, as it does for `EpochHistory`.
+
+What this weakens. Forward secrecy is per epoch for these messages, not per message. The MLS ratchet gave
+per-message secrecy, and a device that was later compromised exposed only the keys still in its ratchet.
+Now a device that held an epoch's key exposes every text of that epoch. New servers default to
+`SinceJoin`, so joiners get none of this. An owner who chooses `All` accepts the cost. `SinceJoin` limits
+what joiners receive. It does not restore per-message secrecy for members.
+
+Old messages keep their MLS form and stay locked for joiners. Nothing can open them retroactively.
+
+Member-only control, the epoch keys of control events, and the rule that bans and removals rotate the epoch
+are unchanged.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

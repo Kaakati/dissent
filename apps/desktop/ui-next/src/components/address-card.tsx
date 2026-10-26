@@ -1,4 +1,4 @@
-// An address with a copy button and, optionally, its QR code. Port of apps/desktop/ui/views/address-card.js.
+// An address with a copy button and, optionally, its QR code. Port of the old UI's views/address-card.js.
 // The short form shows on screen; the title and the copy button carry the full address.
 import { Copy } from 'lucide-react';
 import { addressOf, shortAddress } from '@/lib/address';

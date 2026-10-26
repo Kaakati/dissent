@@ -1,6 +1,6 @@
 # 07. Visual system and spacing audit
 
-The desktop UI (`apps/desktop/ui`) was measured in headless Edge at 1600×1000 (plus 900, 1280 and 2560 wide) with a CDP driver that reads `getBoundingClientRect` and computed styles for every surface. Reference values come from the two layout references in `docs/` (a DM view and a server view of a mainstream chat client), normalised to the 48 px rail pitch, and from the fixed sizes requested for this redesign: channel row 32, DM row 42, member row 42, rail item 48 + 8 gap, 4 px grid, hit targets ≥ 32.
+The desktop UI (`apps/desktop/ui-next`, the old plain-module UI before it) was measured in headless Edge at 1600×1000 (plus 900, 1280 and 2560 wide) with a CDP driver that reads `getBoundingClientRect` and computed styles for every surface. Reference values come from the two layout references in `docs/` (a DM view and a server view of a mainstream chat client), normalised to the 48 px rail pitch, and from the fixed sizes requested for this redesign: channel row 32, DM row 42, member row 42, rail item 48 + 8 gap, 4 px grid, hit targets ≥ 32.
 
 Part 1 is the audit of the UI before the redesign. Part 2 is the visual system that replaces it, implemented as custom properties at the top of `style.css`. Part 3 is the before/after record.
 
@@ -337,7 +337,7 @@ Kept outside the repo, in `C:/Users/Kaaka/AppData/Local/Temp/claude/H--Rust-Proj
 
 ## Part 6. Feature contracts for the engine (new surfaces)
 
-These surfaces come from the design boards in `scratchpad/newdesign/project` and have no engine support yet. The UI builds each one with mock data (`ui/mock.js`) and renders nothing for a feature the backend does not report. The command names and argument names below are the ones `ui/api.js` calls. Tauri maps the camelCase arguments to the snake_case parameters. Ids are base32 strings, times are `u64` milliseconds since the Unix epoch, and user text reaches the UI only through `textContent`.
+These surfaces come from the design boards in `scratchpad/newdesign/project` and have no engine support yet. The UI builds each one with mock data (`src/mock/mock.js`) and renders nothing for a feature the backend does not report. The command names and argument names below are the ones `ui-next/src/lib/api.ts` calls. Tauri maps the camelCase arguments to the snake_case parameters. Ids are base32 strings, times are `u64` milliseconds since the Unix epoch, and user text reaches the UI only through `textContent`.
 
 ### 6.0 Capabilities
 

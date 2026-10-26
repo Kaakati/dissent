@@ -1,4 +1,4 @@
-// The lobby (ui/views/lobby.js): shown in place of the chat when a direct or group conversation has a live call this device
+// The lobby (the old UI's views/lobby.js): shown in place of the chat when a direct or group conversation has a live call this device
 // is not in. The header carries the "Call in progress" pill and Join. The body has the self preview with the mic meter,
 // the microphone and speaker choices, the route note and Join. The right column lists who is in the call and who is not.
 // The camera is off until the video batch lands, and the preview says so.

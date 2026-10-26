@@ -242,7 +242,7 @@ Status: **phase 1 built**, in `crates/dissent-video`. The crate holds the captur
 
 ### Codecs
 
-- **AV1 encoder: SVT-AV1 v4.2.0**, through `shiguredo_svt_av1` built with its `source-build` feature. The crate clones SVT-AV1 at build time with `git clone --depth 1 --branch v4.2.0` from gitlab.com. The tag is not checked against a commit or hash, so the source is pinned only as far as that tag is trusted. It builds with CMake, which the crate downloads from Kitware's GitHub releases and checks against a SHA-256 pinned in `shiguredo_cmake` 4.4.0. SVT needs NASM for its x86 assembly. The encoder sits behind the `svt-av1` cargo feature, which is off by default, so a plain build needs no NASM, libclang or CMake download. Without the feature a call offers H.264 only. Real-time coding at preset 12 is the measured choice for calls. rav1e is removed. It was 10 to 20 times slower and had no non-real-time use here.
+- **AV1 encoder: SVT-AV1 v4.2.0**, through `svt-av1-sys`. The source is the `third_party/SVT-AV1` git submodule, pinned to commit `9292ec8e32bce26f781f277ec8739b53426c4300` (tag v4.2.0). `svt-av1-sys` builds it with CMake and generates bindings with bindgen, and `dissent-video` wraps the raw API. The old `shiguredo_svt_av1` crate is gone, because it fetched the source by tag at build time. The crate clones SVT-AV1 at build time with `git clone --depth 1 --branch v4.2.0` from gitlab.com. The tag is not checked against a commit or hash, so the source is pinned only as far as that tag is trusted. It builds with CMake, which the crate downloads from Kitware's GitHub releases and checks against a SHA-256 pinned in `shiguredo_cmake` 4.4.0. SVT needs NASM for its x86 assembly. The encoder sits behind the `svt-av1` cargo feature, which is off by default, so a plain build needs no NASM, libclang or CMake download. Without the feature a call offers H.264 only. Real-time coding at preset 12 is the measured choice for calls. rav1e is removed. It was 10 to 20 times slower and had no non-real-time use here.
 - **AV1 decoder: rav1d 1.1.** A pure Rust port of dav1d, built for 8-bit with no assembly. dav1d's C library needs meson and NASM, so the Rust port is used instead. One thread and no frame delay, so a chunk yields its frame on the same call. The only `unsafe` in the crate is in `decode/av1.rs`, which wraps rav1d's dav1d-shaped API.
 - **H.264 encoder and decoder: OpenH264** through the `openh264` crate. Its `openh264-sys2` build compiles the bundled OpenH264 source with `cc`. The build is pure C here: `OPENH264_NO_ASM=1`. Its NASM path compiles the assembly, but the objects never reach the static library. The link then fails with unresolved SSE symbols on MSVC. Pure C is slower, so H.264 is kept to the lowest rung, 360p.
 - **VP8: not built.** H.264 is the fallback instead.
@@ -340,7 +340,7 @@ Video frames use the same SFrame media key and per-sender key IDs as audio (the 
 
 ## Video phase 2 plan
 
-Status: **planned, not started.** Phase 2 wires `dissent-video` into `dissent-media`, `dissent-core` and the desktop app. Spike results are recorded below, and the build waits for core and media to be free.
+Status: **phase 2 built, except AV1 in calls and the lobby preview.** `dissent-media` carries video over the H.264 carrier with BWE, the gate and the SFU routing. `dissent-core` runs the camera and the screen share in the call loop, sizes their bitrate from the link's estimate minus the audio reservation, and shows previews, including a self tile. The desktop app and ui-next show them. Still open: AV1 negotiation in calls (core sends H.264 only), the lobby preview, and a picker (camera 0 and the primary screen only).
 
 ### What the sources show
 
@@ -370,6 +370,18 @@ The options that were rejected:
 
 **The guard against str0m changes.** A str0m upgrade that starts parsing NAL contents would break option E silently. The spike's carrier tests (`escape`/`unescape` round trip, FU-A reassembly of a 50 KB NAL, 5% loss) move into `dissent-media` as regression tests, so CI fails on such an upgrade.
 
+### Built in phase 2
+
+- **Carrier and gate** (`dissent-media/src/video.rs`): option E as described above, a per-sender gate that drops deltas after a gap and asks for a keyframe (throttled to 200 ms), and a replay window per sender. The video key is derived from the media key, so video and audio never share a (key, counter) pair.
+- **Negotiation:** every offer carries a video line. `m=video 0` in the answer leaves the call audio-only (`has_video()` is false), with no error. `enable_h264` and `enable_bwe` are in `new_rtc`.
+- **Forwarder:** an SFU relays video for active senders only. A downlink starts at a keyframe for each sender, and a downlink's keyframe request restarts its stream.
+- **Core and desktop:** `set_camera(true)` starts a capture thread (640x360, 15 fps, 600 kbps, H.264), and the call loop sends its frames through the mesh or the forwarder. Received frames are decoded per sender and sent to the window as 320 px RGB previews, base64 encoded, in a `video_frame` event with the person's root id.
+- **Linux:** camera capture is compiled out, so `set_camera(true)` returns an error there.
+- **Bitrate follows the link:** each tick the call loop takes the smallest estimate across peers (str0m's BWE, which needs `enable_bwe`) and the largest audio target, and sizes each capture with `VideoAdapter`, so the audio reservation holds. A budget too small for video pauses it.
+- **Previews:** each remote frame becomes a 320 px JPEG at quality 70, base64 in the `video_frame` event. About 116 KB/s per remote camera, measured on the test picture. Raw RGB base64 would be about 3.5 MB/s.
+- **Datagram margin:** str0m's MTU is the RTP payload limit, so the transport's datagram limit is reduced by 128 bytes for the RTP header, extensions and SRTP tag. Without it, a full-size video packet exceeds the transport limit and the call drops the peer.
+- **SVT-AV1 wrapper:** `svt-av1-sys` builds only with its `build` feature, which `dissent-video`'s `svt-av1` feature enables. The desktop release turns the feature on, and its CI installs NASM and libclang and checks out the submodule. SVT's own log is set to error-only (`SVT_LOG=2`) unless the caller already set `SVT_LOG`.
+
 ### Spike results
 
 Measured in an in-memory harness on str0m 0.24.1, the same version as v0.1.4 and HEAD. Scratch crate outside the workspace.
@@ -396,7 +408,7 @@ Single runs with one seed each. Recovery was measured on the simulated clock.
 - **`enable_bwe` goes in `new_rtc`, with an initial estimate.** Without it the estimate never fires.
 - **str0m forces NACK on for every video payload type** (`add_config` sets `fb_nack` true). It cannot be turned off through the public API. With RTX absent, NACKs are sent but never answered.
 - **Keyframes are capped at about 2× a delta frame.** Keyframes are the recovery bottleneck, so their size is limited. The encoder work must check the controls it has:
-  - **SVT-AV1** (`shiguredo_svt_av1`): `intra_refresh_type` (`KfRefresh` for closed-GOP; `FwdkfRefresh` is incompatible with CBR), `startup_qp_offset` (QP offset for the startup GOP only, not general keyframes), `max_qp_allowed`, and `intra_period_length`. A per-keyframe QP cap is not exposed, so the cap is enforced by `max_qp_allowed` on all frames or by a keyframe interval shorter than the current one.
+  - **SVT-AV1** (`svt-av1-sys`): `intra_refresh_type` (`KfRefresh` for closed-GOP; `FwdkfRefresh` is incompatible with CBR), `startup_qp_offset` (QP offset for the startup GOP only, not general keyframes), `max_qp_allowed`, and `intra_period_length`. A per-keyframe QP cap is not exposed, so the cap is enforced by `max_qp_allowed` on all frames or by a keyframe interval shorter than the current one.
   - **OpenH264** (`openh264` 0.9.9): `qp(QpRange)` applies to all frames, `intra_frame_period`, and `force_intra_frame`. There is no intra-refresh mode and no keyframe-specific QP. Keyframe size control needs a frame-size budget check and a re-encode with a higher QP, which is a later step.
   - Until the encoder work confirms otherwise, the keyframe cap is a target, not a guarantee.
 
@@ -439,7 +451,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 
 - **Camera.** `toggleCamera` and `set_camera` already exist. Phase 2 replaces the stub at `calls.rs:2269` with a call into the media session, which opens `CameraSource`, runs the encoder and drives the send queue. The lobby preview (`ui/views/lobby.js`) and the incoming answer (`ui/views/incoming.js`) change from "off" to the real state.
 - **Remote video.** Decoded frames reach the UI through a Tauri `Channel`, one frame per message, as RGBA, drawn on a canvas tile per speaker. Remote video needs a new engine event beside `CallUpdated`.
-- **Share screen.** Part of the first cut, as the user asked. Linux has no screen capture yet, so it is Windows and macOS only.
+- **Share screen.** Part of the first cut, built for the primary display on Windows and macOS. Linux has no screen capture yet, and the control says so. A window picker is still to do.
 - **macOS.** Add `NSCameraUsageDescription` under `bundle.macOS` in `tauri.conf.json` before the first camera build.
 
 ### Files to touch
@@ -449,7 +461,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 - `crates/dissent-core/src/calls.rs`: a real `set_camera`, camera state, video events.
 - `apps/desktop/src-tauri/src/part6.rs`: `set_camera` wiring, the frame channel, and screen share.
 - `apps/desktop/src-tauri/tauri.conf.json`: `NSCameraUsageDescription`.
-- `apps/desktop/ui`: `actions.js`, `api.js`, `views/lobby.js`, `views/incoming.js`, the call view for tiles, `style.css`.
+- `apps/desktop/ui-next/src`: `lib/actions.ts`, `lib/api.ts`, the lobby and incoming call components, the call view for tiles, `index.css` and `shell.css`.
 - Not touched: `dissent-audio`, and the audio reservation in `adapt.rs`.
 
 ### Test plan
@@ -466,7 +478,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 ### Open decisions for the lead
 
 1. Keyframe cap: which encoder control to use, `max_qp_allowed` on all frames or a shorter keyframe interval for SVT, and whether OpenH264 needs a re-encode check. Needs an encoder spike.
-2. Screen share is in the first cut, as asked.
+2. Screen share is in the first cut, as asked. It is not built yet (see Status).
 
 ## Limits of the spike
 

@@ -88,11 +88,15 @@ fn assert_profile(engine: &Engine) {
         .expect("channel id parses");
     let messages = engine.channel_messages(communities[0].id.parse().unwrap(), general, 100);
     assert_eq!(messages.len(), 4, "four messages in general");
+    // A v0.1.4 profile has no history keys file. Its messages still read, and none is marked locked.
+    assert!(messages.iter().all(|m| !m.locked && !m.before_join), "v0.1.4 messages still read");
     let welcome = messages
         .iter()
         .find(|m| m.text == "welcome to the fixture server")
         .expect("welcome message survives");
     assert_eq!(welcome.reactions.len(), 1, "one reaction on the welcome message");
+    // Messages from v0.1.4 have no mentions trailer, so none of them mentions anyone.
+    assert!(messages.iter().all(|m| !m.mentions_me && m.mentions.is_empty()), "no mentions in a v0.1.4 profile");
     assert_eq!(welcome.reactions[0].emoji, "👍");
     assert_eq!(welcome.reactions[0].count, 1);
     let reply = messages

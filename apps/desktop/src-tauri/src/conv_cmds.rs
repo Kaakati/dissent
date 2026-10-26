@@ -1,5 +1,5 @@
 //! Tauri commands for the actions on direct messages and group DMs: reply, react, unreact, edit and
-//! delete. Each forwards to the engine. Names and argument keys match `ui/api.js`.
+//! delete. Each forwards to the engine. Names and argument keys match `ui-next/src/lib/api.ts`.
 
 use dissent_core::{ConvId, DmItem, RootId};
 use tauri::State;

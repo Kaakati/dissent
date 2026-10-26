@@ -1,5 +1,5 @@
 // The Add Friend form: paste someone's address or contact link to send a request, and share your own contact link.
-// Ported from addBox() in ui/views/friends.js. An address shows "Looking them up…" while the request goes out.
+// Ported from addBox() in the old UI's views/friends.js. An address shows "Looking them up…" while the request goes out.
 import { useEffect, useState } from 'react';
 import { Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';

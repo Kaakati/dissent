@@ -1,6 +1,6 @@
 // Quick switcher (Ctrl+K): one search field over servers, channels, groups and direct messages. Ranking is ours: a
 // prefix match first, then a word start, then any substring; servers and conversations show at once and channels are
-// added when every server has loaded. Ported from ui/views/switcher.js, on the shadcn Command (cmdk).
+// added when every server has loaded. Ported from the old UI's views/switcher.js, on the shadcn Command (cmdk).
 import { useEffect, useMemo, useState } from 'react';
 import { Hash, Search } from 'lucide-react';
 import { create } from 'zustand';

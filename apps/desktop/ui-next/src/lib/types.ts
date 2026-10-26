@@ -22,6 +22,9 @@ export interface Me {
   device_id?: Id;
   display_name: string;
   first_run?: boolean;
+  banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
+  banner_preset?: number | null; // the preset gradient (0-9), when it is one
+  banner_poster?: string | null; // an animated banner's still frame
 }
 
 export interface CommunitySummary {
@@ -43,6 +46,7 @@ export interface VoiceParticipant {
 export interface ChannelView {
   id: Id;
   name: string;
+  mentions?: number; // unread messages that mention the viewer (the red badge)
   voice?: boolean;
   slowmode_s?: number;
   visibility?: 'default' | 'spoiler' | 'age';
@@ -70,13 +74,35 @@ export interface VoiceChannelView {
   participants: VoiceParticipant[];
 }
 
+// This device's preferences for one server (server_prefs.bin). A mute that has run out is already dropped by the engine.
+export interface ServerPrefs {
+  muted_until: number | null; // epoch ms the mute ends; 2^63 for a mute that lasts until it is turned back on
+  notify: 'all' | 'mentions' | 'nothing';
+  suppress_everyone: boolean;
+  hide_muted_channels: boolean;
+}
+
 export interface CommunityView extends CommunitySummary {
   my_role: Role | null;
+  history?: 'since_join' | 'all'; // what a new member can read of past messages
+  can_mention_everyone?: boolean; // the viewer holds the mention-everyone permission (the composer offers @everyone)
   channels: ChannelView[];
   members: Member[];
   relays?: string[]; // the relays voice channels can use; Automatic is always there
   voice_channels?: VoiceChannelView[];
   history_locked?: boolean; // member-only history: older control events wait for a member's key
+  banner?: string | null; // an uploaded 16:9 banner's URL, once this device holds it
+  banner_preset?: number | null; // the preset gradient (0-9) when the banner is one
+  banner_poster?: string | null; // an animated banner's still frame, shown under reduced motion
+  description?: string;
+  traits?: Trait[];
+  created_ms?: number;
+}
+
+// One of a server's traits on its profile: an emoji and a label of up to 24 characters.
+export interface Trait {
+  emoji: string;
+  label: string;
 }
 
 // A call another device said is live in a DM or a group (LiveCallView). Only the people in it show, not this device's.
@@ -108,6 +134,7 @@ export interface DirectSummary {
   last_text?: string;
   last_ms?: number;
   live_call?: LiveCall | null;
+  unread?: number; // unread messages from others, up to 100; the engine counts them
 }
 
 export interface GroupSummary {
@@ -119,11 +146,12 @@ export interface GroupSummary {
   pinned?: boolean;
   last_ms?: number;
   live_call?: LiveCall | null;
+  unread?: number; // unread messages from others, up to 100; the engine counts them
 }
 
 export type ConversationSummary = DirectSummary | GroupSummary;
 
-export type Page = 'contacts' | 'transfers';
+export type Page = 'contacts' | 'transfers' | 'saved';
 
 export type Route = { kind: 'home' } | { kind: 'server'; communityId: Id };
 
@@ -159,6 +187,7 @@ export interface CallState {
   muted: boolean;
   deafened: boolean;
   camera?: boolean;
+  screen?: boolean;
   started_ms?: number;
   participants: VoiceParticipant[];
   route?: CallRoute;
@@ -254,6 +283,7 @@ export interface TransferRates {
 export interface TransferSettings {
   max_accept_bytes: number;
   download_dir: string;
+  download_dir_is_default: boolean; // true until the user picks a folder; then a reset to the default is offered
   auto_accept_bytes?: number | null; // null: always ask
 }
 
@@ -290,8 +320,11 @@ export type EngineEvent =
   | { kind: 'group'; group_id: Id }
   | { kind: 'contacts' }
   | { kind: 'presence' }
+  | { kind: 'attachment_changed'; message_id: Id; attachment_id: Id } // a thumbnail arrived: re-read, no alert
   | { kind: 'call_missed'; call_id: string }
-  | { kind: 'call_answered_elsewhere'; call_id: string };
+  | { kind: 'call_answered_elsewhere'; call_id: string }
+  | { kind: 'reminder_due'; reminder: Reminder } // a saved reminder's time came; the core has removed it from the list
+  | { kind: 'video_frame'; sender: number; root_id: string; screen: boolean; width: number; height: number; jpeg: string }; // a camera or screen preview
 
 export interface Capabilities {
   [feature: string]: boolean;
@@ -370,6 +403,9 @@ export interface UserProfileView {
   display_name: string;
   suffix?: string;
   avatar?: string | null;
+  banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
+  banner_preset?: number | null; // the preset gradient (0-9); neither set means the hue colour
+  banner_poster?: string | null; // an animated banner's still frame
   status?: Presence;
   online?: boolean;
   is_contact?: boolean;
@@ -379,6 +415,16 @@ export interface UserProfileView {
   contact_since_ms?: number | null;
   handles?: { community_id: Id; community_name: string; handle: string | null }[];
   mutual_communities: { id: Id; name: string }[];
+  // Contacts you both have, when they share their contact list with you. Empty when they share none.
+  mutual_friends?: MutualFriend[];
+}
+
+// A contact you and another person both have. Shown on profiles as a mutual friend.
+export interface MutualFriend {
+  root_id: Id;
+  display_name: string;
+  suffix: string;
+  avatar: string | null;
 }
 
 // ---- messages: a channel (server) and a direct or group conversation. Read by the chat batch. ----
@@ -393,12 +439,21 @@ export interface Reaction {
 export type AttachmentState =
   | 'available' | 'downloading' | 'sending' | 'paused' | 'failed' | 'disk_full' | 'too_large' | 'waiting' | 'downloaded';
 
+// The preview of a picture: `available` until its thumbnail is fetched, then `downloading` and `downloaded`.
+export interface ThumbView {
+  state: 'available' | 'downloading' | 'downloaded';
+  path?: string | null; // set once the thumbnail is on this device: the same local path rule as local_path
+  width: number;
+  height: number;
+}
+
 export interface Attachment {
   id: Id;
   name: string;
   size: number | null; // bytes
   mime?: string;
   state: AttachmentState;
+  thumb?: ThumbView | null; // the preview of a picture, when the sender made one
   progress?: number; // 0 to 1
   transfer_id?: Id | null;
   local_path?: string | null; // set once downloaded or sent: the only path an image or open action uses
@@ -428,6 +483,11 @@ export interface InvitePreview {
   community: Id;
   name: string;
   icon: string | null;
+  banner?: string | null; // a local path of the uploaded banner, when the answering member sent one
+  banner_preset?: number | null;
+  banner_poster?: string | null; // a local path of an animated banner's still frame
+  description?: string;
+  traits?: Trait[];
   member_count: number;
   online_count: number;
   created_ms: number;
@@ -445,6 +505,7 @@ export interface Embed {
   image?: string | null; // a local path the backend wrote, never a URL from the message
   image_w?: number;
   image_h?: number;
+  theme?: string | null; // the site's theme colour, as #rrggbb
   subtitle?: string;
   tile?: { color?: string; label?: string } | null;
 }
@@ -457,12 +518,23 @@ export interface ReplyRef {
   locked?: boolean;
 }
 
+// A person a message mentions, as the engine resolved it (the id is the base32 root id).
+export interface MentionRef {
+  id: Id;
+  display_name: string;
+}
+
 interface MessageBase {
   id: Id;
   text: string;
   ms: number;
+  mentions?: MentionRef[]; // the people the text mentions, resolved
+  mentions_me?: boolean; // the text mentions the viewer, or holds a valid @everyone (the highlight)
+  mentions_everyone?: boolean; // a valid @everyone is in the text (its token is a pill)
   edited?: boolean;
   deleted?: boolean;
+  locked?: boolean; // its text is empty until this device can open it
+  before_join?: boolean; // locked and sent before this device joined
   queued?: boolean;
   reply_to?: ReplyRef | null;
   reactions?: Reaction[] | null;
@@ -488,3 +560,29 @@ export type ChatTarget =
   | { kind: 'channel'; communityId: Id; channelId: Id; key: string }
   | { kind: 'dm'; peer: Id; key: string }
   | { kind: 'group'; groupId: Id; key: string };
+
+// ---- saved messages and reminders: local to this device, from the saved module of the core ----
+
+// Where a saved message is: a channel (community and channel), or a direct or group conversation (peer). A group message
+// names its group in `peer`, so a jump checks the open conversations for a group before a person.
+export interface MessageRef {
+  community: Id | null;
+  channel: Id | null;
+  peer: Id | null;
+  message_id: Id;
+  text: string;
+  author_name: string;
+  ms: number;
+}
+
+export interface Bookmark {
+  key: string;
+  message: MessageRef;
+  saved_ms: number;
+}
+
+export interface Reminder {
+  id: Id;
+  at_ms: number;
+  message: MessageRef;
+}

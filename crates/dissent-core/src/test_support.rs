@@ -1,6 +1,10 @@
 //! Helpers for tests. Not for production use: the vaults here are random and held in memory.
 
 use dissent_identity::Vault;
+
+/// Maps a link preview host to a loopback server. See `previews::map_preview_host`.
+#[cfg(feature = "test-hooks")]
+pub use crate::previews::map_preview_host;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,4 +42,20 @@ pub fn fast_timings() -> crate::Timings {
         typing_expiry: Duration::from_secs(2),
         typing_every: Duration::from_secs(1),
     }
+}
+
+/// Makes `engine` behave as v0.1.6 did for direct profiles: it never starts a profile sync and
+/// cannot answer one, and takes a pushed `Profile` only.
+pub fn act_as_v016_profiles(engine: &crate::Engine) {
+    engine.inner.legacy_profiles.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The relay URLs this engine's node has adopted, as strings. Empty when the node has none.
+pub fn adopted_relays(engine: &crate::Engine) -> Vec<String> {
+    engine
+        .inner
+        .node
+        .get()
+        .map(|node| node.relays().iter().map(|url| url.to_string()).collect())
+        .unwrap_or_default()
 }

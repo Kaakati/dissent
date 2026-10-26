@@ -1,5 +1,5 @@
 // The transfer details of one attachment, in the right column: the FileDetail board, or the DirectTransferDetail board for a
-// transfer between this user's devices. Ported from ui/views/filedetail.js (fileDetailNodes, directTransferNodes); the
+// transfer between this user's devices. Ported from the old UI's views/filedetail.js (fileDetailNodes, directTransferNodes); the
 // boards themselves are in components/transfers/file-detail.tsx.
 import { DirectTransferDetail, FileDetail } from '@/components/transfers/file-detail';
 import { findAttachment, useChat } from '@/lib/chat';

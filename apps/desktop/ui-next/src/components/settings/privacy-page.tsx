@@ -22,6 +22,89 @@ function CardPreview() {
   );
 }
 
+// Whether your contacts see your contact list, for mutual friends on their profiles. On by default. Off sends it to nobody.
+function FriendsBlock() {
+  const [on, setOn] = useState(false);
+
+  useEffect(() => {
+    api
+      .friendsShared()
+      .then((value) => setOn(Boolean(value)))
+      .catch(() => {});
+  }, []);
+
+  const change = async (next: boolean) => {
+    const previous = on;
+    setOn(next);
+    try {
+      await api.setFriendsShared(next);
+    } catch (err) {
+      setOn(previous);
+      toast(err);
+    }
+  };
+
+  return (
+    <Block title="Friends">
+      <CheckRow>
+        <input
+          type="checkbox"
+          aria-label="Show my friends list to my friends"
+          checked={on}
+          onChange={(e) => void change(e.target.checked)}
+          className={CHECK_CLASS}
+        />
+        <span>Show my friends list to my friends</span>
+      </CheckRow>
+      <Hint>
+        Your friends see the full list of your contacts, not only the ones they have in common with you. Strangers and server members never see it.
+      </Hint>
+    </Block>
+  );
+}
+
+// Link previews: the sender's device fetches a link once to show its title, description, site name, theme colour and picture.
+// Off until it is turned on here, or in the question the composer asks once.
+function LinkPreviewsBlock() {
+  const [on, setOn] = useState(false);
+
+  useEffect(() => {
+    api
+      .linkPreviews()
+      .then((value) => setOn(Boolean(value)))
+      .catch(() => {});
+  }, []);
+
+  const change = async (next: boolean) => {
+    const previous = on;
+    setOn(next);
+    try {
+      await api.setLinkPreviews(next);
+    } catch (err) {
+      setOn(previous);
+      toast(err);
+    }
+  };
+
+  return (
+    <Block title="Link previews">
+      <CheckRow>
+        <input
+          type="checkbox"
+          aria-label="Show link previews in my messages"
+          checked={on}
+          onChange={(e) => void change(e.target.checked)}
+          className={CHECK_CLASS}
+        />
+        <span>Show link previews in my messages</span>
+      </CheckRow>
+      <Hint>
+        Dissent fetches each link from your device, so the site sees your IP address. Recipients never contact the site: they get the preview in your message.
+      </Hint>
+    </Block>
+  );
+}
+
 export function PrivacyPage() {
   // Unknown until the engine answers; the box stays unticked until then, as before.
   const [on, setOn] = useState(false);
@@ -61,6 +144,8 @@ export function PrivacyPage() {
           Your address is published on the Mainline DHT with your device ids, so people who have it can add you. Turning this off removes it. Contact links work either way.
         </Hint>
       </Block>
+      <LinkPreviewsBlock />
+      <FriendsBlock />
       <Block>
         <Hint>This is your card as other people see it.</Hint>
         <CardPreview />

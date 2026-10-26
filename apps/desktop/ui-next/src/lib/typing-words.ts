@@ -1,6 +1,6 @@
 // The words under the message list: who is typing. Pure, with no DOM, so the wording can be checked on its own.
 // Names come oldest first. The parts are plain strings, and `{ name }` for a name, which the row sets in bold.
-// Ported from ui/typing-words.js.
+// Ported from the old UI's typing-words.js.
 
 export type TypingPart = string | { name: string };
 

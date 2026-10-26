@@ -11,6 +11,7 @@ import { useShell, type ShellState } from '@/lib/store';
 function viewOf(s: Pick<ShellState, 'route' | 'channelId' | 'page' | 'peer' | 'peerName' | 'group' | 'community' | 'voiceChannelId'>): { title: string; view: string } {
   if (s.page === 'contacts') return { title: 'Friends', view: 'Friends' };
   if (s.page === 'transfers') return { title: 'Transfers', view: 'Transfers' };
+  if (s.page === 'saved') return { title: 'Saved Messages', view: 'Saved Messages' };
   if (s.route.kind === 'server') {
     const channel = s.community?.channels.find((c) => c.id === s.channelId);
     if (s.voiceChannelId) return { title: channel?.name ?? '', view: 'Voice channel board' };

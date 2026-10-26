@@ -202,7 +202,9 @@ impl Engine {
         };
         for se in candidates {
             let Payload::Sealed {
-                epoch, ciphertext, ..
+                epoch,
+                ciphertext,
+                kind,
             } = &se.event.body.payload
             else {
                 continue;
@@ -211,11 +213,19 @@ impl Engine {
             if !manifest.is_empty() {
                 self.mirror_manifest(se.event.body.device, &manifest);
             }
-            let outcome = self.with_mls_ratchet(|mls| mls.decrypt_application(&community.0, mls_ciphertext));
+            let history = matches!(kind, SealedKind::HistoryMessage);
+            let outcome = if history {
+                self.open_history_text(community, *epoch, mls_ciphertext)
+                    .map(|bytes| (bytes, se.event.body.device))
+                    .ok_or(())
+            } else {
+                self.with_mls_ratchet(|mls| mls.decrypt_application(&community.0, mls_ciphertext))
+                    .map_err(|_| ())
+            };
             let (bytes, device) = match outcome {
                 Ok((bytes, device)) => (bytes, device),
                 _ => {
-                    if may_catch_up && our_epoch.is_some_and(|ours| *epoch > ours) {
+                    if may_catch_up && !history && our_epoch.is_some_and(|ours| *epoch > ours) {
                         self.catch_up_in_background(community, se.event.body.device);
                     }
                     continue;
@@ -274,7 +284,7 @@ pub(crate) fn content_key(se: &SignedEvent) -> Option<(EventId, Hlc)> {
     let hlc = se.event.body.hlc;
     match &se.event.body.payload {
         Payload::Sealed { kind, .. } => match kind {
-            SealedKind::Message | SealedKind::Reply { .. } => Some((se.event.id, hlc)),
+            SealedKind::Message | SealedKind::HistoryMessage | SealedKind::Reply { .. } => Some((se.event.id, hlc)),
             SealedKind::React { .. } | SealedKind::Unreact { .. } => Some((se.event.id, hlc)),
             SealedKind::Edit { target } => Some((*target, hlc)),
         },

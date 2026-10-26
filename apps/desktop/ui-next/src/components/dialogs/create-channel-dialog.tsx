@@ -1,6 +1,6 @@
 // Create Channel, laid out as Discord's: a channel type, a name that follows the type, a Private Channel switch (not
 // built yet, so disabled) and two footer buttons. Text is the default unless `kind` is 'voice'. Ported from
-// openCreateChannelDialog in ui/views/dialogs.js. Names are cleaned as they are typed.
+// openCreateChannelDialog in the old UI's views/dialogs.js. Names are cleaned as they are typed.
 import { type KeyboardEvent, useState } from 'react';
 import { Hash, Lock, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';

@@ -1,6 +1,7 @@
 // Subscribes the shell to the backend's events and reports input for auto-idle. Ported from the listeners in
-// ui/main.js. Call startShellEvents() once, before boot(), as main.js did.
+// the old UI's main.js. Call startShellEvents() once, before boot(), as main.js did.
 import { api, listenTo, onEngineEvent } from './api';
+import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
 import { attachmentProgress, reloadForEvent, startChat } from './chat';
 import { has } from './features';
@@ -18,6 +19,9 @@ function onMessageEvent(ev: EngineEvent): void {
       break;
     case 'group':
       void useShell.getState().loadConversations().then(() => alertForGroup(ev.group_id)).catch(() => {});
+      break;
+    case 'reminder_due':
+      reminderFired(ev.reminder);
       break;
     default:
       break;
@@ -56,7 +60,11 @@ export function startShellEvents(): void {
     onMessageEvent(ev);
   }).catch(() => {});
   listenTo<Parameters<typeof attachmentProgress>[0]>('dissent://attachment-progress', (p) => attachmentProgress(p)).catch(() => {});
-  listenTo<{ conv?: string } | null>('dissent://notification-click', (p) => void openNotifiedConversation(p?.conv)).catch(() => {});
+  listenTo<{ conv?: string } | null>('dissent://notification-click', (p) => {
+    const conv = p?.conv;
+    if (typeof conv === 'string' && conv.startsWith('reminder:')) void openReminderMessage(conv.slice('reminder:'.length)).catch(() => {});
+    else void openNotifiedConversation(conv);
+  }).catch(() => {});
   listenTo<UpdateInfo>('dissent://update-available', (info) => shell().setUpdate(info)).catch(() => {});
   listenTo<Parameters<ShellState['handleTransfersEvent']>[0]>('dissent://transfers', (p) => shell().handleTransfersEvent(p)).catch(() => {});
   listenTo<CallState | null>('dissent://call-state', (c) => shell().handleCallEvent(c)).catch(() => {});

@@ -15,8 +15,11 @@ import { LobbyBody, LobbyHeader } from '@/components/call/lobby';
 import { useCallBoard } from '@/components/call/call-mode';
 import { TransfersAside, TransfersBody, TransfersTabs } from '@/components/transfers/transfers-page';
 import { FriendsBody, FriendsTabs } from '@/components/friends/friends-page';
+import { SavedBody } from '@/components/saved/saved-page';
 import { ProfileCardHost } from '@/components/profile/profile-card';
 import { ChannelSettingsHost } from '@/components/channel-settings/channel-settings';
+import { ServerSettingsHost } from '@/components/server-settings/server-settings';
+import { EmojiPickerHost } from '@/components/chat/emoji-picker';
 import { DialogHost } from '@/components/dialogs/dialog-host';
 import { QuickSwitcher } from '@/components/dialogs/quick-switcher';
 import { KeyboardShortcuts } from '@/components/keyboard-shortcuts';
@@ -34,6 +37,8 @@ export default function App() {
   const transfers = page === 'transfers';
   // The Friends page (the default view of Home) fills the main column too, and its Active Now column is the right one.
   const friends = page === 'contacts';
+  // The Saved Messages page (Home) fills the main column; it has no right column.
+  const saved = page === 'saved';
   // The chat shows the open conversation or server channel. A voice channel's board, a call here, or the lobby of a live
   // call takes its place (call-mode.ts decides which).
   const chatOpen = useShell((s) => !s.page && !s.voiceChannelId && (s.route.kind === 'server' || s.peer !== null));
@@ -51,13 +56,15 @@ export default function App() {
             headerExtra={transfers ? <TransfersTabs /> : friends ? <FriendsTabs /> : null}
             overlay={!transfers && chatOpen && board === null ? <ChatOverlay /> : null}
           >
-            {transfers ? <TransfersBody /> : friends ? <FriendsBody /> : board === 'call' ? <CallBody /> : board === 'lobby' ? <LobbyBody /> : chatOpen ? <ChatBody /> : <div className="flex min-h-0 items-center justify-center"><EmptyPane /></div>}
+            {transfers ? <TransfersBody /> : friends ? <FriendsBody /> : saved ? <SavedBody /> : board === 'call' ? <CallBody /> : board === 'lobby' ? <LobbyBody /> : chatOpen ? <ChatBody /> : <div className="flex min-h-0 items-center justify-center"><EmptyPane /></div>}
           </MainArea>
           <RightPanel>{transfers ? <TransfersAside /> : right.node}</RightPanel>
           <UserBar />
         </div>
         <SettingsPage />
         <ChannelSettingsHost />
+        <ServerSettingsHost />
+        <EmojiPickerHost />
         <Onboarding />
         <DialogHost />
         <CallHost />

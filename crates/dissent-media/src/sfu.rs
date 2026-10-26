@@ -12,7 +12,7 @@
 //!
 //! Digests follow the same rules as frames, so the receivers still verify every sender.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::task::Poll;
@@ -25,6 +25,7 @@ use crate::election::{Mode, PeerId, AUDIO_TOP_SPEAKERS};
 use crate::error::{MediaError, Result};
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
+use crate::video::{stream_key, RawFrame, RawVideo};
 
 /// How recently a participant must have sent a frame to count as an active speaker.
 const ACTIVE_WINDOW: Duration = Duration::from_secs(1);
@@ -55,7 +56,7 @@ pub struct SfuStats {
 }
 
 /// Where a packet came from, or where it goes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Link {
     /// A participant or child forwarder.
     Down(PeerId),
@@ -64,7 +65,7 @@ enum Link {
 }
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
-type RawOut = Result<Option<Vec<u8>>>;
+type RawOut = Result<Option<RawFrame>>;
 
 /// A forwarder node.
 ///
@@ -80,6 +81,12 @@ pub struct Sfu<T: PacketTransport> {
     rotation: usize,
     /// Each downlink's bitrate budget in kbps, as the estimator reports it.
     budgets: BTreeMap<PeerId, u32>,
+    /// Each (downlink, sender) pair that has received a keyframe, so its deltas may follow.
+    video_started: HashSet<(Link, u64)>,
+    /// Each (downlink, sender) pair that has asked for a keyframe and not yet got one.
+    video_wanted: HashSet<(Link, u64)>,
+    /// The link each sender's video arrives on, for keyframe requests.
+    video_source: BTreeMap<u64, Link>,
     observer: Option<Observer>,
     stats: SfuStats,
 }
@@ -95,6 +102,9 @@ impl<T: PacketTransport> Sfu<T> {
             levels: BTreeMap::new(),
             rotation: 0,
             budgets: BTreeMap::new(),
+            video_started: HashSet::new(),
+            video_wanted: HashSet::new(),
+            video_source: BTreeMap::new(),
             observer: None,
             stats: SfuStats::default(),
         }
@@ -203,10 +213,11 @@ impl<T: PacketTransport> Sfu<T> {
             if self.links.is_empty() && self.upstream.is_empty() {
                 return Ok(false);
             }
+            self.answer_keyframe_requests();
             let (from, outcome) = self.poll_links().await;
             match outcome {
-                Ok(Some(wire)) => {
-                    self.forward(from, wire).await;
+                Ok(Some(frame)) => {
+                    self.forward(from, frame).await;
                     return Ok(true);
                 }
                 Ok(None) | Err(_) => self.lose(from),
@@ -227,13 +238,13 @@ impl<T: PacketTransport> Sfu<T> {
         for (peer, call) in self.upstream.iter_mut() {
             futs.push((
                 Link::Up(*peer),
-                Box::pin(call.next_raw()) as Boxed<'_, RawOut>,
+                Box::pin(call.next_raw_any()) as Boxed<'_, RawOut>,
             ));
         }
         for (peer, call) in self.links.iter_mut() {
             futs.push((
                 Link::Down(*peer),
-                Box::pin(call.next_raw()) as Boxed<'_, RawOut>,
+                Box::pin(call.next_raw_any()) as Boxed<'_, RawOut>,
             ));
         }
         let count = futs.len();
@@ -268,7 +279,14 @@ impl<T: PacketTransport> Sfu<T> {
         }
     }
 
-    async fn forward(&mut self, from: Link, wire: Vec<u8>) {
+    async fn forward(&mut self, from: Link, frame: RawFrame) {
+        match frame {
+            RawFrame::Audio(wire) => self.forward_audio(from, wire).await,
+            RawFrame::Video(raw) => self.forward_video(from, raw).await,
+        }
+    }
+
+    async fn forward_audio(&mut self, from: Link, wire: Vec<u8>) {
         self.stats.frames_in += 1;
         if let Some(observer) = self.observer.as_mut() {
             let origin = match from {
@@ -329,6 +347,109 @@ impl<T: PacketTransport> Sfu<T> {
             }
         };
         self.fan_out(targets, &wire).await;
+    }
+
+    /// Routes one video frame that a link admitted. A downlink gets a frame only after it has a
+    /// keyframe from this sender, so it never starts mid-GOP. Until then the forwarder asks the
+    /// frame's source for a keyframe.
+    async fn forward_video(&mut self, from: Link, raw: RawVideo) {
+        if let Link::Up(parent) = from {
+            if self.active_up != Some(parent) {
+                self.stats.frames_dropped += 1;
+                return;
+            }
+        }
+        if !self.is_active(raw.sender) {
+            self.stats.frames_dropped += 1;
+            return;
+        }
+        let stream = stream_key(raw.sender, raw.screen);
+        self.video_source.insert(stream, from);
+
+        let mut targets: Vec<Link> = self
+            .links
+            .keys()
+            .copied()
+            .filter(|peer| Link::Down(*peer) != from && *peer != raw.sender)
+            .map(Link::Down)
+            .collect();
+        if let (Link::Down(_), Some(parent)) = (from, self.active_up) {
+            targets.push(Link::Up(parent));
+        }
+
+        for target in targets {
+            let key = (target, stream);
+            if !raw.keyframe && !self.video_started.contains(&key) {
+                if self.video_wanted.insert(key) {
+                    self.request_keyframe_from(from);
+                }
+                continue;
+            }
+            if raw.keyframe {
+                self.video_wanted.remove(&key);
+            }
+            self.video_started.insert(key);
+            match self.send_video(target, &raw.nal).await {
+                Ok(()) => self.stats.frames_forwarded += 1,
+                Err(MediaError::NotConnected) => self.stats.frames_dropped += 1,
+                // A downlink without video, `m=video 0`, just gets nothing.
+                Err(MediaError::NoVideoTrack) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "video copy refused, dropping the link");
+                    self.lose(target);
+                }
+            }
+        }
+    }
+
+    /// Writes one carrier NAL to a link, or does nothing if the link is gone.
+    async fn send_video(&mut self, target: Link, nal: &[u8]) -> Result<()> {
+        let call = match target {
+            Link::Down(peer) => self.links.get_mut(&peer),
+            Link::Up(peer) => self.upstream.get_mut(&peer),
+        };
+        match call {
+            Some(call) => call.send_raw_video(nal).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Asks the source of a stream for a keyframe, on the link the stream arrives on.
+    fn request_keyframe_from(&mut self, source: Link) {
+        let call = match source {
+            Link::Down(peer) => self.links.get_mut(&peer),
+            Link::Up(peer) => self.upstream.get_mut(&peer),
+        };
+        if let Some(call) = call {
+            if let Err(e) = call.request_keyframe() {
+                tracing::debug!(error = %e, "could not ask a source for a keyframe");
+            }
+        }
+    }
+
+    /// A downlink that asks for a keyframe has lost video it cannot decode. Its stream restarts
+    /// at the next keyframe of each sender, and each sender is asked for one now.
+    fn answer_keyframe_requests(&mut self) {
+        let asked: Vec<PeerId> = self
+            .links
+            .iter_mut()
+            .filter_map(|(peer, call)| call.take_keyframe_request().then_some(*peer))
+            .collect();
+        for peer in asked {
+            let link = Link::Down(peer);
+            self.video_started.retain(|(target, _)| *target != link);
+            self.video_wanted.retain(|(target, _)| *target != link);
+            let sources: Vec<(u64, Link)> = self
+                .video_source
+                .iter()
+                .map(|(sender, source)| (*sender, *source))
+                .collect();
+            for (sender, source) in sources {
+                if self.is_active(sender >> 1) {
+                    self.request_keyframe_from(source);
+                }
+            }
+        }
     }
 
     /// Writes one packet to each target link, and drops any link that refuses it.

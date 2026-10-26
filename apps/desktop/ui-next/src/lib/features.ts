@@ -1,10 +1,10 @@
 // Feature detection for surfaces the engine may not implement yet. The backend reports what it supports through the
 // `capabilities` command, as an object of booleans or a list of names. A feature not reported renders nothing, so
-// the UI never shows a dead control. Ported from ui/features.js; the list must stay the same.
+// the UI never shows a dead control. Ported from the old UI's features.js; the list must stay the same.
 
 export const FEATURES = [
   'groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change',
-  'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars',
+  'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'mentions', 'server_prefs',
 ] as const;
 
 export type Feature = (typeof FEATURES)[number];

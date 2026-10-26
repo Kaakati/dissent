@@ -9,11 +9,11 @@ const AlertDialog = AlertDialogPrimitive.Root;
 function AlertDialogContent({ className, ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Content>) {
   return (
     <AlertDialogPrimitive.Portal>
-      <AlertDialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/70" />
+      <AlertDialogPrimitive.Overlay className="fixed inset-0 z-[85] bg-black/70" />
       <AlertDialogPrimitive.Content
         data-slot="alert-dialog-content"
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100vh-32px)] w-[min(520px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-chat text-text shadow-[var(--shadow-3)] outline-none',
+          'fixed top-1/2 left-1/2 z-[85] flex max-h-[calc(100vh-32px)] w-[min(520px,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-border bg-chat text-text shadow-[var(--shadow-3)] outline-none',
           className,
         )}
         {...props}

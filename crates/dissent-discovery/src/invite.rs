@@ -194,6 +194,14 @@ impl InviteLink {
         }
     }
 
+    /// The generation of the invite secret.
+    pub fn secret_generation(&self) -> u64 {
+        match self {
+            Self::Full(invite) => invite.secret_generation,
+            Self::Short(short) => short.secret_generation,
+        }
+    }
+
     /// The invite id, if the link has one.
     pub fn invite_id(&self) -> Option<[u8; 16]> {
         match self {

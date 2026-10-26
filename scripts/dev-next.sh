@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Runs the Tauri desktop app on the React UI in apps/desktop/ui-next, without editing tauri.conf.json. The override
-# applies to this run only: build.devUrl points at the Vite dev server, build.beforeDevCommand starts it, and
-# build.features is cleared so the app is built without custom-protocol. Without that, Tauri serves the embedded
-# apps/desktop/ui files and ignores devUrl.
-# The app itself is unchanged, so DISSENT_DATA_DIR and DISSENT_LOOPBACK work as they do for apps/desktop/ui.
+# Runs the Tauri desktop app against the Vite dev server in apps/desktop/ui-next, for this run only. The override sets
+# build.devUrl and build.beforeDevCommand, and clears build.features, so Tauri loads the dev server instead of the embedded
+# dist. DISSENT_DATA_DIR and DISSENT_LOOPBACK work as usual.
 #
 # Usage:
 #   scripts/dev-next.sh                         the app on the new UI, Vite on port 1420
