@@ -57,7 +57,27 @@ When two people can't connect directly, often because of home routers or mobile 
 
 **Direct messages** go straight from your device to the other person's device over an encrypted connection. If they're offline, your app holds the message and keeps trying until it gets through. You can message anyone you share a server with. You can also swap **contact links** with someone you've never shared a server with.
 
-## What you can do in the app today
+## Features
+
+Everything below is in the app today, and all of it is free. There's no paid tier, and nothing is held back for subscribers.
+
+### Free here, paid on Discord
+
+Some things Discord keeps behind Nitro or server boosts are simply part of Dissent. This compares Discord as it was at the time of writing; its plans change, so check theirs for the current details.
+
+| Feature | Discord | Dissent |
+|---|---|---|
+| File size per upload | 10 MB free, 50 MB with Nitro Basic, 500 MB with Nitro | Up to 10 GB, encrypted, for everyone |
+| Profile banner | Nitro only | Free: a preset colour, an image, or a looping GIF |
+| Animated profile banner | Nitro only | Free |
+| Server banner | Needs server boost level 2 | Free for every server |
+| Animated server banner | Needs server boost level 3 | Free (looping GIF) |
+| Invite card with the server's banner | Needs server boosts | Free: every invite link shows the server's banner, icon, counts and description |
+| How many servers you can join | 100, or 200 with Nitro | No limit set by Dissent |
+| Downloads from several sources at once | No | Free: big files come from every member who has them |
+| Message history kept for you | On Discord's servers | On your own devices and your friends' |
+
+Dissent doesn't have everything Discord sells: there are no custom emoji, stickers, soundboards, vanity invite links or profile themes yet.
 
 ### Servers
 
