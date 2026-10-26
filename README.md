@@ -8,7 +8,7 @@
 
 Dissent is a free, open-source chat app in the spirit of Discord. You can create servers, organise them into channels, invite friends, chat in real time and send private direct messages. The difference is underneath. Dissent has no central company server holding everyone's conversations. Your servers live on the computers of the people who use them, and the app connects those people to each other directly.
 
-> **Status: early prototype.** Text chat works today between people who have Dissent installed. Much more is built underneath and is being brought into the app step by step. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
+> **Status: early but usable (v0.1.8).** Servers, encrypted chat, direct messages, voice and video calls and screen sharing all work today between people who have Dissent installed. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
 
 ---
 
@@ -59,14 +59,49 @@ When two people can't connect directly, often because of home routers or mobile 
 
 ## What you can do in the app today
 
-- **Servers:** create servers, join as many as you like from invite links, and switch between them from the side rail. Unread servers and channels are marked, and a "New messages" line shows where you left off.
-- **Channels and messages:** create channels, and send, edit and delete messages. Messages are grouped by person and day, and links are clickable.
-- **Moderation:** use roles (owner, admins and moderators), with banning and unbanning.
-- **People:** see member lists grouped by role. Click anyone to see their profile card, the handles they hold and the servers you share.
-- **Direct messages and contacts:** messages to offline people are sent automatically later, and contact links let you reach someone without a shared server.
-- **Quick switcher:** press Ctrl+K to jump to any server, channel or conversation. The app is fully usable from the keyboard.
-- **Your identity:** back up and restore it with a recovery phrase. Each identity keeps its own separate data.
-- **Network:** use the public relays or your own, and see live network health in the corner of the window. That shows how big the public network is, whether you're reachable, and how many people you're connected to.
+### Servers
+
+- **Create and join servers** from invite links, and switch between them from the side rail. Drag servers to reorder them; the order is yours alone.
+- **Invite cards.** An invite link pasted in chat shows a card with the server's banner, icon, name, member and online counts, and a Join button. Short invite links fit in a message, and a full link is offered for older versions.
+- **Server Profile.** Owners set the name, icon, a banner (a preset colour, an image or a looping GIF), up to five traits and a description, with a live preview. Admins can change everything except the name. The banner shows at the top of the channel list for every member.
+- **Text and voice channels**, with slow mode and per-channel settings. Unread channels are marked, and a "New messages" line shows where you left off.
+- **Encrypted servers.** Server messages are sealed so that only members can read them. A banned or removed member can't read anything new. Owners can switch on member-only mode, which also hides settings and moderation from people who have left.
+- **Message history for new members**, following the server's history setting: new members either see only what was sent after they joined (the default for new servers) or the whole history.
+- **Moderation:** owner, admin and moderator roles, banning and unbanning, and an audit trail every member's app checks for itself.
+- **Right-click a server** to mark it read, invite people, mute it for a while or for good, choose its notification level (all messages, mentions only or nothing), hide muted channels, open its settings, create a channel or leave.
+
+### Messages
+
+- **Mentions.** Type `@` to pick a member, filtered as you type. Owners and admins can use `@everyone`. A message that mentions you is highlighted, and channels and servers show red mention counts until you read them.
+- **Formatting.** Discord-style markdown: bold, italic, underline, strikethrough, headers, lists, quotes, spoilers, links with your own text, and code blocks with syntax highlighting. Ctrl+B, Ctrl+I and Ctrl+U format the selected text.
+- **Right-click a message** to react, reply, edit, forward, copy, pin, bookmark it to Saved Messages, set a reminder, mark it unread, copy a link to it, have it read aloud, or delete it.
+- **Replies and reactions**, with quick reactions from your most-used emoji.
+- **Files of up to 10 GB**, encrypted, downloaded from several members at once, and resumed after a restart. Pictures get a small preview. Downloads go to your Downloads folder unless you choose another.
+- **Link previews** with the page's title, description and picture. They're fetched by the sender, after asking once, so the people reading never contact the website.
+
+### People and direct messages
+
+- **Friends.** Add people by their address (`dsu1…`) or a contact link, accept or decline requests, and block people. Friends who are in a call or online show in Active Now.
+- **Profiles** with your avatar, a banner and a status (online, idle, do not disturb or invisible). Profile cards show mutual servers and, if you allow it, mutual friends.
+- **Direct and group messages**, encrypted, and delivered to every device of both people. Messages to someone offline are held, or left at their inbox, and sent when they're back. A message an inbox refuses shows as failed, with a Retry.
+- **Unread conversations** appear on the side rail with a count, like Discord.
+
+### Calls
+
+- **Voice calls** one to one, in groups, and in voice channels. Small calls connect everyone directly. Bigger ones elect the strongest computer to forward everyone's sealed streams, and a backup takes over if it drops.
+- **Video and screen sharing** during a call, with a camera preview before you join. Audio always keeps its share of the connection, so video can't crowd it out.
+- **Clean audio:** noise suppression, echo cancellation, automatic gain, push-to-talk, and a mic test.
+- Calls are encrypted end to end, and forwarders can't open what they pass along.
+
+### You and your devices
+
+- **Your identity** is backed up with a 24-word recovery phrase, and its keys are kept in your system's keychain.
+- **Several devices.** Link a laptop or a USB stick to the same identity, and cut off a lost one.
+- **Recovery with friends.** Choose guardians, and if you lose your recovery phrase, enough of them can vouch for your new identity.
+- **Safety numbers** to compare with a friend, with a warning if their key changes.
+- **Quick switcher:** press Ctrl+K to jump anywhere. The app is fully usable from the keyboard.
+- **Network:** use the public relays or your own, and see live network health.
+- **Updates** are offered in the app and installed with one click. Every update is checked against Dissent's signing key.
 
 ## Portable version
 
@@ -86,21 +121,12 @@ Whichever you choose:
 - **Only one copy runs at a time.** If Dissent is already open with the same profile, a second copy shows a message and closes.
 - **Updates are manual.** When a new version is out, Dissent tells you. Download the new portable zip from the release page and unpack it over the old folder. Your data stays in `DissentData`.
 
-## Built, and coming to the app next
+## Built underneath, not in the app yet
 
-These pieces are built and tested underneath, and are being connected to the app:
-
-- **Encrypted servers:** messages that only current members can read. When someone is banned, they lose the ability to read new messages. This is being wired in now.
-- **Voice and video calls**, encrypted end to end:
-  - one-to-one calls
-  - small group calls, where everyone sends to everyone
-  - larger calls, where the strongest computer in the call forwards everyone's sealed streams without being able to open them, and a ready backup takes over within moments if it drops
-  - calls ride the same connections as chat, so they work through home routers without extra servers
-- **Recovery with friends:** choose a few trusted people as guardians. If you lose your recovery phrase, enough of them can vouch for your new identity, and your roles and handles in every server carry over.
-- **Several devices:** link your phone and laptop to the same identity, and cut off a lost device.
-- **Safety numbers:** a number you and a friend can compare to be sure nobody is impersonating either of you.
-- **Replies and reactions** to messages.
+- **Private channels.** Channels only chosen members and roles can see, each with its own key. The rules are built and tested, but the keys, the Private Channel switch and the member picker aren't finished, so the app doesn't offer them yet.
+- **AV1 video in the installers.** Calls can use AV1 when every computer in the call supports it, but the installers ship without the AV1 encoder for now and send H.264.
 - **Website-verified handles:** if you own a website, prove a handle like `@example.com`. Every viewer's app checks it for itself.
+- **Push relay** for waking phones, as a prototype.
 
 ## Things anyone can run
 
@@ -115,18 +141,20 @@ Dissent works with no servers at all, but these optional helpers make it better,
 
 Dissent is young, and we would rather tell you what it doesn't do yet than have you find out the hard way.
 
-- **Server messages aren't end-to-end encrypted in the app yet.** Connections between devices are encrypted, so outsiders and relays can't read along. The extra layer that keeps messages readable only to current members is built and being connected now.
-- **Your identity file on disk isn't password-protected yet.** Anyone with access to your computer account could copy it.
+- **No security audit has been done.** The design notes in [`docs/design/06-threat-model.md`](docs/design/06-threat-model.md) list what each part protects against and what it doesn't.
 - **History needs someone online.** You can only catch up on a server when at least one other member, or a seeder, is online.
-- **Calls, guardians, multiple devices and safety numbers aren't in the app yet.** They're built underneath and listed above.
+- **New members can't read messages from before 0.1.7**, even when the server shares its full history. Those were sealed before history keys existed.
+- **Older versions miss newer features.** Someone on an older Dissent sees plain `@names` instead of highlighted mentions, no banners, and server changes such as a rename show for them only once they update.
+- **A sudden power cut can lose your last quarter-second of sent messages.** Other members usually already have them, so they come back when you sync.
+- **Mutual friends shares your whole friends list with your friends**, not just the people you have in common. You can turn this off in Settings › Privacy.
+- **Screen sharing doesn't work on Linux yet**, and the Linux camera isn't supported either.
 - **No mobile app yet.**
-- **Most testing has happened on one machine and over the internet between two copies of the app.** Real-world measurements across many networks and mobile carriers are still to come.
-- **No security audit has been done.**
+- **Most testing has happened on one machine and over the internet between a few copies of the app.** Real-world measurements across many networks and mobile carriers are still to come.
 
 ## What's next
 
-1. Bring encrypted servers, calls, guardians, multiple devices and safety numbers into the app.
-2. Protect your identity file with your system's keychain or a passphrase.
+1. Private channels in the app.
+2. AV1 video in the installers, and screen sharing and camera on Linux.
 3. Measure direct connections across real home and mobile networks, and run relays where they help most.
 4. Phone notifications through push relays, and a mobile app.
 5. A security review.
@@ -146,7 +174,7 @@ No single party can. There's no central switch to flip.
 A moderator can only do what their role allows, and every member's app checks this. An admin can't remove the owner.
 
 **I lost my recovery phrase. Can you help?**
-Nobody holds a copy, which is exactly what keeps your identity yours. Guardian recovery, described above, will let a few trusted friends help you move to a new identity without losing your place in your servers.
+Nobody holds a copy, which is exactly what keeps your identity yours. If you chose guardians in Settings › Recovery, enough of them can vouch for a new identity, and your roles and handles in every server carry over.
 
 **Why does Windows ask to allow Dissent through the firewall?**
 Dissent talks directly to other people's computers, so it needs permission to accept connections. Choosing "Allow" lets friends reach you directly instead of always going through a relay.
@@ -156,25 +184,31 @@ Yes. It's open source, so anyone can read the code, check what it does, and impr
 
 ## For developers
 
-Dissent is written in Rust, with a desktop app built on Tauri. If you want to build it or contribute:
+Dissent is written in Rust, with a desktop app built on Tauri 2 and a React interface (`apps/desktop/ui-next`). If you want to build it or contribute:
 
 - [`docs/Decentralized Discord Alternative — Architecture Spec.md`](docs/Decentralized%20Discord%20Alternative%20%E2%80%94%20Architecture%20Spec.md) covers the overall design and roadmap.
-- [`docs/design/`](docs/design/) holds the design notes for servers and DMs, recovery and safety, and calls.
+- [`docs/design/`](docs/design/) holds the design notes: servers and DMs, recovery and safety, calls, encrypted servers, the threat model, the visual system, files, audio, DM delivery and private channels.
 - [`CLAUDE.md`](CLAUDE.md) explains the project layout, coding conventions and how to run the tests.
 
-To run the desktop app from source:
+You need Rust and Node 24. To run the desktop app from source, against the React dev server:
 
 ```sh
 cargo install tauri-cli --version "^2"
-cd apps/desktop/src-tauri
-cargo tauri dev
+npm --prefix apps/desktop/ui-next ci
+scripts/dev-next.sh
 ```
+
+To try the interface alone in a browser, with a built-in mock backend: `npm --prefix apps/desktop/ui-next run dev`.
 
 To run the tests:
 
 ```sh
-cargo test --workspace
+cargo test --workspace                      # Rust unit and integration tests
+scripts/fwtest.sh dissent-core it --ignored # networked tests (loopback)
+npm --prefix apps/desktop/ui-next run test:ui   # the interface, in a headless browser
 ```
+
+AV1 video is behind the `svt-av1` feature of `dissent-video`, which builds SVT-AV1 from the `third_party/SVT-AV1` submodule and needs NASM and libclang. Without it, video uses H.264.
 
 ## Contributing
 
