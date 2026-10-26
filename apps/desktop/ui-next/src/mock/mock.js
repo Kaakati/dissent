@@ -208,6 +208,9 @@ if (!window.__TAURI__) {
   generalMessages[0].attachments = [att('rules.pdf', 180 * 1024, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/rules.pdf' })];
   generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
+  // The desktop shell settings, as the desktop app would keep them. Start at login is offered in the mock.
+  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false };
+  const shellView = () => ({ ...mockShell, start_at_login_available: true, start_at_login_note: null });
   // The folder the user picked in the mock. Null is the default, which follows the OS Downloads folder.
   let pickedDownloadDir = null;
   const transferSettings = () => ({
@@ -964,6 +967,15 @@ if (!window.__TAURI__) {
     app_version: () => '0.1.0 (mock)',
     identity_export_phrase: () => 'harbor velvet ocean pistol arctic gentle meadow ribbon canyon lunar orbit fabric timber violin elder copper saddle raven maple hollow quartz ember ladder pilot',
     identity_import_phrase: () => null,
+    shell_settings: () => shellView(),
+    set_shell_settings: ({ settings }) => {
+      mockShell = {
+        keep_running: settings.keep_running,
+        start_at_login: settings.start_at_login,
+        notifications_muted: settings.notifications_muted,
+      };
+      return shellView();
+    },
     get_network_settings: () => ({ ...mockNetwork, relays: [...mockNetwork.relays] }),
     set_network_settings: ({ settings }) => {
       const relays = settings.relays.map((r) => {

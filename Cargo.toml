@@ -69,6 +69,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+# Exact: the 3.0 line is an alpha, and 2.7.0 is the release for tauri 2. Checked against its source in the registry.
+tauri-plugin-autostart = "=2.7.0"
 # Match tauri-plugin-dialog, which uses rfd's gtk3 backend; rfd refuses gtk3 and xdg-portal together.
 rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
@@ -81,7 +83,7 @@ unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
 idna = "1"
 hickory-resolver = { version = "0.25", features = ["tokio"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 iroh-relay = { version = "1.4.1", features = ["server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 axum = "0.8"

@@ -305,6 +305,11 @@ fn run(
         }
         engine.pull_playout(&mut play);
         apply_gain(&mut play, out_gain);
+        // The speaker clips at full scale, so the reference is clipped the same way: it must match
+        // what the speaker plays, or the canceller models a signal that never reached the air.
+        for s in play.iter_mut() {
+            *s = s.clamp(-1.0, 1.0);
+        }
         // The echo canceller needs the audio as it leaves the speaker, pushed before the mic frames
         // that hear it. It is fed only while the mic runs, so its reference stays in step with them.
         if mic.is_some() {

@@ -1,0 +1,55 @@
+[Unit]
+Description=Dissent seeder: keeps a server's history available when its members are offline
+Documentation=https://github.com/Kaakati/dissent/blob/main/packaging/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dissent-seeder
+# A dedicated, unprivileged account made for this service. Its state lives in /var/lib/dissent-seeder,
+# which systemd creates and keeps across updates.
+DynamicUser=yes
+StateDirectory=dissent-seeder
+StateDirectoryMode=0700
+UMask=0077
+# Configuration: see packaging/systemd/seeder.env.example. The file is optional.
+EnvironmentFile=-/etc/dissent/seeder.env
+Environment=DISSENT_SEEDER_DATA_DIR=/var/lib/dissent-seeder
+# The passphrase that seals the identity: a credential, readable by this service only.
+# Create /etc/dissent/seeder.passphrase with the passphrase as its only line, mode 0600.
+LoadCredential=passphrase:/etc/dissent/seeder.passphrase
+Environment=DISSENT_SEEDER_PASSPHRASE_FILE=%d/passphrase
+Restart=on-failure
+RestartSec=5
+# The seeder stops on SIGTERM: it sends its offline beacon and flushes its state first.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Hardening. The seeder needs the network and its state directory, and nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

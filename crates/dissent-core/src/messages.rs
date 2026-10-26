@@ -103,6 +103,8 @@ impl Engine {
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, plain.clone());
+        // The sender tells the seeders about the thumbnails and previews, so they keep them for members who join later.
+        self.hint_seeders(community, crate::attachments::media_blobs(&plain));
         let me = self.inner.me;
         let (attachments, mentions_me, mentions, mentions_everyone) = {
             let w = self.read();

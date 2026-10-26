@@ -575,6 +575,17 @@ impl World {
     }
 }
 
+/// The blobs a message's thumbnails and preview pictures point at, as `(hash, ciphertext size)`. Seeders are told these
+/// so they can keep them. See `mirror_hint`.
+pub(crate) fn media_blobs(plain: &str) -> Vec<([u8; 32], u64)> {
+    let Some(o) = open(plain) else {
+        return Vec::new();
+    };
+    let thumbs = o.thumbs.iter().filter(|t| valid_thumb(t)).map(|t| (t.file.hash, t.file.cipher_size));
+    let previews = o.extras.iter().filter_map(|e| e.image.as_ref()).map(|i| (i.file.hash, i.file.cipher_size));
+    thumbs.chain(previews).collect()
+}
+
 /// Where the thumbnail of an attachment is stored on this device.
 fn thumb_path(paths: &crate::store::Paths, id: &str) -> PathBuf {
     paths.thumbnails_dir().join(format!("{id}.jpg"))
@@ -1446,6 +1457,16 @@ impl Engine {
         }
     }
 
+    /// Tells the seeders about the thumbnails and preview pictures of a message this device has fetched.
+    fn hint_media_of(&self, community: Option<dissent_identity::CommunityId>, message: &str) {
+        let Some(c) = community else {
+            return;
+        };
+        if let Ok((text, _)) = self.message_text(Some(c), message) {
+            self.hint_seeders(c, media_blobs(&text));
+        }
+    }
+
     /// Fetches one thumbnail and tells the UI when it is on this device.
     async fn fetch_thumbnail(
         &self,
@@ -1454,6 +1475,9 @@ impl Engine {
         attachment: String,
     ) {
         let result = self.download_thumbnail(community, &message, &attachment).await;
+        if result.is_ok() {
+            self.hint_media_of(community, &message);
+        }
         self.write().thumb_fetching.remove(&attachment);
         match result {
             Ok(()) => self.emit(EngineEvent::AttachmentChanged {
@@ -1499,6 +1523,9 @@ impl Engine {
         picture: String,
     ) {
         let result = self.download_embed_image(community, &message, &picture).await;
+        if result.is_ok() {
+            self.hint_media_of(community, &message);
+        }
         self.write().thumb_fetching.remove(&picture);
         match result {
             Ok(()) => self.emit(EngineEvent::AttachmentChanged {

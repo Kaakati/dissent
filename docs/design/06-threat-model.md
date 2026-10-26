@@ -271,6 +271,21 @@ A record cut short by a power cut is dropped when the log loads, and the records
 
 Sender generations of the MLS ratchet are durable the same way: a sender reserves each block of 100 generations, synced, before its first send past the block, and resumes past the block after a crash. So a crash never makes the sender reuse a generation. Receivers accept the skipped generations within their forward distance of 1000.
 
+## Seeder hints: what a seeder learns about thumbnails and previews
+
+A member that posts a picture, or fetches a message's thumbnail or preview picture, sends the community's seeders
+the hash and ciphertext size of each blob. A seeder then keeps that ciphertext, within its `MirrorPolicy`, so a
+member who joins later can fetch it while the sender is offline.
+
+- **A seeder learns** the hash and size of the blob, and that a member of the community shared it. The manifest
+  already gives a seeder the same for attachments, so this adds no new kind of leak.
+- **A seeder does not learn** the thumbnail's content, its key, its name, the message's text, or which of the
+  community's members will read it. It cannot open the blob, and it holds no key for it.
+- **Only members can hint.** A seeder answers a hint only from a device whose root is a member of the community,
+  and only within its per-device limit of 30 hints a minute. A non-member gets an error.
+- **Other members hold the same blob.** A member that is online may also serve a thumbnail, so a seeder's copy is
+  one of several. The seeder can see the requests it receives, as any provider can.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

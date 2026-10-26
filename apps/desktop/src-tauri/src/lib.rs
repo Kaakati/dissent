@@ -3,6 +3,8 @@ mod events;
 mod network;
 mod storage;
 mod tray;
+mod shell_cmds;
+mod shell_settings;
 mod updates;
 mod attachments;
 mod avatar_cmds;
@@ -60,6 +62,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![shell_settings::BACKGROUND_ARG]),
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -213,6 +219,8 @@ pub fn run() {
             server_settings_cmds::set_community_banner_animated,
             server_settings_cmds::set_profile_banner_animated,
             commands::get_network_settings,
+            shell_cmds::shell_settings,
+            shell_cmds::set_shell_settings,
             commands::safety_number,
             updates::check_update,
             updates::install_update,

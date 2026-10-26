@@ -1702,7 +1702,8 @@ await sleep(300);
 await b.ev(`document.querySelector('[data-settings-page] input[type="checkbox"]').click()`);
 await sleep(300);
 const sounds24 = await b.ev(`JSON.stringify([...document.querySelectorAll('[data-settings-page] input')].map(n => [n.type, n.checked, n.disabled]))`);
-check('E24 Play sounds off disables the per-kind toggles and the volume', (await b.ev(`[...document.querySelectorAll('[data-settings-page] input[type="checkbox"]')].slice(1).every(n => n.disabled) && document.querySelector('[data-settings-page] input[type="range"]').disabled`)) === true, sounds24);
+// Desktop notifications is its own setting (the desktop app's mute), so Play sounds does not disable it.
+check('E24 Play sounds off disables the per-kind toggles and the volume', (await b.ev(`[...document.querySelectorAll('[data-settings-page] input[type="checkbox"]')].slice(1).filter(n => !n.closest('label')?.textContent.includes('Desktop notifications')).every(n => n.disabled) && document.querySelector('[data-settings-page] input[type="range"]').disabled`)) === true, sounds24);
 await pressEsc(b);
 noConsoleErrors('startup', b.consoleErrors);
 
@@ -2356,6 +2357,44 @@ check('an unmuted conversation still is', labels.includes('Maya, 1 unread messag
 await b.close();
 }
 
+// ---- desktop shell: the window and sign-in toggles on Appearance, and the notification toggle on Notifications & sounds ----
+async function section_shell() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9797, profile: `${SCRATCH}/shell-next-profile` });
+const { ev } = b;
+await sleep(800);
+await b.ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+const nav = (label) => ev(`(() => { const n = [...document.querySelectorAll('[data-settings-page] nav button')].find((x) => x.textContent.includes(${JSON.stringify(label)})); if (!n) return false; n.click(); return true; })()`);
+const box = (label) => ev(`(() => { const l = [...document.querySelectorAll('[data-settings-page] label')].find((x) => x.textContent.includes(${JSON.stringify(label)})); return l?.querySelector('input')?.checked ?? null; })()`);
+const enabled = (label) => ev(`(() => { const l = [...document.querySelectorAll('[data-settings-page] label')].find((x) => x.textContent.includes(${JSON.stringify(label)})); return l ? !l.querySelector('input').disabled : null; })()`);
+const clickBox = (label) => ev(`(() => { const l = [...document.querySelectorAll('[data-settings-page] label')].find((x) => x.textContent.includes(${JSON.stringify(label)})); l?.querySelector('input')?.click(); return !!l; })()`);
+
+await nav('Appearance');
+await sleep(300);
+check('keep running starts off', (await box('Keep Dissent running when the window is closed')) === false);
+check('start at login is offered in the browser preview', (await enabled('Open Dissent when you sign in')) === true);
+check('start at login starts off', (await box('Open Dissent when you sign in')) === false);
+await clickBox('Keep Dissent running when the window is closed');
+await sleep(400);
+check('keep running turns on', (await box('Keep Dissent running when the window is closed')) === true);
+await clickBox('Open Dissent when you sign in');
+await sleep(400);
+check('start at login turns on', (await box('Open Dissent when you sign in')) === true);
+
+await nav('Notifications & sounds');
+await sleep(300);
+check('desktop notifications start on', (await box('Desktop notifications')) === true);
+await clickBox('Desktop notifications');
+await sleep(400);
+check('desktop notifications turn off', (await box('Desktop notifications')) === false);
+
+await nav('Appearance');
+await sleep(300);
+check('the window choices keep their state across pages', (await box('Keep Dissent running when the window is closed')) === true && (await box('Open Dissent when you sign in')) === true);
+
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -2368,6 +2407,7 @@ const SECTIONS = [
   ['nomentions', section_nomentions],
   ['serverprefs', section_serverprefs],
   ['unreaddms', section_unreaddms],
+  ['shell', section_shell],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

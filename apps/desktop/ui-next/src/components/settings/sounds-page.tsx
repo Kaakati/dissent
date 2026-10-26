@@ -2,10 +2,12 @@
 // volume. Desktop notification content stays available while Play sounds is off, as in the current UI. Ported from the
 // settings in views/settings.js; the players are in sounds.ts.
 import { Choices, Block, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
+import { setShellPrefs, useShellPrefs } from '@/lib/shell-prefs';
 import { setSoundSettings, useSoundSettings } from '@/lib/sound-settings';
 
 export function SoundsPage() {
   const s = useSoundSettings();
+  const shell = useShellPrefs();
   // The per-kind toggles and the volume are disabled while Play sounds is off.
   const off = !s.enabled;
   return (
@@ -27,6 +29,7 @@ export function SoundsPage() {
         <Toggle label="Message notifications" checked={s.messages} disabled={off} onChange={(messages) => setSoundSettings({ messages })} />
         <Toggle label="Call and voice sounds" checked={s.calls} disabled={off} onChange={(calls) => setSoundSettings({ calls })} />
         <Toggle label="Ringtone" checked={s.ringtone} disabled={off} onChange={(ringtone) => setSoundSettings({ ringtone })} />
+        <Toggle label="Desktop notifications" checked={!shell.notificationsMuted} disabled={false} onChange={(on) => void setShellPrefs({ notifications_muted: !on })} />
       </Block>
 
       <Choices legend="Show in notifications">

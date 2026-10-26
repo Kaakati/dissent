@@ -10,6 +10,7 @@ import type {
   ContactsView,
   ConversationSummary,
   DeviceView,
+  ShellSettings,
   EngineEvent,
   GuardianList,
   Id,
@@ -205,6 +206,9 @@ export const api = {
   appVersion: () => call<string>('app_version'),
   netStatus: () => call<NetStatus>('net_status'),
   getNetworkSettings: () => call<NetworkSettings>('get_network_settings'),
+  shellSettings: () => call<ShellSettings>('shell_settings'),
+  setShellSettings: (settings: Omit<ShellSettings, 'start_at_login_available' | 'start_at_login_note'>) =>
+    call<ShellSettings>('set_shell_settings', { settings }),
   setNetworkSettings: (settings: NetworkSettings) => call<NetworkSettings>('set_network_settings', { settings }),
   identityExportPhrase: () => call<string>('identity_export_phrase'),
   identityImportPhrase: (phrase: string) => call<unknown>('identity_import_phrase', { phrase }),

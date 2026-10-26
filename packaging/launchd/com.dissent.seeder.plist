@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Dissent seeder, a system daemon. Install to /Library/LaunchDaemons/. Read packaging/README.md first. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dissent.seeder</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/dissent-seeder</string>
+        <string>--data-dir</string>
+        <string>/var/db/dissent-seeder</string>
+        <string>--passphrase-file</string>
+        <string>/etc/dissent/seeder.passphrase</string>
+        <string>--name</string>
+        <string>seeder</string>
+    </array>
+    <!-- Invite links are not written here. Add an EnvironmentVariables dict with DISSENT_SEEDER_JOIN
+         set to the invite link, or add the join flag and the link as two more ProgramArguments entries. -->
+    <key>UserName</key>
+    <string>_dissent</string>
+    <key>GroupName</key>
+    <string>_dissent</string>
+    <key>WorkingDirectory</key>
+    <string>/var/db/dissent-seeder</string>
+    <key>UMask</key>
+    <integer>63</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart after a crash or a kill, but not after a clean exit (for example when stopped with launchctl). -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <!-- Seconds between SIGTERM and SIGKILL on stop. The seeder sends its offline beacon and flushes first. -->
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/dissent-seeder.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/dissent-seeder.log</string>
+</dict>
+</plist>

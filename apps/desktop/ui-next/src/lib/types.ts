@@ -378,6 +378,15 @@ export interface NetStatus {
   dials: NetDials | null;
 }
 
+// The desktop shell's settings, from shell_settings. The sign-in toggle is offered only where the note is null.
+export interface ShellSettings {
+  keep_running: boolean; // closing the window hides it, and the engine keeps running in the tray
+  start_at_login: boolean;
+  start_at_login_available: boolean;
+  start_at_login_note: string | null; // why start at login is not offered, when it is not
+  notifications_muted: boolean; // desktop notifications for new messages are off
+}
+
 export interface NetworkSettings {
   use_public_relays: boolean;
   relays: string[];

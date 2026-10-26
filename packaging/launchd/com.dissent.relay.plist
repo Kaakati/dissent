@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Dissent relay, a system daemon. Install to /Library/LaunchDaemons/. Read packaging/README.md first. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dissent.relay</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/dissent-relay</string>
+        <string>--data-dir</string>
+        <string>/var/db/dissent-relay</string>
+        <string>--hostname</string>
+        <string>relay.example.org</string>
+        <string>--acme-email</string>
+        <string>you@example.org</string>
+    </array>
+    <!-- Change the hostname and the email to your own values before loading. The relay needs exactly one
+         TLS mode: the ACME pair (hostname and email), a certificate with its key, or the dev flag for a local test. -->
+    <key>UserName</key>
+    <string>_dissent</string>
+    <key>GroupName</key>
+    <string>_dissent</string>
+    <key>WorkingDirectory</key>
+    <string>/var/db/dissent-relay</string>
+    <key>UMask</key>
+    <integer>63</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/dissent-relay.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/dissent-relay.log</string>
+</dict>
+</plist>

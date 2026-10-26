@@ -91,26 +91,26 @@ pub struct Cli {
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     /// Directory for the identity and engine data. Created if missing. Required to run.
-    #[arg(long)]
+    #[arg(long, env = "DISSENT_SEEDER_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
     /// Display name shown to other members.
-    #[arg(long, default_value = "seeder")]
+    #[arg(long, default_value = "seeder", env = "DISSENT_SEEDER_NAME")]
     pub name: String,
     /// Invite link of a community to join. Repeat the flag for more communities.
-    #[arg(long, value_name = "INVITE")]
+    #[arg(long, value_name = "INVITE", env = "DISSENT_SEEDER_JOIN", value_delimiter = ',')]
     pub join: Vec<String>,
     /// Bind only to 127.0.0.1, with relays and DHT lookup off. For local tests.
-    #[arg(long)]
+    #[arg(long, env = "DISSENT_SEEDER_LOOPBACK")]
     pub loopback: bool,
     /// Seconds between status lines.
-    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..), env = "DISSENT_SEEDER_STATUS_EVERY")]
     pub status_every: u64,
     /// File whose first line is the passphrase that seals the identity. Used only when the OS
     /// keychain is unavailable, as on most headless Linux servers.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", env = "DISSENT_SEEDER_PASSPHRASE_FILE")]
     pub passphrase_file: Option<PathBuf>,
     /// Write rolling log files here, as well as to the console.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = "DISSENT_SEEDER_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
 }
 

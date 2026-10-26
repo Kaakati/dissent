@@ -81,8 +81,8 @@ async fn the_history_form_switches_on_once_the_flag_is_set() {
         let bob = Node::named("bob-flag").await;
         bob.engine.join_community(&invite).await.expect("bob joins");
         eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
-        // A new member device has no answer yet, so the older form is used until a check runs.
-        assert!(alice.engine.history_seal(id, "unknown").is_none());
+        // Alice admitted bob, and checked his devices before the welcome, so the answer is already known.
+        assert!(alice.engine.history_seal(id, "admitted").is_some());
         assert!(alice.engine.refresh_history_ready(id).await, "bob supports history messages");
         assert!(alice.engine.history_seal(id, "supported").is_some());
 
@@ -132,6 +132,43 @@ async fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_m
             assert!(started.elapsed() < std::time::Duration::from_secs(2), "still the older form after {:?}", started.elapsed());
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_starts_from_the_last_readiness_answer() {
+    bounded(async {
+        let alice = Node::named("alice-restart-ready").await;
+        let id = alice.engine.create_community("Restart".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-restart-ready").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+        assert!(alice.engine.refresh_history_ready(id).await, "bob supports it");
+
+        let (identity, dir, port) = alice.stop().await;
+        let again = Node::boot(identity, dir, port).await;
+        // No check runs after the restart: the saved "yes" is the answer, so the first send is in the new form.
+        assert!(again.engine.history_seal(id, "right after the restart").is_some());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_admitted_by_us_is_counted_before_the_welcome_goes_out() {
+    bounded(async {
+        let alice = Node::named("alice-admit").await;
+        let id = alice.engine.create_community("Admit".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-admit").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        // Alice has admitted bob, so the answer for his devices is already known, with no check left to run.
+        eventually("alice has admitted bob", || {
+            alice.engine.community_view(id).map(|v| v.members.len() == 2).unwrap_or(false)
+        })
+        .await;
+        assert!(alice.engine.history_seal(id, "no check to wait for").is_some());
     })
     .await;
 }

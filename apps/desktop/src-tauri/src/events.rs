@@ -78,6 +78,7 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
         loop {
             match rx.recv().await {
                 Ok(EngineEvent::StatusChanged { status, until_ms }) => {
+                    crate::tray::sync_status(&app, status);
                     let payload = json!({ "status": status, "until_ms": until_ms });
                     if let Err(e) = app.emit(STATUS_EVENT, payload) {
                         warn!(error = %e, "could not emit status change");

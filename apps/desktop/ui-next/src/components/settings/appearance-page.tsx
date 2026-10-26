@@ -1,7 +1,8 @@
 // Settings > Appearance: message density and font scale. Both are saved on this device and applied at once. Ported from
 // the appearance section of views/settings.js and appearance.js.
 import { useState } from 'react';
-import { Choices, CheckRow } from '@/components/settings/settings-ui';
+import { Block, Choices, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
+import { useShellPrefs, setShellPrefs } from '@/lib/shell-prefs';
 import { type Density, type FontScale, getAppearance, setAppearance } from '@/lib/appearance';
 
 export function AppearancePage() {
@@ -18,7 +19,38 @@ export function AppearancePage() {
           <Radio key={scale} name="scale" value={String(scale)} label={`${scale}%`} checked={current.scale === scale} onPick={() => pick({ scale })} />
         ))}
       </Choices>
+      <WindowBlock />
     </div>
+  );
+}
+
+// The window and sign-in choices. They live in the desktop app, so the browser preview shows them unchecked and inert.
+function WindowBlock() {
+  const prefs = useShellPrefs();
+  return (
+    <Block title="Window">
+      <CheckRow>
+        <input
+          type="checkbox"
+          checked={prefs.keepRunning}
+          onChange={(e) => void setShellPrefs({ keep_running: e.target.checked })}
+          className={CHECK_CLASS}
+        />
+        <span>Keep Dissent running when the window is closed</span>
+      </CheckRow>
+      <Hint>Dissent stays in the tray, so your servers stay available. Quit from the tray menu to close it.</Hint>
+      <CheckRow>
+        <input
+          type="checkbox"
+          checked={prefs.startAtLogin}
+          disabled={!prefs.startAtLoginAvailable}
+          onChange={(e) => void setShellPrefs({ start_at_login: e.target.checked })}
+          className={CHECK_CLASS}
+        />
+        <span>Open Dissent when you sign in</span>
+      </CheckRow>
+      <Hint>{prefs.startAtLoginNote ?? 'It starts in the tray when “Keep Dissent running” is on.'}</Hint>
+    </Block>
   );
 }
 

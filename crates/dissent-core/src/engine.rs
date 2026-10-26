@@ -114,6 +114,8 @@ pub(crate) struct Inner {
     /// The epoch of each direct conversation at the last pass that wanted to change its devices. The party with the
     /// higher root commits only when the epoch has not moved since then. See `dm_devices`.
     pub dm_sync_seen: Mutex<BTreeMap<crate::groups::ConvId, u64>>,
+    /// How often each device has hinted this seeder. See `mirror_hint`.
+    pub mirror_hints: crate::mirror_hint::HintLimits,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -159,6 +161,7 @@ impl Engine {
         let me = identity.root_id();
         let files_dir = data_dir.join("files");
         let files = std::sync::Arc::new(Self::open_files(&files_dir).await?);
+        let paths_for_ready = Paths::new(data_dir.clone());
         let mut world = World::load(Paths::new(data_dir), &identity, &vault)?;
         world.timings = timings;
         world.attach.default_download_dir = default_download_dir;
@@ -214,12 +217,13 @@ impl Engine {
             history_support: AtomicBool::new(true),
             profile_synced: Default::default(),
             legacy_profiles: AtomicBool::new(false),
-            history_ready: Default::default(),
+            history_ready: Mutex::new(crate::history::load_ready(&paths_for_ready)),
             history_checking: Default::default(),
             history_keys: Default::default(),
             history_file_reads: std::sync::atomic::AtomicU64::new(0),
             dm_devices_support: AtomicBool::new(true),
             dm_sync_seen: Default::default(),
+            mirror_hints: Default::default(),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;

@@ -27,7 +27,7 @@ use tauri::{App, AppHandle, Manager, Runtime};
 
 use crate::commands::{self, AppState};
 use crate::part6::PendingLink;
-use crate::{attachments, avatar_cmds, events, network, status_cmds, storage, tray, updates, voice, voice_settings};
+use crate::{attachments, avatar_cmds, events, network, shell_cmds, shell_settings, status_cmds, storage, tray, updates, voice, voice_settings};
 
 /// The identifier Tauri uses for the app data folder. The installed app's profile lives under it.
 const IDENTIFIER: &str = "chat.dissent.desktop";
@@ -530,6 +530,10 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     app.manage(voice);
     voice_settings::restore_ptt(app);
 
+    // The shell settings are read before the data folder moves into the app state.
+    app.manage(shell_cmds::ShellState::new(&data_dir, mode()));
+    let shell = app.state::<shell_cmds::ShellState>().get();
+    let (status, _) = engine.status();
     app.manage(AppState {
         data_dir,
         vault,
@@ -540,10 +544,13 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     events::forward_notification_clicks(app);
     app.manage(status_cmds::LastInput::new());
     status_cmds::start_idle_watch(app.clone());
-    tray::install(app).map_err(|e| e.to_string())?;
+    tray::install(app, shell, status).map_err(|e| e.to_string())?;
     updates::start_background(app.clone());
     attachments::install(app);
-    show_window(app);
+    // A start at sign-in stays in the tray when "keep running" is on. Any other start shows the window.
+    if !(shell.keep_running && shell_settings::launched_in_background()) {
+        show_window(app);
+    }
     Ok(())
 }
 

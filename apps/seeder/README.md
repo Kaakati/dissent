@@ -6,6 +6,8 @@ A seeder cannot read anything. It stores and passes along the same sealed bytes 
 
 ## Running it
 
+To keep the seeder running as a service, with its restart and shutdown handling, see [`packaging/README.md`](../../packaging/README.md). It covers Linux (systemd), macOS (launchd) and Windows.
+
 Build it with `cargo build --release -p dissent-seeder`. Then run it with an invite link from a member:
 
 ```sh

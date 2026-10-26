@@ -459,14 +459,16 @@ impl Engine {
                 }
             }
             for c in w.communities.values() {
+                // A person's picture in a server comes from any member, so a seeder that holds it can serve it.
+                let members: Vec<RootId> = c.state().members.keys().copied().collect();
                 for (root, (_, banner)) in &c.state().profile_banners {
                     for picture in banner.map(|b| b.pictures()).unwrap_or_default() {
-                        out.push((Owner::Person(*root), picture, vec![*root]));
+                        out.push((Owner::Person(*root), picture, members.clone()));
                     }
                 }
                 for (root, (_, picture)) in &c.state().avatars {
                     if let Some(picture) = picture {
-                        out.push((Owner::Person(*root), *picture, vec![*root]));
+                        out.push((Owner::Person(*root), *picture, members.clone()));
                     }
                 }
                 let roots: Vec<RootId> = c.state().members.keys().copied().collect();
@@ -510,7 +512,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Person(author),
                 picture: *avatar,
                 poster: None,
-                roots: vec![author],
+                roots: c.state().members.keys().copied().collect(),
             })
         }
         Payload::CommunityIconSet { avatar } => {
@@ -528,7 +530,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Person(author),
                 picture: banner.and_then(|b| b.picture()),
                 poster: banner.and_then(|b| b.poster()),
-                roots: vec![author],
+                roots: c.state().members.keys().copied().collect(),
             })
         }
         Payload::CommunityBannerSet { banner } => {

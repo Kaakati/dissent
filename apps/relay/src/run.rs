@@ -39,47 +39,47 @@ pub struct Cli {
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     /// HTTP address to bind. With TLS, it serves only the captive-portal probe.
-    #[arg(long, default_value = "0.0.0.0:3340")]
+    #[arg(long, default_value = "0.0.0.0:3340", env = "DISSENT_RELAY_BIND")]
     pub bind: SocketAddr,
 
     /// HTTPS address to bind. TLS modes only.
-    #[arg(long, default_value = "0.0.0.0:443")]
+    #[arg(long, default_value = "0.0.0.0:443", env = "DISSENT_RELAY_HTTPS_BIND")]
     pub https_bind: SocketAddr,
 
     /// Serve plain HTTP with no TLS. For local testing only.
-    #[arg(long, conflicts_with_all = ["acme_email", "cert", "key"])]
+    #[arg(long, conflicts_with_all = ["acme_email", "cert", "key"], env = "DISSENT_RELAY_DEV")]
     pub dev: bool,
 
     /// Public DNS name of this relay. Required with --acme-email. Also used in the printed URL.
-    #[arg(long)]
+    #[arg(long, env = "DISSENT_RELAY_HOSTNAME")]
     pub hostname: Option<String>,
 
     /// Email for the Let's Encrypt account. Gets a certificate for --hostname.
-    #[arg(long, requires = "hostname", conflicts_with_all = ["cert", "key"])]
+    #[arg(long, requires = "hostname", conflicts_with_all = ["cert", "key"], env = "DISSENT_RELAY_ACME_EMAIL")]
     pub acme_email: Option<String>,
 
     /// Use the Let's Encrypt staging directory. Its certificates are not trusted by browsers.
-    #[arg(long, requires = "acme_email")]
+    #[arg(long, requires = "acme_email", env = "DISSENT_RELAY_ACME_STAGING")]
     pub acme_staging: bool,
 
     /// Directory caching the ACME account and issued certificates. Defaults to `<data-dir>/acme`.
-    #[arg(long)]
+    #[arg(long, env = "DISSENT_RELAY_ACME_CACHE")]
     pub acme_cache: Option<PathBuf>,
 
     /// PEM certificate chain. Use with --key.
-    #[arg(long, requires = "key", conflicts_with = "acme_email")]
+    #[arg(long, requires = "key", conflicts_with = "acme_email", env = "DISSENT_RELAY_CERT")]
     pub cert: Option<PathBuf>,
 
     /// PEM private key. Use with --cert.
-    #[arg(long, requires = "cert")]
+    #[arg(long, requires = "cert", env = "DISSENT_RELAY_KEY")]
     pub key: Option<PathBuf>,
 
     /// Directory for the relay's state: ACME cache and logs. Required to install a service.
-    #[arg(long)]
+    #[arg(long, env = "DISSENT_RELAY_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
     /// Write rolling log files here, as well as to the console.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = "DISSENT_RELAY_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
 }
 

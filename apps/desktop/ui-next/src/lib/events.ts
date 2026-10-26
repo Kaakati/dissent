@@ -6,7 +6,8 @@ import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversa
 import { attachmentProgress, clearMentions, reloadForEvent, startChat, useChat } from './chat';
 import { has } from './features';
 import { useShell, type ShellState } from './store';
-import type { CallState, EngineEvent, TypingTarget, UpdateInfo, UserStatus } from './types';
+import type { CallState, EngineEvent, ShellSettings, TypingTarget, UpdateInfo, UserStatus } from './types';
+import { useShellPrefs } from './shell-prefs';
 
 // The alerts for a new message, and the reload of the open conversation when the event is for it.
 function onMessageEvent(ev: EngineEvent): void {
@@ -75,6 +76,8 @@ export function startShellEvents(): void {
   listenTo<Parameters<ShellState['handleTransfersEvent']>[0]>('dissent://transfers', (p) => shell().handleTransfersEvent(p)).catch(() => {});
   listenTo<CallState | null>('dissent://call-state', (c) => shell().handleCallEvent(c)).catch(() => {});
   listenTo<UserStatus>('dissent://status-changed', (s) => shell().applyStatus(s)).catch(() => {});
+  listenTo<ShellSettings>('dissent://shell-settings', (s) => useShellPrefs.getState().apply(s)).catch(() => {});
+  void useShellPrefs.getState().load();
   listenTo<{ community_id?: string } | null>('dissent://avatar-changed', (p) => void shell().avatarChanged(p)).catch(() => {});
   listenTo<{ target: TypingTarget; names: string[] }>('dissent://typing-changed', (p) => shell().applyTyping(p)).catch(() => {});
   watchActivity();

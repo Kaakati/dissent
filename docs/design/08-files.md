@@ -165,3 +165,24 @@ restart an attachment has no per-source counts until it is downloaded again.
 Tests: `two_providers_each_deliver_part_of_the_file` in `crates/dissent-files/tests/transfer.rs`
 (networked, both providers deliver and the sum covers the file), unit tests of the view mapping in
 `crates/dissent-core/src/attachments.rs`, and the driver's download checks in `apps/desktop/ui-next`.
+
+## What a seeder serves (v0.1.8)
+
+A seeder is a storage member. It holds ciphertext and no read keys, and it serves what it can hold without one.
+
+- **Attachments.** Ciphertext of files the sender marked `seed`, mirrored within the seeder's `MirrorPolicy`
+  and found by the cleartext manifest. Unchanged. A seeder mirrors only if its owner turned mirroring on.
+- **Pictures.** The server icon, the server banner (still and animated, with its poster), each member's avatar,
+  and each member's profile banner. These come from community events, which a storage member can open with the
+  community secret, so a seeder fetches them like any member does and keeps the blobs it holds. Their fetch
+  sources are now every member of the server, not only the picture's owner, so a seeder that holds a picture
+  can serve it when the owner is offline. Covered by `seeder_serves`.
+- **Thumbnails and link-preview images.** Their references sit inside the sealed message, so a seeder cannot
+  read their hashes, and the cleartext manifest is left alone (older readers refuse a message whose manifest does
+  not match its files). Instead, the sender tells the community's seeders the hash and size of each thumbnail and
+  preview picture when it posts, and a member does the same after it fetches one. A seeder keeps the ciphertext
+  within its `MirrorPolicy`, from any member who holds it, and accepts hints only from members. See `mirror_hint`
+  and `06-threat-model.md`, "Seeder hints". Older seeders reject the unknown request, which costs nothing.
+- **History keys and epoch keys. Never.** Storage members are outside the group, and `EpochHistory` and
+  `HistoryKeys` answer only active members (`05`). A seeder never serves a read key, so joiners' history comes from
+  active members.

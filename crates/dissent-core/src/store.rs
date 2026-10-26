@@ -89,6 +89,10 @@ impl Paths {
     pub fn friends_hidden(&self) -> PathBuf {
         self.root.join("friends_hidden.bin")
     }
+    /// The last history-readiness answer of each community, so a restart starts from it. See `history`.
+    pub fn history_ready(&self) -> PathBuf {
+        self.root.join("history_ready.bin")
+    }
     /// Identity changes seen for the people we talk to, so the notice survives a restart.
     pub fn identity_changes(&self) -> PathBuf {
         self.root.join("identity_changes.log")

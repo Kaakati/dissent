@@ -7,6 +7,7 @@ A relay helps two Dissent devices talk when neither can reach the other directly
 - A small Linux server with a public IP address (a VPS is fine), or a Windows or macOS machine that stays on.
 - A DNS name pointing at it, such as `relay.example.org`. Create an `A` (and `AAAA` if you have IPv6) record first, because the TLS certificate needs it.
 - The binary. Build it with `cargo build --release -p dissent-relay` and copy `target/release/dissent-relay` to `/usr/local/bin/`.
+- To run it as an always-on service with the packaged units, see [`packaging/README.md`](../../packaging/README.md).
 
 ## Ports
 

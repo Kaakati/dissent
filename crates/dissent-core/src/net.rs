@@ -378,6 +378,7 @@ impl Engine {
             } => self.answer_invite_preview_full(conn_from, community, token, invite_id),
             Request::Friends => self.serve_friends(conn_from),
             Request::HistoryKeys { community } => self.serve_history_keys(conn_from, community),
+            Request::MirrorHint { community, blobs } => self.serve_mirror_hint(conn_from, community, blobs),
             Request::DmDevicesSupport => Response::DmDevicesSupport(
                 self.inner.dm_devices_support.load(std::sync::atomic::Ordering::Relaxed),
             ),

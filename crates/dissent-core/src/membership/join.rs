@@ -40,6 +40,9 @@ impl Engine {
         };
         self.note_epoch(community, &[conn_from]);
         self.publish_commit(community, commit.commit).await;
+        self.refresh_history_ready(community).await;
+        // Check the new member's devices for history messages before the welcome goes out, so the joiner's first
+        // message from us is in the new form, with no gap while the check runs.
         Response::Welcome(commit.welcome)
     }
 

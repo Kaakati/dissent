@@ -101,6 +101,11 @@ pub(crate) enum Request {
     HistorySupport,
     /// Whether this device can be added to a direct conversation after it was made. Appended, see `dm_devices`.
     DmDevicesSupport,
+    /// Blobs a message's thumbnails and previews point at, which a seeder should keep. Appended, see `mirror_hint`.
+    MirrorHint {
+        community: CommunityId,
+        blobs: Vec<([u8; 32], u64)>,
+    },
     /// The invite preview of a community, for a holder of its invite secret. `token` is the token of
     /// that secret, which the responder checks itself, since the requester is not yet a member.
     /// `invite_id` names the invite used, so the answer can say whether it is live. Appended, see
@@ -223,6 +228,7 @@ impl Request {
             | Request::WriteKeys { community }
             | Request::MemberSealedSupport { community }
             | Request::HistoryKeys { community }
+            | Request::MirrorHint { community, .. }
             | Request::FetchRaw { community, .. } => Some(*community),
             _ => None,
         }

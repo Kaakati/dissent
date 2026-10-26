@@ -2,6 +2,7 @@
 // unfocused. A click restores the window and opens the conversation (see alerts.ts openNotifiedConversation). Whether a
 // message alerts at all is decided by alerts.ts shouldAlert, shared with the notification sound. Ported from the old UI's osnotify.js.
 import { markdownPlain } from './markdown';
+import { useShellPrefs } from './shell-prefs';
 import { useSoundSettings } from './sound-settings';
 import { currentWindow } from './tauri';
 
@@ -29,6 +30,7 @@ export function truncate(text: string, max = BODY_MAX): string {
 
 // `where` is the group name or #channel, empty for a DM.
 export async function showOsNotification({ key, sender, where, text }: { key: string; sender: string; where: string; text: string }): Promise<void> {
+  if (useShellPrefs.getState().notificationsMuted) return;
   if (!(await windowInBackground())) return;
   const now = Date.now();
   if (now - (lastShown.get(key) ?? 0) < GAP_MS) return;

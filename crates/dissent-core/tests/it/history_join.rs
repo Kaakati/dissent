@@ -107,3 +107,31 @@ async fn the_earlier_messages_stay_readable_after_the_sender_goes_offline() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_right_after_a_join_reads_for_the_joiner_with_no_warm_up() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Warm".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        alice
+            .engine
+            .set_history_visibility(id, HistorySetting::All)
+            .await
+            .expect("owner shares past messages");
+        let channel = channel_id(&alice.engine, id, "general").expect("general channel");
+        let link = alice.engine.create_invite(id).await.expect("invite");
+        let bob = peer("bob").await;
+        join_ready(&alice, &bob, &link).await;
+        // No warm-up message: the first send after the join is the one that must read.
+        alice.engine.send_message(id, channel, "first after the join".into()).await.expect("send");
+        wait_seen(&bob, id, channel, "first after the join").await;
+    })
+    .await;
+}

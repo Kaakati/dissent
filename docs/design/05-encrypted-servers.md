@@ -159,7 +159,15 @@ per encryption period rather than per message.
 path only reads that flag and never waits on a member. A community with no other member device is ready at once.
 Otherwise a missing, stale or differently-scoped answer counts as no: the message is sent in today's form, and a
 background check starts. A "yes" is kept for five minutes and a "no" for one minute, and a changed member list
-starts a new check at once. A presence beacon from a member of a community that is not ready also starts a check, debounced by half a second, so a device that comes back online is counted at once. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
+starts a new check at once. A presence beacon from a member of a community that is not ready also starts a check, debounced by half a second, so a device that comes back online is counted at once.
+
+**Restarts and joins.** Each community's last answer is saved in `history_ready.bin`, with the member devices it
+covers, so a restart starts from that answer and not from "unknown". When an active member admits a joiner, it
+checks the member devices again before the welcome goes out, so the joiner's first message from the admitting
+member is in the new form. The check covers every member device, not only the joiner's. A member that was not
+the admitting one learns of the join from the replayed events, and its answer is refreshed then. Until that
+check answers, that member sends in the older form. Closing that gap needs the join itself to carry the
+joiner's support, which is a change to the join event and is not made here. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
 joiner cannot read them. That cannot be fixed retroactively. A device on an older version that joins after the
 switch cannot read `HistoryMessage` text either. It shows as locked, and nothing crashes.
 
@@ -172,3 +180,7 @@ message says "This message is waiting for a key". The tooltip of the first names
 **What does not change.** Member-only control, the epoch ring for control events, bans and rotations. A ban
 or a removal still rotates the epoch, so the banned device gets no keys for later epochs. Storage members
 get no history keys, since they are not in the group.
+
+**Seeders.** A seeder never gets history keys or epoch keys, and never serves them. Storage members are
+outside the group, so joiners read history only from active members. A seeder's part is ciphertext and the
+pictures it can open with the community secret. See `08-files.md`, "What a seeder serves".

@@ -152,8 +152,8 @@ Whichever you choose:
 
 Dissent works with no servers at all, but these optional helpers make it better, and anyone can run them:
 
-- **Seeder.** An always-on member that keeps a server's history available, even when everyone else is offline.
-- **Relay.** A helper that passes sealed traffic between people who can't connect directly. Running one near your community, for example in your country, makes relayed connections faster. A guide is in [`apps/relay/README.md`](apps/relay/README.md).
+- **Seeder.** An always-on member that keeps a server's history available, even when everyone else is offline. To run one as a service on a home server, NAS or VPS, see [`packaging/README.md`](packaging/README.md).
+- **Relay.** A helper that passes sealed traffic between people who can't connect directly. Running one near your community, for example in your country, makes relayed connections faster. A guide is in [`apps/relay/README.md`](apps/relay/README.md), and the service install is in [`packaging/README.md`](packaging/README.md).
 - **Probe.** A small tool that two people on different networks can run to see whether they connect directly or through a relay, and how fast. See [`apps/probe/README.md`](apps/probe/README.md).
 - **Push relay.** A prototype that wakes sleeping phones with an empty notification, without ever learning who is talking to whom. It's in progress.
 

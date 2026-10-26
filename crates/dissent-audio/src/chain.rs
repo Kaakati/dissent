@@ -133,13 +133,14 @@ impl CaptureChain {
         for s in frame.iter_mut() {
             *s *= self.settings.input_gain;
         }
-        soft_limit(frame);
 
+        // The canceller is linear, so it runs before the soft limit, which bends loud samples.
         if self.settings.echo_cancellation {
             if let Some(echo) = self.echo.as_mut() {
                 echo.process(frame);
             }
         }
+        soft_limit(frame);
 
         // A strength of 0.0 is off: the raw frame passes without the denoiser's delay.
         if let Some(strength) = self.settings.noise_suppression.filter(|s| *s > 0.0) {

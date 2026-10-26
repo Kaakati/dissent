@@ -115,9 +115,8 @@ jobs:
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
       # also holds tests that need the public network: internet.rs and any test named internet_*. `--skip`
       # matches a substring, so `internet` skips both.
-      # The offline-joiner retry test is skipped until its race is fixed; it still runs locally through fwtest.
       - name: Loopback networked tests
-        run: "cargo test -p dissent-core --test it -- --ignored --skip internet --skip member_sealed::a_joiner_whose_members_were_offline_unlocks_once_one_comes_back"
+        run: "cargo test -p dissent-core --test it -- --ignored --skip internet"
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.
       - uses: actions/setup-node@v4
@@ -258,6 +257,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.sha }}
+          submodules: true
+      # SVT-AV1 is built from the submodule with the desktop app (the svt-av1 feature). Same setup as the codecs job.
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+      - name: Install NASM and libclang (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nasm llvm --yes --no-progress
+      - name: Install NASM (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm
+      - name: Install NASM and libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm libclang-dev
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -314,7 +329,7 @@ jobs:
           tauriScript: cargo tauri
           releaseId: ${{ needs.changelog.outputs.release_id }}
           includeUpdaterJson: ${{ steps.bundle.outputs.updater }}
-          args: ${{ matrix.args }} --config '${{ steps.bundle.outputs.config }}'
+          args: ${{ matrix.args }} --features svt-av1 --config '${{ steps.bundle.outputs.config }}'
       # A Windows build that runs without installing. The zip holds Dissent.exe, an empty `portable` marker
       # (the exe then keeps its data in DissentData beside it) and a README. DissentData is never shipped.
       - name: Upload portable zip
@@ -398,6 +413,7 @@ jobs:
           cp apps/relay/README.md "$dir/RELAY.md"
           cp apps/probe/README.md "$dir/PROBE.md"
           cp apps/push-relay/README.md "$dir/PUSH-RELAY.md"
+          cp -r packaging "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$dir.zip" "$dir" >/dev/null
             echo "ASSET=$dir.zip" >> "$GITHUB_ENV"

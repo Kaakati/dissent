@@ -77,6 +77,19 @@ fn save_store(paths: &Paths, vault: &Vault, id: &CommunityId, keys: &BTreeMap<u6
     Ok(())
 }
 
+/// The readiness answers kept on disk, by community: the member devices each answer covers, and the answer.
+type ReadyFile = BTreeMap<CommunityId, (Vec<DeviceId>, bool)>;
+
+/// Loads the last readiness answers, so a restart starts from them rather than from "unknown". A missing or unreadable
+/// file starts empty, which is the older form until a check runs.
+pub(crate) fn load_ready(paths: &Paths) -> BTreeMap<CommunityId, ReadyAnswer> {
+    let saved: ReadyFile = crate::store::read_bin(&paths.history_ready()).ok().flatten().unwrap_or_default();
+    saved
+        .into_iter()
+        .map(|(community, (devices, ready))| (community, (Instant::now(), devices, ready)))
+        .collect()
+}
+
 /// Seals `plain` under `key`, with a random nonce in front.
 fn seal_text(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
     let nonce: [u8; NONCE_LEN] = rand::random();
@@ -259,8 +272,25 @@ impl Engine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(community, (Instant::now(), devices, ready));
+        self.save_ready();
         self.inner.history_checking.lock().unwrap_or_else(PoisonError::into_inner).remove(&community);
         ready
+    }
+
+    /// Writes the readiness answers to disk, so a restart starts from them.
+    fn save_ready(&self) {
+        let snapshot: ReadyFile = self
+            .inner
+            .history_ready
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(community, (_, devices, ready))| (*community, (devices.clone(), *ready)))
+            .collect();
+        let paths = self.read().paths.clone();
+        if let Err(e) = crate::store::write_bin(&paths.history_ready(), &snapshot) {
+            warn!(error = %e, "could not save the history readiness");
+        }
     }
 
     /// Answers `HistoryKeys`. Only an active person gets keys, never a storage member. Under `All` the requester
