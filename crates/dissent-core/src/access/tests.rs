@@ -230,7 +230,7 @@ async fn two_admins_rotating_at_once_converge_on_one_secret() {
         let mk = |node: &crate::membership::tests::Node, secret: [u8; 32]| -> SignedEvent {
             let sealed = node
                 .engine
-                .with_mls_ratchet(|m| m.encrypt(&id.0, &secret))
+                .mls_encrypt(&id.0, &secret)
                 .expect("seal");
             let body = EventBody {
                 community: id,

@@ -45,6 +45,8 @@ pub(crate) struct Inner {
     /// Ratchet steps since the last MLS flush. A flush writes the whole state.
     pub mls_dirty: std::sync::atomic::AtomicU64,
     pub mls_flushed_at: Mutex<std::time::Instant>,
+    /// Events logs written without a sync, synced by the group flush (see `store::LOG_SYNC_EVERY`).
+    pub dirty_logs: crate::store::DirtyLogs,
     /// Commit catch-ups in flight, so one missing epoch triggers one request per device.
     pub mls_catching_up: Mutex<std::collections::BTreeSet<(CommunityId, DeviceId)>>,
     /// MLS commits that were refused for now, most often because the ban behind them has not
@@ -107,6 +109,11 @@ pub(crate) struct Inner {
     pub history_keys: Mutex<BTreeMap<CommunityId, crate::history::KeyMap>>,
     /// How many times a history keys file was read from disk. Tests check that sends do not read it.
     pub history_file_reads: std::sync::atomic::AtomicU64,
+    /// Whether this device answers `DmDevicesSupport` with yes. Off only in tests, to model an older device.
+    pub dm_devices_support: AtomicBool,
+    /// The epoch of each direct conversation at the last pass that wanted to change its devices. The party with the
+    /// higher root commits only when the epoch has not moved since then. See `dm_devices`.
+    pub dm_sync_seen: Mutex<BTreeMap<crate::groups::ConvId, u64>>,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -186,6 +193,7 @@ impl Engine {
             mls_path,
             mls_dirty: std::sync::atomic::AtomicU64::new(0),
             mls_flushed_at: Mutex::new(std::time::Instant::now()),
+            dirty_logs: Default::default(),
             mls_catching_up: Mutex::new(std::collections::BTreeSet::new()),
             deferred_commits: Mutex::new(BTreeMap::new()),
             warmed: Mutex::new(BTreeMap::new()),
@@ -210,6 +218,8 @@ impl Engine {
             history_checking: Default::default(),
             history_keys: Default::default(),
             history_file_reads: std::sync::atomic::AtomicU64::new(0),
+            dm_devices_support: AtomicBool::new(true),
+            dm_sync_seen: Default::default(),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;
@@ -253,6 +263,7 @@ impl Engine {
         }
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::store::log_flush_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::saved::reminder_clock(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::typing::typing_loop(Arc::downgrade(&engine.inner)));
@@ -265,6 +276,7 @@ impl Engine {
         // Peers drop us now, rather than when our last beacon runs out.
         let _ = tokio::time::timeout(crate::presence::OFFLINE_WAIT, self.send_offline()).await;
         self.flush_mls(true);
+        self.inner.dirty_logs.flush();
         {
             let mut guard = self.write();
             for c in guard.communities.values_mut() {
@@ -558,7 +570,14 @@ fn open_mls(identity: &Identity, w: &World, vault: &Vault) -> Result<MlsClient> 
         None => MlsClient::new(&identity.device, &identity.cert),
     };
     match restored {
-        Ok(client) => Ok(client),
+        Ok(mut client) => {
+            // Resume past every sender generation that may have been used before the last restart.
+            client.restore_reservations(crate::sealed::read_reservations(&crate::sealed::reserve_path(&path))?);
+            client
+                .resume_sends()
+                .map_err(|e| CoreError::Invalid(format!("MLS state could not resume its sends: {e}")))?;
+            Ok(client)
+        }
         Err(dissent_mls::MlsError::Sealed(e)) => Err(CoreError::Invalid(format!(
             "MLS state cannot be opened with this vault: {e}"
         ))),

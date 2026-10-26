@@ -11,9 +11,62 @@ use std::collections::{hash_map::Entry, HashMap};
 
 use dissent_media::{VideoCodec, VideoFrame};
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 
 use dissent_video::Codec;
+
+/// What a screen share shows: a whole display, or one window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ShareTarget {
+    Display { id: u32 },
+    Window { id: u32 },
+}
+
+/// A display or window the device can share, as the picker lists it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ShareSource {
+    pub target: ShareTarget,
+    pub name: String,
+    /// True for the primary display, which a share uses when no target is picked.
+    pub primary: bool,
+}
+
+/// Lists the displays and the titled windows that can be shared. Windows and macOS only.
+#[cfg(not(target_os = "linux"))]
+pub fn list_share_sources() -> Result<Vec<ShareSource>> {
+    let mut out = Vec::new();
+    for display in dissent_video::screen::list_displays().map_err(camera_error)? {
+        out.push(ShareSource {
+            target: ShareTarget::Display { id: display.id },
+            name: display.name,
+            primary: display.primary,
+        });
+    }
+    for window in dissent_video::screen::list_windows().map_err(camera_error)? {
+        out.push(ShareSource {
+            target: ShareTarget::Window { id: window.id },
+            name: if window.app.is_empty() {
+                window.title
+            } else {
+                format!("{} · {}", window.app, window.title)
+            },
+            primary: false,
+        });
+    }
+    Ok(out)
+}
+
+/// Lists what can be shared. Linux has no screen capture yet.
+#[cfg(target_os = "linux")]
+pub fn list_share_sources() -> Result<Vec<ShareSource>> {
+    Err(CoreError::Invalid("screen sharing is not supported on Linux yet".into()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn camera_error(e: impl std::fmt::Display) -> CoreError {
+    CoreError::Invalid(format!("capture: {e}"))
+}
 
 /// Width of the decoded previews sent to the window.
 const PREVIEW_WIDTH: u32 = 320;
@@ -27,6 +80,8 @@ const PREVIEW_FPS: u64 = 15;
 pub(crate) struct Encoded {
     pub frame_id: u32,
     pub keyframe: bool,
+    /// The codec the bytes are encoded with, named in the frame's header on the wire.
+    pub codec: VideoCodec,
     pub data: Vec<u8>,
 }
 
@@ -98,6 +153,8 @@ mod capture {
     use dissent_video::screen::{Cursor, ScreenSource, ScreenTarget};
     use dissent_video::{CaptureFormat, Codec, VideoSource};
 
+    use dissent_media::VideoCodec;
+
     use super::{encode_jpeg, Encoded, Preview, PREVIEW_WIDTH};
     use crate::error::{CoreError, Result};
 
@@ -138,6 +195,8 @@ mod capture {
         stop: Arc<AtomicBool>,
         key_request: Arc<AtomicBool>,
         bitrate: Arc<AtomicU32>,
+        /// Whether the capture should encode AV1. Set by the call loop, from what the peers agreed to.
+        av1: Arc<AtomicBool>,
         rx: Receiver<Encoded>,
         previews: Receiver<Preview>,
         thread: Option<JoinHandle<()>>,
@@ -164,21 +223,20 @@ mod capture {
             let thread_stop = stop.clone();
             let thread_key = key_request.clone();
             let thread_bitrate = bitrate.clone();
+            let av1 = Arc::new(AtomicBool::new(false));
+            let thread_av1 = av1.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("dissent-{kind:?}").to_lowercase())
                 .spawn(move || {
+                    let config = EncoderConfig {
+                        width: format.width,
+                        height: format.height,
+                        fps: format.fps,
+                        bitrate_kbps: START_KBPS,
+                        keyframe_interval: KEYFRAME_INTERVAL,
+                    };
                     let (mut source, mut encoder) = match open().and_then(|source| {
-                        let encoder = encode::open(
-                            Codec::H264,
-                            EncoderConfig {
-                                width: format.width,
-                                height: format.height,
-                                fps: format.fps,
-                                bitrate_kbps: START_KBPS,
-                                keyframe_interval: KEYFRAME_INTERVAL,
-                            },
-                        )
-                        .map_err(capture_err)?;
+                        let encoder = encode::open(Codec::H264, config).map_err(capture_err)?;
                         Ok((source, encoder))
                     }) {
                         Ok(pair) => {
@@ -192,6 +250,11 @@ mod capture {
                     };
                     let mut frame_id = 0u32;
                     let mut captured = 0u32;
+                    let mut current = Codec::H264;
+                    // AV1 is dropped for good once it cannot keep up with the frame rate.
+                    let mut av1_failed = false;
+                    let mut av1_ms = 0.0_f64;
+                    let mut av1_frames = 0u32;
                     // Pace the capture to its frame rate. A device already delivers at that rate; a
                     // test picture does not, so this keeps both at the same clock.
                     let period = Duration::from_millis(1_000 / u64::from(format.fps));
@@ -223,19 +286,48 @@ mod capture {
                                 let _ = preview_tx.try_send(Preview {
                                     sender: 0,
                                     screen,
+                                    av1: false,
                                     width,
                                     height,
                                     jpeg,
                                 });
                             }
                         }
+                        let wanted_av1 = thread_av1.load(Ordering::Relaxed) && !av1_failed;
+                        if wanted_av1 != (current == Codec::Av1) {
+                            let next = if wanted_av1 { Codec::Av1 } else { Codec::H264 };
+                            match encode::open(next, config) {
+                                Ok(fresh) => {
+                                    encoder = fresh;
+                                    current = next;
+                                    encoder.request_keyframe();
+                                    av1_ms = 0.0;
+                                    av1_frames = 0;
+                                }
+                                Err(_) => av1_failed = true,
+                            }
+                        }
+                        let started = std::time::Instant::now();
                         let Ok(chunks) = encoder.encode(&frame) else {
                             break;
                         };
+                        if current == Codec::Av1 {
+                            // An exponential average of encode time. AV1 that takes most of a frame
+                            // interval cannot keep up with the capture, so it is dropped.
+                            let ms = started.elapsed().as_secs_f64() * 1_000.0;
+                            av1_ms = if av1_frames == 0 { ms } else { av1_ms * 0.9 + ms * 0.1 };
+                            av1_frames += 1;
+                            let budget_ms = period.as_secs_f64() * 1_000.0 * 0.8;
+                            if av1_frames >= 30 && av1_ms > budget_ms {
+                                av1_failed = true;
+                            }
+                        }
+                        let codec = if current == Codec::Av1 { VideoCodec::Av1 } else { VideoCodec::H264 };
                         for chunk in chunks {
                             let encoded = Encoded {
                                 frame_id,
                                 keyframe: chunk.keyframe,
+                                codec,
                                 data: chunk.data,
                             };
                             frame_id = frame_id.wrapping_add(1);
@@ -258,6 +350,7 @@ mod capture {
                 stop,
                 key_request,
                 bitrate,
+                av1,
                 rx,
                 previews,
                 thread: Some(thread),
@@ -281,21 +374,24 @@ mod capture {
             })
         }
 
-        /// The primary display, shared as a screen.
-        pub(crate) fn primary_screen() -> Result<Self> {
-            Self::start(CaptureKind::Screen, || {
-                let displays = dissent_video::screen::list_displays().map_err(capture_err)?;
-                let display = displays
-                    .iter()
-                    .find(|d| d.primary)
-                    .or_else(|| displays.first())
-                    .ok_or_else(|| CoreError::Invalid("no display to share".into()))?;
-                let source = ScreenSource::open(
-                    ScreenTarget::Display(display.id),
-                    SCREEN_FORMAT,
-                    Cursor::Excluded,
-                )
-                .map_err(capture_err)?;
+        /// A display or a window, shared as a screen. `None` is the primary display.
+        pub(crate) fn screen(target: Option<super::ShareTarget>) -> Result<Self> {
+            Self::start(CaptureKind::Screen, move || {
+                let target = match target {
+                    Some(super::ShareTarget::Window { id }) => ScreenTarget::Window(id),
+                    Some(super::ShareTarget::Display { id }) => ScreenTarget::Display(id),
+                    None => {
+                        let displays = dissent_video::screen::list_displays().map_err(capture_err)?;
+                        let display = displays
+                            .iter()
+                            .find(|d| d.primary)
+                            .or_else(|| displays.first())
+                            .ok_or_else(|| CoreError::Invalid("no display to share".into()))?;
+                        ScreenTarget::Display(display.id)
+                    }
+                };
+                let source = ScreenSource::open(target, SCREEN_FORMAT, Cursor::Excluded)
+                    .map_err(capture_err)?;
                 Ok(Box::new(source) as Box<dyn VideoSource>)
             })
         }
@@ -317,6 +413,12 @@ mod capture {
         /// Makes the next frame a keyframe, because a peer asked for one.
         pub(crate) fn request_keyframe(&self) {
             self.key_request.store(true, Ordering::Relaxed);
+        }
+
+        /// Asks for AV1 when `on`, and H.264 otherwise. The capture switches on its next frame, and
+        /// stays on H.264 when AV1 is not built in or cannot keep up.
+        pub(crate) fn set_av1(&self, on: bool) {
+            self.av1.store(on, Ordering::Relaxed);
         }
 
         /// Sets the encoder's target rate, in kbps. The thread applies it on its next frame.
@@ -367,7 +469,7 @@ mod capture {
             ))
         }
 
-        pub(crate) fn primary_screen() -> Result<Self> {
+        pub(crate) fn screen(_target: Option<super::ShareTarget>) -> Result<Self> {
             Err(CoreError::Invalid(
                 "screen sharing is not supported on Linux yet".into(),
             ))
@@ -388,6 +490,8 @@ mod capture {
         pub(crate) fn request_keyframe(&self) {}
 
         pub(crate) fn set_bitrate(&self, _kbps: u32) {}
+
+        pub(crate) fn set_av1(&self, _on: bool) {}
     }
 }
 
@@ -426,13 +530,13 @@ impl Budget {
 /// The decoders of the peers' cameras and screens, one per sender and kind.
 #[derive(Default)]
 pub(crate) struct RemoteVideo {
-    decoders: HashMap<(u64, bool), Box<dyn dissent_video::VideoDecoder>>,
+    decoders: HashMap<(u64, bool, bool), Box<dyn dissent_video::VideoDecoder>>,
 }
 
 impl RemoteVideo {
     /// Drops the decoders of a peer who left, so their pictures stop and memory is freed.
     pub(crate) fn forget(&mut self, sender: u64) {
-        self.decoders.retain(|(peer, _), _| *peer != sender);
+        self.decoders.retain(|(peer, _, _), _| *peer != sender);
     }
 }
 
@@ -442,6 +546,8 @@ pub(crate) struct Preview {
     pub sender: u64,
     /// Whether the picture is a shared screen rather than a camera.
     pub screen: bool,
+    /// Whether the stream it came from is AV1.
+    pub av1: bool,
     pub width: u32,
     pub height: u32,
     /// A JPEG of the picture at the preview size.
@@ -456,7 +562,8 @@ impl RemoteVideo {
             VideoCodec::H264 => dissent_video::Codec::H264,
             VideoCodec::Av1 => dissent_video::Codec::Av1,
         };
-        let decoder = match self.decoders.entry((frame.sender, frame.screen)) {
+        let av1 = frame.codec == VideoCodec::Av1;
+        let decoder = match self.decoders.entry((frame.sender, frame.screen, av1)) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(dissent_video::decode::open(codec).ok()?),
         };
@@ -468,6 +575,7 @@ impl RemoteVideo {
         Some(Preview {
             sender: frame.sender,
             screen: frame.screen,
+            av1: frame.codec == VideoCodec::Av1,
             width,
             height,
             jpeg,

@@ -3,7 +3,7 @@
 // the microphone and speaker choices, the route note and Join. The right column lists who is in the call and who is not.
 // The camera is off until the video batch lands, and the preview says so.
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, ShieldCheck } from 'lucide-react';
+import { Mic, MicOff, ShieldCheck, Video, VideoOff } from 'lucide-react';
 import { api } from '@/lib/api';
 import { joinLiveCall, useLobby } from '@/lib/calls';
 import { chooseDevice } from '@/lib/voice';
@@ -36,6 +36,11 @@ const useConversationName = (): string => useShell((s) => s.group?.name ?? s.pee
 function joinLobby(): Promise<boolean> {
   const s = useShell.getState();
   const muted = !useLobby.getState().micOn;
+  // The call takes the camera over, so the lobby preview lets go of it first.
+  if (useLobby.getState().cameraOn) {
+    useLobby.setState({ cameraOn: false });
+    void api.setCameraPreview(false);
+  }
   return joinLiveCall(s.group ? { groupId: s.group.id } : { peer: s.peer ?? '' }, muted);
 }
 
@@ -93,6 +98,7 @@ export function LobbyBody() {
   const name = useConversationName();
   const group = useShell((s) => s.group);
   const micOn = useLobby((l) => l.micOn);
+  const cameraOn = useLobby((l) => l.cameraOn);
   const dismiss = () => useLobby.setState({ dismissed: useShell.getState().peer });
   if (!live) return null;
   return (
@@ -113,7 +119,7 @@ export function LobbyBody() {
             Not now
           </Button>
           <div className="flex items-center gap-s-3">
-            <span className="text-meta text-muted-foreground">{`${micOn ? 'Mic on' : 'Mic off'} · camera off`}</span>
+            <span className="text-meta text-muted-foreground">{`${micOn ? 'Mic on' : 'Mic off'} · ${cameraOn ? 'camera on' : 'camera off'}`}</span>
             <Button onClick={() => void joinLobby()} className="h-10 min-w-[120px] bg-success text-white hover:bg-success/90">
               Join call
             </Button>
@@ -144,18 +150,39 @@ function routeNote(live: LiveCall): string {
 // The self preview: the avatar with the camera note, the mic meter and the mic button.
 function Preview() {
   const me = useShell((s) => s.me);
+  const own = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
   const micOn = useLobby((l) => l.micOn);
+  const cameraOn = useLobby((l) => l.cameraOn);
   const lit = useMicMeter(micOn);
   const toggle = () => useLobby.setState({ micOn: !useLobby.getState().micOn });
+  const toggleCamera = () => {
+    const next = !useLobby.getState().cameraOn;
+    useLobby.setState({ cameraOn: next });
+    api.setCameraPreview(next).catch(() => useLobby.setState({ cameraOn: false }));
+  };
   return (
-    <div className="relative flex min-h-[300px] flex-col items-center justify-center gap-s-3 rounded-[10px] bg-[#0f1012]">
-      <span className="absolute top-s-3 left-s-3 rounded bg-black/60 px-2 py-1 text-[11px] leading-4 font-semibold text-white">
+    <div className="relative flex min-h-[300px] flex-col items-center justify-center gap-s-3 overflow-hidden rounded-[10px] bg-[#0f1012]">
+      <span className="absolute top-s-3 left-s-3 z-10 rounded bg-black/60 px-2 py-1 text-[11px] leading-4 font-semibold text-white">
         Only you can see this preview
       </span>
-      <div className="flex flex-col items-center gap-s-2">
-        <UserAvatar name={me?.display_name ?? '?'} seed={me?.root_id} size="xl" />
-        <span className="text-meta text-muted-foreground">Your camera is off</span>
-      </div>
+      {cameraOn && own ? (
+        <img src={`data:image/jpeg;base64,${own.jpeg}`} alt="Your camera" className="absolute inset-0 size-full object-contain" />
+      ) : (
+        <div className="flex flex-col items-center gap-s-2">
+          <UserAvatar name={me?.display_name ?? '?'} seed={me?.root_id} size="xl" />
+          <span className="text-meta text-muted-foreground">{cameraOn ? 'Starting your camera' : 'Your camera is off'}</span>
+        </div>
+      )}
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={toggleCamera}
+        aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+        aria-pressed={cameraOn}
+        className="absolute top-s-3 right-s-3 z-10"
+      >
+        {cameraOn ? <Video className="size-4" /> : <VideoOff className="size-4" />}
+      </Button>
       <div className="absolute right-s-3 bottom-s-3 left-s-3 flex items-center justify-between gap-s-3">
         <div role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={METER_BARS} aria-valuenow={lit} className="flex h-3.5 items-center gap-0.5">
           {Array.from({ length: METER_BARS }, (_, i) => (

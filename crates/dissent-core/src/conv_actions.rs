@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::engine::{clean_message, now_ms, Engine};
 use crate::error::{CoreError, Result};
-use crate::groups::{msg_id, Action, Body, ConvBook, ConvId, ConvKind, ConvMeta, ConvMsg, Delivery};
+use crate::groups::{msg_id, packet_conv, Action, Body, ConvBook, ConvId, ConvKind, ConvMeta, ConvMsg, Delivery};
 use crate::store::{append_record, read_records, rewrite_records, Paths};
 use crate::views::{DmItem, ReactionView, ReplyPreview};
 use crate::world::World;
@@ -157,6 +157,25 @@ fn clear_text(w: &mut World, conv: ConvId, target: [u8; 32]) -> Result<()> {
     rewrite_records(&w.paths.conv_log(&conv), msgs.as_slice())
 }
 
+/// The body of a message we sent, rebuilt from its stored text. It is used only when it gives back the message's
+/// id, so a message whose text was cleared by a delete gives none.
+fn stored_body(w: &World, conv: ConvId, id: [u8; 32]) -> Option<Body> {
+    let msgs = w.conv_msgs.get(&conv)?;
+    let msg = msgs.iter().find(|m| m.id == id)?;
+    if msg.text.is_empty() {
+        return None;
+    }
+    let acts = w.conv_acts.get(&conv).map_or(&[][..], Vec::as_slice);
+    let replies = Overlay::build(acts, msgs).replies;
+    let mut actions = vec![Action::Text(msg.text.clone())];
+    if let Some(&target) = replies.get(&id) {
+        actions.push(Action::Reply { target, text: msg.text.clone() });
+    }
+    actions
+        .into_iter()
+        .map(|action| Body { conv, from: msg.from, hlc: msg.hlc, action })
+        .find(|body| msg_id(body).is_ok_and(|bid| bid == id))
+}
 impl Engine {
     /// The messages of `conv`, oldest first, with every stored action applied.
     pub(crate) fn conv_items(&self, conv: ConvId) -> Vec<DmItem> {
@@ -201,6 +220,7 @@ impl Engine {
             delivery: delivery.to_string(),
             queued: delivery == "queued_inbox",
             reason: w.conv_book.failures.get(&m.id).cloned(),
+            retryable: w.refused.retryable(&m.id, now_ms()),
             reply_to: ov.replies.get(&m.id).map(|target| reply_preview(w, ov, by_id, *target)),
             reactions: match (deleted, ov.reactions.get(&m.id)) {
                 (false, Some(list)) => reactions_view(w, list),
@@ -251,6 +271,41 @@ impl Engine {
         }
         self.notify_conv(&meta);
         Ok(id)
+    }
+
+    /// Sends a refused message again. Its text is sealed again under the conversation's current epoch, so the
+    /// recipient accepts it even when the group has moved on. A message whose text is not kept here (a deleted
+    /// one, or an action that is not a message) is sent as it was sealed. The packet joins the end of its device's
+    /// queue. Only messages refused within the envelope lifetime can be retried.
+    pub async fn retry_message(&self, id: &str) -> Result<()> {
+        let id = parse_message_id(id)?;
+        let (body, sealed) = {
+            let w = self.read();
+            let now = now_ms();
+            let Some(entry) = w.refused.packets.get(&id).filter(|_| w.refused.retryable(&id, now)) else {
+                return Err(CoreError::NotFound(format!("failed message {}", id_text(&id))));
+            };
+            (stored_body(&w, packet_conv(&entry.item.packet), id), entry.item.packet.clone())
+        };
+        // Sealing needs the MLS state, so it is done outside the world lock.
+        let packet = match body {
+            Some(body) => self.seal_body(body)?,
+            None => sealed,
+        };
+        {
+            let mut guard = self.write();
+            let w = &mut *guard;
+            let Some(entry) = w.refused.take(id) else {
+                return Err(CoreError::NotFound(format!("failed message {}", id_text(&id))));
+            };
+            w.conv_book.failures.remove(&id);
+            w.conv_book.status.remove(&id);
+            Self::enqueue(w, &[(entry.device, entry.item.root)], &packet);
+            w.refused.save(&w.paths)?;
+            Self::save_book(w)?;
+        }
+        self.flush_quickly().await;
+        Ok(())
     }
 
     /// Flushes the queues in the background, and waits for that at most `QUICK_SEND`.

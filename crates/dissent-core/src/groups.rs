@@ -31,6 +31,7 @@ use tracing::{debug, warn};
 
 use crate::engine::{clean_message, clean_name, now_ms, Engine};
 use crate::error::{CoreError, Result};
+use crate::inbox::DepositOutcome;
 use crate::rpc::{decode, encode, Request, Response};
 use crate::sealed::mls_err;
 use crate::store::{read_bin, read_records, write_bin, Paths};
@@ -228,6 +229,67 @@ pub(crate) struct Queued {
     pub packet: ConvPacket,
 }
 
+/// How long a refused message can be sent again: as long as an inbox keeps an envelope.
+pub(crate) const REFUSED_TTL_MS: u64 = crate::inbox::MAX_AGE_MS;
+
+/// The packet of a message that was refused, with the device it was for and when it was refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RefusedEntry {
+    pub device: DeviceId,
+    pub item: Queued,
+    pub refused_ms: u64,
+}
+
+/// Packets of messages that a recipient or an inbox refused, by message id, kept for `REFUSED_TTL_MS` so the sender
+/// can retry them. Stored apart from `ConvBook`, which is stored without a version, so an existing book still loads.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct RefusedBook {
+    pub packets: BTreeMap<[u8; 32], RefusedEntry>,
+}
+
+impl RefusedBook {
+    /// Loads the book and drops the entries past their lifetime.
+    pub fn load(paths: &Paths) -> Result<Self> {
+        let mut book: Self = read_bin(&paths.refused_packets())?.unwrap_or_default();
+        book.prune(now_ms());
+        Ok(book)
+    }
+
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        write_bin(&paths.refused_packets(), self)
+    }
+
+    pub fn keep(&mut self, id: [u8; 32], device: DeviceId, item: &Queued, now: u64) {
+        self.packets.insert(
+            id,
+            RefusedEntry {
+                device,
+                item: item.clone(),
+                refused_ms: now,
+            },
+        );
+    }
+
+    pub fn take(&mut self, id: [u8; 32]) -> Option<RefusedEntry> {
+        self.packets.remove(&id)
+    }
+
+    /// Whether the refused message `id` can still be sent again at `now`.
+    pub fn retryable(&self, id: &[u8; 32], now: u64) -> bool {
+        self.packets
+            .get(id)
+            .is_some_and(|e| e.refused_ms.saturating_add(REFUSED_TTL_MS) > now)
+    }
+
+    /// Drops the entries past their lifetime. Returns whether any went.
+    pub fn prune(&mut self, now: u64) -> bool {
+        let before = self.packets.len();
+        self.packets
+            .retain(|_, e| e.refused_ms.saturating_add(REFUSED_TTL_MS) > now);
+        before != self.packets.len()
+    }
+}
+
 /// A message stored for display. Only text messages are stored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConvMsg {
@@ -327,14 +389,16 @@ impl Signed {
 }
 
 /// Whether a commit may take effect. The committer must be a current member. Only the creator may
-/// remove anyone except its own devices. Nothing changes in a 1:1 conversation.
+/// remove anyone except its own devices. In a direct conversation each party changes only its own devices: a commit
+/// may add or remove devices certified by the committer's root, and nothing else (see `dm_devices`).
 fn commit_allowed(info: &CommitInfo, meta: &ConvMeta) -> bool {
     let root = info.committer.root;
     if !meta.members.contains(&root) {
         return false;
     }
-    if meta.kind == ConvKind::Dm && (!info.adds.is_empty() || !info.removes.is_empty()) {
-        return false;
+    if meta.kind == ConvKind::Dm {
+        let own = |certs: &[DeviceCert]| certs.iter().all(|c| c.root == root);
+        return own(&info.adds) && own(&info.removes);
     }
     let removes_own_only = info.removes.iter().all(|c| c.root == root);
     removes_own_only || root == meta.creator
@@ -356,7 +420,7 @@ fn roots_of(certs: &[DeviceCert]) -> Vec<RootId> {
     set.into_iter().collect()
 }
 
-fn packet_conv(packet: &ConvPacket) -> ConvId {
+pub(crate) fn packet_conv(packet: &ConvPacket) -> ConvId {
     packet.conv()
 }
 
@@ -381,7 +445,7 @@ enum Direct {
 
 impl Engine {
     /// The MLS members of `conv`, as certified devices. Empty when we hold no group.
-    fn mls_members(&self, conv: ConvId) -> Vec<DeviceCert> {
+    pub(crate) fn mls_members(&self, conv: ConvId) -> Vec<DeviceCert> {
         self.inner
             .mls
             .lock()
@@ -419,7 +483,7 @@ impl Engine {
     }
 
     /// Adds `packet` to the queue of each target. Caller holds the write guard.
-    fn enqueue(w: &mut World, targets: &[(DeviceId, RootId)], packet: &ConvPacket) {
+    pub(crate) fn enqueue(w: &mut World, targets: &[(DeviceId, RootId)], packet: &ConvPacket) {
         for (device, root) in targets {
             w.conv_book
                 .queues
@@ -440,21 +504,21 @@ impl Engine {
     /// The conversation must hold an MLS group.
     pub(crate) fn seal_and_queue(&self, body: Body) -> Result<()> {
         let conv = body.conv;
-        let signed = Signed::sign(body, &self.inner.identity.device, &self.inner.identity.cert)?;
-        let plaintext = encode(&signed)?;
-        let ciphertext = self
-            .with_mls_ratchet(|mls| mls.encrypt(&conv.0, &plaintext))
-            .map_err(mls_err)?;
-        let id = msg_id(&signed.body)?;
+        let packet = self.seal_body(body)?;
         let targets = self.member_targets(conv);
-        let packet = ConvPacket::Message {
-            conv,
-            id,
-            ciphertext,
-        };
         let mut guard = self.write();
         Self::enqueue(&mut guard, &targets, &packet);
         Self::save_book(&guard)
+    }
+
+    /// Seals `body` under the conversation's current epoch, as the packet that carries it.
+    pub(crate) fn seal_body(&self, body: Body) -> Result<ConvPacket> {
+        let conv = body.conv;
+        let signed = Signed::sign(body, &self.inner.identity.device, &self.inner.identity.cert)?;
+        let plaintext = encode(&signed)?;
+        let ciphertext = self.mls_encrypt(&conv.0, &plaintext).map_err(mls_err)?;
+        let id = msg_id(&signed.body)?;
+        Ok(ConvPacket::Message { conv, id, ciphertext })
     }
 
     /// Key packages for `root`: every device that answers adds its own. When none does, the root's
@@ -525,7 +589,7 @@ impl Engine {
     }
 
     /// Queues a welcome for `targets`, signed by this device.
-    fn queue_welcome(
+    pub(crate) fn queue_welcome(
         &self,
         w: &mut World,
         meta: &ConvMeta,
@@ -784,7 +848,7 @@ impl Engine {
     }
 
     /// Removes `devices` with one commit. The rest of the group and the removed devices get it.
-    async fn remove_devices(
+    pub(crate) async fn remove_devices(
         &self,
         conv: ConvId,
         meta: &ConvMeta,
@@ -947,28 +1011,54 @@ impl Engine {
                             self.raise_status(id, Delivery::SentDirect);
                         }
                     }
-                    Direct::Refused(reason) => {
-                        self.pop_if_head(device, &item);
-                        if let ConvPacket::Welcome { conv, kind: ConvKind::Dm, .. } = item.packet {
-                            self.abandon_dm_group(conv, reason.clone());
-                        }
-                        if let ConvPacket::Message { id, .. } = item.packet {
-                            self.write().conv_book.failures.insert(id, reason);
-                            self.raise_status(id, Delivery::Failed);
-                        }
-                    }
-                    Direct::Unreachable => {
-                        if self.deposit_packet(device, item.root, &item.packet).await {
+                    Direct::Refused(reason) => self.refuse_queued(device, &item, reason),
+                    Direct::Unreachable => match self.deposit_packet(device, item.root, &item.packet).await {
+                        DepositOutcome::Accepted => {
                             self.pop_if_head(device, &item);
                             if let ConvPacket::Message { id, .. } = item.packet {
                                 self.raise_status(id, Delivery::QueuedInbox);
                             }
-                        } else {
-                            break;
                         }
-                    }
+                        DepositOutcome::Refused(reason) => self.refuse_queued(device, &item, reason),
+                        DepositOutcome::Unreachable => break,
+                    },
                 }
             }
+        }
+    }
+
+    /// Drops a refused packet from its queue and marks its message failed, with the reason. The packet is kept
+    /// in `RefusedBook`, so `retry_message` can send it again.
+    fn refuse_queued(&self, device: DeviceId, item: &Queued, reason: String) {
+        self.pop_if_head(device, item);
+        if let ConvPacket::Welcome { conv, kind: ConvKind::Dm, .. } = item.packet {
+            self.abandon_dm_group(conv, reason.clone());
+        }
+        if let ConvPacket::Message { id, .. } = item.packet {
+            {
+                let mut guard = self.write();
+                let now = now_ms();
+                guard.conv_book.failures.insert(id, reason);
+                guard.refused.prune(now);
+                guard.refused.keep(id, device, item, now);
+                if let Err(e) = guard.refused.save(&guard.paths) {
+                    warn!(error = %e, "could not keep a refused packet for retry");
+                }
+            }
+            self.fail_status(id);
+        }
+    }
+
+    /// Marks a message we sent as failed. Unlike `raise_status`, this overrides the queued placeholder that
+    /// `post_action` sets before the packet is sent, so a refusal is not lost behind it. A message that a device
+    /// has already acknowledged keeps that status.
+    fn fail_status(&self, id: [u8; 32]) {
+        let mut guard = self.write();
+        if !matches!(guard.conv_book.status.get(&id), Some(Delivery::SentDirect | Delivery::Delivered)) {
+            guard.conv_book.status.insert(id, Delivery::Failed);
+        }
+        if let Err(e) = Self::save_book(&guard) {
+            warn!(error = %e, "could not save delivery state");
         }
     }
 
@@ -1094,7 +1184,8 @@ impl Engine {
         let asked = self.read().conv_book.invite_joins.get(&conv).is_some_and(|j| {
             now < j.expires_ms && crate::invites::join_allowed(j, &cert)
         });
-        if !asked && !crate::contacts::dm_allowed(&self.read(), &cert.root) {
+        // A welcome from one of our own devices is ours to accept, whatever the DM policy says.
+        if !asked && cert.root != me && !crate::contacts::dm_allowed(&self.read(), &cert.root) {
             return Err(CoreError::PolicyRefused {
                 from: cert.root,
                 reason: "DM policy refuses this user".into(),
@@ -1368,5 +1459,32 @@ impl Engine {
             self.notify_conv(&meta);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod refused_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_message_can_be_sent_again_only_within_the_envelope_lifetime() {
+        let mut book = RefusedBook::default();
+        let id = [7u8; 32];
+        let device = dissent_identity::DeviceKey::generate().id();
+        let item = Queued {
+            root: dissent_identity::RootKey::generate().id(),
+            packet: ConvPacket::Message {
+                conv: ConvId([1; 32]),
+                id,
+                ciphertext: vec![1, 2, 3],
+            },
+        };
+        let refused = 1_000_000;
+        book.keep(id, device, &item, refused);
+        assert!(book.retryable(&id, refused + REFUSED_TTL_MS - 1), "inside the lifetime");
+        assert!(!book.retryable(&id, refused + REFUSED_TTL_MS), "past the lifetime");
+        assert!(!book.prune(refused + REFUSED_TTL_MS - 1), "nothing expires early");
+        assert!(book.prune(refused + REFUSED_TTL_MS), "the entry expires at the lifetime");
+        assert!(book.packets.is_empty());
     }
 }

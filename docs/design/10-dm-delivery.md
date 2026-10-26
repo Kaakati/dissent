@@ -98,9 +98,6 @@ in the winning group.
 
 - Key packages are not sent in the first message. The creator takes one from the other side's devices
   or inbox, which is the rule above.
-- Rate limits are not covered by a test yet.
-- A message refused by policy shows as `sent_direct` or `queued_inbox` until the sender drops it.
-  Refusals are not yet reported as `failed` to the sender from an inbox.
 
 ## Delivery status
 
@@ -112,7 +109,7 @@ Each message has one status, shown as `DmItem.delivery`:
 | `sent_direct` | A device of the recipient acknowledged the packet. |
 | `queued_inbox` | Deposited at an inbox. The recipient has not acknowledged it yet. |
 | `delivered` | The recipient device acknowledged the message, through a receipt. |
-| `failed` | Refused, or expired, or a deposit was refused. The sender may retry. |
+| `failed` | Refused, or expired, or a deposit was refused. The reason is kept. The sender may retry with `retry_message` for 30 days after the refusal, the envelope lifetime. |
 
 "Delivered" means a receipt came back from the recipient device. An inbox ack does not count. A
 receipt is a signed `Receipt { id, device, sig }` sent from the recipient to the sender.
@@ -137,13 +134,73 @@ The UI contract in `07-visual-system.md` Part 6.8 also wants a `queued` boolean 
 Bob is offline, and his seeder engine is his inbox. Alice sends Bob a message, and then goes offline
 too. Bob comes back, collects the envelope from the seeder, decrypts it, acks it, and the seeder
 clears its copy. Alice's status moves from `queued_inbox` to `delivered` once Bob's receipt reaches
-her. Covered by a loopback test with relays off. A second test checks that a deposit from a sender
-over the rate limit is refused.
+her. Covered by loopback tests with relays off. A sender who fills an inbox's hourly limit gets its next
+message refused: it shows `failed` with the inbox's reason, and the others stay queued. A retry
+(`retry_message`) seals the message's stored text again under the group's current epoch, so a group that
+moved on still accepts it; a test checks that the retried packet is new ciphertext and that Bob reads it.
+The retry queues the packet for the device it was refused for. A message whose text is not kept (a deleted
+one, or a reaction or an edit) is sent as it was sealed. The test does not drive a group through an epoch
+change, because a 1:1 conversation has no cheap action that makes one. After 30 days a refused message stays
+`failed` with its reason, and has no Retry.
+
+## Multi-device conversations
+
+A direct conversation is an MLS group, and MLS adds devices, not people. Every device of each party must
+be in the group, or that device never gets the conversation. This section covers the devices that come
+and go after the group is made.
+
+**Who changes the group.** Each party adds and removes only its own devices. A device of Bob's is added by
+Bob's devices, and a device Bob revokes is removed by Bob's devices. Alice's devices do the same for Alice.
+Nobody can add a device that its root has not certified, so the party a device belongs to is the only one
+that can add it. A commit that adds or removes any other root's device is refused. Messages keep flowing
+whichever party is offline. A device that is linked is added once its own party's devices run a pass, even
+when the other party is offline.
+
+**Concurrent commits.** Two commits at the same epoch would split the group, since an accepted commit cannot
+be undone. So the two parties take turns by root. The party with the lower root commits at once. The party
+with the higher root records the epoch on one pass, and commits on a later pass only if the epoch has not
+moved since. If the other side committed in the meantime, the higher side sees a new epoch and waits again.
+The window that is left is the time a commit takes to reach the other side. It is small, and a collision
+inside it is the known limit of this rule. The test "both parties link a device at the same time" runs both
+syncs together and checks that all four devices read the conversation.
+
+**Adding.** Every few minutes, in the maintenance pass, each party's devices compare the conversation's devices
+with the devices their own root has certified, minus any device revoked in a community. A device that is certified and not yet
+in the group is added with a commit, and gets a welcome. A device is added only if it answers
+`DmDevicesSupport(true)`, so a peer on an older version keeps its single device. The devices the group
+was made with stay as they were. Our own other devices are added the same way, at the next pass after they
+link, so a device that we link gets the conversation and sees the messages we send from the others. A
+conversation made after a device linked includes that device from the start, as today.
+
+**Removing.** A device that a revocation names is removed with a commit, which rotates the epoch. The
+revoked device no longer receives messages sent after that. Messages it received before stay with it, as
+they do for any member who leaves.
+
+**History for a newly linked device.** A device added later gets no keys for the epochs before its add,
+so it reads messages from after it was linked. The same rule as joiner history applies (`05`, "History
+messages"): the default is `SinceJoin`, and a conversation has no setting to change it, so a linked device
+starts from its link. Our own messages from the other devices are visible to it from then on.
+
+**Delivery.** "Delivered" means a receipt from any device of the recipient, since receipts already name
+the recipient's root. Each device of the recipient can acknowledge, and the first one moves the message to
+`delivered`.
+
+**Compatibility.** A peer with one device sees no change. A peer whose devices all predate this section
+keeps its devices as they are, and gets no new ones.
+
+**Commit rule.** A direct conversation accepts a commit only from one of its parties, and only when every device
+it adds or removes is certified by the committer's own root. Before this, a direct conversation refused every
+change. A welcome from one of our own devices is accepted whatever the DM policy says, since the policy is about
+contacts, and our own root is never one.
+
+**Security.** Each party changes only its own devices. A device added is one that the member's root
+certified. A removed device is one a revocation named, and it is removed by a commit, so the removal rotates
+the epoch. Nothing here lets an outsider join a group: every added device is certified by a member root,
+and the adding party checks the support answer before the add. The one new exposure is that a linked device reads
+the conversation's messages from its link on. That is what linking a device is for, and the user accepts it
+when linking.
 
 ## Open questions
 
-- Multi-device membership. A conversation holds one MLS device per member today, so a second device
-  of the same user does not yet get the group. An inbox does not fix that, because MLS needs each
-  device to join separately.
 - Inbox trust. A user's inbox sees envelope sizes, timing and the recipient root. It does not see
   plaintext. The design accepts that leak for offline delivery.

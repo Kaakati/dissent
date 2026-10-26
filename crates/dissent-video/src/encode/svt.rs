@@ -42,6 +42,8 @@ struct Encoder {
     /// The configuration SVT was initialised with. SVT keeps the address of this struct, so it
     /// must outlive the handle.
     config: Box<sys::EbSvtAv1EncConfiguration>,
+    /// Set once end-of-stream has been sent, so a later drop does not send it again.
+    ended: bool,
 }
 
 // SAFETY: the handle is owned by this value alone, and every call on it takes `&mut self`, so
@@ -76,6 +78,7 @@ impl Encoder {
             handle,
             width: config.width,
             config: svt,
+            ended: false,
         };
 
         let svt = &mut encoder.config;
@@ -139,6 +142,7 @@ impl Encoder {
         let mut header: sys::EbBufferHeaderType = unsafe { mem::zeroed() };
         header.size = mem::size_of::<sys::EbBufferHeaderType>() as u32;
         header.flags = sys::EB_BUFFERFLAG_EOS;
+        self.ended = true;
         // SAFETY: the handle is open.
         check(unsafe { sys::svt_av1_enc_send_picture(self.handle, &mut header) })
     }
@@ -180,6 +184,15 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
+        // SVT logs an error when it is deinitialised before end-of-stream. Flush the frames it still
+        // holds first, then release them. A stream that already ended has nothing left to flush.
+        if !self.ended && self.end().is_ok() {
+            while let Ok(Some(packet)) = self.next_packet(true) {
+                if packet.end_of_stream {
+                    break;
+                }
+            }
+        }
         // SAFETY: the handle is open until this drop, and is closed exactly once here.
         unsafe {
             let _ = sys::svt_av1_enc_deinit(self.handle);

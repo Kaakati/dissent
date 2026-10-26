@@ -34,6 +34,7 @@ import type {
   VoiceSettings,
 } from './types';
 import type { Unlisten } from './tauri';
+import type { ShareSource } from './types';
 
 // Every Tauri command the UI calls, in one place. Args are camelCase (Tauri maps them to snake_case params). Names and
 // argument shapes match the old UI's api.js, so the two UIs can run against the same backend and mock.
@@ -198,6 +199,7 @@ export const api = {
   listConversations: () => call<ConversationSummary[]>('list_conversations'),
   dmMessages: (peer: Id, limit: number) => call<unknown[]>('dm_messages', { peer, limit }),
   sendDm: (peer: Id, text: string) => call<unknown>('send_dm', { peer, text }),
+  retryMessage: (messageId: Id) => call<void>('retry_message', { messageId }),
 
   // ---- app and network ----
   appVersion: () => call<string>('app_version'),
@@ -246,7 +248,9 @@ export const api = {
   setMuted: (muted: boolean) => call<void>('set_muted', { muted }),
   setDeafened: (deafened: boolean) => call<void>('set_deafened', { deafened }),
   setCamera: (on: boolean) => call<void>('set_camera', { on }),
-  setScreenShare: (on: boolean) => call<void>('set_screen_share', { on }),
+  setCameraPreview: (on: boolean) => call<void>('set_camera_preview', { on }),
+  setScreenShare: (on: boolean, target?: ShareSource['target']) => call<void>('set_screen_share', { on, target: target ?? null }),
+  listShareSources: () => call<ShareSource[]>('list_share_sources'),
   sendCallMessage: (text: string) => call<unknown>('send_call_message', { text }),
   acceptCall: (callId: string) => call<unknown>('accept_call', { callId }),
   declineCall: (callId: string) => call<void>('decline_call', { callId }),

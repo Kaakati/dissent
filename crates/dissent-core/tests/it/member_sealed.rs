@@ -416,6 +416,12 @@ async fn a_joiner_whose_members_were_offline_unlocks_once_one_comes_back() {
             .set_member_only(id, true)
             .await
             .expect("member-only control on");
+        // New servers default to since-join. Carol must receive the channel created before she joins.
+        alice
+            .engine
+            .set_history_visibility(id, HistorySetting::All)
+            .await
+            .expect("history of all");
         alice
             .engine
             .create_channel(id, "before-carol".into())

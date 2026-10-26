@@ -1009,6 +1009,75 @@ async fn interrupted_fetch_resumes_from_its_partial_ciphertext() {
     );
 }
 
+/// The process stops midway through a download, and a new one opens the same data folder. The second run keeps
+/// the ciphertext the first one fetched, and only the rest crosses the wire.
+#[tokio::test]
+async fn a_download_resumes_after_the_process_restarts() {
+    let root = TestDir::new();
+    let data = root.path().join("bob");
+    let downloads = root.path().join("downloads");
+    let alice = Peer::new().await;
+    let plain = sample(50 * MIB);
+    let src = alice.dir.path().join("archive.bin");
+    fs::write(&src, &plain).unwrap();
+    let fref = alice
+        .files
+        .add(Input::Path {
+            path: src,
+            mime: "application/octet-stream".into(),
+        })
+        .await
+        .unwrap();
+    let hf = HashAndFormat::raw(Hash::from_bytes(fref.hash));
+    let cipher = fref.cipher_size;
+
+    // First run: the transfer is cut off once half the ciphertext has arrived, the way a closed process
+    // would cut it. The endpoint and the store go down with it, and nothing reports a failure.
+    let first = Files::open(&data).await.unwrap();
+    let endpoint = loopback_endpoint().await;
+    let (half_tx, half_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut half_tx = Some(half_tx);
+    let from = [alice.addr()];
+    let stopped = tokio::select! {
+        _ = first.fetch(&endpoint, &from, &fref, &downloads, move |done, total| {
+            if done >= total / 2 {
+                if let Some(tx) = half_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }) => false,
+        _ = half_rx => true,
+    };
+    assert!(stopped, "the first run must be cut off before it finishes");
+    endpoint.close().await;
+    first.shutdown().await.unwrap();
+    drop(first);
+
+    // Second run: the same data folder. The bytes the first run fetched are still there.
+    let second = Files::open(&data).await.unwrap();
+    let held = second.store().remote().local(hf).await.unwrap().local_bytes();
+    assert!(held > 0 && held < cipher, "held {held} of {cipher} bytes after the restart");
+
+    let bob_endpoint = loopback_endpoint().await;
+    let provider = serve(&alice.files).await;
+    let out = second
+        .fetch(&bob_endpoint, &[provider.endpoint.addr()], &fref, &downloads, |_, _| {})
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&out).unwrap(), plain);
+    // The provider records a transfer after the last byte leaves, so give that event a moment.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent = provider.sent.load(Ordering::SeqCst);
+    assert!(
+        sent <= cipher - held + MIB as u64,
+        "the restart re-sent bytes it already had: sent {sent}, held {held}, total {cipher}"
+    );
+    assert!(
+        sent + held + MIB as u64 >= cipher,
+        "the rest of the file crossed the wire: sent {sent}, held {held}, total {cipher}"
+    );
+}
+
 #[tokio::test]
 async fn disk_checks_refuse_before_any_work() {
     let dir = TestDir::new();

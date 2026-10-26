@@ -9,6 +9,11 @@ use dissent_identity::{DeviceId, DeviceKey, Identity, RootId};
 use dissent_net::{NodeConfig, PeerAddr, RelayChoice};
 
 use crate::engine::Engine;
+use crate::conv_actions::parse_message_id;
+use crate::groups::{ConvPacket, REFUSED_TTL_MS};
+use crate::inbox::{sign_over, Envelope, DEPOSITS_PER_HOUR, DEPOSIT_DOMAIN, MAX_AGE_MS};
+use crate::rpc::{decode, Response};
+use crate::views::DmItem;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -160,4 +165,230 @@ async fn offline_message_is_collected_from_the_inbox_and_cleared() {
     seeder.shutdown().await.expect("seeder shuts down");
     let _ = std::fs::remove_dir_all(alice_dir);
     let _ = std::fs::remove_dir_all(bob_dir);
+}
+
+/// The people in an offline test: Alice, Bob, who is offline, and Bob's seeder, which is his inbox.
+struct Offline {
+    alice: Engine,
+    alice_root: RootId,
+    bob_id: Identity,
+    bob_dir: PathBuf,
+    bob_root: RootId,
+    seeder: Engine,
+    seeder_id: Identity,
+    seeder_dir: PathBuf,
+}
+
+/// Alice is Bob's contact, and Bob's seeder is his inbox. Bob then goes offline, so what Alice sends him waits at the
+/// seeder.
+async fn bob_offline_behind_his_inbox(tag: &str) -> Offline {
+    let alice_id = Identity::create(now());
+    let bob_id = Identity::create(now());
+    let bob_root: RootId = bob_id.root_id();
+    let alice_root: RootId = alice_id.root_id();
+    let alice_dir = scratch(&format!("{tag}-alice"));
+    let bob_dir = scratch(&format!("{tag}-bob"));
+    let seeder_dir = scratch(&format!("{tag}-seeder"));
+
+    let root = bob_id.root.clone().expect("bob holds his root key");
+    let seeder_device = DeviceKey::generate();
+    let seeder_cert = root.certify(seeder_device.id(), now());
+    let seeder_id = Identity {
+        root: Some(root),
+        device: seeder_device,
+        cert: seeder_cert,
+        device_name: "seeder".into(),
+    };
+    let seeder_dev: DeviceId = seeder_id.device_id();
+
+    let alice = start(alice_id.clone(), alice_dir).await;
+    let bob = start(bob_id.clone(), bob_dir.clone()).await;
+    let seeder = start(seeder_id.clone(), seeder_dir.clone()).await;
+    introduce(&alice, &bob);
+    introduce(&alice, &seeder);
+    introduce(&bob, &alice);
+    introduce(&bob, &seeder);
+    introduce(&seeder, &bob);
+
+    seeder.set_serve_inbox(true).expect("seeder serves its inbox");
+    bob.set_inboxes(vec![seeder_dev]).await.expect("bob names his inbox");
+    eventually("the seeder holds bob's key packages", || seeder.inbox_stats().key_packages > 0).await;
+
+    alice.request_contact(&bob.contact_link(), "").await.expect("alice asks bob");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    eventually("bob sees alice's request", || !bob.contact_requests().is_empty()).await;
+    bob.accept_request(alice_root).await.expect("bob accepts alice");
+    eventually("alice is bob's contact", || alice.user_profile(bob_root).is_contact).await;
+
+    bob.shutdown().await.expect("bob shuts down");
+    Offline {
+        alice,
+        alice_root,
+        bob_id,
+        bob_dir,
+        bob_root,
+        seeder,
+        seeder_id,
+        seeder_dir,
+    }
+}
+
+/// Alice's messages to Bob, in the order they were written.
+fn sent(alice: &Engine, bob_root: RootId) -> Vec<DmItem> {
+    alice
+        .dm_messages(bob_root, 200)
+        .into_iter()
+        .filter(|m| m.text.starts_with("message "))
+        .collect()
+}
+
+/// Makes deposits at the seeder from Alice's device, as if she had sent them, until the hourly limit is reached.
+/// Each one is a valid envelope for Bob, so the seeder counts it like any other.
+fn fill_hourly_limit(alice: &Engine, seeder: &Engine, bob_root: RootId) {
+    let me = alice.inner.identity.clone();
+    let room = DEPOSITS_PER_HOUR - seeder.inbox_stats().envelopes;
+    for n in 0..room {
+        let packet = format!("filler {n}").into_bytes();
+        let id = *blake3::hash(&packet).as_bytes();
+        let recipient = DeviceKey::generate().id();
+        let expires_ms = now() + MAX_AGE_MS / 2;
+        let sig = sign_over(&me.device, DEPOSIT_DOMAIN, &(recipient, bob_root, id, expires_ms, &packet))
+            .expect("the filler deposit signs");
+        let env = Envelope {
+            recipient,
+            recipient_root: bob_root,
+            id,
+            expires_ms,
+            packet,
+            from: me.cert.clone(),
+            sig,
+        };
+        assert!(matches!(seeder.receive_deposit(env), Response::Ack), "the inbox takes filler {n}");
+    }
+    assert_eq!(seeder.inbox_stats().envelopes, DEPOSITS_PER_HOUR, "the inbox is at its hourly limit");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sender_over_the_hourly_deposit_limit_is_refused_and_its_message_fails() {
+    let Offline { alice, seeder, bob_root, .. } = bob_offline_behind_his_inbox("limit").await;
+
+    // The first message is deposited with the welcome that starts the group: two envelopes.
+    alice.send_dm(bob_root, "message 0".into()).await.expect("alice writes to bob");
+    eventually("the first message is deposited", || seeder.inbox_stats().envelopes >= 2).await;
+    fill_hourly_limit(&alice, &seeder, bob_root);
+
+    alice.send_dm(bob_root, "message 1".into()).await.expect("alice writes to bob");
+    eventually("the second message is refused", || {
+        sent(&alice, bob_root).last().is_some_and(|m| m.delivery == "failed")
+    })
+    .await;
+
+    let mine = sent(&alice, bob_root);
+    assert_eq!(mine.first().map(|m| m.delivery.as_str()), Some("queued_inbox"), "the first message was deposited");
+    let last = mine.last().expect("messages were sent");
+    assert_eq!(last.reason.as_deref(), Some("deposit rate limit reached"), "the inbox's reason is shown");
+    assert!(last.retryable, "a refused message can be sent again");
+    assert_eq!(seeder.inbox_stats().envelopes, DEPOSITS_PER_HOUR, "the refused deposit was not stored");
+
+    alice.shutdown().await.expect("alice shuts down");
+    seeder.shutdown().await.expect("seeder shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_message_is_sent_again_sealed_anew_once_the_inbox_accepts() {
+    let Offline {
+        alice,
+        alice_root,
+        bob_id,
+        bob_dir,
+        bob_root,
+        seeder,
+        seeder_id,
+        seeder_dir,
+    } = bob_offline_behind_his_inbox("retry").await;
+
+    alice.send_dm(bob_root, "message 0".into()).await.expect("alice writes to bob");
+    eventually("the first message is deposited", || seeder.inbox_stats().envelopes >= 2).await;
+    fill_hourly_limit(&alice, &seeder, bob_root);
+    alice.send_dm(bob_root, "message 1".into()).await.expect("alice writes to bob");
+    eventually("the second message is refused", || {
+        sent(&alice, bob_root).last().is_some_and(|m| m.delivery == "failed")
+    })
+    .await;
+    let refused = sent(&alice, bob_root).pop().expect("a message was sent");
+    let refused_id = parse_message_id(&refused.id).expect("the chat's id parses");
+    let held = seeder.inbox_stats().envelopes;
+    let old_ciphertext = {
+        let w = alice.read();
+        let entry = w.refused.packets.get(&refused_id).expect("the refused packet is kept");
+        match &entry.item.packet {
+            ConvPacket::Message { ciphertext, .. } => ciphertext.clone(),
+            _ => panic!("the refused packet is a message"),
+        }
+    };
+
+    // Past the envelope lifetime the message stays failed with its reason, and it cannot be sent again.
+    alice
+        .write()
+        .refused
+        .packets
+        .get_mut(&refused_id)
+        .expect("the refused packet is kept")
+        .refused_ms = now().saturating_sub(REFUSED_TTL_MS + 1);
+    let expired = sent(&alice, bob_root).pop().expect("a message was sent");
+    assert_eq!(expired.delivery, "failed");
+    assert!(expired.reason.is_some(), "the reason is still shown");
+    assert!(!expired.retryable, "an expired message has no retry");
+    assert!(alice.retry_message(&refused.id).await.is_err(), "an expired message cannot be sent again");
+
+    // Back inside the lifetime, it can, and the inbox takes it because it restarted: its hourly count is not stored.
+    alice
+        .write()
+        .refused
+        .packets
+        .get_mut(&refused_id)
+        .expect("the refused packet is kept")
+        .refused_ms = now();
+    seeder.shutdown().await.expect("seeder shuts down");
+    let seeder = start(seeder_id.clone(), seeder_dir.clone()).await;
+    introduce(&alice, &seeder);
+
+    alice.retry_message(&refused.id).await.expect("alice retries the refused message");
+    eventually("the retried message is deposited", || {
+        sent(&alice, bob_root)
+            .last()
+            .is_some_and(|m| m.id == refused.id && m.delivery == "queued_inbox")
+    })
+    .await;
+    assert_eq!(seeder.inbox_stats().envelopes, held + 1, "the inbox holds the retried packet");
+
+    // The retry is the same message under new ciphertext: it was sealed again under the current epoch.
+    let resent: Vec<ConvPacket> = seeder
+        .read()
+        .inbox
+        .envelopes
+        .iter()
+        .filter_map(|e| decode::<ConvPacket>(&e.packet).ok())
+        .filter(|p| matches!(p, ConvPacket::Message { id, .. } if *id == refused_id))
+        .collect();
+    assert_eq!(resent.len(), 1, "one copy of the message is at the inbox");
+    match &resent[0] {
+        ConvPacket::Message { ciphertext, .. } => {
+            assert_ne!(ciphertext, &old_ciphertext, "the retry is sealed anew, not resent as it was");
+        }
+        _ => unreachable!("filtered to messages"),
+    }
+
+    // Bob comes back, collects, and reads the message that was refused.
+    let bob = start(bob_id.clone(), bob_dir.clone()).await;
+    introduce(&bob, &seeder);
+    bob.collect_inboxes().await.expect("bob collects");
+    eventually("bob reads the retried message", || {
+        bob.dm_messages(alice_root, 200).iter().any(|m| m.text == "message 1")
+    })
+    .await;
+
+    alice.shutdown().await.expect("alice shuts down");
+    bob.shutdown().await.expect("bob shuts down");
+    seeder.shutdown().await.expect("seeder shuts down");
 }

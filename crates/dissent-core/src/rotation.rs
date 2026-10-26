@@ -284,7 +284,7 @@ impl Engine {
         }
         let secret = crate::access::random_secret();
         let group = community.0;
-        let sealed = match self.with_mls_ratchet(|mls| mls.encrypt(&group, &secret)) {
+        let sealed = match self.mls_encrypt(&group, &secret) {
             Ok(sealed) => sealed,
             Err(e) => {
                 debug!(community = %community, error = %e, "could not seal the new secret");

@@ -263,6 +263,14 @@ Old messages keep their MLS form and stay locked for joiners. Nothing can open t
 Member-only control, the epoch keys of control events, and the rule that bans and removals rotate the epoch
 are unchanged.
 
+## Durability: what a power cut can drop
+
+Events in a community's events log are written without a sync. A group flush syncs the logs at most every 250 ms. It also runs before any MLS state that depends on those events is written, and on shutdown. A crash of the app loses nothing, because the bytes are already with the operating system. A power cut can lose the events written in the last 250 ms. Peers hold the same events, and a device asks for what it lacks when it next syncs with them, so an event is lost for good only if every copy is lost in the same window.
+
+A record cut short by a power cut is dropped when the log loads, and the records before it still load. The next append lands after the cut, so the framing stays aligned.
+
+Sender generations of the MLS ratchet are durable the same way: a sender reserves each block of 100 generations, synced, before its first send past the block, and resumes past the block after a crash. So a crash never makes the sender reuse a generation. Receivers accept the skipped generations within their forward distance of 1000.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

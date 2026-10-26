@@ -516,7 +516,9 @@ impl CommunityState {
                     return Err(Rejection::NoPermission);
                 }
                 match kind {
-                    SealedKind::Message | SealedKind::HistoryMessage => {}
+                    // The history form is keyed to the MLS epoch, never to a channel key, so it has no place here.
+                    SealedKind::HistoryMessage => return Err(Rejection::Malformed),
+                    SealedKind::Message => {}
                     SealedKind::Reply { target }
                     | SealedKind::React { target }
                     | SealedKind::Unreact { target } => {

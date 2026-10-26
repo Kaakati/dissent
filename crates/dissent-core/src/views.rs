@@ -330,6 +330,8 @@ pub struct DmItem {
     pub queued: bool,
     /// Why the recipient refused this message, when `delivery` is `failed`.
     pub reason: Option<String>,
+    /// True while a refused message can still be sent again. It stops after the envelope lifetime.
+    pub retryable: bool,
     /// Files in the message.
     pub attachments: Vec<crate::attachments::AttachmentView>,
     /// Link previews the sender made.
@@ -407,6 +409,8 @@ pub enum EngineEvent {
         sender: u64,
         root_id: String,
         screen: bool,
+        /// Whether the picture was encoded with AV1. False for H.264, and for this device's own preview.
+        av1: bool,
         width: u32,
         height: u32,
         jpeg: String,

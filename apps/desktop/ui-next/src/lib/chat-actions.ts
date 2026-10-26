@@ -109,6 +109,11 @@ export function downloadAttachment(communityId: Id | null, messageId: Id, attach
   return run(() => api.downloadAttachment(communityId, messageId, attachment.id), { read: false });
 }
 
+// Sends a message the recipient or an inbox refused, again. The backend keeps the packet for this.
+export function retryMessage(messageId: Id): Promise<boolean> {
+  return run(() => api.retryMessage(messageId), { read: false });
+}
+
 // Programs get a confirmation first. The check uses the real (last) extension.
 export async function openAttachment(a: Attachment): Promise<void> {
   if (!a.local_path) return;

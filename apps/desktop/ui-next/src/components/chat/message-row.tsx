@@ -2,11 +2,12 @@
 // the reply reference, spoiler handling, attachments, link previews, reactions, the hover actions and the inline editor.
 // Ported from the old UI's views/chat.js (messageRow, bodyNode, spoilerGuard, rowActions, editForm, replyRef, systemRow).
 import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Clock, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react';
+import { AlertCircle, Clock, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { useChat } from '@/lib/chat';
 import { splitMentions } from '@/lib/mentions';
-import { editMessage } from '@/lib/chat-actions';
+import { editMessage, retryMessage } from '@/lib/chat-actions';
 import { has } from '@/lib/features';
 import { hueOf } from '@/lib/identity';
 import { clockLabel, stampLabel, whenLabel } from '@/lib/time';
@@ -231,6 +232,16 @@ export function MessageRow({
     <span className="pending-note">
       <Clock aria-hidden="true" />
       sending…
+    </span>
+  ) : item.failed ? (
+    <span className="pending-note" style={{ color: 'var(--danger-text)' }}>
+      <AlertCircle aria-hidden="true" />
+      {`Not delivered${item.failReason ? `: ${item.failReason}` : ''}.`}
+      {item.retryable ? (
+        <Button variant="link" className="h-auto p-0" onClick={() => void retryMessage(item.id)}>
+          Retry
+        </Button>
+      ) : null}
     </span>
   ) : item.queued ? (
     <span className="pending-note">

@@ -2,6 +2,10 @@
 
 use dissent_identity::Vault;
 
+/// Mutes a device's topic gossip, so only its direct beacons reach peers. See `presence::mute_gossip_for_tests`.
+#[cfg(feature = "test-hooks")]
+pub use crate::presence::mute_gossip_for_tests;
+
 /// Maps a link preview host to a loopback server. See `previews::map_preview_host`.
 #[cfg(feature = "test-hooks")]
 pub use crate::previews::map_preview_host;
@@ -58,4 +62,13 @@ pub fn adopted_relays(engine: &crate::Engine) -> Vec<String> {
         .get()
         .map(|node| node.relays().iter().map(|url| url.to_string()).collect())
         .unwrap_or_default()
+}
+
+/// Makes `engine` answer `DmDevicesSupport` with `on`. Off models a device from before multi-device direct
+/// conversations, which is never added to a conversation made before it linked.
+pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
+    engine
+        .inner
+        .dm_devices_support
+        .store(on, std::sync::atomic::Ordering::Relaxed);
 }

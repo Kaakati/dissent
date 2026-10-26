@@ -72,7 +72,9 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
   ciphertext is held under a named tag for 24 hours (`DEFAULT_PARTIAL_TTL`), so garbage collection
   leaves it alone. The next fetch asks iroh-blobs only for the missing ranges. Plaintext is written
   only after the whole ciphertext verifies. The expired holds are released on open, on each fetch,
-  and by `Files::prune_partials`. Garbage collection then removes the bytes on its next run.
+  and by `Files::prune_partials`. Garbage collection then removes the bytes on its next run. A
+  process that stops midway keeps the bytes it fetched too: `a_download_resumes_after_the_process_restarts`
+  stops a fetch at half, reopens the data folder, and checks that only the rest crosses the wire.
 - **Timeouts.** A provider gets 15 seconds to connect and 30 seconds of silence before it is
   dropped. The 30-second stall timeout is the main guard against hangs. The whole download gets
   60 seconds plus 10 seconds per MiB, capped at 24 hours. A 10 GB file reaches the cap.
@@ -107,8 +109,6 @@ Video thumbnails are not made yet. That needs a decoder for the video's first fr
 
 ## Next steps
 
-- A test that resumes a download across a process restart. The hold is a persistent named tag, so
-  the design expects it to work, but no test covers it yet.
 - Padding to fixed size buckets, if length leaks prove a real concern.
 - Core and UI integration, listed below.
 

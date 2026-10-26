@@ -80,6 +80,56 @@ async fn a_status_change_reaches_every_shared_server_at_once() {
     .await;
 }
 
+/// Alice, Bob and Carol share a server. Carol leaves the network before Alice changes status, so the
+/// server's topic has one neighbour left. The status still reaches Bob within two seconds. Beacons are a
+/// minute apart. Networked: run with `scripts/fwtest.sh dissent-core it --ignored presence::a_status_change_reaches_with_a_neighbour_gone`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run through scripts/fwtest.sh"]
+async fn a_status_change_reaches_with_a_neighbour_gone() {
+    bounded(async {
+    let alice = peer_slow_beacons("alice").await;
+    let bob = peer_slow_beacons("bob").await;
+    let carol = peer_slow_beacons("carol").await;
+    let alice_root = alice.identity.root_id();
+    let id: CommunityId = alice
+        .engine
+        .create_community("Rustaceans".into())
+        .await
+        .expect("create")
+        .id
+        .parse()
+        .unwrap();
+    let invite = alice.engine.create_invite(id).await.expect("invite");
+    join_ready(&alice, &bob, &invite).await;
+    join_ready(&alice, &carol, &invite).await;
+    eventually("bob and carol see alice online", || {
+        (member_presence(&bob, id, alice_root) == Some(Presence::Online)
+            && member_presence(&carol, id, alice_root) == Some(Presence::Online))
+            .then_some(())
+    })
+    .await;
+
+    // Carol leaves the network. Bob is still there.
+    let (_, _) = stop(carol).await;
+    // Alice's topic gossip is dropped, as it is when a topic has no live neighbour. Only the direct beacon can
+    // carry the change to Bob.
+    dissent_core::test_support::mute_gossip_for_tests(alice.identity.device_id(), true);
+
+    alice
+        .engine
+        .set_status(Status::Idle, None)
+        .expect("alice goes idle");
+    eventually_within(Duration::from_secs(2), "bob sees alice idle", || {
+        (member_presence(&bob, id, alice_root) == Some(Presence::Idle)).then_some(())
+    })
+    .await;
+    dissent_core::test_support::mute_gossip_for_tests(alice.identity.device_id(), false);
+
+    finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invisible_member_reads_as_offline_while_messaging() {
     bounded(async {

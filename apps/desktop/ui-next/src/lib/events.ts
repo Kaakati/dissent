@@ -3,7 +3,7 @@
 import { api, listenTo, onEngineEvent } from './api';
 import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
-import { attachmentProgress, reloadForEvent, startChat } from './chat';
+import { attachmentProgress, clearMentions, reloadForEvent, startChat, useChat } from './chat';
 import { has } from './features';
 import { useShell, type ShellState } from './store';
 import type { CallState, EngineEvent, TypingTarget, UpdateInfo, UserStatus } from './types';
@@ -11,9 +11,15 @@ import type { CallState, EngineEvent, TypingTarget, UpdateInfo, UserStatus } fro
 // The alerts for a new message, and the reload of the open conversation when the event is for it.
 function onMessageEvent(ev: EngineEvent): void {
   switch (ev.kind) {
-    case 'message':
+    case 'message': {
       void alertForChannelMessage(ev).catch(() => {});
+      // A mention arriving in the channel being read is seen at once, so its count does not climb.
+      const open = useChat.getState().target;
+      if (open?.kind === 'channel' && open.communityId === ev.community_id && open.channelId === ev.channel_id && document.hasFocus()) {
+        void clearMentions(ev.community_id, ev.channel_id);
+      }
       break;
+    }
     case 'dm':
       void useShell.getState().loadConversations().then(() => alertForDm(ev.peer)).catch(() => {});
       break;

@@ -10,7 +10,7 @@ use crate::identity_watch;
 use crate::identity_watch::IdentityChange;
 use crate::messages::event_for;
 use crate::rpc::{Request, Response, decode};
-use crate::store::{append_records, Paths};
+use crate::store::{append_records, append_records_deferred, Paths};
 use crate::typing::TypingTarget;
 use crate::views::EngineEvent;
 use crate::wire::{GossipMsg, decode_gossip};
@@ -198,7 +198,7 @@ impl Engine {
             .get_mut(&community)
             .ok_or_else(|| not_found(&community))?;
         let batch = c.ingest(valid);
-        if let Err(e) = append_records(&paths.events_log(&community), &batch.stored) {
+        if let Err(e) = append_records_deferred(&paths.events_log(&community), &batch.stored, &self.inner.dirty_logs) {
             warn!(community = %community, error = %e, "could not persist events");
         }
         let fresh = c.take_unhandled(&batch.stored);
@@ -208,6 +208,10 @@ impl Engine {
                 Payload::Message { .. }
                     | Payload::Sealed {
                         kind: SealedKind::Message | SealedKind::HistoryMessage,
+                        ..
+                    }
+                    | Payload::PrivateSealed {
+                        kind: SealedKind::Message,
                         ..
                     }
             ) {
@@ -374,6 +378,9 @@ impl Engine {
             } => self.answer_invite_preview_full(conn_from, community, token, invite_id),
             Request::Friends => self.serve_friends(conn_from),
             Request::HistoryKeys { community } => self.serve_history_keys(conn_from, community),
+            Request::DmDevicesSupport => Response::DmDevicesSupport(
+                self.inner.dm_devices_support.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             Request::HistorySupport => Response::HistorySupport(
                 self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed),
             ),
@@ -749,6 +756,9 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         engine.retry_outbox().await;
         engine.retry_contact_outbox().await;
         engine.flush_conv_queues().await;
+        if rounds.is_multiple_of(4) {
+            engine.sync_all_dm_devices().await;
+        }
         if let Err(e) = engine.collect_inboxes().await {
             warn!(error = %e, "could not collect from inboxes");
         }

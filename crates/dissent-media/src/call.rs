@@ -163,6 +163,7 @@ fn new_rtc(start: Instant, max_datagram: Option<usize>) -> Result<Rtc> {
         .clear_codecs()
         .enable_opus(true, false)
         .enable_h264(true)
+        .enable_av1(true)
         .enable_bwe(Some(Bitrate::kbps(BWE_INITIAL_KBPS)))
         .set_stats_interval(Some(STATS_INTERVAL));
     if let Some(max) = max_datagram {
@@ -553,6 +554,17 @@ impl<T: PacketTransport> Call<T> {
     /// the call is audio-only.
     pub fn has_video(&self) -> bool {
         self.video_mid.is_some()
+    }
+
+    /// Whether the peer agreed to AV1 in this call's negotiation. Both sides offer AV1, so it is
+    /// on when both can decode it. Frames still ride the H.264 carrier, and the AV1 bitstream
+    /// is named in the frame's own header, see `video.rs`.
+    pub fn peer_has_av1(&self) -> bool {
+        self.rtc
+            .codec_config()
+            .params()
+            .iter()
+            .any(|p| p.spec().codec == Codec::Av1)
     }
 
     /// The latest available bandwidth from str0m's estimate, in kbps. `None` until the first

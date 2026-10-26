@@ -62,10 +62,13 @@ A ban, leave or departure removes every device of that member. Any member runs t
 
 Writes are split by kind of change:
 
-- Group changes (commits, joins, removals, key package pool refills) and our own sends are written at once and synced to disk. A lost commit would strand a device. A lost sender ratchet could make us reuse a key for the next message, which breaks AES-GCM for both messages, so sends cannot be debounced.
-- Decrypting a received message only marks the state dirty. The state is written at most once a second, or after 100 steps, and on maintenance and shutdown.
+- Group changes (commits, joins, removals, key package pool refills) are written at once and synced to disk. A lost commit would strand a device.
+- Sending and receiving application messages are ratchet steps. The state is written at most once a second, or after 100 steps, and on maintenance and shutdown. A crash can lose the steps since the last write, so a sender reserves its generations first: each reservation covers 100 generations and is synced to `mls_reserve.bin` before the first send past it.
+- Events are appended to the events log without a sync. The log is synced by a group flush at most every 250 ms, before any MLS state that depends on those events is written, and on shutdown. See the durability section of the threat model.
 
-Because sends are written at once, a crash never loses a sender ratchet step. So no key generation can be reused after a restart, and no self-update is needed to recover. Sends cost one synced write each, about 3.8 ms, which is invisible to people.
+On restart the sender resumes at its last reservation. It creates messages up to that mark and discards them, so every generation it used before the crash is below the mark and none is used twice. A crash skips at most 100 generations, which is well inside the receivers' forward distance of 1000 (`RATCHET_FORWARD`); their out-of-order tolerance is 64 (`RATCHET_TOLERANCE`). Sends cost one synced write per 100 sends, not one per send.
+
+The history seals and the event seals draw a random 192-bit nonce for each message and keep no counter, so a crash cannot make them reuse a nonce.
 
 A crash can lose the receive-side ratchet steps taken since the last write. The plaintext those steps produced is already in `content.sealed`, so decrypted history stays readable. The lost steps only mean that a later restart may decrypt the same ciphertexts again, which is harmless because the text is already stored.
 
@@ -156,7 +159,7 @@ per encryption period rather than per message.
 path only reads that flag and never waits on a member. A community with no other member device is ready at once.
 Otherwise a missing, stale or differently-scoped answer counts as no: the message is sent in today's form, and a
 background check starts. A "yes" is kept for five minutes and a "no" for one minute, and a changed member list
-starts a new check at once. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
+starts a new check at once. A presence beacon from a member of a community that is not ready also starts a check, debounced by half a second, so a device that comes back online is counted at once. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
 joiner cannot read them. That cannot be fixed retroactively. A device on an older version that joins after the
 switch cannot read `HistoryMessage` text either. It shows as locked, and nothing crashes.
 

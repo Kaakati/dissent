@@ -35,6 +35,9 @@ export interface ViewItem {
   own: boolean;
   pending: boolean;
   queued: boolean;
+  failed: boolean; // refused, so it was not delivered; the sender may retry
+  failReason: string | null;
+  retryable: boolean; // a refused message can still be sent again
   system: boolean; // a membership line in a group
   replyTo: ReplyRef | null;
   mentions: MentionRef[];
@@ -93,6 +96,9 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       own: m.author === me?.root_id,
       pending: false,
       queued: Boolean(m.queued),
+      failed: false,
+      failReason: null,
+      retryable: false,
       system: false,
       replyTo: m.reply_to ?? null,
       reactions: Array.isArray(m.reactions) ? m.reactions : null,
@@ -135,6 +141,9 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       own,
       pending: Boolean(m.pending),
       queued: Boolean(m.queued),
+      failed: m.delivery === 'failed',
+      failReason: m.reason ?? null,
+      retryable: m.retryable === true,
       system: m.system === true, // a membership line in a group, e.g. "added Omar and Rana."
       replyTo: m.reply_to ?? null,
       reactions: Array.isArray(m.reactions) ? m.reactions : null,

@@ -53,6 +53,8 @@ pub(crate) struct World {
     pub contact_book: crate::contacts::ContactBook,
     /// Conversations and their packet queues.
     pub conv_book: crate::groups::ConvBook,
+    /// Packets of refused messages, kept for retry until they expire.
+    pub refused: crate::groups::RefusedBook,
     /// Stored text messages, by conversation.
     pub conv_msgs: BTreeMap<crate::groups::ConvId, Vec<crate::groups::ConvMsg>>,
     /// Stored replies, reactions, edits and deletes, by conversation. See `conv_actions.rs`.
@@ -123,6 +125,7 @@ impl World {
         }
         let contact_book = crate::contacts::ContactBook::load(&paths)?;
         let conv_book = crate::groups::ConvBook::load(&paths)?;
+        let refused = crate::groups::RefusedBook::load(&paths)?;
         let conv_msgs = crate::groups::load_messages(&paths, &conv_book);
         let conv_acts = crate::conv_actions::load_acts(&paths, &conv_book);
         let contact_times = crate::contact_times::ContactTimes::load(&paths)?;
@@ -168,6 +171,7 @@ impl World {
             outbox,
             contact_book,
             conv_book,
+            refused,
             conv_msgs,
             conv_acts,
             contact_times,
@@ -351,6 +355,8 @@ impl World {
             .state()
             .channels
             .iter()
+            // A private channel is listed only to the people who can read it.
+            .filter(|(id, _)| c.state().can_read(**id, self.me))
             .map(|(id, name)| {
                 let voice = c.state().voice_channels.contains(id);
                 let mut info = ChannelInfo::new(*id, name.clone(), voice, &c.state().settings(id));
@@ -459,6 +465,10 @@ impl World {
         let Some(c) = self.communities.get(community) else {
             return Vec::new();
         };
+        // A private channel's messages are for its readers only. Others see none.
+        if !c.state().can_read(*channel, self.me) {
+            return Vec::new();
+        }
         let Some(msgs) = c.state().messages.get(channel) else {
             return Vec::new();
         };
@@ -674,7 +684,9 @@ pub(crate) type ReactionOp = (Hlc, RootId, bool, String);
 pub(crate) fn reaction_index(c: &Community) -> BTreeMap<EventId, Vec<ReactionOp>> {
     let mut out: BTreeMap<EventId, Vec<ReactionOp>> = BTreeMap::new();
     for se in c.sealed_in_order() {
-        let dissent_events::Payload::Sealed { kind, .. } = &se.event.body.payload else {
+        let (dissent_events::Payload::Sealed { kind, .. } | dissent_events::Payload::PrivateSealed { kind, .. }) =
+            &se.event.body.payload
+        else {
             continue;
         };
         let (target, react) = match kind {

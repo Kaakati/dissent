@@ -346,7 +346,9 @@ impl Engine {
         let Some(sp) = self.beacon() else {
             return;
         };
-        gossip_beacon(&self.topic_senders(), &sp).await;
+        if !gossip_muted(self.inner.identity.device.id()) {
+            gossip_beacon(&self.topic_senders(), &sp).await;
+        }
         let devices = presence_devices(&self.read(), now_ms());
         self.deliver_direct(&sp, devices).await;
     }
@@ -473,6 +475,7 @@ impl Engine {
             );
             (before, w.presence_of(&root, now))
         };
+        self.history_member_seen(root);
         if community.is_some() {
             self.inner.member_seen.notify_waiters();
         } else {
@@ -485,6 +488,35 @@ impl Engine {
             });
         }
         Ok(())
+    }
+}
+
+/// Devices whose topic gossip is muted, so a test can leave only the direct path. Tests only.
+#[cfg(feature = "test-hooks")]
+static MUTED_GOSSIP: std::sync::Mutex<Vec<DeviceId>> = std::sync::Mutex::new(Vec::new());
+
+/// Mutes or unmutes the topic gossip of `device`, so only direct beacons reach its peers. For tests.
+#[cfg(feature = "test-hooks")]
+pub fn mute_gossip_for_tests(device: DeviceId, muted: bool) {
+    let mut list = MUTED_GOSSIP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    list.retain(|d| *d != device);
+    if muted {
+        list.push(device);
+    }
+}
+
+fn gossip_muted(device: DeviceId) -> bool {
+    #[cfg(feature = "test-hooks")]
+    {
+        MUTED_GOSSIP
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&device)
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        let _ = device;
+        false
     }
 }
 

@@ -271,7 +271,9 @@ if (!window.__TAURI__) {
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
   // Mentions of the viewer in a server, summed over its channels (the rail's badge).
-  const mentionsIn = (c, channelId) => (c.msgs[channelId] ?? []).filter((m) => m.mentions_me).length;
+  // When each channel's mentions were last read (mark_mentions_read); a mention counts only when it is newer.
+  const mentionReads = {};
+  const mentionsIn = (c, channelId) => (c.msgs[channelId] ?? []).filter((m) => m.mentions_me && (m.ms ?? 0) > (mentionReads[`${c.id}:${channelId}`] ?? 0)).length;
   const mentionTotal = (c) => c.channels.reduce((n, ch) => n + mentionsIn(c, ch.id), 0);
   const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null, mentions: mentionTotal(c) });
   const RAIL_ORDER_KEY = 'dissent-mock-rail-order';
@@ -947,6 +949,7 @@ if (!window.__TAURI__) {
     dm_unreact: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, false),
     dm_edit: ({ peer, messageId, text }) => dmEditIn(dms[peer] ?? [], messageId, text),
     dm_delete: ({ peer, messageId }) => dmDeleteIn(dms[peer] ?? [], messageId),
+    retry_message: () => null,
     send_dm: ({ peer, text }) => {
       const item = { id: id(`d${++seq}`), from: ME, text, ms: Date.now(), pending: true };
       (dms[peer] ??= []).push(item);
@@ -1259,7 +1262,12 @@ if (!window.__TAURI__) {
     set_muted: ({ muted }) => { if (calls.current) calls.current.muted = muted; return null; },
     set_deafened: ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; return null; },
     set_camera: ({ on }) => { if (calls.current) calls.current.camera = on; return null; },
+    set_camera_preview: () => null,
     set_screen_share: ({ on }) => { if (calls.current) calls.current.screen = on; return null; },
+    list_share_sources: () => [
+      { target: { kind: 'display', id: 1 }, name: 'Built-in display', primary: true },
+      { target: { kind: 'window', id: 2 }, name: 'Notes · Draft', primary: false },
+    ],
     send_call_message: ({ text }) => {
       if (calls.current) calls.current.messages.push({ id: id(`cm${++seq}`), root_id: ME, author_name: 'Sami', ms: Date.now(), text });
       return null;
@@ -1298,6 +1306,7 @@ if (!window.__TAURI__) {
     approve_device: ({ link }) => { need(link.startsWith('dissent://'), 'Not a device link'); return 'dissent://grant/mock-' + suffix(ME); },
     finish_device_link: () => null,
     pinned_conversations: () => [...mockPins],
+    mark_mentions_read: ({ communityId, channelId }) => { mentionReads[`${communityId}:${channelId}`] = Date.now(); return null; },
     read_markers: () => ({}),
     pin_message: ({ messageId, pinned }) => {
       if (pinned) mockPinnedIds.add(messageId);

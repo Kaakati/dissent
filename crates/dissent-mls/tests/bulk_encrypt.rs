@@ -14,7 +14,7 @@ fn six_thousand_messages_encrypt_in_one_group() {
     let started = std::time::Instant::now();
     for i in 0..6000 {
         client
-            .encrypt(&group, format!("m{i}").as_bytes())
+            .encrypt_reserving(&group, format!("m{i}").as_bytes(), &mut |_| Ok(()))
             .expect("encrypt");
         if i % 500 == 0 {
             eprintln!("PROBE-MLS {i} in {:?}", started.elapsed());

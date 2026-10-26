@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use dissent_events::{EventId, Hlc, Payload, SealedKind, SignedEvent};
 use dissent_identity::{CommunityId, DeviceId};
-use dissent_mls::{MlsClient, MlsError};
+use dissent_mls::{MlsClient, MlsError, Reservation};
 
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
-use crate::store::{append_sealed_records, content_vault, write_bytes_atomic, write_bytes_unsynced};
+use crate::store::{append_sealed_records, content_vault, read_bin, write_bin, write_bytes_atomic, write_bytes_unsynced};
 use crate::world::ContentRecord;
 
 /// Ratchet steps before the MLS state is flushed regardless of time.
@@ -25,7 +25,40 @@ pub(crate) fn mls_err(e: MlsError) -> CoreError {
     CoreError::Invalid(format!("encryption: {e}"))
 }
 
+/// The file of the sender reservations, beside the MLS state. A missing file holds none.
+pub(crate) fn reserve_path(mls_path: &std::path::Path) -> std::path::PathBuf {
+    mls_path.with_file_name("mls_reserve.bin")
+}
+
+/// The sender reservations persisted at `path`.
+pub(crate) fn read_reservations(path: &std::path::Path) -> Result<Vec<([u8; 32], Reservation)>> {
+    let marks: Option<std::collections::BTreeMap<[u8; 32], Reservation>> = read_bin(path)?;
+    Ok(marks.unwrap_or_default().into_iter().collect())
+}
+
 impl Engine {
+    /// Encrypts an application message with the sender ratchet. A send past the group's reserved mark first
+    /// persists a new mark a step further on, and only then uses its generation. So after a crash the device
+    /// resumes past every generation it may have used.
+    pub(crate) fn mls_encrypt(&self, group: &[u8; 32], plaintext: &[u8]) -> dissent_mls::Result<Vec<u8>> {
+        self.with_mls_ratchet(|mls| self.encrypt_reserving(mls, group, plaintext))
+    }
+
+    /// The sender ratchet's encryption, with the reservations written to disk durably before any send uses
+    /// them. Call under the MLS lock.
+    pub(crate) fn encrypt_reserving(
+        &self,
+        mls: &mut MlsClient,
+        group: &[u8; 32],
+        plaintext: &[u8],
+    ) -> dissent_mls::Result<Vec<u8>> {
+        let path = reserve_path(&self.inner.mls_path);
+        mls.encrypt_reserving(group, plaintext, &mut |marks| {
+            let map: std::collections::BTreeMap<[u8; 32], Reservation> = marks.iter().copied().collect();
+            write_bin(&path, &map).map_err(|_| MlsError::Rejected("could not persist a sender reservation"))
+        })
+    }
+
     /// Runs an MLS operation that changes group membership, an epoch, or the key package pool.
     /// The state is written at once. Never call this while holding the world lock.
     pub(crate) fn with_mls<T>(
@@ -93,6 +126,8 @@ impl Engine {
     }
 
     fn write_mls_snapshot(&self, bytes: &[u8], durable: bool) {
+        // The state may depend on events logged since the last group flush, so those logs go first.
+        self.inner.dirty_logs.flush();
         let written = if durable {
             write_bytes_atomic(&self.inner.mls_path, bytes)
         } else {
@@ -139,7 +174,7 @@ impl Engine {
             .map_err(|e| CoreError::Encoding(e.to_string()))?;
         self.with_mls(|mls| {
             let epoch = mls.epoch(&community.0)?;
-            let ciphertext = mls.encrypt(&community.0, &plaintext)?;
+            let ciphertext = self.encrypt_reserving(mls, &community.0, &plaintext)?;
             Ok((epoch, ciphertext))
         })
         .map_err(mls_err)
@@ -282,12 +317,14 @@ impl Engine {
 /// keys by its own id. An edit keys by its target.
 pub(crate) fn content_key(se: &SignedEvent) -> Option<(EventId, Hlc)> {
     let hlc = se.event.body.hlc;
-    match &se.event.body.payload {
-        Payload::Sealed { kind, .. } => match kind {
-            SealedKind::Message | SealedKind::HistoryMessage | SealedKind::Reply { .. } => Some((se.event.id, hlc)),
-            SealedKind::React { .. } | SealedKind::Unreact { .. } => Some((se.event.id, hlc)),
-            SealedKind::Edit { target } => Some((*target, hlc)),
-        },
-        _ => None,
+    // A private-channel message keys its content like a sealed one. Its kind is the same.
+    let kind = match &se.event.body.payload {
+        Payload::Sealed { kind, .. } | Payload::PrivateSealed { kind, .. } => kind,
+        _ => return None,
+    };
+    match kind {
+        SealedKind::Message | SealedKind::HistoryMessage | SealedKind::Reply { .. } => Some((se.event.id, hlc)),
+        SealedKind::React { .. } | SealedKind::Unreact { .. } => Some((se.event.id, hlc)),
+        SealedKind::Edit { target } => Some((*target, hlc)),
     }
 }

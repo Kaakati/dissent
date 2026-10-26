@@ -9,10 +9,11 @@ import { UpdateButton } from '@/components/settings/update-dialog';
 import { UserAvatar } from '@/components/user-avatar';
 import { sendCallMessage, useCallRoom } from '@/lib/calls';
 import { callConversationOf, conversationKey, loadCallChat, useCallChat } from '@/lib/call-chat';
+import { api } from '@/lib/api';
 import { hueOf } from '@/lib/identity';
 import { clockLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
-import type { CallMessage, CallState, Id, VoiceParticipant } from '@/lib/types';
+import type { CallMessage, CallState, Id, ShareSource, VoiceParticipant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import './call.css';
 
@@ -104,9 +105,7 @@ function CallStage({ call }: { call: CallState }) {
         >
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
         </ControlButton>
-        <ControlButton label="Share screen, coming soon" disabled>
-          <Monitor className="size-7" />
-        </ControlButton>
+        <ShareButton sharing={Boolean(call.screen)} />
         <button
           type="button"
           aria-label="Leave call"
@@ -185,6 +184,57 @@ function Tile({ person }: { person: VoiceParticipant }) {
       </span>
       {person.forwarder ? (
         <span className="absolute top-2.5 right-2.5 inline-flex h-[26px] items-center rounded-md bg-black/55 px-2.5 text-meta text-text">Forwarding</span>
+      ) : null}
+    </div>
+  );
+}
+
+// The screen share control. Sharing stops with one press. Starting opens a list of the displays and windows to share.
+function ShareButton({ sharing }: { sharing: boolean }) {
+  const toggleScreenShare = useShell((s) => s.toggleScreenShare);
+  const [open, setOpen] = useState(false);
+  const [sources, setSources] = useState<ShareSource[]>([]);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (sharing) {
+    return (
+      <ControlButton label="Stop sharing screen" pressed onClick={() => void toggleScreenShare()}>
+        <Monitor className="size-7" />
+      </ControlButton>
+    );
+  }
+  const openPicker = async () => {
+    setOpen(true);
+    try {
+      setSources(await api.listShareSources());
+      setFailed(null);
+    } catch (e) {
+      setSources([]);
+      setFailed(String(e));
+    }
+  };
+  return (
+    <div className="relative">
+      <ControlButton label="Share screen" onClick={() => (open ? setOpen(false) : void openPicker())}>
+        <Monitor className="size-7" />
+      </ControlButton>
+      {open ? (
+        <div role="menu" aria-label="Share what" className="absolute bottom-full right-0 mb-s-2 grid min-w-64 gap-s-1 rounded-lg border border-border bg-sidebar p-s-2 shadow-lg">
+          {failed ? <p className="px-s-2 py-s-1 text-meta text-muted-foreground">{failed}</p> : null}
+          {sources.map((source) => (
+            <button
+              key={`${source.target.kind}-${source.target.id}`}
+              type="button"
+              role="menuitem"
+              className="rounded-md px-s-2 py-s-1 text-left text-[13px] text-text hover:bg-elevated-hover"
+              onClick={() => {
+                setOpen(false);
+                void toggleScreenShare(source.target);
+              }}
+            >
+              {source.primary ? `${source.name} (primary)` : source.name}
+            </button>
+          ))}
+        </div>
       ) : null}
     </div>
   );

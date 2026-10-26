@@ -123,6 +123,8 @@ fn assert_frames_intact(received: &[VideoFrame], sender: u64) {
 #[tokio::test]
 async fn fifty_kb_keyframes_cross_a_loopback_call_in_both_directions() {
     let (caller, callee) = connect_pair(key(7), key(7)).await;
+    // Both sides offer AV1, so the call can use it. Frames still ride the H.264 carrier.
+    assert!(caller.peer_has_av1() && callee.peer_has_av1(), "AV1 is negotiated when both sides offer it");
 
     let caller_task = tokio::spawn(run_video_side(
         caller,

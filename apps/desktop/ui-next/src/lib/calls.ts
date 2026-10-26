@@ -28,7 +28,7 @@ export function dismissRinging(callId: string): void {
 
 // The lobby: the conversation whose live-call lobby the user dismissed with Not now (cleared when the open conversation
 // changes), and the mic choice the lobby's button and Join share.
-export const useLobby = create<{ dismissed: Id | null; micOn: boolean }>()(() => ({ dismissed: null, micOn: true }));
+export const useLobby = create<{ dismissed: Id | null; micOn: boolean; cameraOn: boolean }>()(() => ({ dismissed: null, micOn: true, cameraOn: false }));
 
 // Sets the call on this device. The store keeps the voice connection only while the call is a channel call.
 const applyCall = (next: CallState | null): void => useShell.getState().handleCallEvent(next);

@@ -10,7 +10,6 @@
 //! The call rekeys when the group epoch changes.
 
 use base64::Engine as _;
-use dissent_media::VideoCodec;
 
 use crate::call_video::{CaptureKind, Encoded, Preview, RemoteVideo, Sending};
 use dissent_media::VideoMeta;
@@ -554,6 +553,9 @@ pub(crate) struct Ringing {
 
 /// Calls on this device, the media links the transport has delivered, and any call ringing.
 pub(crate) struct CallHub {
+    /// This device's camera while the lobby previews it, before a call. A call takes the camera
+    /// over, so the preview is dropped when the call's camera turns on.
+    lobby_camera: Mutex<Option<Sending>>,
     current: Mutex<Option<Arc<Room>>>,
     /// A migrated room being built. It carries audio and offers only once it is swapped in.
     staged: Mutex<Option<Arc<Room>>>,
@@ -576,6 +578,7 @@ pub(crate) struct CallHub {
 impl CallHub {
     pub(crate) fn new(timings: &Timings) -> Self {
         Self {
+            lobby_camera: Mutex::new(None),
             current: Mutex::new(None),
             staged: Mutex::new(None),
             cascade_at: AtomicUsize::new(CASCADE_AT),
@@ -974,6 +977,15 @@ fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
     }
 }
 
+/// Tells each sending capture whether every peer agreed to AV1.
+fn set_av1(room: &Room, on: bool) {
+    for slot in [&room.camera, &room.screen] {
+        if let Some(sending) = lock(slot).as_ref() {
+            sending.capture.set_av1(on);
+        }
+    }
+}
+
 /// Asks each sending capture for a keyframe, because a peer needs one.
 fn request_keyframes(room: &Room) {
     for slot in [&room.camera, &room.screen] {
@@ -1004,6 +1016,7 @@ fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, previ
         sender,
         root_id: root_id.to_string(),
         screen,
+        av1: preview.av1,
         width: preview.width,
         height: preview.height,
         jpeg: base64::engine::general_purpose::STANDARD.encode(&preview.jpeg),
@@ -1030,11 +1043,12 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
         .min()
         .unwrap_or(DEFAULT_AUDIO_KBPS);
     fit_sending(room, mesh.video_available_kbps(), audio);
+    set_av1(room, mesh.all_peers_have_av1());
     for (encoded, screen) in take_encoded(room) {
         let meta = VideoMeta {
             frame_id: encoded.frame_id,
             keyframe: encoded.keyframe,
-            codec: VideoCodec::H264,
+            codec: encoded.codec,
             screen,
         };
         if let Err(e) = mesh.send_video(&encoded.data, meta).await {
@@ -1062,11 +1076,12 @@ async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Partici
         .min()
         .unwrap_or(DEFAULT_AUDIO_KBPS);
     fit_sending(room, participant.video_available_kbps(), audio);
+    set_av1(room, participant.peer_has_av1());
     for (encoded, screen) in take_encoded(room) {
         let meta = VideoMeta {
             frame_id: encoded.frame_id,
             keyframe: encoded.keyframe,
-            codec: VideoCodec::H264,
+            codec: encoded.codec,
             screen,
         };
         if let Err(e) = participant.send_video(&encoded.data, meta).await {
@@ -2425,6 +2440,8 @@ impl Engine {
     /// thread, and its frames reach the peers from the next tick of the call loop.
     pub fn set_camera(&self, on: bool) -> Result<()> {
         let room = self.current_or_err()?;
+        // The call takes the camera over from the lobby preview.
+        *lock(&self.inner.calls.lobby_camera) = None;
         {
             let mut camera = lock(&room.camera);
             if !on {
@@ -2437,22 +2454,64 @@ impl Engine {
         Ok(())
     }
 
+    /// Previews this device's camera in the lobby, before a call. The window receives the preview
+    /// as its own tile. A call's camera takes over from it.
+    pub fn set_camera_preview(&self, on: bool) -> Result<()> {
+        {
+            let mut preview = lock(&self.inner.calls.lobby_camera);
+            if !on {
+                *preview = None;
+                return Ok(());
+            }
+            if preview.is_some() {
+                return Ok(());
+            }
+            *preview = Some(Sending::new(crate::call_video::start_camera()?));
+        }
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                let engine = Engine { inner };
+                let previews: Vec<Preview> = {
+                    let slot = lock(&engine.inner.calls.lobby_camera);
+                    let Some(sending) = slot.as_ref() else {
+                        break;
+                    };
+                    std::iter::from_fn(|| sending.capture.try_preview()).collect()
+                };
+                let root_id = engine.inner.identity.root_id().to_string();
+                for preview in previews {
+                    emit_preview(&engine, 0, &root_id, false, &preview);
+                }
+            }
+        });
+        Ok(())
+    }
+
     /// Test hook: while on, the camera is a deterministic test picture rather than a device.
     /// Process-wide, so a test sets it before it turns the camera on.
     pub fn use_test_camera_pattern(&self, on: bool) {
         crate::call_video::set_test_camera_pattern(on);
     }
 
-    /// Starts or stops sharing this device's primary screen in the current call. Windows and
-    /// macOS only, for now.
-    pub fn set_screen_share(&self, on: bool) -> Result<()> {
+    /// Starts or stops sharing a display or a window in the current call. `None` shares the
+    /// primary display. Windows and macOS only. Starting a share while one runs replaces it.
+    pub fn set_screen_share(
+        &self,
+        on: bool,
+        target: Option<crate::call_video::ShareTarget>,
+    ) -> Result<()> {
         let room = self.current_or_err()?;
         {
             let mut screen = lock(&room.screen);
             if !on {
                 *screen = None;
-            } else if screen.is_none() {
-                *screen = Some(Sending::new(crate::call_video::Capture::primary_screen()?));
+            } else {
+                *screen = Some(Sending::new(crate::call_video::Capture::screen(target)?));
             }
         }
         self.emit(EngineEvent::CallUpdated);

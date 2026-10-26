@@ -204,7 +204,7 @@ function enter(next: ChatTarget | null): void {
   });
   if (next.kind === 'dm') void loadPeerProfile(next.peer);
   // Opening a channel clears its mention count, as opening it clears the unread dot.
-  if (next.kind === 'channel' && has('mentions')) void api.markMentionsRead(next.communityId, next.channelId).catch(() => {});
+  if (next.kind === 'channel') void clearMentions(next.communityId, next.channelId);
   // The names typing here are read once; the engine then sends each change (typing-changed).
   const shell = useShell.getState();
   const engineTarget = typingTarget(next);
@@ -343,4 +343,20 @@ export function startChat(): void {
   });
   // The shell may already hold a conversation (a restored place).
   enter(openedTarget(useShell.getState()));
+}
+
+// Marks a channel's mentions read and reloads the counts the badges read: the open server's channel list and the
+// rail. Called when the channel opens, and when a message arrives in it while it is open and the window has focus.
+export async function clearMentions(communityId: Id, channelId: Id): Promise<void> {
+  if (!has('mentions')) return;
+  try {
+    await api.markMentionsRead(communityId, channelId);
+  } catch {
+    return;
+  }
+  const shell = useShell.getState();
+  await Promise.all([
+    shell.route.kind === 'server' && shell.route.communityId === communityId ? shell.loadCommunity(communityId) : Promise.resolve(),
+    shell.loadCommunities(),
+  ]).catch(() => {});
 }

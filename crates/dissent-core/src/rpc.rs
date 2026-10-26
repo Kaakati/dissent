@@ -99,6 +99,8 @@ pub(crate) enum Request {
     HistoryKeys { community: CommunityId },
     /// Whether this device can read and write history messages. Appended, see `history`.
     HistorySupport,
+    /// Whether this device can be added to a direct conversation after it was made. Appended, see `dm_devices`.
+    DmDevicesSupport,
     /// The invite preview of a community, for a holder of its invite secret. `token` is the token of
     /// that secret, which the responder checks itself, since the requester is not yet a member.
     /// `invite_id` names the invite used, so the answer can say whether it is live. Appended, see
@@ -193,6 +195,8 @@ pub(crate) enum Response {
     HistoryKeys(Vec<(u64, [u8; 32])>),
     /// Whether the responder supports history messages. Appended, see `history`.
     HistorySupport(bool),
+    /// Whether the responder can be added to a direct conversation later. Appended, see `dm_devices`.
+    DmDevicesSupport(bool),
     /// The answer to `Request::ProfileSync`: the responder's signed profile and banner. Appended.
     ProfileSync {
         profile: Box<crate::avatars::SignedProfile>,

@@ -6,9 +6,12 @@
 use crate::error::{CoreError, Result};
 use dissent_identity::{CommunityId, RootId, Vault};
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 /// Locations of everything under the data directory.
 #[derive(Clone, Debug)]
@@ -65,6 +68,10 @@ impl Paths {
     /// Each channel's mention read times. See `mention_reads.rs`.
     pub fn mention_reads(&self) -> PathBuf {
         self.root.join("mention_reads.bin")
+    }
+    /// Packets of messages a recipient or an inbox refused, kept so the sender can retry them.
+    pub fn refused_packets(&self) -> PathBuf {
+        self.root.join("refused_packets.bin")
     }
     /// When each contact was added, and when we first saw each person. See `contact_times.rs`.
     pub fn contact_times(&self) -> PathBuf {
@@ -193,6 +200,73 @@ pub(crate) fn append_records<T: Serialize>(path: &Path, values: &[T]) -> Result<
     file.write_all(&framed)?;
     file.sync_data()?;
     Ok(())
+}
+
+/// How long an events log write may wait in the page cache before it is synced. A crash of this process
+/// loses nothing, since the write is already with the OS. A power loss can lose this window of events, and
+/// peers send them again when we sync with them. MLS state that depends on an event is written only after
+/// the event's log has been synced (see `write_mls_snapshot`).
+pub(crate) const LOG_SYNC_EVERY: Duration = Duration::from_millis(250);
+
+/// Logs written without a sync, waiting for the next group flush.
+#[derive(Default)]
+pub(crate) struct DirtyLogs {
+    paths: Mutex<BTreeSet<PathBuf>>,
+}
+
+impl DirtyLogs {
+    fn note(&self, path: &Path) {
+        self.paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+    }
+
+    /// Syncs every log written since the last flush, once each. A log that cannot be synced stays dirty
+    /// for the next flush.
+    pub(crate) fn flush(&self) {
+        let paths = std::mem::take(&mut *self.paths.lock().unwrap_or_else(PoisonError::into_inner));
+        for path in paths {
+            let synced = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|file| file.sync_data());
+            match synced {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "could not sync a log");
+                    self.note(&path);
+                }
+            }
+        }
+    }
+}
+
+/// Like `append_records`, but without the sync. The log is synced by the next `DirtyLogs::flush`.
+pub(crate) fn append_records_deferred<T: Serialize>(path: &Path, values: &[T], dirty: &DirtyLogs) -> Result<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let framed = frame_records(values)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&framed)?;
+    dirty.note(path);
+    Ok(())
+}
+
+/// Syncs the deferred logs every `LOG_SYNC_EVERY`, until the engine is gone.
+pub(crate) async fn log_flush_loop(weak: std::sync::Weak<crate::engine::Inner>) {
+    loop {
+        tokio::time::sleep(LOG_SYNC_EVERY).await;
+        let Some(inner) = weak.upgrade() else {
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || inner.dirty_logs.flush()).await;
+    }
 }
 
 /// Replaces every record of a log with `values`, atomically. Used when a stored record must lose
@@ -672,5 +746,78 @@ mod skipping_tests {
         // The strict reader still refuses the file, as before.
         assert!(read_records::<(u8, u8)>(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod group_commit_tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dissent-group-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_record_cut_mid_write_is_dropped_and_the_rest_loads() {
+        let d = dir("cut");
+        let path = d.join("events.log");
+        let dirty = DirtyLogs::default();
+        append_records_deferred(&path, &["one".to_string(), "two".to_string()], &dirty).unwrap();
+        dirty.flush();
+        // A crash partway through the last record: its last bytes never reached the disk.
+        let len = fs::metadata(&path).unwrap().len();
+        OpenOptions::new().write(true).open(&path).unwrap().set_len(len - 3).unwrap();
+        assert_eq!(read_records::<String>(&path).unwrap(), vec!["one".to_string()]);
+        // The next append lands after the cut, aligned with the framing.
+        append_records_deferred(&path, &["three".to_string()], &dirty).unwrap();
+        dirty.flush();
+        assert_eq!(read_records::<String>(&path).unwrap(), vec!["one".to_string(), "three".to_string()]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_deferred_write_reads_back_before_any_flush() {
+        let d = dir("read");
+        let path = d.join("events.log");
+        let dirty = DirtyLogs::default();
+        append_records_deferred(&path, &[7u32, 8u32], &dirty).unwrap();
+        assert_eq!(read_records::<u32>(&path).unwrap(), vec![7, 8]);
+        dirty.flush();
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Timing for the events log: 6000 appends, each synced, against the same appends written without a
+    /// sync and synced once per `LOG_SYNC_EVERY`. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "timing: run with --ignored --nocapture"]
+    fn six_thousand_appends_synced_each_or_grouped() {
+        let d = dir("timing");
+        let records: Vec<String> = (0..6000).map(|i| format!("event {i} {}", "x".repeat(200))).collect();
+
+        let start = std::time::Instant::now();
+        for r in &records {
+            append_records(&d.join("synced.log"), std::slice::from_ref(r)).unwrap();
+        }
+        let synced = start.elapsed();
+
+        let dirty = DirtyLogs::default();
+        let start = std::time::Instant::now();
+        let mut since = start;
+        for r in &records {
+            append_records_deferred(&d.join("grouped.log"), std::slice::from_ref(r), &dirty).unwrap();
+            if since.elapsed() >= LOG_SYNC_EVERY {
+                dirty.flush();
+                since = std::time::Instant::now();
+            }
+        }
+        dirty.flush();
+        let grouped = start.elapsed();
+
+        println!("6000 appends: synced each {synced:?}, grouped {grouped:?}");
+        assert_eq!(read_records::<String>(&d.join("grouped.log")).unwrap().len(), 6000);
+        let _ = fs::remove_dir_all(&d);
     }
 }

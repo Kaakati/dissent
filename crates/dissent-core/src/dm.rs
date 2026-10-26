@@ -154,6 +154,7 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
         delivery: if w.outbox.iter().any(|o| o.dm.id == sd.dm.id) { "sending" } else { "delivered" }.to_string(),
         queued: false,
         reason: None,
+        retryable: false,
         attachments: Vec::new(),
         embeds: Vec::new(),
         reply_to: None,

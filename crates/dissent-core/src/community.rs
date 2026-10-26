@@ -224,7 +224,7 @@ impl Community {
         let mut out: Vec<SignedEvent> = self
             .signed
             .values()
-            .filter(|se| matches!(se.event.body.payload, Payload::Sealed { .. }))
+            .filter(|se| matches!(se.event.body.payload, Payload::Sealed { .. } | Payload::PrivateSealed { .. }))
             .cloned()
             .collect();
         out.sort_by_key(|se| (se.event.body.hlc, se.event.id));

@@ -25,6 +25,7 @@ import type {
   UpdateInfo,
   UserStatus,
   VoiceConnection,
+  ShareSource,
 } from './types';
 
 // The key a conversation's unread marker and typing state use. Direct and group conversations differ in their id.
@@ -163,7 +164,8 @@ export interface ShellState {
   toggleMuted: () => Promise<void>;
   toggleDeafened: () => Promise<void>;
   toggleCamera: () => Promise<void>;
-  toggleScreenShare: () => Promise<void>;
+  /** Shares a display or window, or stops the share when one is running. */
+  toggleScreenShare: (target?: ShareSource['target']) => Promise<void>;
   /** The latest preview of each person's camera (`root_id`) and shared screen (`root_id:screen`). JPEG, base64. */
   videoFrames: Record<string, { width: number; height: number; jpeg: string }>;
   leaveCall: () => Promise<void>;
@@ -501,12 +503,12 @@ export const useShell = create<ShellState>()((set, get) => ({
     });
   },
 
-  toggleScreenShare: async () => {
+  toggleScreenShare: async (target) => {
     await guard(async () => {
       const { call } = get();
       if (!call) return;
-      const next = !call.screen;
-      await api.setScreenShare(next);
+      const next = target !== undefined || !call.screen;
+      await api.setScreenShare(next, target);
       set({ call: { ...call, screen: next } });
     });
   },

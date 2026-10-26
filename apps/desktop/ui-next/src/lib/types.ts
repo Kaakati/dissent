@@ -180,6 +180,13 @@ export interface CallMessage {
   file?: { name: string; kind: string; meta: string };
 }
 
+// A display or window a screen share can show, as the picker lists it.
+export interface ShareSource {
+  target: { kind: 'display' | 'window'; id: number };
+  name: string;
+  primary: boolean;
+}
+
 export interface CallState {
   id?: string; // the room id: a new id is a different call
   scope: 'channel' | 'dm' | 'group';
@@ -536,6 +543,9 @@ interface MessageBase {
   locked?: boolean; // its text is empty until this device can open it
   before_join?: boolean; // locked and sent before this device joined
   queued?: boolean;
+  delivery?: string; // direct messages and groups: sending, sent_direct, queued_inbox, delivered or failed
+  reason?: string | null; // why a message we sent was refused, when delivery is failed
+  retryable?: boolean; // a refused message can still be sent again; it stops after the envelope lifetime
   reply_to?: ReplyRef | null;
   reactions?: Reaction[] | null;
   attachments?: Attachment[] | null;

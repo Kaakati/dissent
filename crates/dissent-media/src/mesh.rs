@@ -360,6 +360,12 @@ impl<T: PacketTransport> Mesh<T> {
     /// The smallest bandwidth estimate among the peers, in kbps. A video budget must fit the
     /// slowest link, because one encoder sends the same frames to every peer. `None` until any
     /// peer has an estimate.
+    /// Whether every peer agreed to AV1. One encoder sends to all of them, so AV1 is used only
+    /// when no peer lacks it. False for an empty mesh.
+    pub fn all_peers_have_av1(&self) -> bool {
+        !self.calls.is_empty() && self.calls.values().all(Call::peer_has_av1)
+    }
+
     pub fn video_available_kbps(&self) -> Option<u32> {
         self.calls.values().filter_map(Call::video_available_kbps).min()
     }

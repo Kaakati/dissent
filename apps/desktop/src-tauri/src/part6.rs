@@ -276,10 +276,26 @@ pub async fn set_camera(state: State<'_, AppState>, on: bool) -> Result<(), Stri
     engine(&state).await?.set_camera(on).map_err(err)
 }
 
+/// Previews this device's camera in the lobby, before a call.
+#[tauri::command]
+pub async fn set_camera_preview(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    engine(&state).await?.set_camera_preview(on).map_err(err)
+}
+
 /// Starts or stops sharing this device's primary screen in the current call.
 #[tauri::command]
-pub async fn set_screen_share(state: State<'_, AppState>, on: bool) -> Result<(), String> {
-    engine(&state).await?.set_screen_share(on).map_err(err)
+pub async fn set_screen_share(
+    state: State<'_, AppState>,
+    on: bool,
+    target: Option<dissent_core::ShareTarget>,
+) -> Result<(), String> {
+    engine(&state).await?.set_screen_share(on, target).map_err(err)
+}
+
+/// The displays and windows a share can pick from.
+#[tauri::command]
+pub async fn list_share_sources() -> Result<Vec<dissent_core::ShareSource>, String> {
+    dissent_core::list_share_sources().map_err(err)
 }
 
 #[tauri::command]

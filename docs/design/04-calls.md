@@ -340,7 +340,7 @@ Video frames use the same SFrame media key and per-sender key IDs as audio (the 
 
 ## Video phase 2 plan
 
-Status: **phase 2 built, except AV1 in calls and the lobby preview.** `dissent-media` carries video over the H.264 carrier with BWE, the gate and the SFU routing. `dissent-core` runs the camera and the screen share in the call loop, sizes their bitrate from the link's estimate minus the audio reservation, and shows previews, including a self tile. The desktop app and ui-next show them. Still open: AV1 negotiation in calls (core sends H.264 only), the lobby preview, and a picker (camera 0 and the primary screen only).
+Status: **phase 2 built.** `dissent-media` carries video over the H.264 carrier with BWE, the gate and the SFU routing. `dissent-core` runs the camera and the screen share in the call loop, sizes their bitrate from the link's estimate minus the audio reservation, and shows previews, including a self tile. The desktop app and ui-next show them. AV1 is negotiated in calls when every peer supports it (behind the `svt-av1` feature; the desktop release does not enable it yet). The lobby shows a preview of your own camera. The share button lists the displays and windows that `xcap` reports, and falls back to the primary display.
 
 ### What the sources show
 

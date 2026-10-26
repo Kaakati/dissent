@@ -245,7 +245,7 @@ own_addr.bin                        postcard SignedAddr, our latest announced ad
                                     increasing across restarts.
 communities/<id>/genesis.bin
 communities/<id>/community.key      founder only, sealed under the vault (32-byte seed inside; see 06-threat-model finding 7)
-communities/<id>/events.log         repeated [u32 BE len][SignedEvent postcard]; replayed on start
+communities/<id>/events.log         repeated [u32 BE len][SignedEvent postcard]; replayed on start; appended without a sync, synced at most every 250 ms (06, durability)
 dms/<peer-root-id>.log              repeated [u32 BE len][SignedDm postcard]
 dms/outbox.bin                      postcard Vec<SignedDm> not yet acked
 ```

@@ -3,7 +3,7 @@
 use crate::attachments::Mentions;
 use crate::engine::{clean_message, clean_name, clean_text, not_found, Engine};
 use crate::error::Result;
-use crate::store::append_records;
+use crate::store::append_records_deferred;
 use crate::views::{ChannelInfo, EngineEvent, MessageItem, ModAction};
 use crate::wire::{encode_gossip, GossipMsg};
 use crate::world::World;
@@ -285,7 +285,7 @@ impl Engine {
             cert: self.inner.identity.cert.clone(),
         };
         let stored = c.author(se.clone())?;
-        append_records(&paths.events_log(&community), &stored)?;
+        append_records_deferred(&paths.events_log(&community), &stored, &self.inner.dirty_logs)?;
         Ok(se)
     }
 

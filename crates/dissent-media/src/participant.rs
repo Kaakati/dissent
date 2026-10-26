@@ -288,6 +288,11 @@ impl<T: PacketTransport> Participant<T> {
     /// The counters of each forwarder link.
     /// The smallest bandwidth estimate among the forwarder links, in kbps. `None` until any link
     /// has an estimate.
+    /// Whether the forwarder link agreed to AV1. False without a link.
+    pub fn peer_has_av1(&self) -> bool {
+        self.active.and_then(|active| self.links.get(&active)).is_some_and(Call::peer_has_av1)
+    }
+
     pub fn video_available_kbps(&self) -> Option<u32> {
         self.links.values().filter_map(Call::video_available_kbps).min()
     }

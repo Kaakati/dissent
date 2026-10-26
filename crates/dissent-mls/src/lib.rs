@@ -56,6 +56,30 @@ pub const KEY_PACKAGE_POOL: usize = 5;
 const RATCHET_TOLERANCE: u32 = 64;
 /// How far ahead of the newest generation a sender ratchet will skip.
 const RATCHET_FORWARD: u32 = 1000;
+/// Sender generations covered by one durable reservation. A send past the reserved mark first persists a
+/// new mark this far ahead, so one synced write covers this many sends.
+pub const RESERVE_STEP: u32 = 100;
+
+/// Storage key prefix of a group's sends counter: the epoch and the next sender generation.
+const SENDS_PREFIX: &[u8] = b"dissent/sends/v1/";
+
+/// A group's reserved mark, as stored.
+pub type GroupMark = ([u8; 32], Reservation);
+
+/// A durable mark for one group: sender generations below `reserved_to` may be used in `epoch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reservation {
+    pub epoch: u64,
+    pub reserved_to: u32,
+}
+
+/// The application messages a group's sender has created in one epoch, which is the next generation.
+#[derive(Serialize, Deserialize)]
+struct SendsCount {
+    epoch: u64,
+    next: u32,
+}
+
 /// Past epochs kept, so messages sent just before a commit still decrypt after it.
 const PAST_EPOCHS: usize = 8;
 
@@ -63,6 +87,12 @@ const PAST_EPOCHS: usize = 8;
 pub enum MlsError {
     #[error("unknown group")]
     UnknownGroup,
+    #[error("sender generation {next} of epoch {epoch} is past the reserved mark; reserve before sending")]
+    ReserveFirst {
+        group: [u8; 32],
+        epoch: u64,
+        next: u32,
+    },
     #[error("group already exists")]
     GroupExists,
     #[error("device is not a member of the group")]
@@ -151,6 +181,8 @@ pub struct MlsClient {
     credential: CredentialWithKey,
     groups: HashMap<[u8; 32], MlsGroup>,
     pool: Vec<Vec<u8>>,
+    /// The reserved mark of each group. The caller persists these durably; see `reserve`.
+    reservations: HashMap<[u8; 32], Reservation>,
 }
 
 impl MlsClient {
@@ -183,6 +215,7 @@ impl MlsClient {
             credential,
             groups: HashMap::new(),
             pool: Vec::new(),
+            reservations: HashMap::new(),
         })
     }
 
@@ -554,11 +587,121 @@ impl MlsClient {
 
     /// Encrypts an application message for `group` in its current epoch.
     pub fn encrypt(&mut self, group: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
+        let epoch = self.epoch(group)?;
+        let next = self.sends_in(group, epoch)?;
+        if next >= self.reserved_in(group, epoch) {
+            return Err(MlsError::ReserveFirst {
+                group: *group,
+                epoch,
+                next,
+            });
+        }
         let mls_group = self.groups.get_mut(group).ok_or(MlsError::UnknownGroup)?;
         let message = mls_group
             .create_message(&self.provider, &self.signer, plaintext)
             .map_err(om)?;
-        message.to_bytes().map_err(om)
+        let bytes = message.to_bytes().map_err(om)?;
+        self.store_sends(group, epoch, next + 1)?;
+        Ok(bytes)
+    }
+
+    /// The epoch and the next sender generation of `group`: the application messages this device has
+    /// created in the epoch.
+    pub fn next_generation(&self, group: &[u8; 32]) -> Result<(u64, u32)> {
+        let epoch = self.epoch(group)?;
+        Ok((epoch, self.sends_in(group, epoch)?))
+    }
+
+    /// Encrypts like `encrypt`. When the send passes the group's reserved mark, a new mark a step ahead is
+    /// reserved first. `persist` must store all the marks durably before it returns, and only then is the new
+    /// mark used. If it fails, the mark is not recorded and the send fails.
+    pub fn encrypt_reserving(
+        &mut self,
+        group: &[u8; 32],
+        plaintext: &[u8],
+        persist: &mut dyn FnMut(&[GroupMark]) -> Result<()>,
+    ) -> Result<Vec<u8>> {
+        match self.encrypt(group, plaintext) {
+            Err(MlsError::ReserveFirst { epoch, next, .. }) => {
+                let before = self.reservations();
+                self.reserve(*group, Reservation { epoch, reserved_to: next + RESERVE_STEP });
+                if let Err(e) = persist(&self.reservations()) {
+                    self.restore_reservations(before);
+                    return Err(e);
+                }
+                self.encrypt(group, plaintext)
+            }
+            other => other,
+        }
+    }
+
+    /// The reserved marks, for the caller to persist durably.
+    pub fn reservations(&self) -> Vec<([u8; 32], Reservation)> {
+        self.reservations.iter().map(|(group, mark)| (*group, *mark)).collect()
+    }
+
+    /// Records a reserved mark. Call it only after the mark has been persisted durably: a send below the
+    /// mark uses its generation.
+    pub fn reserve(&mut self, group: [u8; 32], mark: Reservation) {
+        self.reservations.insert(group, mark);
+    }
+
+    /// Replaces the reserved marks with ones read from storage. Call before any send.
+    pub fn restore_reservations(&mut self, marks: impl IntoIterator<Item = ([u8; 32], Reservation)>) {
+        self.reservations = marks.into_iter().collect();
+    }
+
+    /// Brings each group's sender up to its reserved mark, so a generation that may have been used before a
+    /// crash is not used again. Call after restoring the client and its marks. The messages created here are
+    /// discarded.
+    pub fn resume_sends(&mut self) -> Result<()> {
+        let mut pending = Vec::new();
+        for (group, mark) in self.reservations() {
+            let epoch = self.epoch(&group)?;
+            if mark.epoch == epoch {
+                pending.push((group, epoch, mark.reserved_to));
+            }
+        }
+        for (group, epoch, reserved_to) in pending {
+            while self.sends_in(&group, epoch)? < reserved_to {
+                self.encrypt(&group, &[])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The sends of `group` in `epoch`, from storage. Zero when none are recorded for that epoch.
+    fn sends_in(&self, group: &[u8; 32], epoch: u64) -> Result<u32> {
+        let values = self
+            .provider
+            .storage()
+            .values
+            .read()
+            .map_err(|_| MlsError::Rejected("storage lock poisoned"))?;
+        let Some(bytes) = values.get(&sends_key(group)) else {
+            return Ok(0);
+        };
+        let count: SendsCount = postcard::from_bytes(bytes).map_err(encoding)?;
+        Ok(if count.epoch == epoch { count.next } else { 0 })
+    }
+
+    fn store_sends(&self, group: &[u8; 32], epoch: u64, next: u32) -> Result<()> {
+        let bytes = postcard::to_allocvec(&SendsCount { epoch, next }).map_err(encoding)?;
+        let mut values = self
+            .provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| MlsError::Rejected("storage lock poisoned"))?;
+        values.insert(sends_key(group), bytes);
+        Ok(())
+    }
+
+    fn reserved_in(&self, group: &[u8; 32], epoch: u64) -> u32 {
+        self.reservations
+            .get(group)
+            .filter(|mark| mark.epoch == epoch)
+            .map_or(0, |mark| mark.reserved_to)
     }
 
     /// Current epoch of `group`.
@@ -609,6 +752,11 @@ fn check_ciphersuite(found: Ciphersuite) -> Result<()> {
         expected: CIPHERSUITE as u16,
         found: found as u16,
     })
+}
+
+/// The storage key of a group's sends counter.
+fn sends_key(group: &[u8; 32]) -> Vec<u8> {
+    [SENDS_PREFIX, group.as_slice()].concat()
 }
 
 fn sender_ratchet() -> SenderRatchetConfiguration {
@@ -886,6 +1034,107 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|window| window == needle)
+    }
+
+    /// What survives a crash: the last flushed snapshot, and the reserved marks as they were persisted.
+    struct Disk {
+        snapshot: Vec<u8>,
+        marks: Vec<([u8; 32], Reservation)>,
+    }
+
+    /// Seals one message as the device does: reserves a new mark, persisted before the send, when the send
+    /// passes the current one. Returns the sender generation the message used, and the message.
+    fn seal(client: &mut MlsClient, group: &[u8; 32], disk: &mut Disk) -> (u32, Vec<u8>) {
+        let (_, generation) = client.next_generation(group).unwrap();
+        loop {
+            match client.encrypt(group, b"hello") {
+                Ok(bytes) => return (generation, bytes),
+                Err(MlsError::ReserveFirst { epoch, next, .. }) => {
+                    client.reserve(*group, Reservation { epoch, reserved_to: next + RESERVE_STEP });
+                    disk.marks = client.reservations();
+                }
+                Err(e) => panic!("send failed: {e}"),
+            }
+        }
+    }
+
+    fn send(client: &mut MlsClient, group: &[u8; 32], disk: &mut Disk) -> u32 {
+        seal(client, group, disk).0
+    }
+
+    /// Restarts after a crash: the flushed snapshot and the persisted marks, with the sends resumed.
+    fn restart(device: &DeviceKey, cert: &DeviceCert, vault: &Vault, group: [u8; 32], disk: &Disk) -> MlsClient {
+        let mut client = MlsClient::restore_sealed(device, cert, vault, &disk.snapshot, &[group]).unwrap();
+        client.restore_reservations(disk.marks.clone());
+        client.resume_sends().unwrap();
+        client
+    }
+
+    #[test]
+    fn a_crash_never_reuses_a_sender_generation() {
+        let group = [5u8; 32];
+        let device = DeviceKey::generate();
+        let cert = RootKey::generate().certify(device.id(), 1);
+        let vault = Vault::ephemeral_for_tests();
+        let mut client = MlsClient::new(&device, &cert).unwrap();
+        client.create_group(group).unwrap();
+        let mut disk = Disk {
+            snapshot: client.snapshot_sealed(&vault).unwrap(),
+            marks: Vec::new(),
+        };
+        let mut used: Vec<u32> = Vec::new();
+        for round in 0..3u32 {
+            // Some sends are flushed, and more follow without a flush before the crash.
+            for _ in 0..(40 + round * 70) {
+                used.push(send(&mut client, &group, &mut disk));
+            }
+            disk.snapshot = client.snapshot_sealed(&vault).unwrap();
+            for _ in 0..(30 + round * 13) {
+                used.push(send(&mut client, &group, &mut disk));
+            }
+            // Crash: the unflushed sends are lost, and the device restarts from the flushed snapshot.
+            client = restart(&device, &cert, &vault, group, &disk);
+            let (_, next) = client.next_generation(&group).unwrap();
+            let highest = *used.iter().max().unwrap();
+            assert!(next > highest, "after crash {round}, next generation {next} must be above {highest}");
+        }
+        let mut sorted = used.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), used.len(), "no generation is used twice across the crashes");
+    }
+
+    #[test]
+    fn a_receiver_decrypts_across_a_reserved_gap() {
+        let group = [6u8; 32];
+        let alice_device = DeviceKey::generate();
+        let alice_cert = RootKey::generate().certify(alice_device.id(), 1);
+        let bob_device = DeviceKey::generate();
+        let bob_cert = RootKey::generate().certify(bob_device.id(), 1);
+        let vault = Vault::ephemeral_for_tests();
+        let mut alice = MlsClient::new(&alice_device, &alice_cert).unwrap();
+        let mut bob = MlsClient::new(&bob_device, &bob_cert).unwrap();
+        alice.create_group(group).unwrap();
+        let key_packages = bob.take_key_packages(1).unwrap();
+        let commit = alice.add_members(&group, &key_packages).unwrap();
+        bob.join_from_welcome_with_policy(&commit.welcome, |_| true).unwrap();
+
+        let mut disk = Disk {
+            snapshot: alice.snapshot_sealed(&vault).unwrap(),
+            marks: Vec::new(),
+        };
+        let (_, first) = seal(&mut alice, &group, &mut disk);
+        bob.decrypt_application(&group, &first).unwrap();
+        // Flushed after the first send. Two more sends follow, and the crash loses them.
+        disk.snapshot = alice.snapshot_sealed(&vault).unwrap();
+        send(&mut alice, &group, &mut disk);
+        send(&mut alice, &group, &mut disk);
+        let mut alice = restart(&alice_device, &alice_cert, &vault, group, &disk);
+        // The restarted sender resumes at its reserved mark, past the lost sends.
+        let (generation, after) = seal(&mut alice, &group, &mut disk);
+        assert_eq!(generation, RESERVE_STEP, "the restarted sender resumes at the reserved mark");
+        let (text, _) = bob.decrypt_application(&group, &after).unwrap();
+        assert_eq!(text, b"hello");
     }
 
     #[test]

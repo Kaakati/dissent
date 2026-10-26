@@ -14,6 +14,7 @@ mod contacts;
 mod contact_profiles;
 mod control_latency;
 mod dm_actions;
+mod dm_devices;
 mod groups;
 mod identity_flows;
 mod history_join;

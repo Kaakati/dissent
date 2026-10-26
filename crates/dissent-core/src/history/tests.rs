@@ -110,3 +110,28 @@ async fn a_thousand_sends_read_the_key_file_at_most_once() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_member_updating() {
+    bounded(async {
+        let alice = Node::named("alice-wake").await;
+        let id = alice.engine.create_community("Wake".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-wake").await;
+        bob.engine.inner.history_support.store(false, Ordering::Relaxed);
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+        assert!(!alice.engine.refresh_history_ready(id).await, "bob does not support it yet");
+        assert!(alice.engine.history_seal(id, "before").is_none());
+
+        // Bob updates, and his presence beacon reaches Alice.
+        bob.engine.inner.history_support.store(true, Ordering::Relaxed);
+        alice.engine.history_member_seen(bob.identity.root_id());
+        let started = std::time::Instant::now();
+        while alice.engine.history_seal(id, "after").is_none() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(2), "still the older form after {:?}", started.elapsed());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+}

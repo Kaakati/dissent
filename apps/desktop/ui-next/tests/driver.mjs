@@ -915,10 +915,13 @@ await ev(`(() => { const t = document.querySelector('textarea[aria-label="Messag
 // ---- Mentions: the @ autocomplete and the pick, the highlight, the pills, the badges, and @everyone without the permission ----
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
 await sleep(600);
-await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware')).click()`);
-await sleep(700);
 check('the hardware channel row shows its mention count', (await ev(`!!document.querySelector('aside[aria-label="Channels and conversations"] [aria-label="1 mentions"]')`)) === true);
-check('the server rail badge sums the mentions of the server', (await ev(`!!document.querySelector('button[aria-label="Riverside Makers"]').closest('.rail-item').querySelector('[aria-label="2 mentions"]')`)) === true);
+// The server opened on #general, which cleared its own mention; the rail counts the rest.
+check('the server rail badge sums the unread mentions of the server', (await ev(`!!document.querySelector('button[aria-label="Riverside Makers"]').closest('.rail-item').querySelector('[aria-label="1 mentions"]')`)) === true);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware')).click()`);
+await sleep(900);
+check('opening the channel clears its mention count', (await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware')).querySelector('[aria-label$=" mentions"]') === null`)) === true);
+check('reading every mentioned channel clears the server rail badge', (await ev(`document.querySelector('button[aria-label="Riverside Makers"]').closest('.rail-item').querySelector('[aria-label$=" mentions"]') === null`)) === true);
 check('a message that mentions you is highlighted', (await ev(`[...document.querySelectorAll('article.msg.mention')].some((a) => a.textContent.includes('the 3 mm ply is in the rack'))`)) === true);
 check('the mention is a pill that names you', (await ev(`[...document.querySelectorAll('article.msg .mention-pill')].some((p) => p.textContent === '@Sami')`)) === true);
 await ev(`[...document.querySelectorAll('article.msg .mention-pill')].find((p) => p.textContent === '@Sami').click()`);
@@ -1321,9 +1324,9 @@ await sleep(600);
 check('C3 Join opens the call pane in place of the lobby', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && !document.querySelector('section[aria-label="Get ready to join"]')`)) === true);
 check('C3 the call pane has the call chat', (await b.ev(`!!document.querySelector('section[aria-label="Call chat"]')`)) === true);
 check('C3 the group call chat shows the messages of the group the call is in', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
-check('C3 the camera button is live and the screen share slot is disabled and says Coming soon', (await b.ev(`(() => { const cam = document.querySelector('button[aria-label="Turn camera on"]'); const share = document.querySelector('button[aria-label="Share screen, coming soon"]'); return Boolean(cam) && !cam.disabled && Boolean(share) && share.disabled; })()`)) === true);
+check('C3 the camera and screen share buttons are live', (await b.ev(`(() => { const cam = document.querySelector('button[aria-label="Turn camera on"]'); const share = document.querySelector('button[aria-label="Share screen"]'); return Boolean(cam) && !cam.disabled && Boolean(share) && !share.disabled; })()`)) === true);
 check('C3 the header says how many are in the call', (await b.ev(`document.body.textContent.includes('in call') && document.body.textContent.includes('End-to-end encrypted')`)) === true);
-check('C3 the share slot is aria-disabled with the Coming soon tooltip', (await b.ev(`(() => { const n = document.querySelector('button[aria-label="Share screen, coming soon"]'); return Boolean(n) && n.getAttribute('aria-disabled') === 'true' && n.title === 'Coming soon'; })()`)) === true);
+check('C3 the share button opens the picker with the primary display', (await b.ev(`(async () => { const share = document.querySelector('button[aria-label="Share screen"]'); share.click(); await new Promise((r) => setTimeout(r, 300)); const items = [...document.querySelectorAll('[role="menuitem"]')].map((n) => n.textContent); return items.some((t) => t.includes('(primary)')); })()`)) === true);
 check('C3 the call header has the overflow menu and the search box', (await b.ev(`!!document.querySelector('button[aria-label="More group actions"]') && !!document.querySelector('input[aria-label="Search messages"]')`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-call-group.png`);
 

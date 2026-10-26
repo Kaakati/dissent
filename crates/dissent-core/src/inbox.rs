@@ -114,6 +114,17 @@ impl InboxBook {
     }
 }
 
+/// What became of a deposit at the inboxes of a recipient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DepositOutcome {
+    /// An inbox stored it.
+    Accepted,
+    /// An inbox answered and refused it. The reason is the inbox's.
+    Refused(String),
+    /// No inbox answered, so the packet stays queued.
+    Unreachable,
+}
+
 /// Counts for the status views and for tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct InboxStats {
@@ -275,9 +286,9 @@ impl Engine {
         Ok(handled)
     }
 
-    /// Deposits one packet for `device`, of `root`, at each inbox that root lists. True when one
-    /// of them accepted it.
-    pub(crate) async fn deposit_packet(&self, device: DeviceId, root: RootId, packet: &ConvPacket) -> bool {
+    /// Deposits one packet for `device`, of `root`, at each inbox that root lists. Says whether one of
+    /// them accepted it, or refused it with a reason, or none answered.
+    pub(crate) async fn deposit_packet(&self, device: DeviceId, root: RootId, packet: &ConvPacket) -> DepositOutcome {
         let inboxes = self
             .read()
             .contact_book
@@ -286,10 +297,10 @@ impl Engine {
             .cloned()
             .unwrap_or_default();
         if inboxes.is_empty() {
-            return false;
+            return DepositOutcome::Unreachable;
         }
         let Ok(bytes) = encode(packet) else {
-            return false;
+            return DepositOutcome::Unreachable;
         };
         let id = *blake3::hash(&bytes).as_bytes();
         let expires_ms = now_ms() + MAX_AGE_MS;
@@ -298,7 +309,7 @@ impl Engine {
             DEPOSIT_DOMAIN,
             &(device, root, id, expires_ms, &bytes),
         ) else {
-            return false;
+            return DepositOutcome::Unreachable;
         };
         let envelope = Envelope {
             recipient: device,
@@ -310,17 +321,21 @@ impl Engine {
             sig,
         };
         let Ok(req) = self.request_bytes(&Request::Deposit(Box::new(envelope))) else {
-            return false;
+            return DepositOutcome::Unreachable;
         };
         let node = self.node();
+        let mut refused = None;
         for inbox in inboxes {
-            if let Ok(reply) = crate::groups::direct(node.request(inbox, req.clone())).await {
-                if matches!(decode::<Response>(&reply), Ok(Response::Ack)) {
-                    return true;
-                }
+            let Ok(reply) = crate::groups::direct(node.request(inbox, req.clone())).await else {
+                continue;
+            };
+            match decode::<Response>(&reply) {
+                Ok(Response::Ack) => return DepositOutcome::Accepted,
+                Ok(Response::Error(reason)) => refused = Some(reason),
+                _ => refused = Some("the inbox could not process it".to_owned()),
             }
         }
-        false
+        refused.map_or(DepositOutcome::Unreachable, DepositOutcome::Refused)
     }
 
     /// Sends the signed inbox list to every contact, through their outbox.

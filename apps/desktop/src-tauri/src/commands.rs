@@ -480,6 +480,12 @@ pub async fn send_dm(state: State<'_, AppState>, peer: String, text: String) -> 
     engine(&state).await?.send_dm(peer, text).await.map_err(err)
 }
 
+/// Sends a message that was refused, again. `message_id` is the id the chat shows.
+#[tauri::command]
+pub async fn retry_message(state: State<'_, AppState>, message_id: String) -> Result<(), String> {
+    engine(&state).await?.retry_message(&message_id).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn net_status(state: State<'_, AppState>) -> Result<NetStatusView, String> {
     Ok(engine(&state).await?.net_status().await)

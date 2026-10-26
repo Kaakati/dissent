@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use dissent_events::{ChannelId, HistorySetting};
-use dissent_identity::{CommunityId, DeviceId, Vault};
+use dissent_identity::{CommunityId, DeviceId, RootId, Vault};
 use tracing::{debug, warn};
 
 use crate::engine::Engine;
@@ -35,6 +35,8 @@ const READY_FOR: Duration = Duration::from_secs(300);
 /// How long a "no" is kept before it is checked again, so a device that comes back is counted soon.
 const NOT_READY_FOR: Duration = Duration::from_secs(60);
 const ASK_WAIT: Duration = Duration::from_secs(5);
+/// How long a member's presence beacon waits before the readiness check it triggers, so a burst starts one check.
+const PRESENCE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Member devices asked for history keys, and how many must answer before a joiner stops asking.
 const HISTORY_FROM: usize = 3;
 const RETRY_EVERY: Duration = Duration::from_secs(5);
@@ -188,6 +190,12 @@ impl Engine {
 
     /// Starts a background check of `community`, unless one is already running.
     fn start_history_check(&self, community: CommunityId) {
+        self.start_history_check_after(community, Duration::ZERO);
+    }
+
+    /// Starts a background check of `community` after `delay`. A check already waiting or running covers the
+    /// request, so a burst of requests starts one check.
+    fn start_history_check_after(&self, community: CommunityId, delay: Duration) {
         let fresh = self
             .inner
             .history_checking
@@ -197,8 +205,31 @@ impl Engine {
         if fresh {
             let engine = self.clone();
             self.spawn_task(async move {
+                tokio::time::sleep(delay).await;
                 engine.refresh_history_ready(community).await;
             });
+        }
+    }
+
+    /// A member's presence beacon arrived. In each community that member belongs to, a readiness answer of no is
+    /// checked again soon, so a device that came back is counted without waiting for the next minute. The short
+    /// delay lets a burst of beacons start one check.
+    pub(crate) fn history_member_seen(&self, root: RootId) {
+        let communities: Vec<CommunityId> = {
+            let w = self.read();
+            w.communities.iter().filter(|(_, c)| c.is_member(&root)).map(|(id, _)| *id).collect()
+        };
+        for community in communities {
+            let not_ready = self
+                .inner
+                .history_ready
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&community)
+                .is_some_and(|(_, _, ready)| !ready);
+            if not_ready {
+                self.start_history_check_after(community, PRESENCE_DEBOUNCE);
+            }
         }
     }
 

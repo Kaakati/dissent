@@ -159,7 +159,7 @@ fn three_members_exchange_messages_and_epoch_advances() {
             id if id == bob.id => (&mut bob.client, [&mut alice.client, &mut carol.client]),
             _ => (&mut carol.client, [&mut alice.client, &mut bob.client]),
         };
-        let wire = sender_client.encrypt(&group, text.as_bytes()).unwrap();
+        let wire = sender_client.encrypt_reserving(&group, text.as_bytes(), &mut |_| Ok(())).unwrap();
         for other in others {
             assert_eq!(
                 other.decrypt_application(&group, &wire).unwrap(),
@@ -193,13 +193,13 @@ fn removed_member_cannot_read_later_messages() {
         Processed::Commit
     );
 
-    let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"after the ban", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.decrypt_application(&group, &wire).unwrap(),
         (b"after the ban".to_vec(), alice.id)
     );
     assert!(carol.client.decrypt_application(&group, &wire).is_err());
-    assert!(carol.client.encrypt(&group, b"still here").is_err());
+    assert!(carol.client.encrypt_reserving(&group, b"still here", &mut |_| Ok(())).is_err());
 
     let roster: Vec<DeviceId> = alice
         .client
@@ -244,7 +244,7 @@ fn policy_refusing_commit_that_adds_outsider_leaves_state_unchanged() {
     eve.client
         .join_from_welcome_with_policy(&malicious.welcome, allow_welcome)
         .unwrap();
-    let from_bob = bob.client.encrypt(&group, b"members only").unwrap();
+    let from_bob = bob.client.encrypt_reserving(&group, b"members only", &mut |_| Ok(())).unwrap();
     assert!(eve.client.decrypt_application(&group, &from_bob).is_err());
 }
 
@@ -374,7 +374,7 @@ fn refused_welcome_leaves_no_group_and_keeps_key_package() {
 fn replayed_application_message_is_rejected() {
     let group = community();
     let (mut alice, mut bob, _carol) = three_member_group(&group);
-    let wire = alice.client.encrypt(&group, b"once").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"once", &mut |_| Ok(())).unwrap();
 
     bob.client.decrypt_application(&group, &wire).unwrap();
     assert!(bob.client.decrypt_application(&group, &wire).is_err());
@@ -513,7 +513,7 @@ fn deprecated_entry_points_still_join_and_process() {
         .add_members(&group, &[bob.client.key_package().unwrap()])
         .unwrap();
     assert_eq!(bob.client.join_from_welcome(&first.welcome).unwrap(), group);
-    let wire = alice.client.encrypt(&group, b"legacy").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"legacy", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.process(&group, &wire).unwrap(),
         Processed::Application(b"legacy".to_vec(), alice.id)
@@ -700,7 +700,7 @@ fn sealed_snapshot_round_trips_and_restored_client_still_decrypts() {
         MlsClient::restore_sealed(&bob_device, &bob_cert, &vault, &sealed, &[group]).unwrap();
     assert_eq!(restored.epoch(&group).unwrap(), 1);
 
-    let wire = alice.encrypt(&group, b"after restart").unwrap();
+    let wire = alice.encrypt_reserving(&group, b"after restart", &mut |_| Ok(())).unwrap();
     assert_eq!(
         restored.decrypt_application(&group, &wire).unwrap(),
         (b"after restart".to_vec(), alice_device.id())
@@ -1027,7 +1027,7 @@ fn refused_commit_can_be_applied_once_the_policy_accepts_it() {
     );
     assert_eq!(bob.client.epoch(&group).unwrap(), 3);
 
-    let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"after the ban", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.decrypt_application(&group, &wire).unwrap(),
         (b"after the ban".to_vec(), alice.id)
@@ -1061,7 +1061,7 @@ fn refused_commit_removes_member_once_applied_and_locks_it_out() {
         Processed::Commit
     );
 
-    let wire = alice.client.encrypt(&group, b"after the ban").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"after the ban", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.decrypt_application(&group, &wire).unwrap(),
         (b"after the ban".to_vec(), alice.id)
@@ -1073,7 +1073,7 @@ fn refused_commit_removes_member_once_applied_and_locks_it_out() {
 fn corrupted_message_does_not_consume_its_secret() {
     let group = community();
     let (mut alice, mut bob, _carol) = three_member_group(&group);
-    let wire = alice.client.encrypt(&group, b"intact").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"intact", &mut |_| Ok(())).unwrap();
 
     // Flip a byte near the end, which is inside the AEAD tag, so decryption fails.
     let mut corrupted = wire.clone();
@@ -1110,13 +1110,13 @@ fn refused_welcome_is_accepted_later_and_decrypts() {
 
     let wire = alice
         .client
-        .encrypt(&group, b"welcome to the group")
+        .encrypt_reserving(&group, b"welcome to the group", &mut |_| Ok(()))
         .unwrap();
     assert_eq!(
         carol.client.decrypt_application(&group, &wire).unwrap(),
         (b"welcome to the group".to_vec(), alice.id)
     );
-    let reply = carol.client.encrypt(&group, b"thanks").unwrap();
+    let reply = carol.client.encrypt_reserving(&group, b"thanks", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.decrypt_application(&group, &reply).unwrap(),
         (b"thanks".to_vec(), carol.id)
@@ -1127,7 +1127,7 @@ fn refused_welcome_is_accepted_later_and_decrypts() {
 fn corrupted_message_in_the_middle_does_not_consume_its_secret() {
     let group = community();
     let (mut alice, mut bob, _carol) = three_member_group(&group);
-    let wire = alice.client.encrypt(&group, b"intact").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"intact", &mut |_| Ok(())).unwrap();
 
     let mut corrupted = wire.clone();
     let middle = corrupted.len() / 2;
@@ -1148,7 +1148,7 @@ fn garbage_bytes_do_not_desync_the_group() {
         .client
         .process_commit_with_policy(&group, &[0xAB; 64], allow_commit)
         .is_err());
-    let wire = alice.client.encrypt(&group, b"still in sync").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"still in sync", &mut |_| Ok(())).unwrap();
     assert_eq!(
         bob.client.decrypt_application(&group, &wire).unwrap(),
         (b"still in sync".to_vec(), alice.id)
@@ -1159,7 +1159,7 @@ fn garbage_bytes_do_not_desync_the_group() {
 fn application_message_is_rejected_by_the_commit_path_and_state_is_kept() {
     let group = community();
     let (mut alice, mut bob, _carol) = three_member_group(&group);
-    let wire = alice.client.encrypt(&group, b"not a commit").unwrap();
+    let wire = alice.client.encrypt_reserving(&group, b"not a commit", &mut |_| Ok(())).unwrap();
     assert!(matches!(
         bob.client
             .process_commit_with_policy(&group, &wire, allow_commit),

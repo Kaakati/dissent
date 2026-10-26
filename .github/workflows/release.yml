@@ -113,10 +113,11 @@ jobs:
         run: cargo test --workspace
       # Loopback-only tests that are #[ignore]d locally so Windows Firewall doesn't prompt for every
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
-      # also holds internet.rs, which needs the public network, so it is skipped here.
+      # also holds tests that need the public network: internet.rs and any test named internet_*. `--skip`
+      # matches a substring, so `internet` skips both.
       # The offline-joiner retry test is skipped until its race is fixed; it still runs locally through fwtest.
       - name: Loopback networked tests
-        run: "cargo test -p dissent-core --test it -- --ignored --skip internet:: --skip member_sealed::a_joiner_whose_members_were_offline_unlocks_once_one_comes_back"
+        run: "cargo test -p dissent-core --test it -- --ignored --skip internet --skip member_sealed::a_joiner_whose_members_were_offline_unlocks_once_one_comes_back"
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.
       - uses: actions/setup-node@v4
@@ -133,7 +134,7 @@ jobs:
   # ===== BEGIN video codecs (dissent-video) =====
   # SVT-AV1 is behind the dissent-video `svt-av1` feature, off by default, so the test job and
   # plain `cargo test --workspace` need no NASM or libclang. This job enables the feature: the
-  # shiguredo_svt_av1 crate builds SVT-AV1 from source (git clone of a pinned tag, CMake
+  # the svt-av1-sys crate builds SVT-AV1 from the pinned `third_party/SVT-AV1` submodule (CMake
   # downloaded and SHA-256 checked), which needs git, a C compiler, NASM (x86 assembly) and
   # libclang (bindgen). macOS Intel is not built here: no Intel runner is pinned.
   codecs:

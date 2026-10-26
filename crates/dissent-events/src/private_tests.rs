@@ -351,3 +351,19 @@ fn every_message_kind_is_rate_limited_by_slowmode() {
         f.t += 61_000;
     }
 }
+
+#[test]
+fn the_history_form_is_refused_in_a_private_channel() {
+    let mut f = Fixture::new();
+    let bob = f.bob.id();
+    f.access(W::Owner, true, vec![], vec![bob]);
+    let history = f.push_on_channel(
+        W::Bob,
+        Payload::PrivateSealed {
+            kind: SealedKind::HistoryMessage,
+            generation: 0,
+            ciphertext: vec![1],
+        },
+    );
+    assert_eq!(f.rejection_of(history), Some(Rejection::Malformed));
+}
