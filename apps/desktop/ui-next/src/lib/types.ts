@@ -54,6 +54,14 @@ export interface ChannelView {
   user_limit?: number;
   relay?: string;
   topic?: string | null; // shown in the header when the topics feature is on
+  private?: boolean; // a private channel: only its listed readers see it, and it gets a lock
+}
+
+// Who may read a channel, as channel_access reports it. Owners and admins always can, so they are not listed.
+export interface ChannelAccess {
+  private: boolean;
+  roles: ('admin' | 'moderator')[];
+  members: Id[];
 }
 
 // A member of a server, as community_view reports it. Banned members are kept in the list and hidden by the views.

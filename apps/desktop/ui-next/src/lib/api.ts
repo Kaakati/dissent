@@ -4,6 +4,7 @@ import type {
   Bookmark,
   Capabilities,
   CallState,
+  ChannelAccess,
   ChannelView,
   CommunitySummary,
   CommunityView,
@@ -180,6 +181,17 @@ export const api = {
   memberOnlyStatus: (communityId: Id) => call<unknown>('member_only_status', { communityId }),
   setMemberOnly: (communityId: Id, on: boolean) => call<void>('set_member_only', { communityId, on }),
   setHistoryVisibility: (communityId: Id, setting: string) => call<void>('set_history_visibility', { communityId, setting }),
+  channelAccess: (communityId: Id, channelId: Id) => call<ChannelAccess>('channel_access', { communityId, channelId }),
+  createPrivateChannel: (communityId: Id, name: string, access: Pick<ChannelAccess, 'roles' | 'members'>) =>
+    call<ChannelView>('create_private_channel', { communityId, name, roles: access.roles, members: access.members }),
+  setChannelAccess: (communityId: Id, channelId: Id, access: ChannelAccess) =>
+    call<void>('set_channel_access', {
+      communityId,
+      channelId,
+      private: access.private,
+      roles: access.roles,
+      members: access.members,
+    }),
   claimHandle: (communityId: Id, handle: string) => call<unknown>('claim_handle', { communityId, handle }),
   userProfile: (user: Id) => call<UserProfileView>('user_profile', { user }),
   safetyNumber: (user: Id) => call<unknown>('safety_number', { user }),

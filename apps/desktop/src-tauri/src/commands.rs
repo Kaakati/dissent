@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dissent_core::{
-    ChannelId, ChannelInfo, CommunityId, CommunitySummary, InvitePreviewView,
+    ChannelAccessView, ChannelId, ChannelInfo, CommunityId, CommunitySummary, InvitePreviewView, Role,
     Engine, EventId, Identity, MessageItem, MeView, Mentions, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
@@ -314,6 +314,75 @@ pub async fn set_member_only(
 ) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
     engine(&state).await?.set_member_only(community, on).await.map_err(err)
+}
+
+/// Sets who may read a channel. `private` false makes it public again. Roles are `admin` or `moderator`;
+/// members are root ids. Owner and admin only, as replay checks.
+#[tauri::command]
+pub async fn set_channel_access(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+    private: bool,
+    roles: Vec<String>,
+    members: Vec<String>,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    let (roles, members) = access_of(&roles, &members)?;
+    engine(&state)
+        .await?
+        .set_channel_access(community, channel, private, roles, members)
+        .await
+        .map_err(err)
+}
+
+/// Creates a private channel in one call, so there is no public moment for it. Roles and members as
+/// `set_channel_access`. Owner and admin only.
+#[tauri::command]
+pub async fn create_private_channel(
+    state: State<'_, AppState>,
+    community_id: String,
+    name: String,
+    roles: Vec<String>,
+    members: Vec<String>,
+) -> Result<ChannelInfo, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let (roles, members) = access_of(&roles, &members)?;
+    engine(&state)
+        .await?
+        .create_private_channel(community, name, roles, members)
+        .await
+        .map_err(err)
+}
+
+/// Reads a channel's roles and member ids from the command arguments.
+fn access_of(roles: &[String], members: &[String]) -> Result<(Vec<Role>, Vec<RootId>), String> {
+    let roles = roles
+        .iter()
+        .map(|role| match role.as_str() {
+            "admin" => Ok(Role::Admin),
+            "moderator" => Ok(Role::Moderator),
+            other => Err(format!("unknown role: {other}")),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let members = members
+        .iter()
+        .map(|m| parse::<RootId>("member", m))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((roles, members))
+}
+
+/// Who may read a channel now. Only its readers and the owner or admins get the list.
+#[tauri::command]
+pub async fn channel_access(
+    state: State<'_, AppState>,
+    community_id: String,
+    channel_id: String,
+) -> Result<ChannelAccessView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let channel: ChannelId = parse("channel id", &channel_id)?;
+    engine(&state).await?.channel_access(community, channel).map_err(err)
 }
 
 /// Sets which past control content a new member is given keys for: `all` or `since_join`.

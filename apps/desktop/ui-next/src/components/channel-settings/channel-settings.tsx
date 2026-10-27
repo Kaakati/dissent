@@ -1,6 +1,6 @@
 // Channel settings: a full-page overlay built like Settings. Overview holds the name, slowmode and content visibility,
-// and voice channels add bitrate, user limit and relay. Permissions is not built. Invites lists the server's invites
-// with Revoke. Changes wait in a save bar until Save. Owner and admin only. Ported from the old UI's views/channel-settings.js.
+// and voice channels add bitrate, user limit and relay. Permissions makes a channel private and picks its readers.
+// Invites lists the server's invites with Revoke. Changes wait in a save bar until Save. Owner and admin only. Ported from the old UI's views/channel-settings.js.
 import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { Hash, Trash2, Volume2, X } from 'lucide-react';
 import { create } from 'zustand';
@@ -8,12 +8,14 @@ import { cleanChannelName } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { deleteChannel, loadInvites, updateChannel } from '@/lib/actions';
+import { AccessPicker, PrivateSwitch } from '@/components/channel-settings/access-picker';
+import { deleteChannel, loadInvites, setChannelAccess, updateChannel } from '@/lib/actions';
 import { api } from '@/lib/api';
 import { confirm, useDialogs } from '@/lib/dialog';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
-import type { ChannelView, Id } from '@/lib/types';
+import type { ChannelAccess, ChannelView, Id, Member } from '@/lib/types';
+import { has } from '@/lib/features';
 import { cn } from '@/lib/utils';
 
 const SLOWMODE: [string, number][] = [
@@ -138,7 +140,7 @@ function ChannelSettingsPage({ target }: { target: Target }) {
             {voice ? <Volume2 className="size-4 shrink-0 text-muted-foreground" /> : <Hash className="size-4 shrink-0 text-muted-foreground" />}
             <span className="truncate">{`${saved.name} · ${voice ? 'Voice' : 'Text'} Channels`}</span>
           </h2>
-          {SECTIONS.map((s) => (
+          {SECTIONS.filter((s) => s.key !== 'permissions' || has('private_channels')).map((s) => (
             <button
               key={s.key}
               type="button"
@@ -169,11 +171,7 @@ function ChannelSettingsPage({ target }: { target: Target }) {
             <h1 className="text-title font-bold text-text-strong">{SECTION_TITLE[section]}</h1>
           </header>
           {section === 'overview' ? <Overview voice={voice} draft={draft} relayUrls={relayUrls} edit={edit} /> : null}
-          {section === 'permissions' ? (
-            <Block title="Coming soon">
-              <p className="text-sm text-muted-foreground">Per-channel roles are not built yet, so channel permissions cannot be set here.</p>
-            </Block>
-          ) : null}
+          {section === 'permissions' ? <Permissions communityId={communityId} channelId={channelId} /> : null}
           {section === 'invites' ? <InviteList communityId={communityId} /> : null}
           {dirty ? (
             <div role="region" aria-label="Unsaved changes" className="sticky bottom-0 mt-auto flex items-center gap-s-3 rounded-lg border border-border bg-elevated px-s-4 py-s-3">
@@ -197,6 +195,70 @@ function ChannelSettingsPage({ target }: { target: Target }) {
         <span className="text-meta font-semibold text-muted-foreground">ESC</span>
       </div>
     </div>
+  );
+}
+
+const NO_MEMBERS: Member[] = [];
+const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+
+// Who can read the channel. The saved access comes from the engine, and a save publishes the change at once, so it
+// has its own Save and Reset rather than the overview's save bar.
+function Permissions({ communityId, channelId }: { communityId: Id; channelId: Id }) {
+  const members = useShell((s) => (s.community?.id === communityId ? s.community.members : NO_MEMBERS));
+  const [saved, setSaved] = useState<ChannelAccess | null>(null);
+  const [draft, setDraft] = useState<ChannelAccess | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .channelAccess(communityId, channelId)
+      .then((access) => {
+        if (!live) return;
+        setSaved(access);
+        setDraft(access);
+      })
+      .catch((e: unknown) => {
+        if (live) setFailed(String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [communityId, channelId]);
+
+  if (failed) return <p className="text-sm text-muted-foreground">{failed}</p>;
+  if (!saved || !draft) return null;
+  const dirty =
+    saved.private !== draft.private || !sameIds(saved.roles, draft.roles) || !sameIds(saved.members, draft.members);
+
+  const save = async () => {
+    if (await setChannelAccess(communityId, channelId, draft)) {
+      setSaved(draft);
+      toast('Channel access saved', 'info');
+    }
+  };
+
+  return (
+    <>
+      <Block title="Private Channel">
+        <div className="flex items-center justify-between gap-s-3">
+          <span className="text-sm text-muted-foreground">Only selected members and roles will be able to view this channel.</span>
+          <PrivateSwitch checked={draft.private} onChange={(on) => setDraft({ ...draft, private: on })} />
+        </div>
+      </Block>
+      {draft.private ? (
+        <Block title="Who can view">
+          <AccessPicker members={members} value={draft} onChange={(next) => setDraft({ ...draft, ...next })} />
+        </Block>
+      ) : null}
+      {dirty ? (
+        <div role="region" aria-label="Unsaved access changes" className="sticky bottom-0 mt-auto flex items-center gap-s-3 rounded-lg border border-border bg-elevated px-s-4 py-s-3">
+          <span className="mr-auto text-ui font-medium text-text-strong">Careful — you have unsaved changes!</span>
+          <Button variant="outline" onClick={() => setDraft(saved)}>Reset</Button>
+          <Button onClick={() => void save()}>Save</Button>
+        </div>
+      ) : null}
+    </>
   );
 }
 

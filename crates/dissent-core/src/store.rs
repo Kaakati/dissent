@@ -118,6 +118,10 @@ impl Paths {
     pub fn access(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("access.bin")
     }
+    /// The private-channel keys this device holds for a community. Sealed. See `private_keys`.
+    pub fn private_keys(&self, id: &CommunityId) -> PathBuf {
+        self.community_dir(id).join("private-keys.bin")
+    }
     /// The control keys of each MLS epoch this device was in. Sealed. See `epoch_keys`.
     pub fn epoch_keys(&self, id: &CommunityId) -> PathBuf {
         self.community_dir(id).join("epoch-keys.bin")

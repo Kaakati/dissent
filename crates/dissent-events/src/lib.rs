@@ -29,7 +29,8 @@ pub(crate) mod testutil;
 pub mod wire;
 
 pub use control::{
-    is_member_sealable, is_member_sealed, is_sealable, member_parts, member_sealed_payload,
+    carry_private, is_member_sealable, is_member_sealed, is_sealable, member_parts, member_sealed_payload, open_private_text, private_aad,
+    seal_private_text,
     open_event, open_event_keyed, open_member, seal, seal_member, verify_member_tag, EpochKey,
     EpochKeys, OpenError, SealKey, CARRIER_GENERATION, EXPORT_LABEL,
 };

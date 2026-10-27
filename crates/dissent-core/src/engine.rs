@@ -49,6 +49,8 @@ pub(crate) struct Inner {
     pub dirty_logs: crate::store::DirtyLogs,
     /// Commit catch-ups in flight, so one missing epoch triggers one request per device.
     pub mls_catching_up: Mutex<std::collections::BTreeSet<(CommunityId, DeviceId)>>,
+    /// Private-channel key requests in flight, one per channel and generation.
+    pub private_fetching: Mutex<std::collections::BTreeSet<(CommunityId, dissent_events::ChannelId, u64)>>,
     /// MLS commits that were refused for now, most often because the ban behind them has not
     /// reached this device yet. Retried whenever new events arrive.
     pub deferred_commits: Mutex<BTreeMap<CommunityId, Vec<Vec<u8>>>>,
@@ -78,6 +80,13 @@ pub(crate) struct Inner {
     /// Woken when a community member's presence beacon is accepted. A joiner still waiting for its
     /// epoch keys retries at once, instead of waiting out its backoff. See `epoch_keys`.
     pub member_seen: tokio::sync::Notify,
+    /// Woken when a channel's access changes here. A reader waiting for a private channel's keys retries at once.
+    pub access_changed: tokio::sync::Notify,
+    /// Private channels being set up. Posts to one are refused until its access event is in local state.
+    pub private_pending: Mutex<std::collections::BTreeSet<(CommunityId, dissent_events::ChannelId)>>,
+    /// Test only: makes the next access step of `create_private_channel` fail, to test the rollback.
+    #[cfg(test)]
+    pub access_fault: std::sync::atomic::AtomicBool,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
     /// Devices with a live peer lookup running. See `peer_lookup`.
@@ -198,6 +207,7 @@ impl Engine {
             mls_flushed_at: Mutex::new(std::time::Instant::now()),
             dirty_logs: Default::default(),
             mls_catching_up: Mutex::new(std::collections::BTreeSet::new()),
+            private_fetching: Mutex::new(std::collections::BTreeSet::new()),
             deferred_commits: Mutex::new(BTreeMap::new()),
             warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),
@@ -206,6 +216,10 @@ impl Engine {
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
             member_seen: tokio::sync::Notify::new(),
+            access_changed: tokio::sync::Notify::new(),
+            private_pending: Mutex::new(std::collections::BTreeSet::new()),
+            #[cfg(test)]
+            access_fault: std::sync::atomic::AtomicBool::new(false),
             neighbours: Mutex::new(BTreeMap::new()),
             asking: Mutex::new(BTreeSet::new()),
             calls: crate::calls::CallHub::new(&timings),

@@ -39,6 +39,7 @@ pub const CAPABILITIES: &[&str] = &[
     "multi_source",
     "mentions",
     "server_prefs",
+    "private_channels",
 ];
 
 /// Which text a user note stores.

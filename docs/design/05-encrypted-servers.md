@@ -143,6 +143,10 @@ size. The cost is real: per-message forward secrecy within an epoch is replaced 
 that is later compromised exposes every text of each epoch it was in, not only the ones still in its ratchet.
 The threat model records this.
 
+**Push and retries.** When an active member admits a joiner, it sends the joiner the keys the setting allows
+(`PushHistoryKeys`, the same rule as `HistoryKeys`), a few times if needed. The joiner accepts them from an active
+member only. A joiner that has no keys also fetches them: its first retry is after one second, then the wait doubles
+up to a minute, and a member coming online or a new key cuts a wait short. An empty answer does not end the fetch.
 **Serving.** `HistoryKeys { community }` returns `(epoch, key)` pairs. The rule is the same as `EpochHistory`:
 only an active person, never a storage member; `All` gives every epoch; `SinceJoin` gives epochs from the
 requester's join, and none when the responder did not see that join. A joiner asks the first three member

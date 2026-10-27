@@ -93,6 +93,16 @@ pub struct ChannelInfo {
     pub relay: String,
     /// Unread mentions of me in this channel, since it was last marked read. Zero for voice channels.
     pub mentions: u32,
+    /// True for a private channel, which only its listed readers see. The client shows it with a lock.
+    pub private: bool,
+}
+
+/// Who may read a channel, for its settings picker. Roles are `admin` or `moderator`; members are root ids.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChannelAccessView {
+    pub private: bool,
+    pub roles: Vec<&'static str>,
+    pub members: Vec<String>,
 }
 
 impl ChannelInfo {
@@ -111,6 +121,7 @@ impl ChannelInfo {
             user_limit: settings.user_limit,
             relay: settings.relay.clone(),
             mentions: 0,
+            private: false,
         }
     }
 }

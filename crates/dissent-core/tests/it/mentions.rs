@@ -93,15 +93,18 @@ async fn everyone_counts_from_an_admin_and_not_from_a_member() {
         .moderate(id, ModAction::GrantAdmin, bob.identity.root_id())
         .await
         .expect("grant admin");
-    until_event(&carol.engine, Duration::from_secs(60), "carol sees the admin", || {
-        carol
-            .engine
+    // Bob's @everyone is valid only where bob is an admin, so it waits until bob's own replica shows the grant.
+    // Carol's copy is waited on too, since she is one of the receivers this test checks.
+    let bob_root = bob.identity.root_id().to_string();
+    let is_admin = |engine: &Engine| {
+        engine
             .community_view(id)
             .ok()
-            .filter(|v| v.members.iter().any(|m| m.root_id == bob.identity.root_id().to_string() && m.role == "admin"))
+            .filter(|v| v.members.iter().any(|m| m.root_id == bob_root && m.role == "admin"))
             .map(|_| ())
-    })
-    .await;
+    };
+    until_event(&carol.engine, Duration::from_secs(60), "carol sees the admin", || is_admin(&carol.engine)).await;
+    until_event(&bob.engine, Duration::from_secs(60), "bob sees his own grant", || is_admin(&bob.engine)).await;
     bob.engine
         .send_message_with(id, channel, "attention all".into(), everyone.clone())
         .await

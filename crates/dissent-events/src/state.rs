@@ -407,6 +407,11 @@ impl CommunityState {
     /// Whether `user` may read `chan`. A public channel is open to everyone who can see the community.
     /// A private one is open to the owner and admins, to members holding a listed role, and to listed
     /// members who have not left or been banned.
+    /// Whether `user` may change who reads a channel: an owner or an admin.
+    pub fn may_manage_access(&self, user: RootId) -> bool {
+        self.rank(&user) >= Rank::Admin
+    }
+
     pub fn can_read(&self, chan: ChannelId, user: RootId) -> bool {
         let Some((_, spec)) = self.channel_access.get(&chan) else {
             return true;
@@ -533,7 +538,10 @@ impl CommunityState {
             }
             // The message forms below are for public channels only. A private channel's messages take the
             // `PrivateSealed` form, which the community secret and the epoch key cannot open.
-            Payload::Sealed { .. } | Payload::Message { .. } if self.is_private(chan) => {
+            // Plain text forms carry their text in the clear, so they have no place in a private channel either.
+            Payload::Sealed { .. } | Payload::Message { .. } | Payload::Reply { .. } | Payload::Edit { .. }
+                if self.is_private(chan) =>
+            {
                 return Err(Rejection::NoPermission);
             }
             Payload::Sealed { kind, .. } => match kind {
@@ -859,12 +867,14 @@ impl CommunityState {
                     .is_none_or(|(hlc, _)| ev.body.hlc > *hlc);
                 if newer {
                     // Removing a reader from a private channel starts a new key generation.
+                    // Adding a reader under `SinceJoin` does the same, so the newcomer gets only the new generation.
                     if let Some((_, prev)) = self.channel_access.get(channel) {
-                        if prev.private
-                            && spec.private
-                            && (!prev.roles.is_subset(&spec.roles) || !prev.members.is_subset(&spec.members))
-                        {
-                            *self.key_generation.entry(*channel).or_default() += 1;
+                        if prev.private && spec.private {
+                            let removed = !prev.roles.is_subset(&spec.roles) || !prev.members.is_subset(&spec.members);
+                            let added = !spec.roles.is_subset(&prev.roles) || !spec.members.is_subset(&prev.members);
+                            if removed || (added && self.history == HistorySetting::SinceJoin) {
+                                *self.key_generation.entry(*channel).or_default() += 1;
+                            }
                         }
                     }
                     self.channel_access.insert(*channel, (ev.body.hlc, spec));

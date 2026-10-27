@@ -203,8 +203,17 @@ impl Engine {
         }
         let fresh = c.take_unhandled(&batch.stored);
         for se in &fresh {
+            // A private message is stored as a carrier, so the payload that counts is the opened one.
+            let opened = c.open(&se.event);
+            let payload = match &opened {
+                Ok(ev) => &ev.body.payload,
+                Err(_) => &se.event.body.payload,
+            };
+            if matches!(payload, Payload::ChannelAccess { .. }) {
+                self.inner.access_changed.notify_waiters();
+            }
             if matches!(
-                se.event.body.payload,
+                payload,
                 Payload::Message { .. }
                     | Payload::Sealed {
                         kind: SealedKind::Message | SealedKind::HistoryMessage,
@@ -348,6 +357,7 @@ impl Engine {
                 }
             }
             Request::Fetch { community, ids } => Response::Events(self.events_for(community, &ids)),
+            Request::ChannelKeys { community, channel } => self.serve_channel_keys(conn_from, community, channel),
             Request::FetchRaw { community, ids } => Response::EventsRaw(
                 self.events_for(community, &ids).iter().map(|se| se.encode()).collect(),
             ),
@@ -379,6 +389,7 @@ impl Engine {
             Request::Friends => self.serve_friends(conn_from),
             Request::HistoryKeys { community } => self.serve_history_keys(conn_from, community),
             Request::MirrorHint { community, blobs } => self.serve_mirror_hint(conn_from, community, blobs),
+            Request::PushHistoryKeys { community, pairs } => self.accept_history_keys(conn_from, community, pairs),
             Request::DmDevicesSupport => Response::DmDevicesSupport(
                 self.inner.dm_devices_support.load(std::sync::atomic::Ordering::Relaxed),
             ),

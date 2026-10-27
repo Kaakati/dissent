@@ -138,6 +138,10 @@ impl World {
         for (id, c) in communities.iter_mut() {
             if let Some(keys) = access.get(id) {
                 c.set_ring(keys.history.clone());
+                match crate::private_keys::load(&paths, vault, id) {
+                    Ok(keys) => c.private_keys = keys,
+                    Err(e) => warn!(community = %id, error = %e, "could not read the private channel keys"),
+                }
                 match crate::epoch_keys::load(&paths, vault, id) {
                     Ok(epochs) => {
                         c.set_epoch_ring(epochs.enc_ring());
@@ -361,6 +365,7 @@ impl World {
                 let voice = c.state().voice_channels.contains(id);
                 let mut info = ChannelInfo::new(*id, name.clone(), voice, &c.state().settings(id));
                 info.mentions = if voice { 0 } else { self.mention_count(c, id, suppress_everyone) };
+                info.private = c.state().is_private(*id);
                 info
             })
             .collect();

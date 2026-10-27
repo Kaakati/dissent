@@ -67,6 +67,53 @@ pub fn carry_private(kind: SealedKind, generation: u64, ciphertext: Vec<u8>) -> 
     })
 }
 
+const PRIVATE_AAD_DOMAIN: &[u8] = b"dissent/private-text-aad/v1";
+
+/// The associated data a private message's text is sealed with. It binds the community, the channel,
+/// the key generation and the author, so the text cannot be moved to another channel or generation.
+pub fn private_aad(community: &CommunityId, channel: &ChannelId, generation: u64, author: &RootId) -> Vec<u8> {
+    let mut out = PRIVATE_AAD_DOMAIN.to_vec();
+    out.extend_from_slice(community.as_bytes());
+    out.extend_from_slice(&channel.0);
+    out.extend_from_slice(&generation.to_be_bytes());
+    out.extend_from_slice(author.as_bytes());
+    out
+}
+
+/// Seals a private message's plaintext under the channel key of its generation: a fresh nonce, then the
+/// AEAD ciphertext. `aad` comes from `private_aad`.
+pub fn seal_private_text(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
+    let nonce: [u8; NONCE_LEN] = rand::random();
+    let body = XChaCha20Poly1305::new(key.into())
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            AeadPayload {
+                msg: plain,
+                aad,
+            },
+        )
+        .map_err(|_| Error::Encoding("could not seal the private message".into()))?;
+    Ok([nonce.as_slice(), body.as_slice()].concat())
+}
+
+/// Opens a private message's ciphertext with the channel key. `None` when the key is wrong or the
+/// ciphertext was changed.
+pub fn open_private_text(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < NONCE_LEN {
+        return None;
+    }
+    let (nonce, body) = data.split_at(NONCE_LEN);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt(
+            XNonce::from_slice(nonce),
+            AeadPayload {
+                msg: body,
+                aad,
+            },
+        )
+        .ok()
+}
+
 /// Opens a carried private-channel message to its replayed form. No key is needed.
 fn open_private(ciphertext: &[u8]) -> std::result::Result<Payload, OpenError> {
     let carried = carried(ciphertext).ok_or(OpenError::Forged)?;
@@ -1067,6 +1114,20 @@ mod tests {
         }));
         assert!(!is_member_sealable(&Payload::InviteRevoke { invite_id: [0; 16] }));
         assert!(is_member_sealable(&Payload::ChannelCreate { name: "x".into() }));
+    }
+
+    #[test]
+    fn private_text_opens_only_with_its_key_and_its_aad() {
+        let key = [5u8; 32];
+        let (community, channel, author) = (CommunityId([1; 32]), ChannelId([2; 32]), RootId([3; 32]));
+        let aad = private_aad(&community, &channel, 0, &author);
+        let sealed = seal_private_text(&key, &aad, b"secret words").unwrap();
+        assert_eq!(open_private_text(&key, &aad, &sealed).unwrap(), b"secret words");
+        assert!(open_private_text(&[6u8; 32], &aad, &sealed).is_none(), "another key does not open it");
+        let moved = private_aad(&community, &channel, 1, &author);
+        assert!(open_private_text(&key, &moved, &sealed).is_none(), "another generation does not open it");
+        let elsewhere = private_aad(&community, &ChannelId([9; 32]), 0, &author);
+        assert!(open_private_text(&key, &elsewhere, &sealed).is_none(), "another channel does not open it");
     }
 
     #[test]

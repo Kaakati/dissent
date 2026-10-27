@@ -1,14 +1,19 @@
-// Create Channel, laid out as Discord's: a channel type, a name that follows the type, a Private Channel switch (not
-// built yet, so disabled) and two footer buttons. Text is the default unless `kind` is 'voice'. Ported from
-// openCreateChannelDialog in the old UI's views/dialogs.js. Names are cleaned as they are typed.
+// Create Channel, laid out as Discord's: a channel type, a name that follows the type, a Private Channel switch with
+// its member and role picker, and two footer buttons. Text is the default unless `kind` is 'voice'; only text channels
+// can be private. Ported from openCreateChannelDialog in the old UI's views/dialogs.js. Names are cleaned as they are typed.
 import { type KeyboardEvent, useState } from 'react';
 import { Hash, Lock, Volume2 } from 'lucide-react';
+import { AccessPicker, type AccessValue, PrivateSwitch } from '@/components/channel-settings/access-picker';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { createChannel } from '@/lib/actions';
+import { has } from '@/lib/features';
 import { openDialog } from '@/lib/dialog';
 import { useShell } from '@/lib/store';
+import type { Member } from '@/lib/types';
+
+const NO_MEMBERS: Member[] = [];
 
 // Text channel names follow Discord: lowercase, spaces become hyphens, other characters are dropped. Voice names are
 // kept as typed.
@@ -59,13 +64,17 @@ function CreateChannelBody({ communityId, kind, close }: { communityId: string; 
   const [voice, setVoice] = useState(kind === 'voice');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [isPrivate, setPrivate] = useState(false);
+  const [access, setAccess] = useState<AccessValue>({ roles: [], members: [] });
+  const members = useShell((s) => (s.community?.id === communityId ? s.community.members : NO_MEMBERS));
   const cleaned = cleanChannelName(name, voice).trim();
+  const privateText = isPrivate && !voice;
 
   const submit = async () => {
     const next = cleanChannelName(name, voice).trim();
     if (!next || busy) return;
     setBusy(true);
-    const ok = await createChannel(communityId, next, { voice });
+    const ok = await createChannel(communityId, next, { voice, access: privateText ? access : undefined });
     if (ok) close();
     else setBusy(false);
   };
@@ -74,6 +83,7 @@ function CreateChannelBody({ communityId, kind, close }: { communityId: string; 
   const pick = (value: 'text' | 'voice') => {
     setVoice(value === 'voice');
     setName((n) => cleanChannelName(n, value === 'voice'));
+    if (value === 'voice') setPrivate(false);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -110,19 +120,23 @@ function CreateChannelBody({ communityId, kind, close }: { communityId: string; 
           />
         </div>
       </section>
-      <section className="flex flex-col gap-1">
-        <div className="flex items-center justify-between gap-s-3">
-          <span className="inline-flex items-center gap-s-2 text-body leading-[19px] font-semibold text-text-strong">
-            <Lock className="size-5" aria-hidden="true" />
-            Private Channel
-          </span>
-          <label title="Coming soon" className="relative inline-flex h-6 w-10 shrink-0 cursor-not-allowed opacity-60">
-            <input type="checkbox" role="switch" className="sr-only" disabled aria-label="Private Channel" aria-description="Coming soon" />
-            <span aria-hidden="true" className="relative h-full w-full rounded-full bg-elevated shadow-[inset_0_0_0_1px_var(--border)] after:absolute after:top-1 after:left-1 after:size-4 after:rounded-full after:bg-muted" />
-          </label>
-        </div>
-        <p className="text-sm leading-[17px] text-muted-foreground">Only selected members and roles will be able to view this channel.</p>
-      </section>
+      {has('private_channels') ? (
+        <section className="flex flex-col gap-1">
+          <div className="flex items-center justify-between gap-s-3">
+            <span className="inline-flex items-center gap-s-2 text-body leading-[19px] font-semibold text-text-strong">
+              <Lock className="size-5" aria-hidden="true" />
+              Private Channel
+            </span>
+            <PrivateSwitch checked={privateText} onChange={setPrivate} disabled={voice} />
+          </div>
+          <p className="text-sm leading-[17px] text-muted-foreground">Only selected members and roles will be able to view this channel.</p>
+          {privateText ? (
+            <div className="mt-s-2">
+              <AccessPicker members={members} value={access} onChange={setAccess} />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <DialogFooter className="mt-0 -mx-s-4 -mb-s-4 grid grid-cols-2 bg-panel px-s-4 py-s-4 [&_button]:w-full">
         <Button variant="secondary" onClick={close}>Cancel</Button>
         <Button onClick={() => void submit()} disabled={!cleaned || busy}>Create Channel</Button>

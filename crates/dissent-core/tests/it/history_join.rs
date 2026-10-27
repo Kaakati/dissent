@@ -135,3 +135,42 @@ async fn a_send_right_after_a_join_reads_for_the_joiner_with_no_warm_up() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joiner_reads_a_message_sent_right_after_the_join_within_three_seconds() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Quick".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        alice
+            .engine
+            .set_history_visibility(id, HistorySetting::All)
+            .await
+            .expect("owner shares past messages");
+        let channel = channel_id(&alice.engine, id, "general").expect("general channel");
+        let link = alice.engine.create_invite(id).await.expect("invite");
+        let bob = peer("bob").await;
+        join_ready(&alice, &bob, &link).await;
+        alice.engine.send_message(id, channel, "right after the join".into()).await.expect("send");
+        let started = std::time::Instant::now();
+        loop {
+            let read = bob
+                .engine
+                .channel_messages(id, channel, 50)
+                .iter()
+                .any(|m| m.text == "right after the join" && !m.locked);
+            if read {
+                break;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(3), "not readable after {:?}", started.elapsed());
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+}

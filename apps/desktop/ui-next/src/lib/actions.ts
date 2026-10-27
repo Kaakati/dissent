@@ -6,7 +6,7 @@ import { has } from './features';
 import { refreshProfiles } from './profiles';
 import { useShell } from './store';
 import { toast } from './toasts';
-import type { CommunitySummary, GroupSummary, Id, Trait } from './types';
+import type { ChannelAccess, CommunitySummary, GroupSummary, Id, Trait } from './types';
 
 async function guarded<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try {
@@ -54,16 +54,31 @@ export const createFullInvite = (communityId: Id) => guarded(() => api.createFul
 export const loadInvites = (communityId: Id) => api.listInvites(communityId);
 
 // Makes a text channel and opens it, or a voice channel, which stays unjoined until someone clicks it.
-export const createChannel = (communityId: Id, name: string, { voice = false }: { voice?: boolean } = {}) =>
+export const createChannel = (
+  communityId: Id,
+  name: string,
+  { voice = false, access }: { voice?: boolean; access?: Pick<ChannelAccess, 'roles' | 'members'> } = {},
+) =>
   guarded(async () => {
     if (voice) {
       await api.createVoiceChannel(communityId, name);
       await shell().loadCommunity(communityId);
       return true;
     }
-    const channel = (await api.createChannel(communityId, name)) as { id: Id };
+    // A private channel is made in one command, so it is never listed to everyone.
+    const channel = (access
+      ? await api.createPrivateChannel(communityId, name, access)
+      : await api.createChannel(communityId, name)) as { id: Id };
     await shell().loadCommunity(communityId);
     await shell().openChannel(channel.id);
+    return true;
+  });
+
+// Sets who may read a channel. Owner and admin only; the engine checks it again.
+export const setChannelAccess = (communityId: Id, channelId: Id, access: ChannelAccess) =>
+  guarded(async () => {
+    await api.setChannelAccess(communityId, channelId, access);
+    await shell().loadCommunity(communityId);
     return true;
   });
 

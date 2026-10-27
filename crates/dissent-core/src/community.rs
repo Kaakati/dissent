@@ -58,6 +58,8 @@ pub(crate) struct Community {
     pub task: Option<ReceiverTask>,
     /// Control keys of the MLS epochs this device has been in. See `epoch_keys`.
     pub epochs: crate::epoch_keys::EpochStore,
+    /// The key of each generation of each private channel this device holds. See `private_keys`.
+    pub private_keys: crate::private_keys::PrivateKeys,
 }
 
 impl Community {
@@ -78,6 +80,7 @@ impl Community {
             sender: None,
             task: None,
             epochs: Default::default(),
+            private_keys: Default::default(),
         }
     }
 
@@ -224,8 +227,23 @@ impl Community {
         let mut out: Vec<SignedEvent> = self
             .signed
             .values()
-            .filter(|se| matches!(se.event.body.payload, Payload::Sealed { .. } | Payload::PrivateSealed { .. }))
-            .cloned()
+            .filter_map(|se| match &se.event.body.payload {
+                Payload::Sealed { .. } | Payload::PrivateSealed { .. } => Some(se.clone()),
+                // A private-channel message is stored as a carrier. Open it, so the unseal pass sees its
+                // generation and clear kind. The event keeps its id, which keys its text.
+                Payload::SealedControl {
+                    generation: dissent_events::CARRIER_GENERATION,
+                    ..
+                } => self
+                    .open(&se.event)
+                    .ok()
+                    .filter(|ev| matches!(ev.body.payload, Payload::PrivateSealed { .. }))
+                    .map(|ev| SignedEvent {
+                        event: ev.into_owned(),
+                        cert: se.cert.clone(),
+                    }),
+                _ => None,
+            })
             .collect();
         out.sort_by_key(|se| (se.event.body.hlc, se.event.id));
         out

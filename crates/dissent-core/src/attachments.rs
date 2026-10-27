@@ -696,6 +696,9 @@ impl Engine {
         seed: bool,
         mentions: Mentions,
     ) -> Result<crate::views::MessageItem> {
+        if self.is_private_channel(community, channel) {
+            return Err(crate::error::CoreError::Invalid(crate::private_keys::PRIVATE_FILES_REFUSED.into()));
+        }
         let (attached, thumbs) = self.add_files(&paths, seed).await?;
         let plain = pack_all(text.trim(), &attached, &[], &thumbs, Some(&mentions))?;
         self.send_channel_plain(community, channel, plain).await

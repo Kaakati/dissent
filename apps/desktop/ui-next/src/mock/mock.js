@@ -736,6 +736,15 @@ if (!window.__TAURI__) {
       c.msgs[ch.id] = [];
       return ch;
     },
+    create_private_channel: ({ communityId, name, roles, members }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can create channels');
+      const ch = { id: `ch${++seq}`, name, private: true };
+      c.channels.push(ch);
+      c.msgs[ch.id] = [];
+      channelAccess.set(ch.id, { private: true, roles, members });
+      return ch;
+    },
     update_channel: ({ communityId, channelId, ...patch }) => {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can change channels');
@@ -997,8 +1006,10 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels'];
   const ignoredSet = new Set();
+  // Private channel access, kept per channel id for the preview's round trip.
+  const channelAccess = new Map();
   const KARIM = id('karim-n2w5d8fx');
   Object.assign(people, { [NADIA]: 'Nadia', [YUSUF]: 'Yusuf', [KARIM]: 'Karim' });
   Object.assign(handles, { [NADIA]: 'nadia', [YUSUF]: 'yusuf', [KARIM]: 'karim' });
@@ -1118,6 +1129,13 @@ if (!window.__TAURI__) {
   Object.assign(handlers, {
     // `?nomentions` and `?noserverprefs` are the engine before those capabilities: every other feature is still reported.
     capabilities: () => (window.__mockNoCapabilities ? [] : [...FEATURES].filter((f) => !(f === 'mentions' && new URLSearchParams(location.search).has('nomentions')) && !(f === 'server_prefs' && new URLSearchParams(location.search).has('noserverprefs')))),
+    channel_access: ({ channelId }) => channelAccess.get(channelId) ?? { private: false, roles: [], members: [] },
+    set_channel_access: ({ communityId, channelId, private: isPrivate, roles, members }) => {
+      channelAccess.set(channelId, { private: isPrivate, roles, members });
+      const ch = servers[communityId]?.channels.find((x) => x.id === channelId);
+      if (ch) ch.private = isPrivate;
+      return null;
+    },
     // Desktop notifications: the native plugin shows them in the app. The browser preview only logs them.
     'plugin:notification|notify': ({ options }) => { console.info('[mock] desktop notification', options); return null; },
     // Your status. set_status emits dissent://status-changed the way the engine will; a timed status reverts to online.

@@ -5,6 +5,7 @@
 export const FEATURES = [
   'groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change',
   'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'mentions', 'server_prefs',
+  'private_channels',
 ] as const;
 
 export type Feature = (typeof FEATURES)[number];

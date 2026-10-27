@@ -88,18 +88,22 @@ impl Engine {
         channel: ChannelId,
         plain: String,
     ) -> Result<MessageItem> {
-        let (kind, epoch, ciphertext) = match self.history_seal(community, &plain) {
-            Some((epoch, ciphertext)) => (SealedKind::HistoryMessage, epoch, ciphertext),
-            None => {
-                let (epoch, ciphertext) = self.seal(community, &plain)?;
-                (SealedKind::Message, epoch, ciphertext)
+        let payload = if self.is_private_channel(community, channel) {
+            self.private_payload(community, channel, SealedKind::Message, &plain).await?
+        } else {
+            let (kind, epoch, ciphertext) = match self.history_seal(community, &plain) {
+                Some((epoch, ciphertext)) => (SealedKind::HistoryMessage, epoch, ciphertext),
+                None => {
+                    let (epoch, ciphertext) = self.seal(community, &plain)?;
+                    (SealedKind::Message, epoch, ciphertext)
+                }
+            };
+            let ciphertext = crate::attachments::wrap_manifest(&crate::attachments::manifest_of(&plain), ciphertext)?;
+            Payload::Sealed {
+                epoch,
+                kind,
+                ciphertext,
             }
-        };
-        let ciphertext = crate::attachments::wrap_manifest(&crate::attachments::manifest_of(&plain), ciphertext)?;
-        let payload = Payload::Sealed {
-            epoch,
-            kind,
-            ciphertext,
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, plain.clone());
@@ -153,11 +157,12 @@ impl Engine {
         text: String,
     ) -> Result<()> {
         let text = clean_message(&text)?;
-        let (epoch, ciphertext) = self.seal(community, &text)?;
-        let payload = Payload::Sealed {
-            epoch,
-            kind: SealedKind::Edit { target: message },
-            ciphertext,
+        let kind = SealedKind::Edit { target: message };
+        let payload = if self.is_private_channel(community, channel) {
+            self.private_payload(community, channel, kind, &text).await?
+        } else {
+            let (epoch, ciphertext) = self.seal(community, &text)?;
+            Payload::Sealed { epoch, kind, ciphertext }
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, message, se.event.body.hlc, text);
@@ -298,7 +303,14 @@ impl Engine {
         channel: ChannelId,
         payload: Payload,
     ) -> Result<SignedEvent> {
+        if channel != ChannelId::CONTROL && self.is_pending_private(community, channel) {
+            return Err(crate::error::CoreError::Invalid("this private channel is still being set up".into()));
+        }
+        let access_changed = matches!(payload, Payload::ChannelAccess { .. });
         let se = self.author(community, channel, payload)?;
+        if access_changed {
+            self.inner.access_changed.notify_waiters();
+        }
         self.publish(community, &se).await;
         Ok(se)
     }

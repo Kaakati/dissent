@@ -216,7 +216,7 @@ impl Engine {
         self.unseal_pass(community, true);
     }
 
-    fn unseal_pass(&self, community: CommunityId, may_catch_up: bool) {
+    pub(crate) fn unseal_pass(&self, community: CommunityId, may_catch_up: bool) {
         let own_device = self.inner.identity.device_id();
         let our_epoch = self.mls_epoch(community);
         let candidates: Vec<SignedEvent> = {
@@ -236,6 +236,15 @@ impl Engine {
                 .collect()
         };
         for se in candidates {
+            if let Payload::PrivateSealed {
+                generation,
+                ciphertext,
+                ..
+            } = &se.event.body.payload
+            {
+                self.unseal_private(community, &se, *generation, ciphertext);
+                continue;
+            }
             let Payload::Sealed {
                 epoch,
                 ciphertext,

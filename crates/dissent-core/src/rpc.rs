@@ -106,6 +106,12 @@ pub(crate) enum Request {
         community: CommunityId,
         blobs: Vec<([u8; 32], u64)>,
     },
+    /// History keys an active member sends a device it has just admitted, so the device need not wait for its own
+    /// fetch. Answered `Ack`. Appended, see `history`.
+    PushHistoryKeys {
+        community: CommunityId,
+        pairs: Vec<(u64, [u8; 32])>,
+    },
     /// The invite preview of a community, for a holder of its invite secret. `token` is the token of
     /// that secret, which the responder checks itself, since the requester is not yet a member.
     /// `invite_id` names the invite used, so the answer can say whether it is live. Appended, see
@@ -137,6 +143,12 @@ pub(crate) enum Request {
     /// picture set before the contact existed still arrives. A device from before this cannot decode
     /// it and answers with an error. Appended, see `profile_sync`.
     ProfileSync(Box<crate::avatars::SignedProfile>),
+    /// The keys of a private channel, for a reader's device: the reader is this device's root. Appended,
+    /// see `private_keys`. Answered only to a reader in the responder's DAG.
+    ChannelKeys {
+        community: CommunityId,
+        channel: dissent_events::ChannelId,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,6 +219,8 @@ pub(crate) enum Response {
         profile: Box<crate::avatars::SignedProfile>,
         banner: Option<Box<crate::profile_banners::SignedBanner>>,
     },
+    /// The `(generation, key)` pairs of a private channel, for a reader. See `Request::ChannelKeys`. Appended.
+    ChannelKeys(Vec<(u64, [u8; 32])>),
 }
 
 impl Request {
@@ -229,7 +243,9 @@ impl Request {
             | Request::MemberSealedSupport { community }
             | Request::HistoryKeys { community }
             | Request::MirrorHint { community, .. }
-            | Request::FetchRaw { community, .. } => Some(*community),
+            | Request::PushHistoryKeys { community, .. }
+            | Request::FetchRaw { community, .. }
+            | Request::ChannelKeys { community, .. } => Some(*community),
             _ => None,
         }
     }

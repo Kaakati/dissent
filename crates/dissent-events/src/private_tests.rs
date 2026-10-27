@@ -217,6 +217,18 @@ fn a_plain_or_mls_message_in_a_private_channel_is_refused() {
 }
 
 #[test]
+fn a_plain_reply_or_edit_in_a_private_channel_is_refused() {
+    let mut f = Fixture::new();
+    let bob = f.bob.id();
+    f.access(W::Owner, true, vec![], vec![bob]);
+    let target = f.post(W::Bob, "hidden");
+    let reply = f.push_on_channel(W::Bob, Payload::Reply { target, text: "in the clear".into() });
+    assert_eq!(f.rejection_of(reply), Some(Rejection::NoPermission));
+    let edit = f.push_on_channel(W::Bob, Payload::Edit { target, text: "in the clear".into() });
+    assert_eq!(f.rejection_of(edit), Some(Rejection::NoPermission));
+}
+
+#[test]
 fn a_private_message_in_a_public_channel_is_malformed() {
     let mut f = Fixture::new();
     let ev = f.post(W::Bob, "no access was ever set");
@@ -243,6 +255,17 @@ fn a_change_that_only_adds_readers_keeps_the_generation() {
     f.access(W::Owner, true, vec![], vec![bob]);
     f.access(W::Owner, true, vec![], vec![bob, mod_]);
     assert_eq!(f.state().key_generation.get(&f.channel).copied().unwrap_or(0), 0);
+}
+
+#[test]
+fn adding_a_reader_under_since_join_starts_a_new_generation() {
+    let mut f = Fixture::new();
+    let (bob, mod_) = (f.bob.id(), f.mod_.id());
+    f.push(W::Owner, Payload::HistoryVisibility { setting: crate::HistorySetting::SinceJoin });
+    f.access(W::Owner, true, vec![], vec![bob]);
+    assert_eq!(f.state().key_generation.get(&f.channel).copied().unwrap_or(0), 0, "the first grant starts no new key");
+    f.access(W::Owner, true, vec![], vec![bob, mod_]);
+    assert_eq!(f.state().key_generation.get(&f.channel), Some(&1), "the newcomer gets a generation of its own");
 }
 
 #[test]

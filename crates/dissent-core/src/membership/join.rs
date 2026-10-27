@@ -39,6 +39,8 @@ impl Engine {
             Err(e) => return Response::Error(format!("could not add: {e}")),
         };
         self.note_epoch(community, &[conn_from]);
+        // The joiner gets the history keys it may have now, so it need not wait for its own fetch.
+        self.push_history_keys(community, conn_from);
         self.publish_commit(community, commit.commit).await;
         self.refresh_history_ready(community).await;
         // Check the new member's devices for history messages before the welcome goes out, so the joiner's first

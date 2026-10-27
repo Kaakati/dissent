@@ -26,6 +26,7 @@ mod invites;
 mod leave;
 mod mentions;
 mod member_sealed;
+mod private_channels;
 mod mirror_hints;
 mod legacy_state;
 mod part6;

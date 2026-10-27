@@ -39,8 +39,13 @@ const ASK_WAIT: Duration = Duration::from_secs(5);
 const PRESENCE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// Member devices asked for history keys, and how many must answer before a joiner stops asking.
 const HISTORY_FROM: usize = 3;
-const RETRY_EVERY: Duration = Duration::from_secs(5);
-const RETRY_TRIES: usize = 24;
+/// A joiner's first retry, then doubling up to `RETRY_CAP`. A member coming online or a new key cuts a wait short.
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_CAP: Duration = Duration::from_secs(60);
+const RETRY_TRIES: usize = 30;
+/// How often a push is tried, and how many times, before the joiner's own fetch takes over.
+const PUSH_EVERY: Duration = Duration::from_secs(1);
+const PUSH_TRIES: usize = 4;
 
 /// The keys of one community: the history key of each epoch, by epoch number.
 pub(crate) type KeyMap = BTreeMap<u64, [u8; 32]>;
@@ -138,6 +143,74 @@ impl Engine {
         self.store_keys(&paths, community, |keys| {
             keys.entry(epoch).or_insert(key);
         });
+        // A new epoch's key is news to a joiner that is waiting for keys.
+        self.inner.member_seen.notify_waiters();
+    }
+
+    /// Sends the keys a device may have, to a device this member has just admitted. Under `All` every epoch; under
+    /// `SinceJoin` only the epochs from the device's join. A push is tried a few times, then the device's own fetch
+    /// takes over.
+    pub(crate) fn push_history_keys(&self, community: CommunityId, device: DeviceId) {
+        let engine = self.clone();
+        self.spawn_task(async move {
+            engine.send_history_keys(community, device).await;
+        });
+    }
+
+    async fn send_history_keys(&self, community: CommunityId, device: DeviceId) {
+        for _ in 0..PUSH_TRIES {
+            let floor = {
+                let w = self.read();
+                let Some(c) = w.communities.get(&community) else {
+                    return;
+                };
+                match c.state().history {
+                    HistorySetting::All => 0,
+                    HistorySetting::SinceJoin => match c.epochs.join_epoch(&device) {
+                        Some(epoch) => epoch,
+                        None => return,
+                    },
+                }
+            };
+            let paths = self.read().paths.clone();
+            let pairs = match self.with_keys(&paths, community, |keys| {
+                keys.iter().filter(|(e, _)| **e >= floor).map(|(e, k)| (*e, *k)).collect::<Vec<_>>()
+            }) {
+                Ok(pairs) if !pairs.is_empty() => pairs,
+                _ => return,
+            };
+            let req = Request::PushHistoryKeys { community, pairs };
+            match tokio::time::timeout(ASK_WAIT, self.call(device, &req)).await {
+                Ok(Ok(Response::Ack)) => return,
+                _ => tokio::time::sleep(PUSH_EVERY).await,
+            }
+        }
+    }
+
+    /// Answers `PushHistoryKeys`. Only an active member may send keys, and what it sends is kept like a fetched key.
+    pub(crate) fn accept_history_keys(
+        &self,
+        from: DeviceId,
+        community: CommunityId,
+        pairs: Vec<(u64, [u8; 32])>,
+    ) -> Response {
+        {
+            let w = self.read();
+            let Some(root) = w.directory.root_of(&from) else {
+                return Response::Error("unknown device".into());
+            };
+            let Some(c) = w.communities.get(&community) else {
+                return Response::Error("unknown community".into());
+            };
+            if !crate::membership::CommitRules::of(c).is_person(&root) {
+                return Response::Error("not an active member".into());
+            }
+        }
+        if self.remember_history_keys(community, &pairs) {
+            self.unseal_pending(community);
+            self.announce_channels(community);
+        }
+        Response::Ack
     }
 
     /// The history key of `epoch`, if this device holds it. Read from memory, never from the file.
@@ -345,7 +418,10 @@ impl Engine {
             }
             match self.call(device, &Request::HistoryKeys { community }).await {
                 Ok(Response::HistoryKeys(pairs)) => {
-                    answers += 1;
+                    // An answer with no keys does not end the fetch: the member may simply not hold them yet.
+                    if !pairs.is_empty() {
+                        answers += 1;
+                    }
                     learned |= self.remember_history_keys(community, &pairs);
                 }
                 _ => debug!(community = %community, peer = %device, "no history keys from this member"),
@@ -434,6 +510,7 @@ impl Engine {
     /// `fetch_history_keys`, retried until a member answers, for up to `RETRY_TRIES` attempts. A joiner runs
     /// this after it joins.
     pub(crate) async fn fetch_history_keys_until_answered(&self, community: CommunityId) {
+        let mut wait = RETRY_FIRST;
         for _ in 0..RETRY_TRIES {
             if !self.read().communities.contains_key(&community) {
                 return;
@@ -441,7 +518,14 @@ impl Engine {
             if self.fetch_history_keys(community).await > 0 {
                 return;
             }
-            tokio::time::sleep(RETRY_EVERY).await;
+            // Wait for the backoff, or sooner when a member comes online or a new key is recorded.
+            let woken = self.inner.member_seen.notified();
+            tokio::pin!(woken);
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = &mut woken => {}
+            }
+            wait = (wait * 2).min(RETRY_CAP);
         }
     }
 }

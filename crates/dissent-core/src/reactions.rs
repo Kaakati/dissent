@@ -41,11 +41,12 @@ impl Engine {
         } else {
             crate::attachments::pack_all(&text, &[], &[], &[], Some(&mentions))?
         };
-        let (epoch, ciphertext) = self.seal(community, &text)?;
-        let payload = Payload::Sealed {
-            epoch,
-            kind: SealedKind::Reply { target },
-            ciphertext,
+        let kind = SealedKind::Reply { target };
+        let payload = if self.is_private_channel(community, channel) {
+            self.private_payload(community, channel, kind, &text).await?
+        } else {
+            let (epoch, ciphertext) = self.seal(community, &text)?;
+            Payload::Sealed { epoch, kind, ciphertext }
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, text);
@@ -89,16 +90,16 @@ impl Engine {
     ) -> Result<()> {
         let emoji = normalize_emoji(&emoji)
             .map_err(|e| CoreError::Invalid(format!("emoji: {e:?}")))?;
-        let (epoch, ciphertext) = self.seal(community, &emoji)?;
         let kind = if react {
             SealedKind::React { target }
         } else {
             SealedKind::Unreact { target }
         };
-        let payload = Payload::Sealed {
-            epoch,
-            kind,
-            ciphertext,
+        let payload = if self.is_private_channel(community, channel) {
+            self.private_payload(community, channel, kind, &emoji).await?
+        } else {
+            let (epoch, ciphertext) = self.seal(community, &emoji)?;
+            Payload::Sealed { epoch, kind, ciphertext }
         };
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, emoji);

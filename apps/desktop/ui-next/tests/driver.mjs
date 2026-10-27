@@ -259,7 +259,10 @@ check('Create Channel is disabled while the name is empty', createDisabled === t
 await ev(`document.querySelector('[role="dialog"] input[aria-label="Channel name"]').focus()`);
 await typeText('Hello World!');
 check('the text channel name is normalised as typed: hello-world', (await ev(`document.querySelector('[role="dialog"] input[aria-label="Channel name"]').value === 'hello-world'`)) === true);
-check('the Private Channel switch is disabled', (await ev(`document.querySelector('[role="dialog"] input[role="switch"]').disabled === true`)) === true);
+check('the Private Channel switch is on for a text channel', (await ev(`document.querySelector('[role="dialog"] input[role="switch"]').disabled === false`)) === true);
+await ev(`document.querySelectorAll('[role="dialog"] input[name="channel-kind"]')[1].click()`);
+await sleep(200);
+check('a voice channel cannot be private', (await ev(`document.querySelector('[role="dialog"] input[role="switch"]').disabled === true`)) === true);
 await ev(`document.querySelectorAll('[role="dialog"] input[name="channel-kind"]')[1].click()`);
 await sleep(200);
 await ev(`document.querySelector('[role="dialog"] input[aria-label="Channel name"]').focus()`);

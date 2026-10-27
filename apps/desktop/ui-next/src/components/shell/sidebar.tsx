@@ -2,7 +2,7 @@
 // channels and voice channels with the people in them. Controls whose views are not ported yet are shown disabled.
 // Ported from the old UI's views/sidebar.js.
 import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Headphones, Link as LinkIcon, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
+import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
 import { openChannelSettings } from '@/components/channel-settings/channel-settings';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
@@ -374,7 +374,11 @@ function ServerList({ community }: { community: CommunityView }) {
               onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id) : undefined}
             >
               {isUnread ? <UnreadDot /> : null}
-              <Hash className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              {ch.private ? (
+                <Lock className="size-5 shrink-0 text-muted-foreground" aria-label="Private channel" role="img" />
+              ) : (
+                <Hash className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              )}
               <span className="min-w-0 flex-1 truncate" title={`#${ch.name}`}>{ch.name}</span>
               {has('mentions') && ch.mentions ? (
                 <span aria-label={`${ch.mentions} mentions`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-danger px-1 text-[10px] leading-none font-bold text-white">{ch.mentions}</span>

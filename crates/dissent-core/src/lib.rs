@@ -18,6 +18,9 @@ mod identity_flows;
 mod local;
 mod communities;
 mod epoch_keys;
+mod private_keys;
+#[cfg(test)]
+mod private_create_tests;
 mod contact_times;
 mod contacts;
 mod conv_actions;
@@ -96,6 +99,6 @@ pub use peer_exchange::AddrAnswer;
 pub use views::*;
 pub use call_video::{list_share_sources, ShareSource, ShareTarget};
 pub use channels::{parse_invite_id, ChannelPatch};
-pub use dissent_events::{ChannelVisibility, HistorySetting, Trait};
+pub use dissent_events::{ChannelVisibility, HistorySetting, Role, Trait};
 pub use animated_banner::{CropRect, EncodedBanner};
 pub use epoch_keys::MemberOnlyStatus;
