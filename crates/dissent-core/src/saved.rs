@@ -101,6 +101,9 @@ impl Engine {
     pub fn list_bookmarks(&self) -> Vec<Bookmark> {
         let path = bookmarks_path(self);
         let mut all: Vec<Bookmark> = read_bin(&path).ok().flatten().unwrap_or_default();
+        // Stored oldest first. Reversing before the stable sort keeps the later save first when two
+        // share a millisecond.
+        all.reverse();
         all.sort_by_key(|b| std::cmp::Reverse(b.saved_ms));
         all
     }
