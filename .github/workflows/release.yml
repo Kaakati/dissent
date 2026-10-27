@@ -109,13 +109,16 @@ jobs:
       # Build every test binary once, so the test and loopback steps below only run them.
       - name: Build tests
         run: cargo test --workspace --no-run
+      # A hung test fails the run in minutes rather than holding the release for hours.
       - name: Tests (networked tests stay ignored)
+        timeout-minutes: 30
         run: cargo test --workspace
       # Loopback-only tests that are #[ignore]d locally so Windows Firewall doesn't prompt for every
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
       # also holds tests that need the public network: internet.rs and any test named internet_*. `--skip`
       # matches a substring, so `internet` skips both.
       - name: Loopback networked tests
+        timeout-minutes: 40
         run: "cargo test -p dissent-core --test it -- --ignored --skip internet"
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.

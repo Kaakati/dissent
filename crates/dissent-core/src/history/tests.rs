@@ -4,11 +4,11 @@
 use std::sync::atomic::Ordering;
 
 use crate::membership::tests::{eventually, general, readable, Node};
-use crate::testutil::bounded;
+use crate::testutil::on_own_thread;
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_message_sent_while_an_older_member_is_present_stays_locked_for_joiners() {
-    bounded(async {
+#[test]
+fn a_message_sent_while_an_older_member_is_present_stays_locked_for_joiners() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-mixed").await;
         let id = alice.engine.create_community("Mixed".into()).await.expect("create").id.parse().unwrap();
         alice
@@ -45,13 +45,12 @@ async fn a_message_sent_while_an_older_member_is_present_stays_locked_for_joiner
         })
         .await;
         assert!(first.id != second.id);
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_send_with_every_other_member_offline_returns_quickly() {
-    bounded(async {
+#[test]
+fn a_send_with_every_other_member_offline_returns_quickly() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-offline").await;
         let id = alice.engine.create_community("Quiet".into()).await.expect("create").id.parse().unwrap();
         let channel = general(&alice.engine, id);
@@ -65,13 +64,12 @@ async fn a_send_with_every_other_member_offline_returns_quickly() {
         let started = std::time::Instant::now();
         alice.engine.send_message(id, channel, "into the void".into()).await.expect("send");
         assert!(started.elapsed() < std::time::Duration::from_secs(1), "a send took {:?}", started.elapsed());
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_history_form_switches_on_once_the_flag_is_set() {
-    bounded(async {
+#[test]
+fn the_history_form_switches_on_once_the_flag_is_set() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-flag").await;
         let id = alice.engine.create_community("Flag".into()).await.expect("create").id.parse().unwrap();
         // Nobody else is a member, so there is nothing to ask.
@@ -90,13 +88,12 @@ async fn the_history_form_switches_on_once_the_flag_is_set() {
         bob.engine.inner.history_support.store(false, Ordering::Relaxed);
         assert!(!alice.engine.refresh_history_ready(id).await);
         assert!(alice.engine.history_seal(id, "unsupported").is_none());
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_thousand_sends_read_the_key_file_at_most_once() {
-    bounded(async {
+#[test]
+fn a_thousand_sends_read_the_key_file_at_most_once() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-reads").await;
         let id = alice.engine.create_community("Reads".into()).await.expect("create").id.parse().unwrap();
         let before = alice.engine.inner.history_file_reads.load(Ordering::Relaxed);
@@ -107,13 +104,12 @@ async fn a_thousand_sends_read_the_key_file_at_most_once() {
         let reads = alice.engine.inner.history_file_reads.load(Ordering::Relaxed) - before;
         assert!(reads <= 1, "the key file was read {reads} times");
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "1000 sends took {:?}", started.elapsed());
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_member_updating() {
-    bounded(async {
+#[test]
+fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_member_updating() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-wake").await;
         let id = alice.engine.create_community("Wake".into()).await.expect("create").id.parse().unwrap();
         let invite = alice.engine.create_invite(id).await.expect("invite");
@@ -132,13 +128,12 @@ async fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_m
             assert!(started.elapsed() < std::time::Duration::from_secs(2), "still the older form after {:?}", started.elapsed());
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_restart_starts_from_the_last_readiness_answer() {
-    bounded(async {
+#[test]
+fn a_restart_starts_from_the_last_readiness_answer() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-restart-ready").await;
         let id = alice.engine.create_community("Restart".into()).await.expect("create").id.parse().unwrap();
         let invite = alice.engine.create_invite(id).await.expect("invite");
@@ -151,13 +146,12 @@ async fn a_restart_starts_from_the_last_readiness_answer() {
         let again = Node::boot(identity, dir, port).await;
         // No check runs after the restart: the saved "yes" is the answer, so the first send is in the new form.
         assert!(again.engine.history_seal(id, "right after the restart").is_some());
-    })
-    .await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_member_admitted_by_us_is_counted_before_the_welcome_goes_out() {
-    bounded(async {
+#[test]
+fn a_member_admitted_by_us_is_counted_before_the_welcome_goes_out() {
+    on_own_thread(|| async {
         let alice = Node::named("alice-admit").await;
         let id = alice.engine.create_community("Admit".into()).await.expect("create").id.parse().unwrap();
         let invite = alice.engine.create_invite(id).await.expect("invite");
@@ -169,6 +163,5 @@ async fn a_member_admitted_by_us_is_counted_before_the_welcome_goes_out() {
         })
         .await;
         assert!(alice.engine.history_seal(id, "no check to wait for").is_some());
-    })
-    .await;
+    });
 }
