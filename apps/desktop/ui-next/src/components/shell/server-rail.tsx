@@ -5,15 +5,16 @@
 // events, not HTML5 drag and drop, which the webview does not deliver reliably. The order is this device's own and is
 // saved with set_server_order; Home and "+" stay where they are.
 import { has } from '@/lib/features';
-import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import { Plus } from 'lucide-react';
-import { DissentMark } from '@/components/dissent-mark';
+import { OwlMark } from '@/components/owl-mark';
 import { GroupAvatar } from '@/components/shell/sidebar';
 import { UserAvatar } from '@/components/user-avatar';
 import { openServerDialog } from '@/components/dialogs/server-dialog';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { imageOf } from '@/lib/images';
+import { bannersStill, subscribeBannerMotion } from '@/lib/banners';
+import { iconSrc } from '@/lib/images';
 import { hueBackground, hueOf, initials } from '@/lib/identity';
 import { openServerRailMenu } from '@/components/menus/server-rail-menu';
 import { useMutes } from '@/lib/mutes';
@@ -60,6 +61,8 @@ export function ServerRail() {
   const communities = useShell((s) => s.communities);
   const unread = useShell((s) => s.unread);
   const prefs = useServerPrefs((s) => s.prefs);
+  // An animated icon shows its still frame while motion is held, so the rail redraws when that changes.
+  useSyncExternalStore(subscribeBannerMotion, bannersStill);
   // The servers' preferences, for the muted servers' unread dots. Loaded again when the list of servers changes.
   const idKey = communities.map((c) => c.id).join(',');
   useEffect(() => {
@@ -158,7 +161,7 @@ export function ServerRail() {
             onClick={() => void openHome()}
             className={cn('size-12 rounded-2xl bg-chat text-brand hover:bg-accent hover:text-white', onHome && 'rounded-2xl bg-accent text-white')}
           >
-            <DissentMark className="size-6" />
+            <OwlMark className="size-6" />
           </Button>
         </Labelled>
         {dmUnread > 0 ? <Badge count={dmUnread} label={`${dmUnread} unread conversations`} /> : null}
@@ -172,7 +175,7 @@ export function ServerRail() {
         const active = route.kind === 'server' && route.communityId === c.id;
         // A muted server shows no unread dot. Its mentions still count on the badge.
         const hasUnread = [...unread].some((k) => k.startsWith(`ch:${c.id}:`)) && !isServerMuted(prefs[c.id] ?? DEFAULT_PREFS);
-        const image = imageOf(c.id);
+        const image = iconSrc(c.id);
         const dragging = drag !== null && drag.id === c.id;
         return (
           <Fragment key={c.id}>

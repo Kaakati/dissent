@@ -25,6 +25,8 @@ pub struct ShellSettings {
     pub notifications_muted: bool,
     /// The "still running in the tray" notice has been shown once.
     pub tray_notice_shown: bool,
+    /// Emoticons such as `:D` are sent as typed, not converted to emoji. Off by default, so they convert.
+    pub emoticons_as_text: bool,
 }
 
 /// Why "start at login" is not offered in `mode`, for the settings page. `None` when it is offered. A portable build
@@ -88,10 +90,20 @@ mod tests {
             start_at_login: true,
             notifications_muted: true,
             tray_notice_shown: true,
+            emoticons_as_text: true,
         };
         save(&dir, &saved).unwrap();
         assert_eq!(load(&dir), saved);
         assert!(!dir.join("shell.json.tmp").exists(), "the temporary file is renamed away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_the_emoticon_setting_converts_emoticons() {
+        let dir = scratch("emoticons");
+        std::fs::write(dir.join(FILE), br#"{"keep_running": true, "start_at_login": false, "notifications_muted": false, "tray_notice_shown": true}"#).unwrap();
+        let loaded = load(&dir);
+        assert!(loaded.keep_running && !loaded.emoticons_as_text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -478,7 +478,7 @@ The sidebar's conversation menu shows these items, each only when its feature is
 | Menu item | Feature | Command | Notes |
 |---|---|---|---|
 | Add to favorites / Remove from favorites | `pins` | `pin_conversation({ key, pinned })` | Shows the star icon. The label says favorites and the command keeps its engine name `pin_conversation`. |
-| Close DM | `close_dm` | `close_conversation({ key })` | Removes a DM from the sidebar. `key` is the conversation key the sidebar lists. |
+| Close DM | `close_dm` | `close_conversation({ key })` | Removes a DM from the sidebar and keeps its history. An open pane for it goes to Friends. It comes back when a newer message arrives or when the DM is opened again (`reopen_conversation({ key })`). `key` is the conversation key the sidebar lists. |
 | Ignore / Unignore | `ignore` | `ignore_user({ user })`, `unignore_user({ user })` | Ignore hides their messages without telling them, and their messages render collapsed. |
 
 `ignored_users()` returns the base32 root ids of ignored users as an array of strings. The UI loads it at boot and after each change. Without the `ignore` feature nobody is ignored, and the menu item does not render. Ignoring applies only to DMs. Group and channel menus never show it. The item stays hidden until the backend reports `ignore`.

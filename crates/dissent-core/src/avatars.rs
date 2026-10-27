@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use dissent_events::{ChannelId, Hlc, Payload, Picture, Role, MAX_ANIMATED_BANNER_BYTES, MAX_PICTURE_BYTES};
+use dissent_events::{AnimatedIcon, ChannelId, Hlc, Payload, Picture, Role, MAX_ANIMATED_BANNER_BYTES, MAX_PICTURE_BYTES};
 use dissent_files::{cipher_len, FileRef, Input};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId, Signature, Vault};
 use std::path::Path;
@@ -191,11 +191,18 @@ impl World {
             .and_then(|p| picture_file(&self.paths, &p))
     }
 
-    /// The icon of a community, if it has one this device holds.
+    /// The icon of a community, if it has one this device holds. For an animated icon, its GIF.
     pub(crate) fn icon_of(&self, c: &Community) -> Option<String> {
         c.state()
-            .icon
-            .and_then(|(_, picture)| picture)
+            .shown_icon()
+            .and_then(|(image, _)| picture_file(&self.paths, &image))
+    }
+
+    /// The still frame of a community's animated icon, if it has one this device holds.
+    pub(crate) fn icon_poster_of(&self, c: &Community) -> Option<String> {
+        c.state()
+            .shown_icon()
+            .and_then(|(_, poster)| poster)
             .and_then(|p| picture_file(&self.paths, &p))
     }
 
@@ -273,6 +280,14 @@ impl Engine {
 
     async fn publish_icon(&self, community: CommunityId, avatar: Option<Picture>) -> Result<()> {
         self.author_publish(community, ChannelId::CONTROL, Payload::CommunityIconSet { avatar })
+            .await?;
+        self.emit_owner(Owner::Community(community));
+        Ok(())
+    }
+
+    /// Publishes an animated icon, or removes the icon with `None`. See `Payload::CommunityIconAnimated`.
+    pub(crate) async fn publish_animated_icon(&self, community: CommunityId, icon: Option<AnimatedIcon>) -> Result<()> {
+        self.author_publish(community, ChannelId::CONTROL, Payload::CommunityIconAnimated { icon })
             .await?;
         self.emit_owner(Owner::Community(community));
         Ok(())
@@ -521,6 +536,15 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Community(community),
                 picture: *avatar,
                 poster: None,
+                roots: c.state().members.keys().copied().collect(),
+            })
+        }
+        Payload::CommunityIconAnimated { icon } => {
+            let current = c.state().animated_icon.is_some_and(|(_, i)| i == *icon);
+            current.then(|| PictureFetch {
+                owner: Owner::Community(community),
+                picture: icon.map(|i| i.image),
+                poster: icon.map(|i| i.poster),
                 roots: c.state().members.keys().copied().collect(),
             })
         }

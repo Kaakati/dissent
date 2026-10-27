@@ -12,6 +12,8 @@ import { api } from '@/lib/api';
 import { MAX_FILE_LABEL, guessMime, isOverLimit } from '@/lib/attachments';
 import { useChat, type StagedFile } from '@/lib/chat';
 import { useShell } from '@/lib/store';
+import { convertEmoticons } from '@/lib/emoticons';
+import { useShellPrefs } from '@/lib/shell-prefs';
 import { MAX_ROWS, activeMention, candidatesFor, mentionArg, mentionText, picksInText, type Candidate, type MentionPick } from '@/lib/mentions';
 import { pickFiles, sendFiles, sendMessage, sendReply } from '@/lib/chat-actions';
 import { copyText } from '@/lib/clipboard';
@@ -47,7 +49,10 @@ async function copyContactLink(): Promise<void> {
 }
 
 export function Composer({ view }: { view: ChatView }) {
-  const replyTo = useChat((s) => s.replyTo);
+  // A reply belongs to the view that holds its message, so one started in another chat (the call chat, or the chat behind
+  // a call) does not show here.
+  const replying = useChat((s) => s.replyTo);
+  const replyTo = replying && view.items.some((m) => m.id === replying.id) ? replying : null;
   const staged = useChat((s) => s.staged);
   const [text, setText] = useState('');
   // "@" autocomplete: the token under the caret, the highlighted row, and the members picked so far.
@@ -104,8 +109,10 @@ export function Composer({ view }: { view: ChatView }) {
   const send = async (answered = false) => {
     if (sending.current) return;
     const value = text;
-    const trimmed = value.trim();
-    const { staged: files, replyTo: reply } = useChat.getState();
+    // Emoticons become emoji in the text that is sent, so every reader sees them, older versions included.
+    const trimmed = (useShellPrefs.getState().convertEmoticons ? convertEmoticons(value) : value).trim();
+    const { staged: files, replyTo: pending } = useChat.getState();
+    const reply = pending && view.items.some((m) => m.id === pending.id) ? pending : null;
     if (!trimmed && files.length === 0) return;
     if (!answered && files.length === 0 && previews && !previews.on && !previews.prompted && /https:\/\//.test(trimmed)) {
       setAskPreviews(true);
@@ -153,6 +160,20 @@ export function Composer({ view }: { view: ChatView }) {
   };
 
   const onChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
+    const el = e.target;
+    // Typing a space or a new line after an emoticon turns it into emoji at once, as Discord does. Only the text before
+    // the caret changes, so the caret stays after what was typed. An escaped one keeps its backslash until the send.
+    const caret = el.selectionStart;
+    if (useShellPrefs.getState().convertEmoticons && caret > 0 && /\s/.test(el.value[caret - 1]) && el.value.length > text.length) {
+      const before = convertEmoticons(el.value.slice(0, caret), { keepEscapes: true });
+      if (before !== el.value.slice(0, caret)) {
+        const next = before + el.value.slice(caret);
+        setText(next);
+        typed(view.target, next);
+        requestAnimationFrame(() => el.setSelectionRange(before.length, before.length));
+        return;
+      }
+    }
     setText(e.target.value);
     setMention(view.target.kind === 'channel' && has('mentions') ? activeMention(e.target.value, e.target.selectionStart) : null);
     setMentionIndex(0);

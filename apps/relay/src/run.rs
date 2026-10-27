@@ -17,7 +17,7 @@ pub const SPEC: Spec = Spec {
     title: "Dissent Relay",
     label: "org.dissent.relay",
     description: "Dissent relay: carries encrypted traffic between devices that cannot connect directly",
-    path_flags: &["--data-dir", "--cert", "--key", "--acme-cache", "--log-dir"],
+    path_flags: &["--data-dir", "--cert", "--key", "--acme-cache", "--log-dir", "--passphrase-file"],
     user_by_default: false,
 };
 
@@ -81,6 +81,35 @@ pub struct RunArgs {
     /// Write rolling log files here, as well as to the console.
     #[arg(long, value_name = "DIR", env = "DISSENT_RELAY_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
+
+    /// Run as the relay for your own servers: only their members may use it. Each invite joins the
+    /// server as storage, so the relay learns the members' devices. Repeat the flag, or separate invites
+    /// with commas. Needs --data-dir.
+    #[arg(long, value_name = "INVITE", env = "DISSENT_RELAY_JOIN", value_delimiter = ',')]
+    pub join: Vec<String>,
+
+    /// File whose first line is the passphrase that seals the relay's identity. Used with --join.
+    #[arg(long, value_name = "PATH", env = "DISSENT_RELAY_PASSPHRASE_FILE")]
+    pub passphrase_file: Option<PathBuf>,
+
+    /// Most bytes per second the relay reads from its clients together, with --join. Each client gets
+    /// an equal share, over the connection cap.
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = crate::hosted::DEFAULT_TOTAL_BYTES_PER_SECOND,
+        env = "DISSENT_RELAY_BANDWIDTH"
+    )]
+    pub bandwidth: u32,
+
+    /// Most connections the relay holds open at once, with --join.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value_t = crate::hosted::DEFAULT_MAX_CONNECTIONS,
+        env = "DISSENT_RELAY_MAX_CONNECTIONS"
+    )]
+    pub max_connections: usize,
 }
 
 #[derive(Debug, Subcommand)]
@@ -138,7 +167,7 @@ pub struct LevelArgs {
 }
 
 /// The TLS mode the flags select.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Mode {
     Dev,
     Tls(Tls),
@@ -200,6 +229,9 @@ pub fn run_blocking(run: RunArgs, stop: Arc<Notify>) -> Result<()> {
 }
 
 async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
+    if !run.join.is_empty() {
+        return crate::members::serve(&run, &mode, stop).await;
+    }
     let (config, tls) = match mode {
         Mode::Dev => (dev_config(run.bind), false),
         Mode::Tls(tls) => (
@@ -226,7 +258,7 @@ async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
 }
 
 /// Resolves when Ctrl-C, SIGTERM, or the service stop notification arrives.
-async fn shutdown_requested(stop: Arc<Notify>) {
+pub(crate) async fn shutdown_requested(stop: Arc<Notify>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

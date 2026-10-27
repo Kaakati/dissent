@@ -5,7 +5,8 @@
 // Sections: core (the shell, chat, transfers, dialogs, menus, Settings), friends (Friends, DM panel, profile card,
 // addresses), calls (lobby, incoming call, voice channels, voice popovers, Settings > Voice), startup (gate, onboarding,
 // Settings). Exits 1 when any check fails.
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch } from './cdp.mjs';
@@ -17,12 +18,46 @@ const BASE = `http://127.0.0.1:${UI_PORT}`;
 const SCRATCH = process.env.SCRATCH ?? join(tmpdir(), 'dissent-ui-driver');
 mkdirSync(`${SCRATCH}/shots`, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Polls `test` (an async function) until it is truthy, up to `ms`. Resolves to the last value, so a failure shows it.
+const until = async (test, ms = 15000) => {
+  const end = Date.now() + ms;
+  let value = await test();
+  while (!value && Date.now() < end) {
+    await sleep(100);
+    value = await test();
+  }
+  return value;
+};
 
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok: Boolean(ok), detail });
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` :: ${detail}` : ''}`);
 };
+
+// Static guard for the packaged app's policy. A data: image is blocked unless img-src allows data:, and the policy is the
+// csp in tauri.conf.json. The check reads that img-src and scans the app's own source (not the mock) for data:image URLs.
+{
+  const config = JSON.parse(readFileSync(fileURLToPath(new URL('../../src-tauri/tauri.conf.json', import.meta.url)), 'utf8'));
+  const imgSrc = config.app.security.csp.split(';').map((d) => d.trim()).find((d) => d.startsWith('img-src')) ?? '';
+  const dataImageFiles = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) {
+        if (name !== 'mock') walk(path);
+      } else if (/\.(tsx?|jsx?)$/.test(name) && /data:image\//.test(readFileSync(path, 'utf8'))) {
+        dataImageFiles.push(path.slice(path.indexOf('src')));
+      }
+    }
+  };
+  walk(fileURLToPath(new URL('../src', import.meta.url)));
+  check(
+    'the packaged app\'s img-src allows data: wherever a source file shows a data: image',
+    dataImageFiles.length === 0 || /(^|\s)data:(\s|$)/.test(imgSrc),
+    `${dataImageFiles.length} files use data:image (${dataImageFiles.join(', ')}); img-src is "${imgSrc}"`,
+  );
+}
 
 // Every section's page reports its console errors here; one check per section, so the list is not repeated.
 // The wording past three names is a pure function of the names, so it is read here, not through the page (the mock has
@@ -390,7 +425,7 @@ check('SS1 the owner\'s server menu offers Server Settings first', (await menuIt
 await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
 await sleep(400);
 check('SS2 Server Settings opens on Server Profile', (await ev(`document.querySelector('${SS} h1')?.textContent`)) === 'Server Profile');
-check('SS3 the nav lists Server Profile, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Members', 'Invites', 'Bans']));
+check('SS3 the nav lists Server Profile and Boosts, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Boosts', 'Members', 'Invites', 'Bans']));
 check('SS4 the form holds Name, Server Icon, Banner, Traits, Message history and Description', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} section h2')].map((n) => n.textContent))`)) === JSON.stringify(['Name', 'Server Icon', 'Banner', 'Traits', 'Message history', 'Description']));
 check('SS5 the name field holds the name, stops at 64, and nothing is unsaved', (await ev(`(() => { const i = document.querySelector('${SS} input[aria-label="Server Name"]'); return i.value === 'Settings test' && i.maxLength === 64; })()`)) === true && !(await ssBar()));
 check('SS6 the icon block offers Change Server Icon', (await ev(`!!${ssButton('Change Server Icon')}`)) === true);
@@ -458,7 +493,7 @@ await ev(`(() => { const native = HTMLInputElement.prototype.click; window.__nat
 await ev(`document.querySelector('${SS} [data-banner-upload]').click()`);
 await sleep(200);
 await ev(`(async () => {
-  const blob = await (await fetch('app-icon-96.png')).blob();
+  const blob = await (await fetch('app-icon-128.png')).blob();
   const dt = new DataTransfer();
   dt.items.add(new File([blob], 'wide.png', { type: 'image/png' }));
   window.__pickerInput.files = dt.files;
@@ -476,7 +511,7 @@ await sleep(900);
 await ev(`${ssButton('Change Server Icon')}.click()`);
 await sleep(200);
 await ev(`(async () => {
-  const blob = await (await fetch('app-icon-96.png')).blob();
+  const blob = await (await fetch('app-icon-128.png')).blob();
   const dt = new DataTransfer();
   dt.items.add(new File([blob], 'icon.png', { type: 'image/png' }));
   window.__pickerInput.files = dt.files;
@@ -557,10 +592,34 @@ await typeText('Join us: dissent://invite/mock-rustaceans');
 await press('Enter');
 await sleep(1500);
 check('SS27a the invite card shows the server\'s banner, description and traits', (await ev(`(() => { const c = [...document.querySelectorAll('main [data-server-card]')].at(-1); if (!c) return 'no card'; return [c.querySelector('[data-card-banner]').dataset.cardBanner, c.querySelector('[data-card-description]')?.textContent, [...c.querySelectorAll('[data-card-traits] li')].map((n) => n.textContent).join('|')].join(' / '); })()`)) === 'preset / Systems programmers sharing crates, questions and the occasional crab. / 🦀Rust|🛠️Tooling', String(await ev(`[...document.querySelectorAll('main [data-server-card]')].length`)));
+// The invite card states the answering member's boost.
+check('BS0 the invite card shows the boost level and hosts', (await ev(`[...document.querySelectorAll('main [data-server-card]')].at(-1)?.querySelector('[data-card-boost]')?.textContent`)) === 'Level 1 · 1 relay host');
+
+// Boosts: a server with no host is level 0 and shows no level; publishing a relay makes this person a host.
+check('BS1 a server with no relay host shows no level by its name', (await ev(`!document.querySelector('${SIDEBAR} [data-boost-level]')`)) === true);
+await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
+await sleep(250);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await sleep(400);
+await ev(`${ssButton('Boosts')}.click()`);
+await sleep(300);
+check('BS2 Boosts starts at level 0 and says nothing basic is locked', (await ev(`document.querySelector('${SS} [data-boost-summary]')?.textContent`)) === 'Level 0 · 0 relay hosts' && (await ev(`document.querySelector('${SS}').textContent.includes('never lock anything')`)) === true);
+await fill(`${SS} input[aria-label="Relay address"]`, 'https://relay.me.example/');
+await ev(`${ssButton('Publish')}.click()`);
+await sleep(800);
+check('BS3 a published relay makes a host, listed with a thank-you, and the level rises', (await ev(`document.querySelector('${SS} [data-boost-summary]')?.textContent`)) === 'Level 1 · 1 relay host' && (await ev(`document.querySelector('${SS} [data-boost-hosts]')?.textContent.includes('relay.me.example')`)) === true);
+check('BS4 the sidebar shows the level by the server name', (await ev(`document.querySelector('${SIDEBAR} [data-boost-level]')?.getAttribute('aria-label')`)) === 'Level 1 · 1 relay host');
+await ev(`${ssButton('Withdraw my relay')}.click()`);
+await sleep(800);
+check('BS5 withdrawing drops back to level 0', (await ev(`document.querySelector('${SS} [data-boost-summary]')?.textContent`)) === 'Level 0 · 0 relay hosts');
+await press('Escape');
+await sleep(300);
 
 // A member of Riverside Makers gets no Server Settings.
 await clickRail('Riverside Makers');
 await sleep(600);
+check('BS6 Riverside Makers, with three relay hosts, shows level 2 by its name', (await ev(`document.querySelector('${SIDEBAR} [data-boost-level]')?.getAttribute('aria-label')`)) === 'Level 2 · 3 relay hosts');
+check('BS7 the member list marks each relay host', (await ev(`document.querySelectorAll('[data-relay-host]').length`)) === 3, String(await ev(`document.querySelectorAll('[data-relay-host]').length`)));
 await pointerClick(`document.querySelector('button[aria-label="Riverside Makers menu"]')`);
 await sleep(250);
 check('SS28 a member\'s server menu has no Server Settings', !(await menuItems()).some((l) => l.startsWith('Server Settings')), JSON.stringify(await menuItems()));
@@ -637,6 +696,9 @@ await sleep(400);
 await ev(`${rowByText('Maya')}.click()`);
 await sleep(600);
 check('the DM header has Start voice call, Add friends to group and the profile toggle', (await ev(`['Start voice call with Maya', 'Add friends to group', 'Hide profile panel'].every(l => !!document.querySelector('button[aria-label="' + l + '"]'))`)) === true);
+check('the DM header has a video call button, and the sidebar heading is title case', (await ev(`!!document.querySelector('button[aria-label="Start video call with Maya"]') && [...document.querySelectorAll('aside[aria-label="Channels and conversations"] span')].some(n => n.textContent === 'Direct Messages')`)) === true);
+const fontFaces = await ev(`[...document.fonts].filter(f => f.family.replace(/"/g, '') === 'Google Sans Flex').length`);
+check('the UI font, Google Sans Flex, is bundled and registered', fontFaces >= 2 && (await ev(`document.fonts.check('14px "Google Sans Flex"')`)) === true, `faces: ${fontFaces}`);
 check('the DM search says "Search Maya"', (await ev(`document.querySelector('.search input')?.placeholder === 'Search Maya'`)) === true);
 const dmTotal = await ev(`document.querySelectorAll('.msg').length`);
 const dmFirst = await ev(`document.querySelector('.msg .body')?.textContent ?? ''`);
@@ -1079,7 +1141,18 @@ check('Enter on All selects it and lists "All friends"', (await b.ev(`document.q
 
 const glyphs = await b.ev(`['Online', 'Idle', 'Do Not Disturb', 'Offline'].map(l => !!document.querySelector('main [role="img"][aria-label="' + l + '"]'))`);
 check('friend rows show the four presence glyphs (online, idle, dnd, offline)', JSON.stringify(glyphs) === '[true,true,true,true]', JSON.stringify(glyphs));
-check('the DND glyph is red (its colour token resolves)', (await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`)) === 'rgb(211, 54, 57)', await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`));
+check('the DND glyph is red (its colour token resolves)', (await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`)) === 'rgb(224, 22, 58)', await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`));
+check('the accent and danger tokens meet WCAG AA: white on the fills, the accent text on every dark surface', (await b.ev(`(() => {
+  const css = getComputedStyle(document.documentElement);
+  const token = (name) => css.getPropertyValue(name).trim();
+  const rgb = (c) => (c.startsWith('#') ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)) : c.match(/\\d+(\\.\\d+)?/g).slice(0, 3).map(Number));
+  const lum = (c) => rgb(c).map((v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }).reduce((sum, x, i) => sum + x * [0.2126, 0.7152, 0.0722][i], 0);
+  const ratio = (a, c) => { const [hi, lo] = [lum(a), lum(c)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+  const white = '#ffffff';
+  const fills = ['--accent', '--primary', '--danger'].every((t) => ratio(token(t), white) >= 4.5);
+  const surfaces = ['--chat', '--sidebar', '--panel', '--elevated'].every((t) => ratio(token('--accent-text'), token(t)) >= 4.5);
+  return fills && surfaces;
+})()`)) === true);
 check('a friend in a call shows the call line under the name', (await b.ev(`[...document.querySelectorAll('main span')].some(n => n.textContent.startsWith('In a call · '))`)) === true);
 check('the friend avatar is 32 px', (await b.ev(`document.querySelector('main [role="img"][aria-label="Online"]').parentElement.getBoundingClientRect().width`)) === 32);
 
@@ -1140,7 +1213,8 @@ check('Esc in a DM returns to Friends', (await b.ev(`document.querySelector('h1'
 // ---- 0b. DM profile panel ----
 await clickByText('button', 'Maya');
 await sleep(700);
-check('the DM profile panel is open in the right column', (await b.ev(`document.querySelector('${RIGHT}')?.hidden === false && document.querySelector('${RIGHT}').textContent.includes('View full profile')`)) === true);
+check('a message group header shows the date and a 12-hour clock', (await b.ev(`/\\d{2}\\/\\d{2}\\/\\d{4} \\d{1,2}:\\d{2} (AM|PM)/.test(document.querySelector('.msg-head time')?.textContent ?? '')`)) === true, await b.ev(`document.querySelector('.msg-head time')?.textContent ?? null`));
+check('the DM profile panel is open in the right column', (await b.ev(`document.querySelector('${RIGHT}')?.hidden === false && document.querySelector('${RIGHT}').textContent.includes('View Full Profile')`)) === true);
 check('the DM panel avatar is 80 px with a presence glyph', (await b.ev(`(() => { const r = document.querySelector('${RIGHT} [role="img"][aria-label="Online"]'); return !!r && Math.round(r.parentElement.getBoundingClientRect().width) === 80; })()`)) === true);
 const mutualText = await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Servers?$/.test(n.textContent.trim()))?.textContent.trim() ?? null`);
 check('the mutual servers line reads "N Mutual Servers"', /^\d+ Mutual Servers?$/.test(mutualText ?? ''), String(mutualText));
@@ -1157,7 +1231,7 @@ const mutualCount = Number((mutualText ?? '0').split(' ')[0]);
 await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual Servers?$/.test(n.textContent.trim())).click()`);
 await sleep(200);
 check('clicking the mutual servers count lists that many servers', (await b.ev(`document.querySelectorAll('${RIGHT} ul li').length === ${mutualCount}`)) === true, `count ${mutualCount}`);
-check('the panel shows Contact since with the date and year', (await b.ev(`(() => { const h = [...document.querySelectorAll('${RIGHT} h4')].find(n => n.textContent === 'Contact since'); return !!h && /[A-Z][a-z]{2} \\d{1,2}, \\d{4}/.test(h.nextElementSibling?.textContent ?? ''); })()`)) === true);
+check('the panel shows Member Since with the date and year', (await b.ev(`(() => { const h = [...document.querySelectorAll('${RIGHT} h4')].find(n => n.textContent === 'Member Since'); return !!h && /[A-Z][a-z]{2} \\d{1,2}, \\d{4}/.test(h.nextElementSibling?.textContent ?? ''); })()`)) === true);
 
 // Hide and show the panel from the chat header's toggle.
 await b.ev(`document.querySelector('button[aria-label="Hide profile panel"]')?.click()`);
@@ -1167,10 +1241,13 @@ await b.ev(`document.querySelector('button[aria-label="Show profile panel"]')?.c
 await sleep(300);
 
 // ---- Full profile ----
-await clickByText('button', 'View full profile');
+await clickByText('button', 'View Full Profile');
 await sleep(600);
 const dialogText = await b.ev(`document.querySelector('[role="dialog"]')?.textContent ?? ''`);
-check('View full profile opens the full profile dialog', dialogText.includes('Mutual servers') && dialogText.includes('Safety number') && dialogText.includes('Handles'), dialogText.slice(0, 60));
+check('View Full Profile opens the full profile dialog', dialogText.includes('Mutual servers') && dialogText.includes('Safety number') && dialogText.includes('Handles'), dialogText.slice(0, 60));
+check('the full profile has the banner, the relay host badge, Member Since and the mutual friends', dialogText.includes('Member Since') && dialogText.includes('Mutual friends') && (await b.ev(`!!document.querySelector('[role="dialog"] [data-profile-banner]') && !!document.querySelector('[role="dialog"] [data-relay-host-badge]')`)) === true);
+check('the full profile has Copy contact link under the address', (await b.ev(`[...document.querySelectorAll('[role="dialog"] button')].some(n => n.textContent.trim() === 'Copy contact link')`)) === true);
+check('the full profile footer offers Message, Call and Verify safety number', (await b.ev(`['Message', 'Call', 'Verify safety number'].every(l => [...document.querySelectorAll('[role="dialog"] button')].some(n => n.textContent.trim() === l))`)) === true);
 check('the full profile shows the address with a QR code', (await b.ev(`!!document.querySelector('[role="dialog"] [role="img"][aria-label="QR code of the user address"]')`)) === true);
 await b.ev(`document.querySelector('[role="dialog"] button[aria-label="Copy user address"]').click()`);
 const copied = await toastShown('User address copied');
@@ -1192,6 +1269,7 @@ check('the card is 300 px and inside the window', !!card && card.width === 300 &
 check('the card shows the address tag and the mutual servers line', !!card && card.text.includes('·') && /mutual server|No mutual servers/.test(card.text));
 check('the card has Message, Verify safety number and the role line for Maya', !!card && card.text.includes('Message') && card.text.includes('Verify safety number'));
 // Maya set the Teal preset as her profile banner (in the mock), so her card shows it instead of her hue.
+check('the card shows the Relay host badge with the servers they host for', (await b.ev(`document.querySelector('[role="dialog"][aria-label="User profile"] [data-relay-host-badge]')?.textContent`)) === 'Relay hostfor Riverside Makers', String(await b.ev(`document.querySelector('[role="dialog"][aria-label="User profile"] [data-relay-host-badge]')?.textContent ?? null`)));
 check('the card shows the person\'s banner preset', (await b.ev(`getComputedStyle(document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]')).backgroundImage.includes('rgb(142, 232, 220)')`)) === true, String(await b.ev(`getComputedStyle(document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]') ?? document.body).backgroundImage.slice(0, 80)`)));
 await b.press('Escape');
 await sleep(300);
@@ -1327,8 +1405,10 @@ await sleep(600);
 check('C3 Join opens the call pane in place of the lobby', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && !document.querySelector('section[aria-label="Get ready to join"]')`)) === true);
 check('C3 the call pane has the call chat', (await b.ev(`!!document.querySelector('section[aria-label="Call chat"]')`)) === true);
 check('C3 the group call chat shows the messages of the group the call is in', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
+check('C3 the group call chat says everyone in the group reads it', (await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)) === '· Messages go to Saturday workshop crew. Everyone in the group can read them.', String(await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)));
 check('C3 the camera and screen share buttons are live', (await b.ev(`(() => { const cam = document.querySelector('button[aria-label="Turn camera on"]'); const share = document.querySelector('button[aria-label="Share screen"]'); return Boolean(cam) && !cam.disabled && Boolean(share) && !share.disabled; })()`)) === true);
 check('C3 the header says how many are in the call', (await b.ev(`document.body.textContent.includes('in call') && document.body.textContent.includes('End-to-end encrypted')`)) === true);
+check('C3 the tiles report their drawn width to the engine', (await b.ev(`Object.values(window.__tileWidths ?? {}).some((w) => w > 0)`)) === true, JSON.stringify(await b.ev(`window.__tileWidths ?? null`)));
 check('C3 the share button opens the picker with the primary display', (await b.ev(`(async () => { const share = document.querySelector('button[aria-label="Share screen"]'); share.click(); await new Promise((r) => setTimeout(r, 300)); const items = [...document.querySelectorAll('[role="menuitem"]')].map((n) => n.textContent); return items.some((t) => t.includes('(primary)')); })()`)) === true);
 check('C3 the call header has the overflow menu and the search box', (await b.ev(`!!document.querySelector('button[aria-label="More group actions"]') && !!document.querySelector('input[aria-label="Search messages"]')`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-call-group.png`);
@@ -1407,6 +1487,7 @@ check('C7 the joined voice channel is the active row', (await b.ev(`[...document
 check('C7 the user bar says Voice connected with the channel and server', (await b.ev(`document.body.textContent.includes('Voice connected') && document.body.textContent.includes('#workshop · Riverside Makers')`)) === true);
 check('C7 the right column shows the call details', (await b.ev(`document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Call details') && document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Encryption')`)) === true);
 check('C7 the call header names the channel and the count', (await b.ev(`[...document.querySelectorAll('h2')].some((n) => n.textContent === 'workshop')`)) === true);
+check('C7 the voice channel call chat says anyone who can read the channel reads it', (await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)) === '· Messages go to #workshop. Anyone who can read #workshop can read them.', String(await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)));
 check('C7 the voice roster lists you first in the channel you joined', (await b.ev(`[...document.querySelectorAll('[role="list"][aria-label="In workshop"] [role="listitem"]')][0]?.textContent.includes('Sami') === true`)) === true);
 check('C7 the call details show the route sections the call has (no route block)', (await b.ev(`!document.querySelector('aside[aria-label="Details"]')?.textContent.includes('ROUTE') && !document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Route')`)) === true);
 check('C7 the call details show Forwarded by and Backup for a forwarded call', (await b.ev(`document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Forwarded by') && document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Backup')`)) === true);
@@ -1514,9 +1595,50 @@ await clickBy('button[aria-label="Start voice call with Maya"]');
 await sleep(700);
 check('C11 the DM call button shows the call pane with the person it rings', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && document.body.textContent.includes('Calling Maya')`)) === true);
 check('C11 the DM call chat shows the messages of the conversation', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
+// The call chat renders with the chat's own rows and composer: link previews, formatting and invite cards, as in the chat.
+const CALL_CHAT = 'section[aria-label="Call chat"]';
+check('C11 the call chat shows a link preview card', (await b.ev(`!!document.querySelector('${CALL_CHAT} article.embed .embed-title')`)) === true);
+check('C11 the call chat has the chat composer', (await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea')?.placeholder`)) === 'Message the call');
+check('C11 the DM call chat says who reads it: the chat with Maya', (await b.ev(`document.querySelector('${CALL_CHAT} [data-call-chat-audience]')?.textContent`)) === '· Messages go to your chat with Maya.');
+await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea').focus()`);
+await b.send('Input.insertText', { text: '**Loud** news: dissent://invite/mock-rustaceans' });
+await sleep(250);
+await b.press('Enter');
+await sleep(1500);
+check('C11 bold text in the call chat is strong', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body strong')].some((n) => n.textContent === 'Loud')`)) === true, String(await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body')].map((n) => n.innerHTML).at(-1)`)));
+check('C11 an invite link in the call chat shows the invite card', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} [data-server-card]')].at(-1)?.textContent.includes('Rustaceans')`)) === true);
+check('C11 the call chat message has the hover actions and the message menu', (await b.ev(`(() => { const m = [...document.querySelectorAll('${CALL_CHAT} article.msg')].at(-1); return !!m?.querySelector('button[aria-label="More message actions"]'); })()`)) === true);
+check('C11 the call chat stays at its end once the invite card has loaded', (await until(() => b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return l.scrollHeight - l.scrollTop - l.clientHeight < 4; })()`))) === true, JSON.stringify(await b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return [l.scrollHeight, l.scrollTop, l.clientHeight]; })()`)));
+await b.screenshot(`${SCRATCH}/shots/C11-call-chat.png`);
 await clickBy('section[aria-label="Call"] button', 'Leave call');
 await sleep(500);
+// The same message in the DM chat, once the call is left: the same rows, so the same bold text and card.
+check('C11 the message sent in the call chat reads the same in the chat', (await b.ev(`(() => { const rows = [...document.querySelectorAll('.messages[aria-label="Messages"] article.msg')]; const m = rows.at(-1); return !!m && [...m.querySelectorAll('.body strong')].some((n) => n.textContent === 'Loud') && !!m.querySelector('[data-server-card]'); })()`)) === true);
 
+// The call chat checks open their own DM call with Maya, so they do not depend on the call above. The call is left after.
+await clickBy('button[aria-label="Direct messages"]');
+await sleep(500);
+await clickBy('aside[aria-label="Channels and conversations"] button', 'Maya');
+await sleep(500);
+await clickBy('button[aria-label="Start voice call with Maya"]');
+await sleep(1200);
+check('E42 a DM call with Maya is open with its chat', (await b.ev(`!!document.querySelector('${CALL_CHAT}')`)) === true);
+// The call chat follows its DM while the call is open. A reaction (dm_changed) shows in it; and when two loads overlap,
+// the older reply arriving last does not replace the newer list.
+await b.ev(`window.__mockReactLastDm('Maya', '\\u{1F389}')`);
+await b.ev(`window.__mockEngineEvent({ kind: 'dm_changed', peer: window.__mockRootOf('Maya') })`);
+await sleep(600);
+check('E42 a reaction arriving during a call shows in the call chat', (await b.ev(`document.querySelector('${CALL_CHAT}')?.textContent.includes('\\u{1F389}') === true`)) === true, (await b.ev(`(document.querySelector('${CALL_CHAT}')?.textContent ?? 'NO CALL CHAT').slice(-240)`)));
+await b.ev(`window.__mockStaleReads = true; window.__mockDelay = 900`);
+await b.ev(`window.__mockEngineEvent({ kind: 'dm', peer: window.__mockRootOf('Maya') })`);
+await b.ev(`window.__mockPostDm('Maya', 'the newest word')`);
+await b.ev(`window.__mockDelay = 0`);
+await b.ev(`window.__mockEngineEvent({ kind: 'dm', peer: window.__mockRootOf('Maya') })`);
+await sleep(1500);
+check('E42 two quick loads keep the newest list when the older reply arrives last', (await b.ev(`document.querySelector('${CALL_CHAT}')?.textContent.includes('the newest word') === true`)) === true, (await b.ev(`(document.querySelector('${CALL_CHAT}')?.textContent ?? 'NO CALL CHAT').slice(-240)`)));
+await b.ev(`window.__mockStaleReads = false; window.__mockDelay = 0`);
+await clickBy('section[aria-label="Call"] button', 'Leave call');
+await sleep(500);
 await clickBy('aside[aria-label="Channels and conversations"] button', 'Relay operators');
 await sleep(500);
 check('C11 the group header has the Start a voice call in button', (await b.ev(`!!document.querySelector('button[aria-label="Start a voice call in Relay operators"]')`)) === true);
@@ -1586,7 +1708,7 @@ const pickPicture = async () => {
   await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent.includes('Change avatar')).click()`);
   await sleep(200);
   await b.ev(`(async () => {
-    const blob = await (await fetch('app-icon-96.png')).blob();
+    const blob = await (await fetch('app-icon-128.png')).blob();
     const dt = new DataTransfer();
     dt.items.add(new File([blob], 'face.png', { type: 'image/png' }));
     window.__pickerInput.files = dt.files;
@@ -1657,7 +1779,7 @@ await openIdentity();
 await b.ev(`document.querySelector('[data-settings-page] [data-banner-upload]').click()`);
 await sleep(200);
 await b.ev(`(async () => {
-  const blob = await (await fetch('app-icon-96.png')).blob();
+  const blob = await (await fetch('app-icon-128.png')).blob();
   const dt = new DataTransfer();
   dt.items.add(new File([blob], 'wide.png', { type: 'image/png' }));
   window.__pickerInput.files = dt.files;
@@ -1691,6 +1813,62 @@ await sleep(400);
 await b.ev(`[...document.querySelectorAll('[data-settings-page] nav button')].find(n => n.textContent === 'Network').click()`);
 await sleep(500);
 check('E22 Network shows Resolved via in the status table', (await b.ev(`[...document.querySelectorAll('[data-settings-page] dt')].some(n => n.textContent === 'Resolved via')`)) === true);
+// Relay list: a host's relay names the host, and carries Verified only when the app counts that host.
+const relayRowText = (name) => `([...document.querySelectorAll('[aria-label="Relays"] li')].find((li) => li.textContent.includes('${name}'))?.textContent ?? '')`;
+check('E24 a verified host relay is listed as hosted, with the mark', (await b.ev(`${relayRowText('hosted-yusuf')}.includes('Hosted by Yusuf') && ${relayRowText('hosted-yusuf')}.includes('Verified')`)) === true);
+check('E24 an unverified host relay names its host without the mark', (await b.ev(`${relayRowText('hosted-nadia')}.includes('Hosted by Nadia') && !${relayRowText('hosted-nadia')}.includes('Verified')`)) === true);
+// The switch: off, the servers' relays go, and they come back when it is on again.
+const offersSwitch = `document.querySelector('[data-settings-page] input[aria-label="Use relays offered by my servers"]')`;
+await b.ev(`${offersSwitch}.click()`);
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Save network settings').click()`);
+await sleep(400);
+check('E24 switching off the server relays removes every hosted relay', (await b.ev(`!document.querySelector('[data-settings-page]').textContent.includes('Hosted by')`)) === true);
+await b.ev(`${offersSwitch}.click()`);
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Save network settings').click()`);
+await sleep(400);
+check('E24 switching the server relays back on lists the hosted relay again', (await b.ev(`document.querySelector('[data-settings-page]').textContent.includes('Hosted by Yusuf')`)) === true);
+// number0's directory: on by default, says what number0 sees, and its value is saved both ways.
+const n0Switch = `document.querySelector('[data-settings-page] input[aria-label="Find devices through number0\u2019s directory"]')`;
+const saveNetwork = `[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Save network settings').click()`;
+check('E25 the number0 directory switch is on by default', (await b.ev(`${n0Switch}.checked`)) === true);
+check('E25 the switch says that number0 sees the device ID and addresses', (await b.ev(`document.querySelector('[data-settings-page]').textContent.includes('number0 sees your device ID and addresses.')`)) === true);
+await b.ev(`${n0Switch}.click()`);
+await b.ev(saveNetwork);
+await sleep(400);
+check('E25 switching the number0 directory off is saved', (await b.ev(`${n0Switch}.checked`)) === false);
+await b.ev(`${n0Switch}.click()`);
+await b.ev(saveNetwork);
+await sleep(400);
+check('E25 switching the number0 directory back on is saved', (await b.ev(`${n0Switch}.checked`)) === true);
+// A relay is pinned or turned off, never both: a turned-off relay cannot be pinned, and a pinned one cannot be turned off.
+// The draft is put back the way it was, so the save checks after this see the same settings.
+const firstRelayUrl = await b.ev(`document.querySelector('[aria-label="Relays"] li span')?.textContent ?? ''`);
+const relayButton = (label) => `[...document.querySelectorAll('[aria-label="Relays"] button')].find(n => n.getAttribute('aria-label') === ${JSON.stringify(label)})`;
+await b.ev(`${relayButton('Turn off ' + firstRelayUrl)}.click()`);
+await sleep(200);
+check('E24 a turned-off relay cannot be pinned', (await b.ev(`${relayButton('Pin ' + firstRelayUrl)}.disabled`)) === true);
+await b.ev(`${relayButton('Turn on ' + firstRelayUrl)}.click()`);
+await sleep(200);
+await b.ev(`${relayButton('Pin ' + firstRelayUrl)}.click()`);
+await sleep(200);
+check('E24 a pinned relay cannot be turned off', (await b.ev(`${relayButton('Turn off ' + firstRelayUrl)}.disabled`)) === true);
+await b.ev(`${relayButton('Unpin ' + firstRelayUrl)}.click()`);
+await sleep(200);
+const typeInto = async (sel, text) => { await b.ev(`(() => { const i = document.querySelector(${JSON.stringify(sel)}); i.focus(); i.select(); })()`); await b.typeText(text); };
+// Host a relay: the check reports the mock's latency for its one reachable relay, publishing unlocks only after that pass,
+// and changing the address locks it again until the new address is checked.
+const publishDisabled = `[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Publish to this server').disabled`;
+await typeInto('[data-settings-page] input[aria-label="Hosted relay URL"]', 'https://relay-eu.riverside.example');
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Check my relay').click()`);
+await sleep(300);
+check('E23 a passing check says it was checked by a member, with the latency', (await b.ev(`document.querySelector('[data-settings-page]').textContent.includes('Reachable, checked by a member just now (42 ms).')`)) === true);
+check('E23 publishing unlocks after a pass for the same address', (await b.ev(`${publishDisabled} === false`)) === true);
+await typeInto('[data-settings-page] input[aria-label="Hosted relay URL"]', 'https://relay.unchecked.example');
+check('E23 changing the address locks publishing until it is checked', (await b.ev(`${publishDisabled} === true`)) === true);
+await typeInto('[data-settings-page] input[aria-label="Hosted relay URL"]', 'https://relay.unreachable.example');
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'Check my relay').click()`);
+await sleep(300);
+check('E23 a failing check says why, and publishing stays locked', (await b.ev(`document.querySelector('[data-settings-page]').textContent.includes('Not checked: not reachable over TLS from this device')`)) === true && (await b.ev(`${publishDisabled} === true`)) === true);
 // The search keeps its text between openings, as the current UI's does, so clear it before the next section.
 await b.ev(`document.querySelector('[data-settings-page] input[type="search"]').focus()`);
 await keyPress(b, 'a', 'KeyA', 65, 2);
@@ -1926,6 +2104,13 @@ check('three hash marks give headings one, two and three', (await all('.md-h1'))
 check('-# gives subtext and > gives a block quote', (await all('.md-subtext')).includes('a subtext line') && (await all('.md-quote')).some((t) => t.includes('a quoted line')));
 check('nested indent gives a list inside a list item', (await ev(`(() => { const r = ${row}; return !!r && [...r.querySelectorAll('ul.md-list li ul.md-list li')].some((n) => n.textContent.includes('nested item')); })()`)) === true);
 check('1. gives an ordered list item', (await ev(`(() => { const r = ${row}; return !!r && [...r.querySelectorAll('ol.md-list li')].some((n) => n.textContent.includes('ordered one')); })()`)) === true);
+check('lists show their markers: discs, numbers, and circles for a nested list', (await ev(`(() => { const r = ${row}; const style = (sel) => { const n = r?.querySelector(sel); return n ? getComputedStyle(n).listStyleType : null; }; return [style('ul.md-list'), style('ol.md-list'), style('ul.md-list ul.md-list')]; })()`)).join(',') === 'disc,decimal,circle');
+// The channel header's pins button lists the channel's pinned messages, and says so when there are none.
+await ev(`document.querySelector('button[aria-label="Pinned messages"]')?.click()`);
+await sleep(500);
+check('the header pins button lists the pinned messages, or says there are none', (await ev(`[...document.querySelectorAll('[role^="menuitem"]')].some((n) => n.textContent.includes('No pinned messages'))`)) === true);
+await ev(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(300);
 check('inline code is code and keeps its stars', (await all('code.md-code')).includes('inline *code*'));
 check('a fenced block shows its language and its text as code', (await all('.md-codelang')).includes('rust') && (await all('.md-codeblock pre code')).some((t) => t.includes('fn main() {}')), JSON.stringify([await all('.md-codelang'), await all('.md-codeblock pre code')]));
 await sleep(1200);
@@ -2118,6 +2303,62 @@ await clickMenuItem('Remove Bookmark');
 await sleep(500);
 check('Remove Bookmark confirms with a toast', (await toastTexts()).includes('Bookmark removed'));
 
+// ---- Saved Messages draws each message with the chat's row, read-only: formatting, invite cards and link previews ----
+const SAVED_FMT = '**Saved** card: dissent://invite/mock-rustaceans';
+await typeSend(SAVED_FMT);
+await sleep(600);
+const savedFmtId = await ev(`${MSG('card')}?.dataset.id ?? null`);
+await openMenuOn(`[...document.querySelectorAll('article.msg')].find((a) => a.dataset.id === ${JSON.stringify(savedFmtId)})`);
+await clickMenuItem('Bookmark Message');
+await sleep(500);
+await goHome();
+await clickSidebar('Maya');
+await sleep(500);
+await openMenuOn(MSG('github.com/Kaakati/dissent/tree/main/apps/relay'));
+await clickMenuItem('Bookmark Message');
+await sleep(500);
+await clickSidebar('Saved Messages');
+await sleep(800);
+const SAVED = 'ul[aria-label="Saved messages"]';
+check('a saved message shows its bold text as bold', (await ev(`[...document.querySelectorAll('${SAVED} .msg .body strong')].some((n) => n.textContent === 'Saved')`)) === true, String(await ev(`document.querySelector('${SAVED}')?.innerHTML.slice(0, 200)`)));
+check('a saved message with an invite link shows the invite card', (await ev(`!!document.querySelector('${SAVED} [data-server-card]')`)) === true);
+check('a saved message with a link shows its preview card', (await ev(`!!document.querySelector('${SAVED} article.embed .embed-title')`)) === true);
+check('saved messages are read-only: no message actions or menu', (await ev(`!document.querySelector('${SAVED} button[aria-label="More message actions"]') && !document.querySelector('${SAVED} .msg-actions')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/saved-messages.png`);
+// Remove the DM one here, then Jump to the channel one and remove it from its menu, so no bookmark is left behind.
+await ev(`(() => { const li = [...document.querySelectorAll('${SAVED} > li')].find((l) => l.querySelector('.msg')?.dataset.id !== ${JSON.stringify(savedFmtId)}); [...li.querySelectorAll('button')].find((x) => x.textContent === 'Remove')?.click(); })()`);
+for (let i = 0; i < 20 && (await ev(`document.querySelectorAll('${SAVED} > li').length`)) !== 1; i++) await sleep(150);
+check('Remove takes a saved message off the page', (await ev(`document.querySelectorAll('${SAVED} > li').length`)) === 1, String(await ev(`[...document.querySelectorAll('${SAVED} > li')].map((l) => l.textContent.slice(0, 40)).join(' | ')`)));
+await ev(`(() => { const li = [...document.querySelectorAll('${SAVED} > li')].find((l) => l.querySelector('.msg')?.dataset.id === ${JSON.stringify(savedFmtId)}); [...li.querySelectorAll('button')].find((x) => x.textContent === 'Jump')?.click(); })()`);
+await sleep(1200);
+check('Jump from a formatted saved message still opens the channel at the message', (await ev(`!document.querySelector('${SAVED}') && document.activeElement?.dataset.id === ${JSON.stringify(savedFmtId)}`)) === true);
+await openMenuOn(`[...document.querySelectorAll('article.msg')].find((a) => a.dataset.id === ${JSON.stringify(savedFmtId)})`);
+await clickMenuItem('Remove Bookmark');
+await sleep(500);
+
+// A saved message from a spoiler channel of a server that is not open stays blurred until clicked: the page reads that
+// server's channel setting, and blurs when it cannot.
+await ev(`(async () => {
+  const invoke = window.__TAURI__.core.invoke;
+  const [first] = await invoke('channel_messages', { communityId: 'c2', channelId: 'ch5', limit: 50 });
+  await invoke('add_bookmark', { message: { community: 'c2', channel: 'ch5', peer: null, message_id: first.id, text: first.text, author_name: first.author_name, ms: first.ms } });
+})()`);
+await ev(`window.__mockVisibility('c2', 'ch5', 'spoiler')`);
+await goHome();
+await clickSidebar('Saved Messages');
+await sleep(800);
+const spoilerRow = `[...document.querySelectorAll('${SAVED} > li')].find((l) => l.textContent.includes('Dispossessed'))`;
+check('a saved message from a spoiler channel of another server is blurred', (await ev(`!!${spoilerRow}?.querySelector('.body.spoiler-hidden')`)) === true, String(await ev(`${spoilerRow}?.querySelector('.body')?.className`)));
+await ev(`${spoilerRow}.querySelector('.body.spoiler-hidden').click()`);
+await sleep(300);
+check('a click reveals the saved spoiler', (await ev(`!${spoilerRow}.querySelector('.body.spoiler-hidden')`)) === true);
+await ev(`[...${spoilerRow}.querySelectorAll('button')].find((x) => x.textContent === 'Remove')?.click()`);
+await sleep(700);
+await ev(`window.__mockVisibility('c2', 'ch5', 'default')`);
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(700);
+await openGeneral();
+
 // ---- Pin: channels only, Pin then Unpin ----
 await openMenuOn(MSG(OWN_TEXT));
 await clickMenuItem('Pin Message');
@@ -2256,7 +2497,7 @@ await sleep(500);
 await openRailMenu('Riverside Makers');
 await sleep(400);
 const muted = await menuNames();
-check('a timed mute shows its end time under Mute Server', muted.some((l) => /^Mute Server.*Muted until \d{2}:\d{2}/.test(l)), JSON.stringify(muted));
+check('a timed mute shows its end time under Mute Server', muted.some((l) => /^Mute Server.*Muted until \d{1,2}:\d{2} (AM|PM)/.test(l)), JSON.stringify(muted));
 await closeMenus();
 
 // Hide Muted Channels: a muted channel leaves the sidebar, and the open channel stays. The mute is saved before a reload.
@@ -2360,11 +2601,263 @@ check('an unmuted conversation still is', labels.includes('Maya, 1 unread messag
 await b.close();
 }
 
+// ---- Close DM and Remove contact: an open pane goes to Friends, the row leaves the list, the unread marker goes, and the
+// history comes back when the DM is reopened or a new message arrives. ----
+async function section_dmclose() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9803, profile: `${SCRATCH}/dmclose-next-profile` });
+const { ev } = b;
+await sleep(800);
+const mockId = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
+const LINUS = mockId('w8r2d6nblinus');
+const post = (peer, text) => ev(`window.__mockDm('${peer}', ${JSON.stringify(text)})`);
+const SIDEBAR_BUTTONS = `[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')]`;
+const dmRows = () => ev(`${SIDEBAR_BUTTONS}.map((n) => n.textContent.trim())`);
+const hasRow = async (name) => (await dmRows()).some((t) => t.includes(name));
+const openRow = (name) => ev(`${SIDEBAR_BUTTONS}.find((n) => n.textContent.includes(${JSON.stringify(name)}))?.click()`);
+const rightClickRow = (name) => ev(`(() => { const row = ${SIDEBAR_BUTTONS}.find((n) => n.textContent.includes(${JSON.stringify(name)})); const r = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+const menuClick = (prefix) => ev(`(() => { const n = [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((m) => m.textContent.trim().startsWith(${JSON.stringify(prefix)})); if (!n) return false; n.click(); return true; })()`);
+const menuItems = () => ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+const railLabels = async () => (await ev(`[...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] button')].map((n) => n.getAttribute('aria-label'))`)) ?? [];
+const onFriends = () => ev(`document.querySelector('h1')?.textContent === 'Friends'`);
+const composerOpen = () => ev(`!!document.querySelector('textarea[aria-label="Message"]')`);
+const messageCount = () => ev(`document.querySelectorAll('.messages[aria-label="Messages"] article.msg').length`);
+
+// Close DM from an open pane: the pane goes to Friends and the row leaves the list.
+await openRow('Jonas');
+await sleep(700);
+const before = await messageCount();
+check('Jonas opens in a pane with its history', (await composerOpen()) && before > 0, `messages ${before}`);
+await rightClickRow('Jonas');
+await sleep(300);
+const jonasMenu = await menuItems();
+check('the DM menu offers Close DM', jonasMenu.some((l) => l.startsWith('Close DM')), JSON.stringify(jonasMenu));
+await menuClick('Close DM');
+await sleep(700);
+check('Close DM on the open pane goes to Friends', (await onFriends()) && !(await composerOpen()));
+check('Close DM removes the row from the list', !(await hasRow('Jonas')), JSON.stringify(await dmRows()));
+
+// Message brings the row back, and the history is still there.
+await ev(`document.querySelector('button[aria-label="Message Jonas"]')?.click()`);
+await sleep(700);
+check('reopening the DM brings its row back', await hasRow('Jonas'));
+check('reopening the DM shows the history again', (await composerOpen()) && (await messageCount()) === before, `messages ${await messageCount()}, before ${before}`);
+// The gutter time on a grouped message is a 12-hour clock with AM or PM, like the group header.
+await post(LINUS, 'A first line from Jonas');
+await post(LINUS, 'A second line from Jonas, grouped under the first');
+await sleep(700);
+const gutter = await ev(`[...document.querySelectorAll('.gutter-time')].at(-1)?.textContent ?? ''`);
+check('the gutter time is a 12-hour clock with AM or PM', /^\d{1,2}:\d{2} (AM|PM)$/.test(gutter), JSON.stringify(gutter));
+
+// A message sent to a DM that is listed and unread, then Close DM from Friends: the unread marker goes with the row.
+await b.press('Escape');
+await sleep(400);
+check('Escape returns to Friends', await onFriends());
+await post(LINUS, 'Sent while Friends is open');
+await sleep(900);
+check('a message on Friends marks the listed DM unread', (await railLabels()).some((l) => l.startsWith('Jonas,')), JSON.stringify(await railLabels()));
+await rightClickRow('Jonas');
+await sleep(300);
+await menuClick('Close DM');
+await sleep(700);
+check('Close DM clears the unread marker and the row', !(await railLabels()).some((l) => l.startsWith('Jonas,')) && !(await hasRow('Jonas')), JSON.stringify(await railLabels()));
+
+// A new message brings a closed DM back into the list, unread.
+await post(LINUS, 'A message after Close DM');
+await sleep(900);
+check('a new message brings the closed DM back to the list', await hasRow('Jonas'));
+check('the returning DM is unread on the rail', (await railLabels()).some((l) => l.startsWith('Jonas,')), JSON.stringify(await railLabels()));
+
+// Remove contact from an open pane: the same navigation and row removal, and the friend leaves Friends.
+await openRow('Maya');
+await sleep(700);
+check('Maya opens in a pane', await composerOpen());
+await rightClickRow('Maya');
+await sleep(300);
+const mayaMenu = await menuItems();
+check('the DM menu offers Remove contact', mayaMenu.some((l) => l.startsWith('Remove contact')), JSON.stringify(mayaMenu));
+await menuClick('Remove contact');
+await sleep(400);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Remove')?.click()`);
+await sleep(900);
+check('Remove contact on the open pane goes to Friends', (await onFriends()) && !(await composerOpen()));
+check('Remove contact removes the row from the list', !(await hasRow('Maya')));
+check('the removed contact is gone from Friends', (await ev(`!document.querySelector('button[aria-label="More actions for Maya"]')`)) === true);
+check('the removed contact leaves no unread marker', !(await railLabels()).some((l) => l.startsWith('Maya,')), JSON.stringify(await railLabels()));
+
+await b.close();
+}
+
+// ---- dissent:// links: each shows a confirm dialog or a notice, and nothing happens until its button is pressed ----
+async function section_deeplink() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9805, profile: `${SCRATCH}/deeplink-next-profile` });
+const { ev } = b;
+await sleep(800);
+const mockId = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
+const GRACE = mockId('k3f9q2xagrace');
+const LINUS = mockId('w8r2d6nblinus');
+const RANA = mockId('rana-z6q1e8jd');
+const link = (url) => ev(`window.__mockDeepLink(${JSON.stringify(url)})`);
+const dialogTitle = () => ev(`document.querySelector('[role="dialog"] h2')?.textContent ?? null`);
+const dialogText = () => ev(`document.querySelector('[role="dialog"]')?.textContent ?? ''`);
+const dialogButtons = () => ev(`[...document.querySelectorAll('[role="dialog"] button')].map((n) => n.textContent.trim())`);
+const clickDialogButton = (label) => ev(`(() => { const n = [...document.querySelectorAll('[role="dialog"] button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!n) return false; n.click(); return true; })()`);
+const railHas = (name) => ev(`[...document.querySelectorAll('button[aria-label]')].some((n) => n.getAttribute('aria-label') === ${JSON.stringify(name)})`);
+const toastHas = (text) => ev(`[...document.querySelectorAll('[role="status"]')].some((n) => n.textContent.includes(${JSON.stringify(text)}))`);
+
+// An invite opens the confirm dialog with the server's card. Nothing joins until Join server is pressed.
+check('the rail has no Rustaceans server before the link', (await railHas('Rustaceans')) === false);
+await link('dissent://invite/mock-rustaceans');
+await sleep(900);
+check('an invite link opens the Join server dialog', (await dialogTitle()) === 'Join server', String(await dialogTitle()));
+check('the invite dialog shows the full server name', (await dialogText()).includes('Rustaceans'));
+check('the invite dialog offers Join server and Cancel', (await dialogButtons()).includes('Join server') && (await dialogButtons()).includes('Cancel'), JSON.stringify(await dialogButtons()));
+check('opening the invite joins nothing', (await railHas('Rustaceans')) === false);
+await clickDialogButton('Join server');
+await sleep(1000);
+check('Join server joins the server and closes the dialog', (await dialogTitle()) === null && (await railHas('Rustaceans')) === true);
+
+// An invite to a server already joined says so, and offers Open server.
+await link('dissent://invite/member-riverside');
+await sleep(900);
+check('an invite to a joined server says so', (await dialogText()).includes('already a member of Riverside Makers'), (await dialogText()).slice(0, 120));
+check('a joined server offers Open server and no Join', (await dialogButtons()).includes('Open server') && !(await dialogButtons()).includes('Join server'), JSON.stringify(await dialogButtons()));
+await clickDialogButton('Open server');
+await sleep(700);
+check('Open server closes the dialog', (await dialogTitle()) === null);
+
+// A contact link for someone already a contact offers Message, and for someone else a contact request.
+const grace = await ev(`window.__mockAddressOf(${JSON.stringify(GRACE)})`);
+await link(`dissent://contact/${grace}`);
+await sleep(900);
+check('a contact link opens the Add contact dialog', (await dialogTitle()) === 'Add contact', String(await dialogTitle()));
+check('a contact already in the list is offered Message', (await dialogButtons()).includes('Message') && (await dialogText()).includes('Already a contact'), JSON.stringify(await dialogButtons()));
+await clickDialogButton('Message');
+await sleep(700);
+check('Message opens the conversation with that contact', (await dialogTitle()) === null && (await ev(`!!document.querySelector('textarea[aria-label="Message"]')`)) === true);
+await b.press('Escape');
+await sleep(400);
+
+const rana = await ev(`window.__mockAddressOf(${JSON.stringify(RANA)})`);
+await link(`dissent://contact/${rana}`);
+await sleep(900);
+check('a stranger is offered a contact request', (await dialogButtons()).includes('Send contact request'), JSON.stringify(await dialogButtons()));
+await clickDialogButton('Cancel');
+await sleep(500);
+check('Cancel sends nothing and closes the dialog', (await dialogTitle()) === null);
+
+// A link Dissent does not open, and a malformed one, get a notice and nothing else.
+await link('dissent://nope/whatever');
+await sleep(500);
+check('an unknown dissent:// link gets a notice', await toastHas("isn't one Dissent can open"));
+check('an unknown link opens no dialog', (await dialogTitle()) === null);
+await link('dissent://contact/dsu1qqqqqqqqqqqqqqqqqqqq');
+await sleep(500);
+check('a malformed contact link opens no dialog', (await dialogTitle()) === null);
+check('a malformed contact link gets the address notice', await toastHas('typo'));
+
+// A message link to a message this device does not have says so.
+await link(`dissent://message/dm/${LINUS}/no-such-message`);
+await sleep(4800);
+check('a message link to a missing message says so', await toastHas("You can't see that message"));
+
+// A device link opens Settings > Devices with the code in the box, and approves nothing.
+await link('dissent://link/mock-device-code');
+await sleep(900);
+check('a device link fills the code box on Settings › Devices', (await ev(`document.querySelector('input[aria-label="Link code from the new device"]')?.value ?? ''`)) === 'dissent://link/mock-device-code');
+check('a device link approves nothing by itself', !(await toastHas('New device approved')));
+
+await b.close();
+}
+
+// ---- the title bar's DHT and relay latency: shown in ms, coloured by its value, and updated by the net_latency event ----
+async function section_netlatency() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9807, profile: `${SCRATCH}/netlatency-next-profile` });
+const { ev } = b;
+await sleep(1200);
+const line = () => ev(`document.querySelector('[data-net-line]')?.textContent ?? ''`);
+const segments = () => ev(`[...document.querySelectorAll('[data-net-line] [data-net-tone]')].map((n) => ({ text: n.textContent, tone: n.dataset.netTone }))`);
+const latencySegment = async () => (await segments()).find((s) => /ms( lookup)?$/.test(s.text) || s.text === '—');
+
+check('the title bar shows the DHT lookup time as a lookup in ms', (await line()).includes('2529 ms lookup'), await line());
+check('the title bar shows the relay round trip in ms', (await line()).includes('42 ms'), await line());
+check('a normal lookup takes no warning colour', (await latencySegment())?.tone === 'normal', JSON.stringify(await latencySegment()));
+
+await ev(`window.__mockNetLatency(3500, 48)`);
+await sleep(500);
+check('a new probe reading updates the bar without polling', (await line()).includes('3500 ms lookup') && !(await line()).includes('2529 ms lookup'), await line());
+check('a lookup from 3 to 5 s is a warning', (await segments()).some((s) => s.text === '3500 ms lookup' && s.tone === 'warn'), JSON.stringify(await segments()));
+
+await ev(`window.__mockNetLatency(6000, 48)`);
+await sleep(500);
+check('a lookup over 5 s is slow', (await segments()).some((s) => s.text === '6000 ms lookup' && s.tone === 'slow'), JSON.stringify(await segments()));
+
+await ev(`window.__mockNetLatency(null, 48)`);
+await sleep(500);
+check('no lookup answered shows a dash', (await line()).includes('—'), await line());
+
+await b.close();
+}
+
 // ---- desktop shell: the window and sign-in toggles on Appearance, and the notification toggle on Notifications & sounds ----
 async function section_shell() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9797, profile: `${SCRATCH}/shell-next-profile` });
 const { ev } = b;
 await sleep(800);
+// A repeated event for one message alerts once. A mention is posted, announced, then announced again 5.5 s later
+// (past the 5 s gaps for the sound and the notification): the first announcement notifies and sounds, the repeat neither.
+await sleep(5500);
+await b.ev(`(() => {
+  window.__mockNotified = [];
+  window.__mockPlays = 0;
+  window.__origPlay = window.__origPlay ?? HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () { window.__mockPlays++; return window.__origPlay.apply(this, arguments); };
+  document.hasFocus = () => false;
+  window.__mockPostMention('c1', 'ch2');
+  window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch2' });
+})()`);
+await sleep(400);
+const firstAlert = await b.ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+check('E26 a new mention notifies and sounds once', firstAlert === '[1,1]', firstAlert);
+await sleep(5500);
+await b.ev(`window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch2' })`);
+await sleep(400);
+const repeatAlert = await b.ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+check('E26 the same message announced again does not notify or sound again', repeatAlert === '[1,1]', repeatAlert);
+await b.ev(`(() => { delete document.hasFocus; HTMLMediaElement.prototype.play = window.__origPlay; })()`);
+
+// A new group message alerts once, the same as a channel message. The repeat, 5.5 s later, notifies and sounds no more.
+const startAlerts = `(() => {
+  window.__mockNotified = [];
+  window.__mockPlays = 0;
+  window.__origPlay = window.__origPlay ?? HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () { window.__mockPlays++; return window.__origPlay.apply(this, arguments); };
+  document.hasFocus = () => false;
+})()`;
+const stopAlerts = `(() => { delete document.hasFocus; HTMLMediaElement.prototype.play = window.__origPlay; })()`;
+await sleep(5500);
+await b.ev(startAlerts);
+await b.ev(`window.__mockPostGroupMessage('grp1', 'group announcement')`);
+await b.ev(`window.__mockEngineEvent({ kind: 'group', group_id: 'grp1' })`);
+await sleep(400);
+const groupFirst = await b.ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+check('E40 a new group message notifies and sounds once', groupFirst === '[1,1]', groupFirst);
+await sleep(5500);
+await b.ev(`window.__mockEngineEvent({ kind: 'group', group_id: 'grp1' })`);
+await sleep(400);
+const groupRepeat = await b.ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+check('E40 the same group message announced again does not notify or sound again', groupRepeat === '[1,1]', groupRepeat);
+await b.ev(stopAlerts);
+
+// A private-channel message alerts through the same path as a channel message. Whether this device can read it is
+// decided by the engine, which only announces readable messages (a Rust test covers that).
+await sleep(5500);
+await b.ev(startAlerts);
+await b.ev(`(async () => { await window.__TAURI__.core.invoke('set_channel_access', { communityId: 'c1', channelId: 'ch4', private: true, roles: [], members: [] }); window.__mockPostMention('c1', 'ch4'); window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch4' }); })()`);
+await sleep(600);
+const privateFirst = await b.ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+check('E41 a private channel message notifies and sounds once', privateFirst === '[1,1]', privateFirst);
+await b.ev(stopAlerts);
+
 await b.ev(`document.querySelector('button[aria-label="Settings"]').click()`);
 await sleep(400);
 const nav = (label) => ev(`(() => { const n = [...document.querySelectorAll('[data-settings-page] nav button')].find((x) => x.textContent.includes(${JSON.stringify(label)})); if (!n) return false; n.click(); return true; })()`);
@@ -2398,6 +2891,238 @@ check('the window choices keep their state across pages', (await box('Keep Disse
 await b.close();
 }
 
+// ---- Animated server icons: the rail shows the looping GIF, and its still poster while the window is in the background ----
+async function section_animatedicon() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9784, profile: `${SCRATCH}/animatedicon-next-profile` });
+const { ev } = b;
+await sleep(800);
+const railSrc = () => ev(`document.querySelector('button[aria-label="Riverside Makers"] img')?.getAttribute('src') ?? null`);
+check('a server with no icon shows none on the rail', (await railSrc()) === null);
+// The mock saves an animated icon the way the engine would: a GIF with its still poster.
+await ev(`window.__mockAnimatedIcon('c1')`);
+await sleep(900);
+const gif = await railSrc();
+check('an animated icon shows its GIF on the rail', typeof gif === 'string' && gif.startsWith('data:image/gif'), String(gif).slice(0, 40));
+await ev(`window.dispatchEvent(new Event('blur'))`);
+await sleep(400);
+const still = await railSrc();
+check('the rail shows the still poster while the window is in the background', typeof still === 'string' && still.startsWith('data:image/png'), String(still).slice(0, 40));
+await ev(`window.dispatchEvent(new Event('focus'))`);
+await sleep(400);
+const back = await railSrc();
+check('the GIF returns when the window is focused again', typeof back === 'string' && back.startsWith('data:image/gif'), String(back).slice(0, 40));
+await b.close();
+
+// The invite card shows the same icon: the GIF with the window focused, the poster when motion is reduced. The link names
+// "member", so the mock previews Riverside Makers, whose icon is set above.
+// The mock's asset URL encodes a GIF's data URL and leaves a PNG's as it is, so the source is decoded before it is compared.
+const inviteCardSrc = async (ev) => decodeURIComponent((await ev(`document.querySelector('[data-server-card] img')?.getAttribute('src') ?? ''`)) ?? '');
+async function invitePostedAndShown(b) {
+  await b.ev(`window.__mockAnimatedIcon('c1')`);
+  await b.ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'Join us: dissent://invite/mock-member')`);
+  await sleep(700);
+  await b.ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+  await sleep(700);
+  await b.ev(`[...document.querySelectorAll('button')].find((n) => n.textContent.trim().startsWith('general'))?.click()`);
+  await sleep(1200);
+}
+const focused = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9785, profile: `${SCRATCH}/animatedicon-focus-profile` });
+await sleep(800);
+await invitePostedAndShown(focused);
+const card = await inviteCardSrc(focused.ev);
+check('the invite card shows the animated icon GIF when the window has focus', card.includes('data:image/gif'), card.slice(0, 60));
+await focused.close();
+
+const reduced = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9786, profile: `${SCRATCH}/animatedicon-reduced-profile`, reducedMotion: true });
+await sleep(800);
+await invitePostedAndShown(reduced);
+const poster = await inviteCardSrc(reduced.ev);
+check('the invite card shows the poster under reduced motion', poster.includes('data:image/png') && !poster.includes('data:image/gif'), poster.slice(0, 60));
+await reduced.close();
+}
+
+// ---- A pin older than the loaded window: the pins list reaches it, loading the older history first ----
+async function section_oldpin() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9787, profile: `${SCRATCH}/oldpin-next-profile` });
+const { ev } = b;
+await sleep(800);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('button')].find((n) => n.textContent.trim().startsWith('general'))?.click()`);
+await sleep(700);
+// 210 more messages push the oldest one out of the newest 200 the channel loads.
+await ev(`(() => { for (let i = 0; i < 210; i++) window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'Bulk message ' + i); })()`);
+await sleep(2500);
+const oldText = await ev(`window.__mockPinOldest('c1', 'ch1')`);
+const inView = (needle) => ev(`[...document.querySelectorAll('.messages .msg')].some((n) => n.textContent.includes(${JSON.stringify(needle)}))`);
+check('the oldest message is not in the loaded window before the jump', (await inView(oldText)) === false, String(oldText).slice(0, 40));
+await ev(`[...document.querySelectorAll('button')].find((n) => n.getAttribute('aria-label') === 'Pinned messages')?.click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('[role^="menuitem"]')][0]?.click()`);
+await sleep(2000);
+check('a pick jumps to a pin older than the loaded window', (await inView(oldText)) === true);
+// A new message arrives: the live reload keeps the wider window, so the jump is not yanked back to the newest 200.
+await ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'A new message after the jump')`);
+await sleep(1500);
+check('a new message does not pull a jumped-to pin out of view', (await inView(oldText)) === true);
+await b.close();
+
+// A pin past the cap: the jump says it cannot find the message in this channel's history.
+const capped = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9788, profile: `${SCRATCH}/oldpin-cap-profile` });
+await sleep(800);
+await capped.ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await capped.ev(`[...document.querySelectorAll('button')].find((n) => n.textContent.trim().startsWith('general'))?.click()`);
+await sleep(700);
+await capped.ev(`(() => { for (let i = 0; i < 520; i++) window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'Bulk message ' + i); })()`);
+await sleep(2500);
+// Lower the cap below the wider windows, so the oldest pin is past it.
+await capped.ev(`window.__mockHistoryCap = 300`);
+await capped.ev(`window.__mockPinOldest('c1', 'ch1')`);
+await capped.ev(`[...document.querySelectorAll('button')].find((n) => n.getAttribute('aria-label') === 'Pinned messages')?.click()`);
+await sleep(500);
+await capped.ev(`[...document.querySelectorAll('[role^="menuitem"]')][0]?.click()`);
+await sleep(1500);
+check('a pin past the history cap says it cannot find the message', (await capped.ev(`[...document.querySelectorAll('[role=status]')].some((n) => n.textContent.includes("Couldn't find that message"))`)) === true);
+await capped.close();
+}
+
+// ---- Scroll back: the list asks for older pages near its top, holds the message at the top in place, and reaches the start ----
+async function section_scrollback() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9789, profile: `${SCRATCH}/scrollback-next-profile` });
+const { ev } = b;
+await sleep(800);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('button')].find((n) => n.textContent.trim().startsWith('general'))?.click()`);
+await sleep(700);
+// 300 messages: the channel holds more than the newest 200 that it loads first.
+await ev(`(() => { for (let i = 0; i < 300; i++) window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'Scroll message ' + i); })()`);
+await sleep(3000);
+// The top message on screen, and how far below the list's top it sits.
+const rowAt = (id) => ev(`(() => { const el = document.querySelector('.messages'); const t = el.getBoundingClientRect().top; const row = [...el.querySelectorAll('.msg')].find((n) => n.dataset.id === ${JSON.stringify(id)}); return row ? row.getBoundingClientRect().top - t : null; })()`);
+const scrollTop = () => ev(`document.querySelector('.messages').scrollTop = 0`);
+// The message at the top when the list is scrolled to its start, read in the same step as the scroll, so it is the message
+// the list anchors on (the scroll handler reads the same rows, a moment later, before any page comes in).
+const rowsBefore = await ev(`document.querySelectorAll('.messages .msg').length`);
+const anchor = await ev(`(() => { const el = document.querySelector('.messages'); el.scrollTop = 0; const t = el.getBoundingClientRect().top; const row = [...el.querySelectorAll('.msg')].find((n) => n.getBoundingClientRect().top >= t); return row ? { id: row.dataset.id, at: row.getBoundingClientRect().top - t } : null; })()`);
+// The page is in when the list has more rows and no loader is left, then a short settle for the layout.
+await until(async () => (await ev(`document.querySelectorAll('.messages .msg').length`)) > rowsBefore && !(await ev(`!!document.querySelector('.messages [role="status"]')`)));
+await sleep(300);
+const held = anchor ? await rowAt(anchor.id) : null;
+check('a page of older history comes in with the message at the top held in place', anchor !== null && held !== null && Math.abs(held - anchor.at) <= 4, JSON.stringify({ anchor, held }));
+for (let i = 0; i < 40; i++) {
+  const start = await ev(`document.querySelector('.messages')?.textContent.includes('This is the start of the #general channel')`);
+  if (start) break;
+  await scrollTop();
+  await sleep(500);
+}
+check('scrolling up reaches the oldest message', (await ev(`document.querySelector('.messages')?.textContent.includes('Scroll message 0')`)) === true);
+check('the start of the channel header shows at the true start', (await ev(`document.querySelector('.messages')?.textContent.includes('This is the start of the #general channel')`)) === true);
+// A live message reads only the newest page, and the history already shown stays above it.
+await ev(`window.__mockPageLog = []`);
+await ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'A message while scrolled back')`);
+await until(() => ev(`(window.__mockPageLog ?? []).length > 0`));
+await sleep(500);
+const liveReads = await ev(`window.__mockPageLog`);
+check('a live message reads only the newest page', liveReads.length >= 1 && liveReads.every((r) => r.before === null && r.limit === 200), JSON.stringify(liveReads));
+check('the history above the new message is kept', (await ev(`document.querySelector('.messages')?.textContent.includes('Scroll message 0')`)) === true);
+// A direct conversation has more than its newest 200 too, and scrolls back the same way.
+// The mock's id for Jonas: the name's base32 bytes, padded to 52 characters, as the mock makes them.
+const JONAS = base32Encode(new TextEncoder().encode('w8r2d6nblinus')).padEnd(52, 'a').slice(0, 52);
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(700);
+await ev(`document.querySelector('button[title="Jonas"]')?.click()`);
+await sleep(900);
+await ev(`(() => { for (let i = 0; i < 300; i++) window.__mockDm('${JONAS}', 'DM scroll ' + i); })()`);
+await sleep(3000);
+await until(async () => {
+  if (await ev(`document.querySelector('.messages')?.textContent.includes('DM scroll 0')`)) return true;
+  await scrollTop();
+  return false;
+}, 30000);
+check('a direct conversation scrolls back to its oldest message', (await until(() => ev(`document.querySelector('.messages')?.textContent.includes('DM scroll 0')`))) === true);
+await b.close();
+}
+
+// ---- Emoticons: :D and the like become emoji in the composer, live on a space and on send, in channels and DMs. Code
+// keeps them as typed, and with the setting off nothing converts. ----
+async function section_emoticons() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9809, profile: `${SCRATCH}/emoticons-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const openRow = async (label) => {
+  await ev(`[...document.querySelectorAll('${SIDE} button')].find((x) => x.textContent.includes(${JSON.stringify(label)}))?.click()`);
+  await sleep(700);
+};
+const composer = `document.querySelector('textarea[aria-label="Message"]')`;
+const typeIn = async (text) => {
+  await ev(`${composer}.focus()`);
+  await send('Input.insertText', { text });
+  await sleep(250);
+};
+const enter = async () => {
+  const base = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'char', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(900);
+};
+// The body of the newest message whose text includes `marker`.
+const bodyOf = (marker) => ev(`[...document.querySelectorAll('.messages article.msg')].reverse().find((a) => a.textContent.includes(${JSON.stringify(marker)}))?.querySelector('.body')?.textContent ?? null`);
+
+// A channel: sent as typed, converted on send.
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(800);
+await openRow('general');
+await typeIn(':D hi from the channel');
+await enter();
+check('EM1 ":D" sent in a channel shows as 😄', (await bodyOf('hi from the channel'))?.startsWith('😄 hi from the channel') === true, String(await bodyOf('hi from the channel')));
+// Code keeps the emoticon as typed.
+await typeIn('code `:D` and :P stays');
+await enter();
+check('EM2 an emoticon in inline code stays as typed, and one outside converts', (await ev(`(() => { const a = [...document.querySelectorAll('.messages article.msg')].reverse().find((x) => x.textContent.includes('and')&&x.textContent.includes('stays')); return [a?.querySelector('code')?.textContent, a?.querySelector('.body')?.textContent.includes('😛')]; })()`)).join('|') === ':D|true');
+// A link and a time stay as typed. (An https link would first ask about link previews.)
+await typeIn('at 10:30 see http://example.com/a:D std::path');
+await enter();
+check('EM3 a time, a link and a path stay as typed', (await bodyOf('at 10:30'))?.includes('at 10:30 see http://example.com/a:D std::path') === true, String(await bodyOf('at 10:30')));
+
+// A DM: a space after the emoticon converts it at once, before the send.
+await ev(`document.querySelector('button[aria-label="Direct messages"]')?.click()`);
+await sleep(600);
+await openRow('Maya');
+await typeIn(':P ');
+check('EM4 typing a space after ":P" shows 😛 in the composer at once', (await ev(`${composer}.value`)) === '😛 ', String(await ev(`${composer}.value`)));
+await typeIn('typed live');
+await enter();
+check('EM5 ":P" sent in a DM shows as 😛', (await bodyOf('typed live')) === '😛 typed live', String(await bodyOf('typed live')));
+// A backslash keeps it as typed.
+await typeIn('\\:D escaped');
+await enter();
+check('EM6 a backslash keeps the emoticon as typed', (await bodyOf('escaped')) === ':D escaped', String(await bodyOf('escaped')));
+
+// The setting off: nothing converts.
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('[data-settings-page] nav button')].find((x) => x.textContent.includes('Appearance'))?.click()`);
+await sleep(300);
+const emoBox = `[...document.querySelectorAll('[data-settings-page] label')].find((x) => x.textContent.includes('Convert emoticons to emoji'))?.querySelector('input')`;
+check('EM7 "Convert emoticons to emoji" is in Settings › Appearance and starts on', (await ev(`${emoBox}?.checked`)) === true);
+await ev(`${emoBox}.click()`);
+await sleep(400);
+check('EM8 the setting turns off', (await ev(`${emoBox}?.checked`)) === false);
+await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+await sleep(500);
+await typeIn(':P ');
+check('EM9 with the setting off, a space after ":P" leaves it as typed', (await ev(`${composer}.value`)) === ':P ', String(await ev(`${composer}.value`)));
+await typeIn('setting off');
+await enter();
+check('EM10 with the setting off, ":P" is sent as typed', (await bodyOf('setting off')) === ':P setting off', String(await bodyOf('setting off')));
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -2410,7 +3135,14 @@ const SECTIONS = [
   ['nomentions', section_nomentions],
   ['serverprefs', section_serverprefs],
   ['unreaddms', section_unreaddms],
+  ['dmclose', section_dmclose],
+  ['deeplink', section_deeplink],
+  ['netlatency', section_netlatency],
+  ['animatedicon', section_animatedicon],
+  ['oldpin', section_oldpin],
+  ['scrollback', section_scrollback],
   ['shell', section_shell],
+  ['emoticons', section_emoticons],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);
@@ -2424,5 +3156,10 @@ for (const [name, run] of SECTIONS) {
 }
 
 const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+console.log(`
+${results.length - failed.length}/${results.length} checks passed`);
+// Every failing check by name, on stdout and in the scratch folder, so a run's failures can be counted across runs.
+const failedText = failed.map((r) => `FAILED ${r.name}${r.detail ? ` :: ${r.detail}` : ''}`).join('\n');
+writeFileSync(`${SCRATCH}/failed-checks.txt`, failed.length ? `${failedText}\n` : '');
+if (failed.length) console.log(`FAILED CHECKS (${failed.length}):\n${failedText}`);
 process.exit(failed.length ? 1 : 0);

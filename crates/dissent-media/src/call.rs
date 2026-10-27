@@ -77,6 +77,11 @@ pub struct CallStats {
     /// starts at a default, and moves with the measured RTT and loss, see
     /// [`Call::target_bitrate_kbps`].
     pub target_kbps: u32,
+    /// What this side sent on the link, in kbps, every byte of every datagram, smoothed over the
+    /// stats intervals. `None` until two stats reports have arrived. It is a floor for what the link
+    /// carries, not an estimate of what it could: str0m's TWCC estimate stays at its starting value
+    /// unless the call sets a desired bitrate and probes for it.
+    pub sent_kbps: Option<u32>,
 }
 
 /// The keys of a call that has them.
@@ -143,6 +148,8 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     loss: f32,
     red_override: Option<bool>,
     stats: CallStats,
+    /// Bytes sent by the last stats report, and when it came. See `CallStats::sent_kbps`.
+    sent_mark: Option<(u64, Instant)>,
 }
 
 // Keeps Call movable across tasks. A type that is not Send fails to compile here.
@@ -396,6 +403,7 @@ impl<T: PacketTransport> Call<T> {
             loss: 0.0,
             red_override: None,
             stats: CallStats::default(),
+            sent_mark: None,
         }
     }
 
@@ -859,6 +867,23 @@ impl<T: PacketTransport> Call<T> {
         }
     }
 
+    /// Updates the smoothed send rate from a stats report's byte count.
+    fn note_sent(&mut self, bytes: u64, at: Instant) {
+        if let Some((before, then)) = self.sent_mark {
+            let ms = at.saturating_duration_since(then).as_millis() as u64;
+            // Bits per millisecond is kbps.
+            if let Some(kbps) = bytes.saturating_sub(before).saturating_mul(8).checked_div(ms) {
+                let kbps = u32::try_from(kbps).unwrap_or(u32::MAX);
+                // Smoothed a little, so one burst or gap does not swing the announced capacity.
+                self.stats.sent_kbps = Some(match self.stats.sent_kbps {
+                    Some(old) => ((u64::from(old) * 7 + u64::from(kbps) * 3) / 10) as u32,
+                    None => kbps,
+                });
+            }
+        }
+        self.sent_mark = Some((bytes, at));
+    }
+
     /// A snapshot of the call's counters.
     pub fn stats(&self) -> CallStats {
         CallStats {
@@ -960,6 +985,7 @@ impl<T: PacketTransport> Call<T> {
                 }
             }
             Event::PeerStats(stats) => {
+                self.note_sent(stats.peer_bytes_tx, stats.timestamp);
                 if let Some(rtt) = stats.rtt {
                     let rtt_ms = rtt.as_secs_f64() * 1000.0;
                     self.stats.rtt_ms = Some(rtt_ms);

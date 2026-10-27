@@ -36,7 +36,7 @@ see `AGENTS.md`), `DISSENT_NEXT_PORT` (another Vite port).
 src/
   main.tsx              entry: loads the mock in a browser, reads capabilities, renders, starts listeners, boots
   App.tsx               the shell layout: title bar, grid (rail | sidebar | main | right), user panel, toasts
-  index.css             theme: shadcn variables, Dissent tokens, @theme mapping, Poppins
+  index.css             theme: shadcn variables, Dissent tokens, @theme mapping, Google Sans Flex
   shell.css             the few shell rules utilities cannot express: app grid, presence glyphs, rail pill
   lib/
     api.ts              every Tauri command, typed, with the names and args of the old UI's api.js
@@ -81,9 +81,9 @@ src/
     network/            the title bar's network and DHT line
     user-avatar.tsx     avatar with picture or initials, and the presence glyph
     presence.tsx        presence glyph
-    dissent-mark.tsx    the Dissent mark (from the old UI's icons.svg)
+    owl-mark.tsx        the Dissent owl (traced from assets/icon/app_icon.svg)
     toaster.tsx         the toast stack
-public/fonts/           Poppins (SIL OFL 1.1, OFL.txt alongside)
+public/fonts/           Google Sans Flex (SIL OFL 1.1, OFL-GoogleSansFlex.txt alongside)
 ```
 
 Data flow: components read the store and call its actions. Actions call `api`, then `set` the store. Backend events go
@@ -175,7 +175,7 @@ Tailwind names, from `@theme inline`:
 - spacing: `gap-s-2`, `pl-s-4`, `h-…` (the spacing scale is `s-1` … `s-12` as px tokens).
 - radius: `rounded-sm`, `rounded-md`, `rounded-lg` (not `rounded-r-*`, which is Tailwind's directional radius).
 
-Font: Poppins 400, 500, 600 and 700 (latin and latin-ext, the same unicode ranges as `style.css`), from `public/fonts`.
+Font: Google Sans Flex, one variable file per subset for weights 400 to 700 (latin and latin-ext, the unicode ranges the Google Fonts CSS API gives), from `public/fonts`. The legacy UI's `style.css` still uses Poppins.
 
 Known difference from the current UI: `style.css` puts `* { font-size-adjust: 0.49 }` inside the last `@font-face`
 block, where the browser ignores it. The shipped UI therefore renders Poppins without the adjustment (computed
@@ -257,7 +257,7 @@ Status: **done** (ported and checked against the current UI), **partial** (the s
 | `avatars.js` | done | `lib/images.ts`. |
 | `ui.js` | partial | `lib/identity.ts`, `components/user-avatar.tsx`, `lib/toasts.ts`, `lib/dialog.ts` (`openDialog`, `confirm`), `lib/clipboard.ts` (`copyText`). `skeletonRows` is `SkeletonRows` in `components/chat/parts.tsx`, `linkify` is `lib/text.ts`, the time labels are `lib/time.ts`. |
 | `mock.js` | shared | `src/mock/mock.js`, the only copy. |
-| `icons.svg` | partial | Lucide icons (`lucide-react`) replace the sprite. The Dissent mark is in `dissent-mark.tsx`. |
+| `icons.svg` | partial | Lucide icons (`lucide-react`) replace the sprite. The Dissent owl is in `owl-mark.tsx`. |
 | `fonts/` | done | `public/fonts/`. |
 | `style.css` | partial | Tokens in `index.css`, shell rules in `shell.css`. The chat rules are in `components/chat/chat.css`, under the current UI's class names. Still to port: the dialog, settings and call rules. |
 

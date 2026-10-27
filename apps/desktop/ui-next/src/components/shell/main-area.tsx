@@ -3,7 +3,7 @@
 import type { ReactNode } from 'react';
 import { Users } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
-import { DissentMark } from '@/components/dissent-mark';
+import { OwlMark } from '@/components/owl-mark';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { useShell, type ShellState } from '@/lib/store';
 
@@ -53,7 +53,7 @@ export function MainArea({ children, headerExtra, header, overlay }: { children?
       )}
       {children ?? (
         <div className="flex min-h-0 flex-col items-center justify-center gap-s-3 p-s-8 text-center">
-          <DissentMark className="size-12 text-faint" />
+          <OwlMark className="size-12 text-faint" />
           <p className="text-body text-muted-foreground">Not ported yet: {view}.</p>
           <p className="text-sm text-faint">The current UI (apps/desktop/ui) shows it here.</p>
         </div>

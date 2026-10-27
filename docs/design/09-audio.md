@@ -151,6 +151,44 @@ measurements below come from `crates/dissent-audio/tests/echo_path.rs`: a room i
   Any per-bin statistic has to be computed after the delay alignment, or over a window that covers the
   echo's full spread.
 
+- **Correlation detector on the reference, time domain, reverted.** A running normalised correlation over
+  20 ms between the mic and the reference aligned to its echo (`LAG_MARGIN` before the filter's newest sample),
+  gated on the far end being loud. Adaptation froze, and the residual suppressor backed off, while the
+  correlation was below a threshold. Measured with `echo_path`, against 40.9 dB ERLE and -24.9 dBFS output
+  (near-end voice -19.3 dBFS) at HEAD:
+  - Threshold 0.75: far-end ERLE 12.5 dB. The detector fires during echo-only audio, so the filter never
+    converges. Double-talk output -10.3 dBFS, louder than the near end.
+  - Threshold 0.6: far-end ERLE 19.3 dB, output -12.8 dBFS.
+  - Threshold 0.3: far-end ERLE 39.6 dB, the only setting that keeps the target, but the output is -15.6
+    dBFS. That is 3.7 dB louder than the near-end voice, so echo leaks through during double talk. The
+    detector hardly fires in double talk, so the near-end gain is not recovered.
+  - Disabling the residual suppressor (floor 1.0) gave the same double-talk output, so the suppressor
+    back-off is not the cause.
+  - Setting the detector stopped the delay re-estimate during double talk. Then the delay never moved from
+    zero, the detector never got the aligned reference, and it stayed set. That is a deadlock: a detector
+    fed by the delay estimate must not also gate the estimate.
+  - Offline, on synthetic signals, the normalised correlation of an echo-only block against its aligned
+    reference is about 0.89 at the median, and about 0.70 in double talk. Reflections keep the echo-only
+    value well below 1, so no single threshold separates the two cases cleanly.
+  - Conclusion: a detector on the reference and the mic alone does not separate echo from near-end speech
+    in this room. A detector has to model the echo's full spread, not one aligned lag, and that brings
+    back the dependency on the filter's own output that the earlier attempts ran into.
+
+- **Two-path (background and foreground) canceller, reverted.** The background NLMS adapts on every sample,
+  the foreground produces the output and does not adapt, and the foreground takes the background's coefficients
+  after the background's block error is 3 dB below both the foreground's and the mic's for three blocks in a
+  row. The idea was that double talk makes the background diverge, so nothing gets copied. Measured with
+  `echo_path`, against 40.9 dB far-end ERLE at HEAD:
+  - Background step 0.3: far-end ERLE 7.7 dB, and 6.4 dB with a loud far end. The background converges
+    within a few blocks, and it keeps moving at that step. A copy is stale by the next block, so the
+    foreground stays about 13 dB behind the background's own error. Copies happen about every third block.
+  - Background step 0.05: far-end ERLE 18.4 dB. Step 0.1: 14.8 dB. A slower background converges too slowly
+    for the foreground to catch it.
+  - Double-talk output stayed at or above the near-end level (-7.0 dBFS at step 0.3), so the copy rule did not
+    protect the foreground either.
+  - Conclusion: a foreground that only copies a background cannot track the echo. It needs to adapt too, and
+    then double talk moves it, which is the problem the copy rule was meant to solve.
+
 Next attempt: start from the block path's constraint and normaliser fixes above, or from a detector
 that reads only the mic and the reference. Test with `echo_path`, including the ignored double-talk
 test. Keep the time-domain path until a new one meets far-only ERLE of at least 38 dB and double-talk
@@ -216,3 +254,79 @@ For the desktop app:
    with `enable_echo_cancellation` when the output is speakers, not headphones.
 5. Read `VoiceReceiver::stats` and `CaptureStream::overflows` or `PlayoutStream::underruns` for
    the connection view.
+
+## Static in double talk: measurements
+
+A user reports static that comes and goes while both parties talk. The measurements use `echo_path`, with a
+room impulse response, 60 ms of speaker buffering, 100 ppm drift, and a speech-like far end and near end.
+
+- **Divergence bursts.** In 353 double-talk blocks of 20 ms, 44 (12%) had output louder than the mic, 12 of
+  them by more than 3 dB, and the worst by 6.6 dB. The output can only exceed the mic when the echo estimate
+  adds energy, so the filter had diverged. The guard in `EchoCanceller::watch_divergence` rolls the weights back
+  to the last converged snapshot when the error stays louder than the mic for 20 ms, and passes the mic until the
+  error falls below half of it. With the guard: 20 blocks above the mic, 1 above 3 dB, worst 5.4 dB. Far-only ERLE
+  is unchanged (40.9 dB at 0 ppm, 38.8 dB at 200 ppm, 40 ms buffering, as before).
+- **Echo leak in double talk, not fixed.** The canceller removes almost no echo while both talk: the leak is
+  0.1 dB below the echo in double-talk blocks, against 37.7 dB in far-only blocks. The residual suppressor is off
+  in double talk by design (`near_present`), so this is the filter. Freezing the weights during near-end frames
+  (an oracle, not a detector) leaves the leak at 6 dB below the echo, and freezing from 8 s with the near end
+  silent drops far-only ERLE to 7.7 dB. Freezing the lag estimate as well, and removing clock drift, did not
+  change that. The mechanism is not yet pinned down. This is the likely static: an echo that the filter does not
+  cancel while both talk.
+- **Near voice down about 10 dB in near-only blocks.** Measured as the best-fit gain of the output to the near
+  end. Disabling the residual suppressor's floor gives the same result, so the suppressor is not the cause.
+
+Counters, logged at debug level every ten seconds by `voice.rs` (`audio counters: ...`): late wake-ups of the 20 ms
+tick (over 5 ms, with the worst lateness), speaker underruns (silence filled by the speaker callback), mic
+overflows, samples at full scale after input gain, and the canceller's divergence events, bypassed samples and
+suppressor gate flips. Stream errors that cpal reports are now logged as warnings. They were silently dropped
+before. Not counted yet: jitter-buffer underruns and PLC frames, and noise-suppressor gate flips. A live call on two
+dev instances is needed to see which counter moves with the static.
+
+Open: the double-talk leak above. The divergence guard only handles energy added by a diverged filter, which is one
+part of the static.
+
+## Echo after switching processing off and on mid-call
+
+Report: after the other party set Voice Isolation to Studio and back during a call, they heard themselves as echo.
+Cause: Studio turns echo cancellation off, and the canceller was kept. While it was off, the reference kept
+being pushed but the canceller did not run, so its reference position and the mic position drifted apart by the
+length of the off period. The canceller then read the far end from the wrong moment. Reconnecting built a new
+canceller, which is why a new call cleared it. The test `echo_recovers_after_processing_is_switched_off_and_on`
+reproduced it: ERLE stayed at 0 dB for the rest of the call after switching back on.
+Fix: `CaptureChain::set_settings` drops the canceller whenever the echo setting changes, and the next frame builds
+a new one, as call start does. Measured: ERLE 12.5 dB in the first two seconds after switching back on, 36.5 dB at
+two to four seconds, 41 dB after that. The never-switched call holds about 43 dB.
+Other mid-call changes: device switches restart the voice worker, so they build a new chain. Mute stops both the
+reference and the mic frames, and `echo_recovers_after_the_mic_is_muted_and_unmuted` checks that unmuting
+recovers. Noise suppression and AGC changes keep the canceller, as they should.
+
+## Double talk: options compared (design, not built)
+
+Measured here, before choosing: the 10 dB near-voice loss is not a measurement artefact. The controls in
+`measure_near_only_loss_controls` (same chain, same metric): with no echo and a silent far end the near voice
+passes at 0.0 dB, so the harness and its level calibration are right. With the far end talking and no echo path
+at all, the loss is 3.1 dB per block, with a best-fit near gain of -10.6 dB. The filter is fitting the near
+voice's chance correlation with the far end. With 4608 taps and a 96 ms window, the NLMS has enough freedom to do
+that. So the loss is the canceller's, and it appears whenever the far end talks.
+
+Double-talk leak is the other half: 0.1 dB of cancellation in double-talk blocks, against 37.7 dB in far-only
+blocks (`measure_echo_leak_in_double_talk`). The divergence guard, already in, fixes the energy bursts, not this.
+
+| Option | Double-talk behaviour (expected, not measured here) | Licence | Build cost | Risk |
+|---|---|---|---|---|
+| Speex MDF (`aec-rs` 1.0.0 with `aec-rs-sys`, which bundles speexdsp) | Variable step from the residual-power trend and a leak estimate (`mdf.c`: `Pey`, `Pyy`, `leak_estimate`), plus a foreground and background filter with a backtrack on `Davg1`/`Davg2`. No explicit double-talk detector, but adaptation slows when the residual stops falling. Better than fixed-step NLMS, probably short of AEC3 | `aec-rs` MIT. Bundled speexdsp uses the Xiph BSD-style COPYING (header read; the full text still needs checking before shipping) | cmake and a C compiler on every CI runner, plus bindgen, which needs libclang on Windows, macOS and Linux | Fixed-point C with an unsafe FFI boundary. Old code, fixed filter sizes, and the crate is a thin wrapper, so we own the integration |
+| Pure-Rust AEC3 port (`aec3` 0.4.0) | The WebRTC AEC3 design: a separate dominant near-end detector, a linear model that is frozen during near-end, and a residual suppressor. Expected to be the best double-talk behaviour of the four, but this is the port's claim, not a measurement | MIT OR BSD-3-Clause, with WebRTC's patent grant (PATENT file) | Pure Rust, no C. New dependencies: `rustfft` and `num-complex` (already in our lock file), `crossbeam-channel` (also there), and `log`. The crate is edition 2024, which our rustc 1.99 builds | The crate says it is a work in progress. Its only integration test is a smoke test with no double-talk metric. Port fidelity, CPU cost and the API are unmeasured |
+| `webrtc-audio-processing` 2.1.0 (C++ WebRTC, AEC3 included) | Same algorithm family as the port, with the mature tuning. Expected best behaviour | The WebRTC COPYING is BSD-3-Clause with the patent grant. The wrapper's `license-file` field is non-standard, so read it | The bundled build runs meson and ninja with a C++ toolchain, and its build script calls a Unix `cp`, so Windows needs MSYS-style tools. The non-bundled build needs a system library through pkg-config, which means Linux only. Adds minutes to every CI job and to the installers | High on Windows. The build script is the main obstacle |
+| NLMS with a variable step (our filter, plus a step that falls as near-end power rises) | Limited. Every detector we have tried is documented above as failing or as too weak. Only a shadow-filter scheme, which MDF also uses, is untried | Ours | None | Low cost, but repeating a known dead end is the main risk |
+
+Recommendation:
+1. Keep the NLMS, the divergence guard, the counters and the mode-switch fix in v0.1.12. The double-talk limit is known and documented.
+2. Next, spike the pure-Rust AEC3 port (`aec3` 0.4.0) behind the echo harness, with no change to the product path.
+   Measure double-talk leak, near-only loss, ERLE at 40 ms and 200 ppm, and CPU per 20 ms frame. Read the
+   source for the license grant and for the port's fidelity to WebRTC's `echo_canceller3.cc`.
+   Adopt it only if double talk improves by at least 20 dB of leak and the near-only loss falls under 1 dB.
+3. If the port fails, the fallback is `webrtc-audio-processing`, and its build cost must be planned for Windows
+   first: vendor the meson build or pre-build the library, and do not start from the bundled path as shipped.
+4. Speex MDF is the middle option if we want C without WebRTC's build. Its benefit over NLMS is unmeasured.
+   Do not take it before the AEC3 spike.

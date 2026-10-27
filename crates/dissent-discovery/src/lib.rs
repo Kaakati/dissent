@@ -8,22 +8,25 @@
 mod contact;
 mod dns;
 mod invite;
+mod latency;
 mod record;
 mod user_record;
 
 use data_encoding::BASE32_NOPAD;
 use dissent_identity::{CommunityId, CommunityKey, IdentityError, RootId, RootKey};
 use pkarr::dht::{DhtClient, DhtConfig, ResolveError};
-use pkarr::{PublicKey, SignedPacket};
+use pkarr::{Keypair, PublicKey, SignedPacket};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 use tracing::{debug, warn};
 use url::Url;
 
 pub use contact::{short_url, ContactCard, ContactLink};
 pub use dns::{dns_record_value, normalize_domain, verify_dns_handle};
 pub use invite::{Invite, InviteLink, ShortInvite};
+pub use latency::LatencyWindow;
 pub use record::{CommunityRecord, MAX_PEERS};
 pub use user_record::{UserRecord, MAX_DEVICES, MAX_USER_PEERS};
 
@@ -99,7 +102,12 @@ fn from_link<T: DeserializeOwned>(prefix: &str, s: &str) -> std::result::Result<
 pub struct Discovery {
     /// One DHT node for publish, resolve and stats. The app's iroh lookup runs its own node.
     dht: Mutex<DhtClient>,
+    /// Times of recent lookups, for the status bar. See `probe_latency`.
+    latency: Mutex<LatencyWindow>,
 }
+
+/// The key a latency probe looks up. Nothing is stored under it, so the lookup only walks the DHT.
+const PROBE_SEED: [u8; 32] = [0x6c; 32];
 
 /// DHT network statistics for the status bar. Deliberately omits local and public addresses.
 #[derive(Clone, Debug, Serialize)]
@@ -110,6 +118,9 @@ pub struct DhtStats {
     pub confidence: f64,
     /// True if this node is likely behind a NAT or firewall.
     pub firewalled: bool,
+    /// The median time of recent DHT lookups in milliseconds, or `None` when none has been answered. See
+    /// `Discovery::probe_latency`.
+    pub latency_ms: Option<u64>,
 }
 
 impl Discovery {
@@ -119,17 +130,37 @@ impl Discovery {
             .map_err(|e| DiscoveryError::Pkarr(format!("dht: {e}")))?;
         Ok(Self {
             dht: Mutex::new(dht),
+            latency: Mutex::new(LatencyWindow::default()),
         })
+    }
+
+    /// Times one DHT lookup and adds it to the window. A lookup that no node answered is recorded as such. Mainline does
+    /// not report round trips per node, so this times a whole lookup. It sends a small, bounded number of queries.
+    pub async fn probe_latency(&self) {
+        let key = Keypair::from_secret_key(&PROBE_SEED).public_key();
+        let started = Instant::now();
+        let outcome = self.dht().resolve(&key, None).await.complete().await;
+        let sample = (outcome.report.responded() > 0).then(|| started.elapsed());
+        self.latency
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sample);
     }
 
     /// Current DHT size estimate and firewall state, for display.
     pub async fn stats(&self) -> Result<DhtStats> {
         let info = self.dht().info().await;
         let (size_estimate, confidence) = info.dht_size_estimate();
+        let latency_ms = self
+            .latency
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .median_ms();
         Ok(DhtStats {
             size_estimate,
             confidence,
             firewalled: info.firewalled(),
+            latency_ms,
         })
     }
 
@@ -320,6 +351,44 @@ mod tests {
         let stats = discovery.stats().await.expect("stats");
         println!("{stats:?}");
         assert!(stats.size_estimate > 0, "{stats:?}");
+    }
+
+    /// Calibration, not a check: times 20 probe lookups on a warm node and prints each one with its percentiles, so the
+    /// status bar's thresholds can be set from measured values. Run with `--ignored --nocapture`.
+    #[ignore]
+    #[tokio::test]
+    async fn calibrate_lookup_times() {
+        let discovery = Discovery::new().expect("client");
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let key = Keypair::from_secret_key(&PROBE_SEED).public_key();
+        let mut times = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let outcome = discovery.dht().resolve(&key, None).await.complete().await;
+            let answered = outcome.report.responded();
+            let ms = started.elapsed().as_millis();
+            eprintln!("LOOKUP ms={ms} answered={answered}");
+            if answered > 0 {
+                times.push(ms);
+            }
+        }
+        times.sort();
+        let pick = |p: usize| times[(times.len() * p / 100).min(times.len() - 1)];
+        eprintln!("LOOKUP answered={} p50={} p90={} max={}", times.len(), pick(50), pick(90), times.last().copied().unwrap_or(0));
+    }
+
+    /// Needs the Mainline DHT and network access; run with `cargo test -- --ignored`.
+    /// Two probes after a warm-up give a median, and the median is reported once a probe has been answered.
+    #[ignore]
+    #[tokio::test]
+    async fn probe_latency_reports_a_median_once_lookups_are_answered() {
+        let discovery = Discovery::new().expect("client");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        discovery.probe_latency().await;
+        discovery.probe_latency().await;
+        let stats = discovery.stats().await.expect("stats");
+        println!("{stats:?}");
+        assert!(stats.latency_ms.is_some(), "{stats:?}");
     }
 
     /// Needs the Mainline DHT and network access; run with `cargo test -- --ignored`.

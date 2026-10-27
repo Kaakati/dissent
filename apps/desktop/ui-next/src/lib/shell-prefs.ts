@@ -12,6 +12,7 @@ interface ShellPrefs {
   startAtLoginAvailable: boolean;
   startAtLoginNote: string | null;
   notificationsMuted: boolean;
+  convertEmoticons: boolean; // the composer turns :D and the like into emoji
   apply: (s: ShellSettings) => void;
   load: () => Promise<void>;
 }
@@ -22,6 +23,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   startAtLoginAvailable: false,
   startAtLoginNote: null,
   notificationsMuted: false,
+  convertEmoticons: true,
   apply: (s) =>
     set({
       keepRunning: s.keep_running,
@@ -29,6 +31,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
       startAtLoginAvailable: s.start_at_login_available,
       startAtLoginNote: s.start_at_login_note,
       notificationsMuted: s.notifications_muted,
+      convertEmoticons: s.emoticons_as_text !== true,
     }),
   load: async () => {
     try {
@@ -39,7 +42,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   },
 }));
 
-type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted'>>;
+type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted' | 'emoticons_as_text'>>;
 
 // Saves one change with the rest of the settings. The backend answers with what it saved, which is what the page shows.
 export async function setShellPrefs(change: Change): Promise<void> {
@@ -48,6 +51,7 @@ export async function setShellPrefs(change: Change): Promise<void> {
     keep_running: current.keepRunning,
     start_at_login: current.startAtLogin,
     notifications_muted: current.notificationsMuted,
+    emoticons_as_text: !current.convertEmoticons,
     ...change,
   };
   try {

@@ -167,3 +167,31 @@ fn incremental_state_matches_full_replay() {
     assert_eq!(c.state(), &full);
     assert_eq!(c.max_hlc(), Some(Hlc { wall_ms: 39, counter: 0 }));
 }
+
+#[test]
+fn pending_alerts_are_bounded_and_drop_the_oldest() {
+    let mut pending = PendingAlerts::default();
+    let id = |n: usize| {
+        let mut bytes = [0u8; 32];
+        bytes[0] = (n % 251) as u8;
+        bytes[1] = (n / 251) as u8;
+        EventId(bytes)
+    };
+    for n in 0..PENDING_ALERTS_MAX + 10 {
+        pending.note(id(n));
+    }
+    assert_eq!(pending.len(), PENDING_ALERTS_MAX, "the set stops at its cap");
+    assert!(!pending.take(&id(0)), "the oldest id was dropped");
+    assert!(pending.take(&id(10)), "the newest ids are kept");
+}
+
+#[test]
+fn a_pending_alert_is_announced_once() {
+    let mut pending = PendingAlerts::default();
+    let id = EventId([7; 32]);
+    pending.note(id);
+    pending.note(id);
+    assert_eq!(pending.len(), 1, "a repeat note keeps one entry");
+    assert!(pending.take(&id));
+    assert!(!pending.take(&id), "a second take finds nothing");
+}

@@ -137,3 +137,32 @@ async fn community_relays_reach_members_online_and_joiners() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_changes_its_relays_many_times_keeps_only_the_current_ones() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let server = alice.engine.create_community("Restless".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let adopted = |p: &Peer| dissent_core::test_support::adopted_relays(&p.engine);
+        let before = adopted(&alice).len();
+        // Ten lists of four over one run: forty adoptions, more than the node's cap of 30.
+        for round in 0..10 {
+            let relays: Vec<String> = (0..4).map(|i| format!("https://r{round}-{i}.restless.example/")).collect();
+            alice.engine.set_community_relays(id, relays.clone()).await.expect("set relays");
+            let now = adopted(&alice);
+            for relay in &relays {
+                assert!(now.contains(relay), "round {round}: {relay} is adopted");
+            }
+            assert!(
+                !now.iter().any(|r| r.contains(".restless.example") && !relays.contains(r)),
+                "round {round}: relays the server no longer names are gone: {now:?}"
+            );
+            assert_eq!(now.len(), before + 4);
+        }
+        alice.engine.set_community_relays(id, Vec::new()).await.expect("clear");
+        assert_eq!(adopted(&alice).len(), before, "with no relays named, only the configured ones stay");
+        finish(vec![alice]).await;
+    })
+    .await;
+}

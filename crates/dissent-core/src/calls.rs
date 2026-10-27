@@ -25,7 +25,7 @@ use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId};
 use dissent_audio::{OpusEncoder, SenderConfig, SenderPacket, VoiceReceiver, VoiceSender};
 use dissent_media::{
     assign_forwarders, elect, plan as cascade_plan, Auth, Candidate, LinkTransport, MediaKey, Mesh, Mode, Participant, ReceivedFrame, Sfu,
-    PacketTransport, MAX_SENDER_ID, SYNTHETIC_CALLEE, SYNTHETIC_CALLER,
+    PacketTransport, AUDIO_STREAM_KBPS, MAX_SENDER_ID, SYNTHETIC_CALLEE, SYNTHETIC_CALLER, VIDEO_720P_KBPS,
     Side, Signal, FRAME_SAMPLES,
 };
 use std::collections::VecDeque;
@@ -129,7 +129,16 @@ pub(crate) enum CallMsg {
     /// The sender's account of the DM or group call it is in. Sent to the people who could join
     /// it, so they can show it as live. An empty roster means the sender has left.
     Presence(Box<PresenceMsg>),
+    /// The call features the sender supports, as `FEATURE_*` bits. Appended after the released
+    /// variants: a released device cannot decode it and answers it as a bad request, which is how
+    /// the sender learns that device is released. See `docs/design/13-forwarded-calls.md`.
+    Features { room: RoomId, bits: u64 },
 }
+
+/// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
+const FEATURE_BOOST_TIERS: u64 = 1;
+/// Every call feature this device supports.
+const FEATURES: u64 = FEATURE_BOOST_TIERS;
 
 /// A device's roster for the DM or group call it is in.
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,6 +201,10 @@ pub(crate) trait CallAudio: Send {
     fn playout(&mut self, now_ms: u64, out: &mut [f32]);
     /// Adds captured samples. A synthetic source ignores them.
     fn capture(&mut self, samples: &[f32]) -> Result<()>;
+    /// Playout slots lost, concealed by PLC and silenced, summed over the senders. A synthetic source has none.
+    fn loss(&self) -> (u64, u64, u64) {
+        (0, 0, 0)
+    }
 }
 
 /// Constant frames, one per tick. Enough to exercise the media path end to end. The first byte
@@ -264,6 +277,13 @@ impl CallAudio for VoiceAudio {
         if self.receiver.pop_mix(now_ms, out).is_err() {
             out.fill(0.0);
         }
+    }
+
+    fn loss(&self) -> (u64, u64, u64) {
+        self.receiver
+            .stats()
+            .values()
+            .fold((0, 0, 0), |(lost, concealed, silenced), j| (lost + j.lost, concealed + j.concealed, silenced + j.silenced))
     }
 
     fn capture(&mut self, samples: &[f32]) -> Result<()> {
@@ -524,6 +544,10 @@ pub(crate) struct Room {
     capacity_clock: AtomicU64,
     /// When a better forwarder first appeared. Cleared when it no longer does.
     forwarder_since: Mutex<Option<Instant>>,
+    /// The `Features` bits other devices sent, by sender id, with when each arrived.
+    features: Mutex<BTreeMap<u64, (u64, Instant)>>,
+    /// Devices this room has sent its own `Features` to, by sender id.
+    told: Mutex<std::collections::BTreeSet<u64>>,
     /// False on a staged room, which receives but does not send until it is swapped in.
     sending: AtomicBool,
     /// Media links this room has established. Counts links, not presence entries.
@@ -553,6 +577,11 @@ pub(crate) struct Ringing {
 
 /// Calls on this device, the media links the transport has delivered, and any call ringing.
 pub(crate) struct CallHub {
+    /// The pixel width each remote tile is drawn at, by the peer's root id and whether it is a
+    /// screen. A preview is made that wide, so a small tile costs little.
+    tiles: Mutex<HashMap<(String, bool), u32>>,
+    /// Where this engine's camera, lobby preview and screen take their pictures from. A device, unless a test set it.
+    test_capture: Mutex<crate::call_video::TestCapture>,
     /// This device's camera while the lobby previews it, before a call. A call takes the camera
     /// over, so the preview is dropped when the call's camera turns on.
     lobby_camera: Mutex<Option<Sending>>,
@@ -578,6 +607,8 @@ pub(crate) struct CallHub {
 impl CallHub {
     pub(crate) fn new(timings: &Timings) -> Self {
         Self {
+            tiles: Mutex::new(HashMap::new()),
+            test_capture: Mutex::new(crate::call_video::TestCapture::Device),
             lobby_camera: Mutex::new(None),
             current: Mutex::new(None),
             staged: Mutex::new(None),
@@ -837,6 +868,8 @@ impl Room {
             own_kbps: AtomicU32::new(0),
             capacity_clock: AtomicU64::new(0),
             forwarder_since: Mutex::new(None),
+            features: Mutex::new(BTreeMap::new()),
+            told: Mutex::new(std::collections::BTreeSet::new()),
             sending: AtomicBool::new(true),
             links: AtomicUsize::new(0),
             clocked: AtomicBool::new(false),
@@ -980,8 +1013,8 @@ fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
 /// Tells each sending capture whether every peer agreed to AV1.
 fn set_av1(room: &Room, on: bool) {
     for slot in [&room.camera, &room.screen] {
-        if let Some(sending) = lock(slot).as_ref() {
-            sending.capture.set_av1(on);
+        if let Some(sending) = lock(slot).as_mut() {
+            sending.set_av1(on);
         }
     }
 }
@@ -1023,13 +1056,26 @@ fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, previ
     });
 }
 
-/// Shows a peer's frame, and tells the window about the picture it decodes to.
+/// Shows a peer's frame, and tells the window about the picture it decodes to. The preview is as
+/// wide as the window draws the tile, when the window has said so, and the default otherwise.
 fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
-    if let Some(preview) = lock(&room.remote_video).show(frame) {
-        let root_id = lock(&room.peers)
-            .get(&preview.sender)
-            .map(|peer| peer.root.to_string())
-            .unwrap_or_default();
+    use crate::call_video::{LARGE_PREVIEW_INTERVAL, PREVIEW_INTERVAL};
+    let root_id = lock(&room.peers)
+        .get(&frame.sender)
+        .map(|peer| peer.root.to_string())
+        .unwrap_or_default();
+    let tile = (root_id.clone(), frame.screen);
+    let (width, largest) = {
+        let tiles = lock(&engine.inner.calls.tiles);
+        // The widest tile is the largest. A tie goes to the lower key, so exactly one tile is largest.
+        let largest = tiles
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(key, _)| key.clone());
+        (tiles.get(&tile).copied().unwrap_or(crate::call_video::PREVIEW_WIDTH), largest)
+    };
+    let interval = if largest.as_ref() == Some(&tile) { LARGE_PREVIEW_INTERVAL } else { PREVIEW_INTERVAL };
+    if let Some(preview) = lock(&room.remote_video).show(frame, width, interval) {
         emit_preview(engine, preview.sender, &root_id, preview.screen, &preview);
     }
 }
@@ -1412,8 +1458,10 @@ impl Engine {
             if let Scope::Channel { community, channel } = room.scope {
                 let w = self.read();
                 if let Some(c) = w.communities.get(&community) {
-                    let cap = c.state().settings(&channel).bitrate_kbps.saturating_mul(1000);
-                    config.bitrate_bps = config.bitrate_bps.min(cap);
+                    // The channel's setting, held to the server's boost ceiling. See `boosts`.
+                    let ceiling = crate::boosts::ceilings(w.boost_level(c, crate::engine::now_ms())).voice_kbps;
+                    let kbps = c.state().settings(&channel).bitrate_kbps.min(ceiling);
+                    config.bitrate_bps = config.bitrate_bps.min(kbps.saturating_mul(1000));
                 }
             }
             match VoiceAudio::new(config) {
@@ -1455,6 +1503,14 @@ impl Engine {
                 lock(&room.audio).playout(now_ms(), out);
             }
             _ => out.fill(0.0),
+        }
+    }
+
+    /// The playout loss counts of the current call, `(lost, concealed, silenced)`. Zero with no call.
+    pub fn playout_loss(&self) -> (u64, u64, u64) {
+        match lock(&self.inner.calls.current).clone() {
+            Some(room) => lock(&room.audio).loss(),
+            None => (0, 0, 0),
         }
     }
 
@@ -1817,6 +1873,7 @@ impl Engine {
                 CallReply::Ack
             }
             CallMsg::Presence(msg) => self.on_presence(from, *msg),
+            CallMsg::Features { room, bits } => self.on_features(from, room, bits),
         }
     }
 
@@ -2436,6 +2493,14 @@ impl Engine {
         Ok(())
     }
 
+    /// The boost ceilings of a call's server: a voice channel's server, level 0 for a DM or group.
+    fn room_ceilings(&self, room: &Room) -> crate::boosts::Ceilings {
+        match room.scope {
+            Scope::Channel { community, .. } => self.call_ceilings(Some(community)),
+            _ => self.call_ceilings(None),
+        }
+    }
+
     /// Turns this device's camera on or off in the current call. Turning it on starts the capture
     /// thread, and its frames reach the peers from the next tick of the call loop.
     pub fn set_camera(&self, on: bool) -> Result<()> {
@@ -2447,7 +2512,9 @@ impl Engine {
             if !on {
                 *camera = None;
             } else if camera.is_none() {
-                *camera = Some(Sending::new(crate::call_video::start_camera()?));
+                let mut sending = Sending::new(crate::call_video::start_camera(self.test_capture())?);
+                sending.budget.cap(self.room_ceilings(&room).video);
+                *camera = Some(sending);
             }
         }
         self.emit(EngineEvent::CallUpdated);
@@ -2456,6 +2523,18 @@ impl Engine {
 
     /// Previews this device's camera in the lobby, before a call. The window receives the preview
     /// as its own tile. A call's camera takes over from it.
+    /// Tells the engine how many pixels wide the tile for a peer's camera or screen is drawn, so
+    /// the preview of that tile is made at that width. Takes effect on the next frame.
+    /// A width of 0 removes the tile, once it is no longer drawn.
+    pub fn set_video_tile(&self, root_id: &str, screen: bool, width: u32) {
+        let mut tiles = lock(&self.inner.calls.tiles);
+        if width == 0 {
+            tiles.remove(&(root_id.to_string(), screen));
+        } else {
+            tiles.insert((root_id.to_string(), screen), width.min(4096));
+        }
+    }
+
     pub fn set_camera_preview(&self, on: bool) -> Result<()> {
         {
             let mut preview = lock(&self.inner.calls.lobby_camera);
@@ -2466,7 +2545,7 @@ impl Engine {
             if preview.is_some() {
                 return Ok(());
             }
-            *preview = Some(Sending::new(crate::call_video::start_camera()?));
+            *preview = Some(Sending::new(crate::call_video::start_camera(self.test_capture())?));
         }
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
@@ -2492,10 +2571,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Test hook: while on, the camera is a deterministic test picture rather than a device.
-    /// Process-wide, so a test sets it before it turns the camera on.
-    pub fn use_test_camera_pattern(&self, on: bool) {
-        crate::call_video::set_test_camera_pattern(on);
+    /// Test hook: where this engine's camera and screen take their pictures from. Tests set a pattern or no capture, so
+    /// none of them opens a real device. Each engine has its own setting.
+    pub fn set_test_capture(&self, source: crate::call_video::TestCapture) {
+        *lock(&self.inner.calls.test_capture) = source;
+    }
+
+    fn test_capture(&self) -> crate::call_video::TestCapture {
+        *lock(&self.inner.calls.test_capture)
     }
 
     /// Starts or stops sharing a display or a window in the current call. `None` shares the
@@ -2511,7 +2594,9 @@ impl Engine {
             if !on {
                 *screen = None;
             } else {
-                *screen = Some(Sending::new(crate::call_video::Capture::screen(target)?));
+                let mut sending = Sending::new(crate::call_video::Capture::screen(target, self.test_capture())?);
+                sending.budget.cap(self.room_ceilings(&room).screen);
+                *screen = Some(sending);
             }
         }
         self.emit(EngineEvent::CallUpdated);
@@ -2569,6 +2654,12 @@ impl Engine {
     }
 
     /// The call on this device, or `None` when it is not in one.
+    /// Whether this device is in a call now. Relay probes wait while it is, so they cannot cause an
+    /// audio blip (see `boosts`). Tests can pretend with `test_support::pretend_in_call`.
+    pub(crate) fn in_call(&self) -> bool {
+        lock(&self.inner.calls.current).is_some() || self.inner.pretend_in_call.load(Ordering::Relaxed)
+    }
+
     pub fn call_state(&self) -> Option<CallView> {
         let room = lock(&self.inner.calls.current).clone()?;
         let reported = self.self_reported_deafen();
@@ -2645,16 +2736,19 @@ impl Engine {
         let Some(group) = room.scope.group_id() else {
             return;
         };
+        self.tell_features(room, false);
         self.tier_check(room);
         self.forwarder_check(room);
         let tick = room.capacity_clock.fetch_add(1, Ordering::SeqCst);
         if tick.is_multiple_of(CAPACITY_EVERY) {
-            let mesh_targets: Vec<u32> = if room.forwarding.is_none() {
-                mesh.stats().values().map(|s| s.target_kbps).collect()
+            // Sent again with each capacity, so a device that missed it, or rejoined, hears it.
+            self.tell_features(room, true);
+            let mesh_links: Vec<Option<u32>> = if room.forwarding.is_none() {
+                mesh.stats().values().map(|s| s.sent_kbps).collect()
             } else {
                 Vec::new()
             };
-            if let Some(kbps) = self.measure_capacity(room, mesh_targets).await {
+            if let Some(kbps) = self.measure_capacity(room, mesh_links).await {
                 room.own_kbps.store(kbps, Ordering::SeqCst);
                 self.announce_capacity(room, kbps).await;
             }
@@ -2878,6 +2972,9 @@ pub(crate) enum Tier {
 pub(crate) struct TierPolicy {
     /// A forwarded call goes up to a cascade at this count, and drops back below `cascade_at - 5`.
     pub cascade_at: usize,
+    /// A mesh is forwarded above this count, and a forwarded call goes back to a mesh below it.
+    /// Level 0's is 6: forwarded at 7, back at 5. See `effective_mesh_limit`.
+    pub mesh_limit: usize,
 }
 
 impl TierPolicy {
@@ -2887,10 +2984,10 @@ impl TierPolicy {
             Tier::P2p if n >= 3 => Tier::Mesh,
             Tier::P2p => Tier::P2p,
             Tier::Mesh if n <= 2 => Tier::P2p,
-            Tier::Mesh if n >= 7 => Tier::Forwarded,
+            Tier::Mesh if n > self.mesh_limit => Tier::Forwarded,
             Tier::Mesh => Tier::Mesh,
             Tier::Forwarded if n >= self.cascade_at => Tier::Cascade,
-            Tier::Forwarded if n <= 5 => Tier::Mesh,
+            Tier::Forwarded if n < self.mesh_limit => Tier::Mesh,
             Tier::Forwarded => Tier::Forwarded,
             Tier::Cascade if n < self.cascade_at.saturating_sub(5) => Tier::Forwarded,
             Tier::Cascade => Tier::Cascade,
@@ -2904,7 +3001,7 @@ mod tier_tests {
 
     #[test]
     fn calls_move_up_at_the_thresholds() {
-        let p = TierPolicy { cascade_at: 50 };
+        let p = TierPolicy { cascade_at: 50, mesh_limit: 6 };
         assert_eq!(p.tier_for(2, Tier::P2p), Tier::P2p);
         assert_eq!(p.tier_for(3, Tier::P2p), Tier::Mesh);
         assert_eq!(p.tier_for(6, Tier::Mesh), Tier::Mesh);
@@ -2915,13 +3012,22 @@ mod tier_tests {
 
     #[test]
     fn a_call_hovering_at_an_edge_does_not_flap() {
-        let p = TierPolicy { cascade_at: 50 };
+        let p = TierPolicy { cascade_at: 50, mesh_limit: 6 };
         // Forwarded at 6 stays forwarded: going back to mesh needs 5 or fewer.
         assert_eq!(p.tier_for(6, Tier::Forwarded), Tier::Forwarded);
         assert_eq!(p.tier_for(5, Tier::Forwarded), Tier::Mesh);
         // A cascade at 46 stays a cascade: it drops only below 45.
         assert_eq!(p.tier_for(46, Tier::Cascade), Tier::Cascade);
         assert_eq!(p.tier_for(44, Tier::Cascade), Tier::Forwarded);
+    }
+
+    #[test]
+    fn a_boosted_limit_moves_both_edges() {
+        let p = TierPolicy { cascade_at: 50, mesh_limit: 8 };
+        assert_eq!(p.tier_for(8, Tier::Mesh), Tier::Mesh);
+        assert_eq!(p.tier_for(9, Tier::Mesh), Tier::Forwarded);
+        assert_eq!(p.tier_for(8, Tier::Forwarded), Tier::Forwarded);
+        assert_eq!(p.tier_for(7, Tier::Forwarded), Tier::Mesh);
     }
 }
 
@@ -3067,6 +3173,7 @@ impl Engine {
         let live = lock(&room.live).len();
         let policy = TierPolicy {
             cascade_at: self.inner.calls.cascade_at.load(Ordering::SeqCst),
+            mesh_limit: self.mesh_limit(room),
         };
         let want = media_tier(policy.tier_for(live, room.tier));
         if want == room.tier {
@@ -3108,6 +3215,7 @@ impl Engine {
         let auth = self.auth_for(&certs);
         let mesh = Mesh::new_authenticated(key.clone(), my_sid, auth.clone()).map_err(call_err)?;
         let mut room = Room::new(old.id, old.scope, mesh, my_sid, epoch, None);
+        room.features = Mutex::new(lock(&old.features).clone());
         let caps = self.fresh_capacities(old);
         let forwarder = match to {
             Tier::Forwarded => Some(match forced {
@@ -3367,32 +3475,32 @@ impl Engine {
         caps
     }
 
-    /// This device's capacity: the mean bitrate target of the links that carry its media. A
-    /// forwarder measures its downlinks, and a leaf measures its link to its forwarder.
-    async fn measure_capacity(&self, room: &Arc<Room>, mesh_targets: Vec<u32>) -> Option<u32> {
+    /// This device's upload in kbps, as a floor: what it sends now, summed over the links that carry
+    /// its media (`CallStats::sent_kbps`). A mesh device sums its links to the peers, a forwarder its
+    /// downlinks, and a leaf its link to its forwarder. Links with no rate yet add nothing, and with
+    /// none at all there is no measurement. It is what the device carries, not what it could: no
+    /// probe measures headroom yet. The audio target, 16 to 64 kbps, is a separate value that sizes
+    /// the voice only.
+    async fn measure_capacity(&self, room: &Arc<Room>, mesh_links: Vec<Option<u32>>) -> Option<u32> {
         let overridden = self.inner.calls.capacity_override.load(Ordering::SeqCst);
         if overridden > 0 {
             return Some(overridden);
         }
-        let mut targets: Vec<u32> = Vec::new();
+        let mut links: Vec<Option<u32>> = Vec::new();
         match room.forwarding.as_ref() {
-            None => targets.extend(mesh_targets),
+            None => links.extend(mesh_links),
             Some(forwarding) if forwarding.role == Role::Leaf => {
                 if let Some(participant) = forwarding.leaf.lock().await.as_ref() {
-                    targets.extend(participant.link_stats().values().map(|s| s.target_kbps));
+                    links.extend(participant.link_stats().values().map(|s| s.sent_kbps));
                 }
             }
             Some(forwarding) => {
                 if let Some(relay) = forwarding.sfu.lock().await.as_ref() {
-                    targets.extend(relay.downlink_stats().values().map(|s| s.target_kbps));
+                    links.extend(relay.downlink_stats().values().map(|s| s.sent_kbps));
                 }
             }
         }
-        if targets.is_empty() {
-            return None;
-        }
-        let sum: u64 = targets.iter().map(|t| u64::from(*t)).sum();
-        u32::try_from(sum / targets.len() as u64).ok()
+        upload_kbps(&links)
     }
 
     /// Signs and sends this device's capacity to the other devices in the call.
@@ -3781,5 +3889,217 @@ impl Engine {
             not_in,
             scope: dm.then_some("dm"),
         })
+    }
+}
+
+impl Engine {
+    /// For tests: this device's measured upload in its current call, in kbps, before any override.
+    /// `None` before the first measurement.
+    pub(crate) fn own_call_capacity(&self) -> Option<u32> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        Some(room.own_kbps.load(Ordering::SeqCst)).filter(|k| *k > 0)
+    }
+
+    /// For tests: the election over measured capacities alone, with no defaults. Returns how many
+    /// live devices have a fresh measurement, and the forwarder it picks among them for a call of
+    /// the live roster's size.
+    pub(crate) fn measured_election(&self) -> (usize, Option<u64>) {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return (0, None);
+        };
+        let caps = self.fresh_capacities(&room);
+        let sids: Vec<u64> = caps.keys().copied().collect();
+        let participants = lock(&room.live).len();
+        (sids.len(), elect_forwarder(&sids, participants, &caps))
+    }
+}
+
+/// A device's upload from its links' send rates: their sum, ignoring links with no rate yet. `None`
+/// when no link has one.
+fn upload_kbps(links: &[Option<u32>]) -> Option<u32> {
+    let measured: Vec<u64> = links.iter().flatten().map(|k| u64::from(*k)).collect();
+    if measured.is_empty() {
+        return None;
+    }
+    Some(u32::try_from(measured.iter().sum::<u64>()).unwrap_or(u32::MAX))
+}
+
+/// The mesh limit of boost level 0. A released device uses it too: it forwards at 7 and goes back
+/// to a mesh at 5.
+const LEVEL0_MESH_LIMIT: usize = 6;
+
+/// The mesh limit a call uses. A boosted limit above level 0's holds only while every live device
+/// has said it supports one (`FEATURE_BOOST_TIERS`), and every live device's announced upload covers
+/// a copy of its stream for each other device, `copy_kbps` each. Otherwise it is level 0's, which
+/// released devices use, so they never see a mesh larger than they expect. A device with no fresh
+/// capacity counts as the election's default.
+fn effective_mesh_limit(
+    boosted: usize,
+    live: &[u64],
+    supports: impl Fn(u64) -> bool,
+    capacities: &BTreeMap<u64, u32>,
+    copy_kbps: u32,
+) -> usize {
+    if boosted <= LEVEL0_MESH_LIMIT {
+        return boosted;
+    }
+    if !live.iter().all(|sid| supports(*sid)) {
+        return LEVEL0_MESH_LIMIT;
+    }
+    let copies = u32::try_from(live.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let need = copies.saturating_mul(copy_kbps);
+    if live
+        .iter()
+        .any(|sid| capacities.get(sid).copied().unwrap_or(DEFAULT_KBPS) < need)
+    {
+        return LEVEL0_MESH_LIMIT;
+    }
+    boosted
+}
+
+impl Engine {
+    /// The mesh limit for `room` now: its server's boosted one when every device can take it. See
+    /// `effective_mesh_limit`.
+    fn mesh_limit(&self, room: &Room) -> usize {
+        if self.inner.legacy_calls.load(Ordering::Relaxed) {
+            return LEVEL0_MESH_LIMIT;
+        }
+        let boosted = self.room_ceilings(room).mesh_limit;
+        // Each copy carries audio, and a camera or screen when anyone in the call shows one.
+        let video = lock(&room.camera).is_some()
+            || lock(&room.screen).is_some()
+            || lock(&room.remote_video).receiving();
+        let copy_kbps = AUDIO_STREAM_KBPS + if video { VIDEO_720P_KBPS } else { 0 };
+        let live: Vec<u64> = lock(&room.live).keys().copied().collect();
+        let capacities = self.fresh_capacities(room);
+        let now = Instant::now();
+        let features = lock(&room.features).clone();
+        let supports = |sid: u64| {
+            sid == room.my_sid
+                || features.get(&sid).is_some_and(|(bits, at)| {
+                    bits & FEATURE_BOOST_TIERS != 0 && now.duration_since(*at) < CAPACITY_FRESH
+                })
+        };
+        effective_mesh_limit(boosted, &live, supports, &capacities, copy_kbps)
+    }
+
+    /// Sends this device's `Features` to the live devices it has not told yet, or to all of them
+    /// with `again`. A device that refuses it, because it has not seen us join yet, is told again on
+    /// the next tick. A released device answers it as a bad request, and is asked again only with
+    /// the next `again`.
+    fn tell_features(&self, room: &Arc<Room>, again: bool) {
+        if self.inner.legacy_calls.load(Ordering::Relaxed) {
+            return;
+        }
+        let me = self.inner.identity.device_id();
+        let targets: Vec<(u64, DeviceId)> = {
+            let live = lock(&room.live);
+            let mut told = lock(&room.told);
+            live.iter()
+                .filter(|(_, device)| **device != me)
+                .filter(|(sid, _)| told.insert(**sid) || again)
+                .map(|(sid, device)| (*sid, *device))
+                .collect()
+        };
+        for (sid, device) in targets {
+            let engine = self.clone();
+            let weak = Arc::downgrade(room);
+            let msg = CallMsg::Features {
+                room: room.id,
+                bits: FEATURES,
+            };
+            self.spawn_task(async move {
+                match engine.call_rpc(device, msg).await {
+                    Ok(CallReply::Refused(_)) => {
+                        if let Some(room) = weak.upgrade() {
+                            lock(&room.told).remove(&sid);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => debug!(device = %device, error = %e, "call features not delivered"),
+                }
+            });
+        }
+    }
+
+    /// Records the `Features` a device in the call sent.
+    fn on_features(&self, from: DeviceId, id: RoomId, bits: u64) -> CallReply {
+        let Some(room) = self.current_room(&id) else {
+            return CallReply::Refused("not in this call".into());
+        };
+        if !lock(&room.live).values().any(|d| *d == from) {
+            return CallReply::Refused("the sender is not in this call".into());
+        }
+        lock(&room.features).insert(sender_id_of(&room, &from), (bits, Instant::now()));
+        CallReply::Ack
+    }
+}
+
+#[cfg(test)]
+mod mesh_limit_tests {
+    use super::*;
+
+    fn caps(entries: &[(u64, u32)]) -> BTreeMap<u64, u32> {
+        entries.iter().copied().collect()
+    }
+
+    #[test]
+    fn level_zero_limits_need_nothing() {
+        let live = [1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(effective_mesh_limit(6, &live, |_| false, &caps(&[(1, 1)]), 32), 6);
+    }
+
+    #[test]
+    fn a_boosted_limit_holds_when_every_device_supports_it() {
+        let live = [1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(effective_mesh_limit(8, &live, |_| true, &BTreeMap::new(), 32), 8);
+    }
+
+    #[test]
+    fn one_released_device_brings_back_level_zero() {
+        let live = [1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(effective_mesh_limit(10, &live, |sid| sid != 4, &BTreeMap::new(), 32), 6);
+    }
+
+    #[test]
+    fn an_upload_short_of_the_copies_keeps_the_mesh_small() {
+        let live = [1, 2, 3, 4, 5, 6, 7];
+        // Six copies of a 720p camera need over 9 Mbps. Device 3 has 5.
+        let low = caps(&[(3, 5_000)]);
+        let copy = AUDIO_STREAM_KBPS + VIDEO_720P_KBPS;
+        assert_eq!(effective_mesh_limit(8, &live, |_| true, &low, copy), 6);
+        // The same upload covers six copies of audio.
+        assert_eq!(effective_mesh_limit(8, &live, |_| true, &low, AUDIO_STREAM_KBPS), 8);
+    }
+}
+
+#[cfg(test)]
+mod features_compat_tests {
+    use super::*;
+
+    /// `CallMsg` as released devices have it: the same variants, in order, without `Features`.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    enum ReleasedCallMsg {
+        Join(Box<JoinMsg>),
+        Offer { room: RoomId, gen: RoomId, signal: Vec<u8> },
+        Mute { room: RoomId, muted: bool },
+        Decline { room: RoomId },
+        Tier(Box<TierMsg>),
+        Capacity { room: RoomId, kbps: u32, sig: dissent_identity::Signature },
+        AnsweredElsewhere { room: RoomId },
+        Leave { room: RoomId },
+        Presence(Box<PresenceMsg>),
+    }
+
+    #[test]
+    fn a_released_device_cannot_decode_features_but_still_decodes_the_rest() {
+        let features = postcard::to_stdvec(&CallMsg::Features { room: [1; 32], bits: FEATURES }).unwrap();
+        assert!(postcard::from_bytes::<ReleasedCallMsg>(&features).is_err());
+        let mute = postcard::to_stdvec(&CallMsg::Mute { room: [1; 32], muted: true }).unwrap();
+        assert!(matches!(
+            postcard::from_bytes::<ReleasedCallMsg>(&mute),
+            Ok(ReleasedCallMsg::Mute { muted: true, .. })
+        ));
     }
 }

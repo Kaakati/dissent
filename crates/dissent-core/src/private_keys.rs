@@ -18,7 +18,7 @@ use crate::error::{CoreError, Result};
 use crate::membership::CommitRules;
 use crate::rpc::{Request, Response};
 use crate::store::{write_bytes_atomic, Paths};
-use crate::views::ChannelInfo;
+use crate::views::{ChannelInfo, EngineEvent};
 
 /// The first wait after a key request fails, then doubled up to the cap.
 const PRIVATE_KEY_RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -329,7 +329,18 @@ impl Engine {
             return;
         };
         if let Some((id, hlc)) = crate::sealed::content_key(se) {
+            let announce = self
+                .write()
+                .communities
+                .get_mut(&community)
+                .is_some_and(|c| c.take_pending_alert(&se.event.id));
             self.store_content(community, id, hlc, text);
+            if announce {
+                self.emit(EngineEvent::Message {
+                    community_id: community.to_string(),
+                    channel_id: channel.to_string(),
+                });
+            }
         }
     }
 

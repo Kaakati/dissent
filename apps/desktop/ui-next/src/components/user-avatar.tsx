@@ -21,6 +21,7 @@ export function UserAvatar({
   seed,
   size = 'md',
   presence,
+  presenceClass,
   speaking = false,
   className,
 }: {
@@ -28,6 +29,8 @@ export function UserAvatar({
   seed?: string | null;
   size?: AvatarSize;
   presence?: PresenceState;
+  // Where the presence dot sits, for a picture with a ring of its own. The default is the corner inside the picture.
+  presenceClass?: string;
   speaking?: boolean;
   className?: string;
 }) {
@@ -46,7 +49,7 @@ export function UserAvatar({
       <AvatarFallback className="bg-transparent text-white" style={{ background: hueBackground(hueOf(id)), fontSize: 'inherit' }}>
         {initials(name)}
       </AvatarFallback>
-      {presence ? <PresenceDot status={presence} className={size === 'xl' ? 'right-0 bottom-0 size-[18px]' : undefined} /> : null}
+      {presence ? <PresenceDot status={presence} className={presenceClass ?? (size === 'xl' ? 'right-0 bottom-0 size-[18px]' : undefined)} /> : null}
     </Avatar>
   );
 }

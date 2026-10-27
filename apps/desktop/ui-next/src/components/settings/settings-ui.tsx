@@ -5,9 +5,10 @@ import { cn } from '@/lib/utils';
 
 export const BLOCK_TITLE = 'text-meta font-semibold tracking-[.02em] text-muted-foreground uppercase';
 
+// Each section after the first sits under a divider, with room above its title, as Discord's settings lay them out.
 export function Block({ title, children, className }: { title?: string; children: ReactNode; className?: string }) {
   return (
-    <section className={cn('flex min-w-0 flex-col gap-2.5', className)}>
+    <section className={cn('flex min-w-0 flex-col gap-s-3 border-t border-divider pt-s-6 first:border-t-0 first:pt-0', className)}>
       {title ? <h2 className={BLOCK_TITLE}>{title}</h2> : null}
       {children}
     </section>
@@ -17,7 +18,7 @@ export function Block({ title, children, className }: { title?: string; children
 // A group of radio buttons under a legend ("Message density" and the like).
 export function Choices({ legend, children }: { legend: string; children: ReactNode }) {
   return (
-    <fieldset className="flex min-w-0 flex-col gap-2.5 border-0 p-0 m-0">
+    <fieldset className="mt-s-3 flex min-w-0 flex-col gap-2.5 border-0 p-0 m-0">
       <legend className={cn(BLOCK_TITLE, 'p-0')}>{legend}</legend>
       {children}
     </fieldset>

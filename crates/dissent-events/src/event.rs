@@ -275,6 +275,20 @@ pub enum Payload {
         roles: Vec<Role>,
         members: Vec<RootId>,
     },
+    /// Sets or clears the community's animated icon. Owner and admin only, like `CommunityIconSet`,
+    /// which it supersedes when it is the newer of the two. Sealed, so a client that predates it
+    /// rejects it as forged and shows the still icon, or none. Appended, see `control` and `picture`.
+    CommunityIconAnimated { icon: Option<crate::picture::AnimatedIcon> },
+    /// The relays the author hosts for this community: at most four https URLs, as for `SetRelays`.
+    /// An empty list withdraws. Any member who is a person may send it, for themselves. The latest by
+    /// HLC per author wins. Each member's app verifies the relays itself before counting the author
+    /// as a host (`docs/design/12-boosts.md`). Sealed, so a client that predates it rejects it as
+    /// forged. Appended, see `control`.
+    RelayHostSet { relays: Vec<String> },
+    /// Whether members, and not only admins and the owner, may publish `RelayHostSet` in this
+    /// community. Off by default; the latest by HLC wins. Admin and owner only. Sealed, so a client that
+    /// predates it rejects it as forged. Appended. See `docs/design/12-boosts.md`.
+    MembersHostRelays { on: bool },
 }
 
 /// One of a community's traits: an optional emoji (empty when there is none) and a short label. See

@@ -4,7 +4,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { CircleAlert } from 'lucide-react';
-import { DissentMark } from '@/components/dissent-mark';
+import { OwlMark } from '@/components/owl-mark';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
@@ -46,7 +46,7 @@ function Brand() {
   return (
     <div className="flex items-center gap-3.5 text-[27px] leading-[34px] font-bold text-text-strong">
       <span className="grid size-14 place-items-center rounded-2xl bg-accent text-white">
-        <DissentMark className="size-8" />
+        <OwlMark className="size-8" />
       </span>
       <span>Dissent</span>
     </div>

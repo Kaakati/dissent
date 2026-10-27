@@ -283,6 +283,8 @@ function Overview({
   edit: (patch: Partial<Fields>) => void;
 }) {
   const relays = [{ id: 'automatic', name: 'Automatic' }, ...relayUrls.map((url) => ({ id: url, name: safeHost(url) }))];
+  // The server's boost raises the most a voice channel may use; level 0 keeps 96 kbps.
+  const voiceCap = useShell((s) => s.community?.boost?.voice_kbps ?? 96);
   return (
     <div className="flex flex-col gap-s-4">
       <Block title="Channel Name">
@@ -329,7 +331,7 @@ function Overview({
               <input
                 type="range"
                 min={8}
-                max={96}
+                max={voiceCap}
                 step={1}
                 value={draft.bitrate_kbps}
                 aria-label="Bitrate"

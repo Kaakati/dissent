@@ -157,8 +157,22 @@ impl Engine {
         });
     }
 
+    /// Whether `device` belongs to a person who is an active member of `community`. A member who left or was
+    /// banned is not, so keys are never pushed to them or served to them, even mid-retry.
+    pub(crate) fn person_device(&self, community: CommunityId, device: DeviceId) -> bool {
+        let w = self.read();
+        w.communities.get(&community).is_some_and(|c| {
+            w.directory
+                .root_of(&device)
+                .is_some_and(|root| crate::membership::CommitRules::of(c).is_person(&root))
+        })
+    }
+
     async fn send_history_keys(&self, community: CommunityId, device: DeviceId) {
         for _ in 0..PUSH_TRIES {
+            if !self.person_device(community, device) {
+                return;
+            }
             let floor = {
                 let w = self.read();
                 let Some(c) = w.communities.get(&community) else {
@@ -370,18 +384,14 @@ impl Engine {
     /// gets every epoch this device holds. Under `SinceJoin` it gets the epochs from the requester's join, and
     /// nothing older, the same as `EpochHistory`.
     pub(crate) fn serve_history_keys(&self, from: DeviceId, community: CommunityId) -> Response {
+        if !self.person_device(community, from) {
+            return Response::Error("not an active member".into());
+        }
         let (floor, paths) = {
             let w = self.read();
             let Some(c) = w.communities.get(&community) else {
                 return Response::Error("unknown community".into());
             };
-            let person = w
-                .directory
-                .root_of(&from)
-                .is_some_and(|root| crate::membership::CommitRules::of(c).is_person(&root));
-            if !person {
-                return Response::Error("not an active member".into());
-            }
             let floor = match c.state().history {
                 HistorySetting::All => 0,
                 HistorySetting::SinceJoin => match c.epochs.join_epoch(&from) {
@@ -500,7 +510,7 @@ impl Engine {
             }
         };
         for channel in channels {
-            self.emit(EngineEvent::Message {
+            self.emit(EngineEvent::MessagesChanged {
                 community_id: community.to_string(),
                 channel_id: channel.to_string(),
             });

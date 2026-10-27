@@ -9,6 +9,7 @@ mod updates;
 mod attachments;
 mod avatar_cmds;
 mod server_prefs_cmds;
+mod paging_cmds;
 mod server_settings_cmds;
 mod voice;
 mod voice_settings;
@@ -21,10 +22,11 @@ mod conv_cmds;
 mod status_cmds;
 mod typing_cmds;
 mod profile;
+mod deep_link;
 
 use commands::AppState;
 use dissent_core::NodeConfig;
-use dissent_identity::{keystore, Vault};
+use dissent_identity::keystore;
 use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
 
@@ -52,11 +54,14 @@ pub fn run() {
     // until run() returns, which is when the app exits.
     let _profile_lock = profile::claim_early();
     let mut builder = tauri::Builder::default();
-    // Only the default profile is single instance. Dev and portable profiles can run beside it (see profile.rs).
-    if profile::mode() == profile::Mode::Default {
-        builder = builder.plugin(profile::single_instance());
+    // Only the default profile is single instance, and only it takes dissent:// links. Dev and portable profiles can run
+    // beside it (see profile.rs) and never claim the scheme.
+    let default_profile = profile::mode() == profile::Mode::Default;
+    if default_profile {
+        builder = builder.plugin(profile::single_instance()).plugin(tauri_plugin_deep_link::init());
     }
     let app = builder
+        .manage(deep_link::Queue::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -78,9 +83,13 @@ pub fn run() {
             if let Err(e) = setup(app) {
                 profile::fatal(&e.to_string());
             }
+            if profile::mode() == profile::Mode::Default {
+                deep_link::start(app.handle());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            deep_link::take_deep_links,
             commands::identity_status,
             commands::identity_export_phrase,
             commands::identity_import_phrase,
@@ -210,9 +219,14 @@ pub fn run() {
             avatar_cmds::clear_profile_banner,
             avatar_cmds::set_community_icon,
             avatar_cmds::clear_community_icon,
+            avatar_cmds::prepare_animated_icon,
+            avatar_cmds::set_community_icon_animated,
             server_prefs_cmds::get_server_prefs,
             server_prefs_cmds::set_server_prefs,
             server_prefs_cmds::server_alerts,
+            paging_cmds::channel_messages_before,
+            paging_cmds::dm_messages_before,
+            paging_cmds::group_messages_before,
             server_settings_cmds::rename_community,
             server_settings_cmds::set_community_banner,
             server_settings_cmds::clear_community_banner,
@@ -221,6 +235,9 @@ pub fn run() {
             server_settings_cmds::prepare_animated_banner,
             server_settings_cmds::set_community_banner_animated,
             server_settings_cmds::set_profile_banner_animated,
+            server_settings_cmds::set_hosted_relays,
+            server_settings_cmds::set_members_host_relays,
+            server_settings_cmds::check_relay,
             commands::get_network_settings,
             shell_cmds::shell_settings,
             shell_cmds::set_shell_settings,
@@ -236,6 +253,7 @@ pub fn run() {
             attachments::reveal_attachment,
             attachments::open_attachment,
             commands::set_network_settings,
+            commands::relay_status,
             part6::capabilities,
             part6::set_note,
             part6::pin_conversation,
@@ -252,6 +270,7 @@ pub fn run() {
             part6::set_deafened,
             part6::set_camera,
             part6::set_camera_preview,
+            part6::set_video_tile,
             part6::set_screen_share,
             part6::list_share_sources,
             part6::send_call_message,
@@ -337,11 +356,11 @@ fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
 
     // chisle: the data key comes from the OS credential store. If none is available we refuse to start
     // rather than write plaintext.
-    let vault = match Vault::open("dissent", &profile::vault_profile(&data_dir)) {
+    let vault = match profile::open_vault(&data_dir) {
         Ok(vault) => vault,
         Err(e) => {
-            tracing::error!(error = %e, "no credential store for the identity key; refusing to start");
-            return Err(Box::new(e));
+            tracing::error!(error = %e, "no key for the identity; refusing to start");
+            return Err(e.into());
         }
     };
     let identity = keystore::load_or_create(&data_dir.join("identity.bin"), commands::now_ms()?, &vault)?;

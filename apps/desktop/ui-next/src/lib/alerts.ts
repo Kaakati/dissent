@@ -13,6 +13,7 @@ import type { ChannelMessage, DirectSummary, GroupSummary, Id } from './types';
 interface AlertMessage {
   kind: 'channel' | 'dm' | 'group';
   key: string;
+  id: Id; // the message's id: one message alerts once
   from: Id; // the author's root id
   sender: string;
   where: string; // "#channel" or the group's name, empty for a DM
@@ -41,8 +42,23 @@ function reading(key: string): boolean {
   return openedTarget(s)?.key === key && !s.page && document.hasFocus();
 }
 
+// The messages already alerted on, oldest first. An event can name a message that already alerted (an edit, a
+// reaction, or the same message announced again), and that must not sound or notify twice. Bounded, so the oldest
+// id is forgotten past NOTIFIED_MAX.
+const NOTIFIED_MAX = 500;
+const notified = new Set<string>();
+
+// True the first time a message alerts. Records it.
+function firstAlert(key: string, id: Id): boolean {
+  const mark = `${key}|${id}`;
+  if (notified.has(mark)) return false;
+  notified.add(mark);
+  if (notified.size > NOTIFIED_MAX) notified.delete(notified.values().next().value as string);
+  return true;
+}
+
 function alertFor(msg: AlertMessage): void {
-  if (!shouldAlert(msg)) return;
+  if (!shouldAlert(msg) || !firstAlert(msg.key, msg.id)) return;
   if (!reading(msg.key)) playNotification();
   void showOsNotification(msg);
 }
@@ -63,6 +79,7 @@ export async function alertForChannelMessage(ev: { community_id: Id; channel_id:
   alertFor({
     kind: 'channel',
     key: `ch:${ev.community_id}:${ev.channel_id}`,
+    id: latest.id,
     from: latest.author,
     sender: latest.author_name,
     where: channel ? `#${channel.name}` : '',
@@ -73,19 +90,19 @@ export async function alertForChannelMessage(ev: { community_id: Id; channel_id:
 
 // Any DM message from the peer alerts. Call after the conversation list is reloaded, so a closed DM is not listed.
 export async function alertForDm(peer: Id): Promise<void> {
-  const [latest] = (await api.dmMessages(peer, 1)) as { from: Id; text: string }[];
+  const [latest] = (await api.dmMessages(peer, 1)) as { id: Id; from: Id; text: string }[];
   const conv = useShell.getState().conversations.find((c): c is DirectSummary => c.kind === 'dm' && c.peer === peer);
   if (!latest || !conv) return;
-  alertFor({ kind: 'dm', key: `dm:${peer}`, from: latest.from, sender: conv.display_name, where: '', text: latest.text });
+  alertFor({ kind: 'dm', key: `dm:${peer}`, id: latest.id, from: latest.from, sender: conv.display_name, where: '', text: latest.text });
 }
 
 // Any group message alerts. Membership lines in a group are not messages.
 export async function alertForGroup(groupId: Id): Promise<void> {
-  const [latest] = (await api.groupMessages(groupId, 1)) as { from: Id; text: string; system?: boolean }[];
+  const [latest] = (await api.groupMessages(groupId, 1)) as { id: Id; from: Id; text: string; system?: boolean }[];
   const conv = useShell.getState().conversations.find((c): c is GroupSummary => c.kind === 'group' && c.id === groupId);
   if (!latest || !conv || latest.system) return;
   const sender = conv.members?.find((m) => m.root_id === latest.from)?.display_name ?? 'Someone';
-  alertFor({ kind: 'group', key: `group:${groupId}`, from: latest.from, sender, where: conv.name, text: latest.text });
+  alertFor({ kind: 'group', key: `group:${groupId}`, id: latest.id, from: latest.from, sender, where: conv.name, text: latest.text });
 }
 
 // A desktop notification was clicked. The backend has restored the window; this opens the conversation it was for.

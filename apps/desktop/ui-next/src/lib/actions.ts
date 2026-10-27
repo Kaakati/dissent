@@ -106,6 +106,15 @@ export const setCommunityIcon = (communityId: Id, bytes: string) =>
     return true;
   });
 
+// An animated server icon: a looping square GIF and its still poster. A later still icon or a removal replaces it.
+export const setCommunityIconAnimated = (communityId: Id, gif: string, poster: string) =>
+  guarded(async () => {
+    await api.setCommunityIconAnimated(communityId, gif, poster);
+    await shell().loadCommunities();
+    await shell().loadCommunity(communityId);
+    return true;
+  });
+
 export const clearCommunityIcon = (communityId: Id) =>
   guarded(async () => {
     await api.clearCommunityIcon(communityId);
@@ -227,10 +236,22 @@ export const setNote = (peer: Id, kind: 'note' | 'nickname', text: string) =>
     return true;
   });
 
+// Takes a direct conversation out of the UI: an open pane for it goes to Friends, and its unread and typing state is
+// dropped. The engine keeps its history; only the list and the pane change.
+const leaveDm = async (peer: Id) => {
+  const s = shell();
+  s.clearDmState(peer);
+  if (s.route.kind === 'home' && s.peer === peer) await s.openHome();
+};
+
 export const removeContact = (rootId: Id) =>
   guarded(async () => {
     await api.removeContact(rootId);
-    await shell().loadContacts();
+    // The contact's conversation leaves the list the way Close DM takes it out. Its history stays on this device.
+    await api.closeConversation(`dm:${rootId}`);
+    await leaveDm(rootId);
+    await Promise.all([shell().loadContacts(), shell().loadConversations()]);
+    refreshProfiles();
     return true;
   });
 
@@ -252,6 +273,7 @@ export const setIgnored = (rootId: Id, ignore: boolean) =>
 export const closeDm = (key: string) =>
   guarded(async () => {
     await api.closeConversation(key);
+    if (key.startsWith('dm:')) await leaveDm(key.slice('dm:'.length));
     await shell().loadConversations();
     return true;
   });

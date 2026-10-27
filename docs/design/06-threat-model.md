@@ -22,7 +22,8 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 | Message text confidentiality | Channel message text, replies and edits are sealed with MLS (RFC 9420, X25519, AES-128-GCM, Ed25519). There is no plaintext fallback: sending fails if the group isn't ready. |
 | Media confidentiality | Call frames are SFrame-encrypted (RFC 9605) with keys from the MLS exporter. Forwarders hold no key. |
 | Direct messages | Sent only device to device over the authenticated QUIC connection, never stored by third parties. Signed by the sender and bound to the recipient. |
-| Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 16 per device. |
+| Links from outside the app | A `dissent://` link (from a browser, chat or file) only chooses a confirm dialog. Joining a server, adding a contact and approving a device need the person's press in that dialog, and a link never does them on its own. Links over 4 KB and with control characters are dropped. A device link fills the code box and approves nothing. |
+| Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 30 per device, shared with the relays the device adds. |
 | Presence privacy | Online status comes only from signed beacons, sent every 30 s to community members and direct contacts, never from traffic. Invisible sends none, but a peer may still show the last beacon for up to 60 s after you go invisible. Status is per device, not per account. |
 | Address lookup | A user record is signed by the root key that is the address, and every device cert in it is verified against that root. A forged record, a cert from another root, or a packet signed by anyone else is refused. |
 
@@ -285,6 +286,78 @@ member who joins later can fetch it while the sender is offline.
   and only within its per-device limit of 30 hints a minute. A non-member gets an error.
 - **Other members hold the same blob.** A member that is online may also serve a thumbnail, so a seeder's copy is
   one of several. The seeder can see the requests it receives, as any provider can.
+
+## Relay for my servers: what a host sees
+
+A member can host a relay for the servers they belong to (`packaging/README.md`). The host's relay
+carries only sealed traffic. It cannot read messages, files or calls, because those are end-to-end
+encrypted, and the relay holds no keys for them. What the host does see is metadata:
+
+- **Who connects.** Each client's IP address, and its device key, which is how the relay admits it.
+  Only keys on the server's member list are admitted, so the host learns the device keys of the
+  server's members and nothing about strangers, who are refused at connection time.
+- **Who talks to whom.** The relay routes each packet to a destination device key, so it learns which
+  two devices exchange traffic and when.
+- **How much.** Byte counts and timing per connection. The bandwidth cap is enforced on these counts.
+- **Membership changes, indirectly.** When a device is banned or leaves, the host's allow-list changes.
+  The host learns that membership changed, not why.
+
+The host can check reachability itself: "Check my relay" asks a member on another network to connect to
+the relay and reports the result. The service does not check its own reachability, since it cannot see the
+internet from inside its network. A ban closes the banned device's open connections at once, with
+iroh-relay's `Clients::disconnect`, and the relay keeps running for everyone else. Nothing is restarted, so
+other members see no disruption. The relay cannot tell which community a packet belongs to, only which
+device keys it moves between.
+
+## Relay choice: who picks relays, and what the list reveals
+
+A device uses up to 30 relays (`MAX_RELAY_LIST`). Each one comes from one of three sources, and Settings >
+Network shows which:
+
+- **Yours.** Added in Settings. At most 16. Stored only in `network.json` on this device.
+- **Community.** Named by a `SetRelays` control event. Only the owner or an admin can publish one; the
+  engine rejects it from anyone else (`events/state.rs`). At most 4 per community, and they share the
+  node's list with the rest.
+- **number0.** The public defaults, on unless turned off.
+
+Duplicates are merged, and the first source keeps the label (your own choice before a community's, a
+community's before number0's). Pins and turn-offs are local. They are never sent to a community or a
+relay. A community relay cannot be turned off on this device yet. The node adds it on join, and only its owners and admins can remove it.
+
+**number0's device directory.** With "Find devices through number0's directory" on (the default), a device
+that uses number0's relays publishes its device ID and addresses to number0's DNS directory (`dns.iroh.link`),
+and resolves peers through it. number0 sees both. Turning it off stops that. Custom relays never use the
+directory, whatever the switch says. The Mainline DHT and the LAN find peers either way.
+
+**Measurement reveals your address to every listed relay.** iroh's net report probes each relay in the
+list from this device, so each one sees this device's IP address, even a relay that never becomes home.
+A longer list therefore tells more operators when and from where this device is online. Turning off
+relays you do not trust shortens that list. The home relay is the one that carries traffic, and it
+already learns the same things listed under "Relay for my servers".
+
+**Choosing the home relay.** iroh picks the home relay from the latencies it measures, and moves only
+when another relay is clearly faster: a new best latency must be under two thirds of the current one.
+iroh does not keep a connection open to the second-fastest relay. If the home relay fails, iroh measures
+all of them again and picks afresh, so failover takes one measurement round. Dissent shows the
+measurements; it does not choose the home relay itself.
+
+**Bad certificates are not used.** A relay must present a certificate that the public roots trust for
+its name. One that fails the TLS check never completes a connection, so it is never home. It stays in
+the list with no latency. An identity check (the device key, on the relay's member list for a hosted
+relay) still applies on top, as above.
+
+Tests: `dissent-net/src/relay_rank.rs` covers the merge, the cap and the ranking. `dissent-net/tests/relay_home.rs`
+runs two loopback relays, one behind a proxy that adds delay, and checks that the faster one becomes home.
+
+**Relay checks connect to an address a peer picks.** A `RelayCheck` makes a member's app connect to a
+relay URL that the asker publishes for this server. The responder refuses unless the member uses server
+relays, the asker publishes that exact URL, the URL is https, and every address its name resolves to is
+public (no loopback, private, link-local, CGNAT or multicast address). The rebinding caveat: the responder
+resolves the name for that check, and the connection resolves it again, so a name whose answer changes
+between the two can point the connection at another address. That is acceptable, because the relay
+connection needs a valid TLS certificate for the name. A rebound address on the member's network fails the
+handshake, so all such a check can learn is that a TCP connection was attempted. A member that is in a call
+refuses, so a check never causes an audio gap.
 
 ## Findings
 

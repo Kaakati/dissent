@@ -32,6 +32,7 @@ dissent-events = { path = "crates/dissent-events" }
 dissent-net = { path = "crates/dissent-net" }
 dissent-discovery = { path = "crates/dissent-discovery" }
 dissent-core = { path = "crates/dissent-core" }
+dissent-seeder = { path = "apps/seeder" }
 dissent-mls = { path = "crates/dissent-mls" }
 dissent-media = { path = "crates/dissent-media" }
 dissent-audio = { path = "crates/dissent-audio" }
@@ -53,7 +54,7 @@ blake3 = "1"
 bip39 = "3"
 hex = "0.4"
 data-encoding = "2"
-iroh = "1"
+iroh = { version = "1", features = ["unstable-net-report"] }
 rcgen = "0.14"
 noq-proto = { version = "1.4", default-features = false, features = ["rustls", "aws-lc-rs"] }
 iroh-gossip = "0.101"
@@ -69,6 +70,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
 # Exact: the 3.0 line is an alpha, and 2.7.0 is the release for tauri 2. Checked against its source in the registry.
 tauri-plugin-autostart = "=2.7.0"
 # Match tauri-plugin-dialog, which uses rfd's gtk3 backend; rfd refuses gtk3 and xdg-portal together.
@@ -103,6 +105,7 @@ keyring = "4"
 zeroize = "1"
 cc = "1"
 cpal = "0.18"
+http = "1.5"
 nnnoiseless = "0.5"
 ringbuf = "0.5"
 bytes = "1"

@@ -3,7 +3,7 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 import { ArrowLeft, ArrowRight, ArrowUpDown, Bookmark, Server, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { DissentMark } from '@/components/dissent-mark';
+import { OwlMark } from '@/components/owl-mark';
 import { NetStatusLine } from '@/components/network/net-status';
 import { imageOf } from '@/lib/images';
 import { currentWindow } from '@/lib/tauri';
@@ -38,7 +38,7 @@ function TitleText() {
     </span>
   );
   let text = 'Direct Messages';
-  let mark: ReactNode = <DissentMark className="size-4 text-brand" />;
+  let mark: ReactNode = <OwlMark className="size-4 text-brand" />;
   if (titleOverride) {
     text = titleOverride;
   } else if (page === 'contacts') {

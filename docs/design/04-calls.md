@@ -373,7 +373,7 @@ The options that were rejected:
 - **Carrier and gate** (`dissent-media/src/video.rs`): option E as described above, a per-sender gate that drops deltas after a gap and asks for a keyframe (throttled to 200 ms), and a replay window per sender. The video key is derived from the media key, so video and audio never share a (key, counter) pair.
 - **Negotiation:** every offer carries a video line. `m=video 0` in the answer leaves the call audio-only (`has_video()` is false), with no error. `enable_h264` and `enable_bwe` are in `new_rtc`.
 - **Forwarder:** an SFU relays video for active senders only. A downlink starts at a keyframe for each sender, and a downlink's keyframe request restarts its stream.
-- **Core and desktop:** `set_camera(true)` starts a capture thread (640x360, 15 fps, 600 kbps, H.264), and the call loop sends its frames through the mesh or the forwarder. Received frames are decoded per sender and sent to the window as 320 px RGB previews, base64 encoded, in a `video_frame` event with the person's root id.
+- **Core and desktop:** `set_camera(true)` starts a capture thread (640x360, 15 fps, H.264 at the start rate, then whatever plan the budget picks), and the call loop sends its frames through the mesh or the forwarder. Received frames are decoded per sender and sent to the window as 320 px RGB previews, base64 encoded, in a `video_frame` event with the person's root id.
 - **Linux:** camera and screen capture build with the same packages as the rest of the app, see the release workflow.
 - **Bitrate follows the link:** each tick the call loop takes the smallest estimate across peers (str0m's BWE, which needs `enable_bwe`) and the largest audio target, and sizes each capture with `VideoAdapter`, so the audio reservation holds. A budget too small for video pauses it.
 - **Previews:** each remote frame becomes a 320 px JPEG at quality 70, base64 in the `video_frame` event. About 116 KB/s per remote camera, measured on the test picture. Raw RGB base64 would be about 3.5 MB/s.
@@ -427,7 +427,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 - Put the video m-line in the first offer with `Direction::SendRecv`, even when the camera is off. Turning the camera on then needs no renegotiation.
 - **`m=video 0` means no video, not failure.** Spike 1 showed a str0m 0.24.1 answerer that lacks video answers `m=video 0`, and audio still completes (20 of 20 frames). The offerer must treat a rejected video m-line as "no video", and the call stays audio-only without an error. This must be tested in `dissent-media` (see the regression tests above).
 - The real codec, AV1 or H.264, is chosen in our own signalling, from `codec::negotiate` (`dissent-video/src/codec.rs`). AV1 is preferred when both sides have it, H.264 otherwise.
-- Receivers request keyframes with PLI or FIR, which map to `VideoEncoder::request_keyframe`. A resolution or fps change rebuilds the encoder, because both are fixed per encoder.
+- Receivers request keyframes with PLI or FIR, which map to `VideoEncoder::request_keyframe`. A resolution or fps change reopens the source and the encoder, because both are fixed per encoder. The capture thread reopens them at most once per 5 seconds, so a plan that flaps does not reopen the camera. A bitrate change goes to the open encoder. AV1 is planned only when every peer can decode it, and H.264 is the fallback.
 - Handle `Event::MediaAdded` for video as well as audio.
 
 ### Forwarder routing
@@ -508,3 +508,33 @@ A voice channel call starts as a mesh and moves between tiers as its live roster
 - **Signed tier message.** The migrating device signs a tier announcement over the room, tier, forwarder and roster hash, and sends it to the others. A receiver applies it only if the signature is from a device in its own roster and the roster hash matches its own. A forged or unsigned message, or one that names a different roster, is ignored.
 
 Migration is per device, so two devices can reach the same tier a little apart. The generation id and the tier message keep them in step.
+
+## Webview decode with WebCodecs (design, not built)
+
+**Why.** Today a remote frame is decoded in Rust, scaled by the box filter, encoded as a JPEG, base64-encoded into an event, and decoded again by the webview. Measured on one 720p30 H.264 tile, the Rust part (decode, scale and JPEG) costs 53 to 59% of a core at 1280 px, and the webview's base64 and image decode cost 5 to 7 ms per frame on its main thread. The JPEG step exists only to get pictures into the webview. `VideoDecoder` can decode the encoded frame in the webview, on the GPU or a hardware decoder, so the picture never needs a Rust decode, a scale or a JPEG.
+
+**What moves.** The sender side does not change: frames are still encoded in Rust and sent through the mesh or the forwarder. Decryption (SFrame) stays in Rust, as now, so the webview gets plain codec bitstream and never a key. For each received frame the call loop hands the decrypted codec payload to the webview, instead of decoding it and sending a JPEG.
+
+**Support, per webview.** Checked on 27 October 2026. Windows was checked on this machine. macOS and Linux rely on the published tables, and nothing was run on them.
+- **Windows, WebView2 (Chromium 155, the build in the custom-protocol app).** `VideoDecoder` exists, and the page is a secure context under the app's `http://tauri.localhost` origin. `VideoDecoder.isConfigSupported` returns `supported: true` for H.264 `avc1.42E01F` at 1280x720 and for AV1 `av01.0.04M.08` at 1280x720, with `prefer-hardware` and with `prefer-software`. The result echoes the preference it was given, so it does not prove that hardware decoding is used. Measure the decode time before relying on the hardware path.
+- **macOS, WKWebView (Safari engine).** [Can I Use](https://caniuse.com/webcodecs) lists Safari 16.4 to 18.7 as *partial* support, and Safari 26.0 onward as supported. Not run on a Mac from this machine. The WKWebView on a given macOS release may differ from the Safari version in that table, so check the target macOS version before relying on it.
+- **Linux, WebKitGTK.** The [WebKitGTK 2.44 release post](https://webkitgtk.org/2024/03/27/webkigit-2.44.html) says "WebKitGTK now supports the WebCodecs API". It does not say whether that is on by default, behind a flag, or hardware-accelerated. Not run on Linux from this machine. Treat the default as unknown until a Linux build reports it.
+- **Every platform.** [MDN](https://developer.mozilla.org/en-US/docs/Web/API/VideoDecoder) says the API is available only in secure contexts, and some browsers lack it. Detect it at run time: `typeof VideoDecoder !== 'undefined'`, then `VideoDecoder.isConfigSupported(...)` for the exact codec string. If either fails, the JPEG path runs. That fallback stays until the Linux and macOS checks above are done.
+
+**Keyframes and layer changes.**
+- A decoder must start from a keyframe. The webview configures a `VideoDecoder` with the codec string when the first keyframe arrives: `avc1.42E01F` for H.264 Baseline at 720p (the codec string depends on the level), and `av01.0.08M.08` for AV1 Main. Our H.264 is Annex B, and WebCodecs accepts Annex B without a `description`.
+- A delta frame that arrives before its keyframe, or after a decode error, is dropped. The webview then asks Rust for a keyframe through the existing request path (`request_keyframe`, rate-limited to 200 ms). Rust already answers that request on the sender.
+- A size or rate change (the 5-second reshape of the capture) puts a keyframe at the start of the new size. The webview calls `configure` again with the new size when the keyframe's size differs from the decoder's, and closes the old decoder first. The frame header carries the size, so the webview never guesses.
+- A codec change (AV1 to H.264, when a peer joins or leaves) works the same way: the header names the codec, and a keyframe starts a decoder for it.
+
+**Transport.** Encoded frames are small: on live webcam frames at 720p and 2 Mbit/s the average was 8.3 KB per frame for H.264 and 6.4 KB for AV1, and keyframes are larger. Send them as binary over a `tauri::ipc::Channel<InvokeResponseBody>`, because a JSON event would base64 them. The header is fixed: sender (u64), screen (bool), codec (u8), keyframe (bool), frame id (u32), width and height (u16), timestamp (u32, microseconds in the call clock). The payload follows, as raw bytes the webview receives as an `ArrayBuffer`. Keep the JPEG event as the fallback for webviews without WebCodecs, so a tile works on every platform.
+
+**What still needs a Rust decode.**
+- The JPEG preview on platforms without WebCodecs (Linux today).
+- Thumbnails and recordings, if they arrive later. Neither exists now.
+- The self tile never decodes: it shows the local capture, which is already in Rust.
+- Nothing else in the call path. Audio is Opus and is decoded in `dissent-audio`, as before.
+
+**CPU saved (estimate, to measure before relying on it).** For one 720p30 remote tile, today's path costs roughly: decode 3 ms, box scale 4 ms and JPEG 9 ms in Rust, about 16 ms a frame, or 48% of a core at 30 fps, plus 5 to 7 ms a frame of base64 and image decode in the webview. With WebCodecs the Rust side only copies the payload into the Channel, under 0.5 ms a frame, and the decode runs on the GPU or a hardware decoder, so the webview's main thread spends close to nothing on it. The saving is roughly 45 percentage points of a core per large tile and most of the webview's per-frame cost. Measure it on the target machines before the design is built: the figures above are from this Windows machine with a software H.264 decoder.
+
+**Order of work.** First build the transport on Linux-free platforms behind the existing fallback, and measure the webview's main-thread time per frame on WebView2. Then the Rust side can stop decoding for tiles whose webview has WebCodecs, which the webview reports at start.

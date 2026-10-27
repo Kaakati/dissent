@@ -28,6 +28,7 @@ export interface Me {
 }
 
 export interface CommunitySummary {
+  icon_poster?: string | null; // an animated icon's still frame, shown under reduced motion and while the window is blurred
   id: Id;
   name: string;
   hue?: number;
@@ -75,6 +76,7 @@ export interface Member {
   banned: boolean;
   status?: Presence;
   online?: boolean;
+  relay_host?: boolean; // this device verifies the member as a relay host of the server
 }
 
 export interface VoiceChannelView {
@@ -102,9 +104,24 @@ export interface CommunityView extends CommunitySummary {
   banner?: string | null; // an uploaded 16:9 banner's URL, once this device holds it
   banner_preset?: number | null; // the preset gradient (0-9) when the banner is one
   banner_poster?: string | null; // an animated banner's still frame, shown under reduced motion
+  boost?: BoostView; // the server's boost, as this device verifies its relay hosts
   description?: string;
   traits?: Trait[];
   created_ms?: number;
+}
+
+// A server's boost: the level its verified relay hosts earn, the hosts, and the ceilings the level gives calls.
+export interface BoostView {
+  level: number;
+  hosts: { root_id: Id; display_name: string; relays: string[] }[];
+  next_level_hosts: number | null;
+  voice_kbps: number;
+  video_width: number;
+  video_height: number;
+  video_fps: number;
+  mesh_limit: number;
+  members_can_host?: boolean; // members, not only admins and the owner, may publish relays
+  can_publish?: boolean; // this person may publish their relay now
 }
 
 // One of a server's traits on its profile: an emoji and a label of up to 24 characters.
@@ -177,15 +194,6 @@ export interface CallQuality {
   loss_pct: number;
   jitter_ms: number;
   flagged: number; // frames whose signature failed; a healthy call shows zero
-}
-
-export interface CallMessage {
-  id: Id;
-  root_id: Id;
-  author_name: string;
-  ms: number | string;
-  text?: string;
-  file?: { name: string; kind: string; meta: string };
 }
 
 // A display or window a screen share can show, as the picker lists it.
@@ -331,6 +339,9 @@ export type EngineEvent =
   | { kind: 'communities_changed' }
   | { kind: 'community_updated'; community_id: Id }
   | { kind: 'message'; community_id: Id; channel_id: Id }
+  | { kind: 'messages_changed'; community_id: Id; channel_id: Id }
+  | { kind: 'dm_changed'; peer: Id }
+  | { kind: 'conversation_changed'; id: Id }
   | { kind: 'dm'; peer: Id }
   | { kind: 'group'; group_id: Id }
   | { kind: 'contacts' }
@@ -339,7 +350,8 @@ export type EngineEvent =
   | { kind: 'call_missed'; call_id: string }
   | { kind: 'call_answered_elsewhere'; call_id: string }
   | { kind: 'reminder_due'; reminder: Reminder } // a saved reminder's time came; the core has removed it from the list
-  | { kind: 'video_frame'; sender: number; root_id: string; screen: boolean; width: number; height: number; jpeg: string }; // a camera or screen preview
+  | { kind: 'video_frame'; sender: number; root_id: string; screen: boolean; width: number; height: number; jpeg: string } // a camera or screen preview
+  | { kind: 'net_latency'; dht_ms: number | null; relay_ms: number | null }; // the DHT lookup median and the relay round trip, every probe
 
 export interface Capabilities {
   [feature: string]: boolean;
@@ -380,10 +392,17 @@ export interface NetDials {
 }
 
 export interface NetStatus {
-  dht: { size_estimate: number; confidence: number; firewalled: boolean } | null;
+  dht: { size_estimate: number; confidence: number; firewalled: boolean; latency_ms: number | null } | null;
   peers: number;
   relay: string | null;
+  relay_ms: number | null; // the home relay's round trip, when known
   dials: NetDials | null;
+}
+
+// The latest readings for the title bar, from the net_latency event: the median DHT lookup time and the relay's round trip.
+export interface NetLatency {
+  dht_ms: number | null;
+  relay_ms: number | null;
 }
 
 // The desktop shell's settings, from shell_settings. The sign-in toggle is offered only where the note is null.
@@ -393,12 +412,40 @@ export interface ShellSettings {
   start_at_login_available: boolean;
   start_at_login_note: string | null; // why start at login is not offered, when it is not
   notifications_muted: boolean; // desktop notifications for new messages are off
+  emoticons_as_text?: boolean; // emoticons are sent as typed, not as emoji; absent from an older desktop app
 }
 
 export interface NetworkSettings {
   use_public_relays: boolean;
   relays: string[];
   lan_discovery?: boolean;
+  // Kept when the list is over its limit. Any relay can be pinned.
+  pinned?: string[];
+  // Turned off on this device. A relay a community names cannot be turned off here yet.
+  disabled?: string[];
+  // Use the relays that servers name. Off, they are neither measured nor used.
+  use_community_relays?: boolean;
+  // Find devices through number0's DNS directory. Used only with number0's relays.
+  use_n0_lookup?: boolean;
+}
+
+// One relay in Settings > Network, with what the node measured. `source` is where the relay came from.
+export interface RelayRow {
+  url: string;
+  source: 'custom' | 'community' | 'hosted' | 'public';
+  latency_ms: number | null;
+  home: boolean;
+  pinned: boolean;
+  disabled: boolean;
+  in_use: boolean;
+  // For a hosted relay: the host's name, and whether this app counts the host as verified.
+  host: string | null;
+  verified: boolean;
+}
+
+export interface RelayStatus {
+  home: string | null;
+  relays: RelayRow[];
 }
 
 // The guardians of this identity, and the threshold of them that must agree.
@@ -439,6 +486,7 @@ export interface UserProfileView {
   contact_since_ms?: number | null;
   handles?: { community_id: Id; community_name: string; handle: string | null }[];
   mutual_communities: { id: Id; name: string }[];
+  hosts_for?: { id: Id; name: string }[]; // shared servers this device verifies them as a relay host of
   // Contacts you both have, when they share their contact list with you. Empty when they share none.
   mutual_friends?: MutualFriend[];
 }
@@ -507,9 +555,12 @@ export interface InvitePreview {
   community: Id;
   name: string;
   icon: string | null;
+  icon_poster?: string | null; // a local path of an animated icon's still frame, shown under reduced motion
   banner?: string | null; // a local path of the uploaded banner, when the answering member sent one
   banner_preset?: number | null;
   banner_poster?: string | null; // a local path of an animated banner's still frame
+  boost_level?: number; // the answering member's count; 0 from a member that predates boosts
+  boost_hosts?: number;
   description?: string;
   traits?: Trait[];
   member_count: number;

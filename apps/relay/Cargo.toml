@@ -7,6 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+dissent-core.workspace = true
+dissent-identity.workspace = true
+dissent-seeder.workspace = true
+iroh.workspace = true
 iroh-relay.workspace = true
 rustls.workspace = true
 tokio = { workspace = true, features = ["signal"] }
@@ -15,6 +19,8 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+http.workspace = true
+iroh-relay = { workspace = true, features = ["test-utils"] }
 dissent-identity.workspace = true
 dissent-net.workspace = true
 tokio.workspace = true

@@ -63,7 +63,7 @@ export interface ChatView {
   files: boolean;
 }
 
-interface ShellSlice {
+export interface ShellSlice {
   me: { root_id: Id; display_name: string } | null;
   community: CommunityView | null;
   peerName: string;
@@ -77,61 +77,47 @@ function peerNameOf(shell: ShellSlice, peer: Id): string {
   return known || shell.peerName || `anon·${shortOf('user', peer)}`;
 }
 
-function buildView(shell: ShellSlice, target: ChatTarget | null, messages: ChannelMessage[], dmMessages: ConversationMessage[]): ChatView | null {
-  if (!target) return null;
-  const me = shell.me;
-  if (target.kind === 'channel') {
-    const channel = shell.community?.channels.find((c) => c.id === target.channelId);
-    if (!channel) return null;
-    const items: ViewItem[] = messages.map((m) => ({
-      id: m.id,
-      author: m.author,
-      authorName: m.author_name,
-      text: m.text,
-      ms: Number(m.ms),
-      edited: Boolean(m.edited),
-      deleted: Boolean(m.deleted),
-      locked: Boolean(m.locked),
-      beforeJoin: Boolean(m.before_join),
-      own: m.author === me?.root_id,
-      pending: false,
-      queued: Boolean(m.queued),
-      failed: false,
-      failReason: null,
-      retryable: false,
-      system: false,
-      replyTo: m.reply_to ?? null,
-      reactions: Array.isArray(m.reactions) ? m.reactions : null,
-      attachments: Array.isArray(m.attachments) ? m.attachments : null,
-      embeds: Array.isArray(m.embeds) ? m.embeds : [],
-      mentions: Array.isArray(m.mentions) ? m.mentions : [],
-      mentionsMe: m.mentions_me === true,
-      mentionsEveryone: m.mentions_everyone === true,
-    }));
-    return {
-      target,
-      dm: false,
-      group: false,
-      title: channel.name,
-      peer: null,
-      topic: has('topics') ? (channel.topic ?? null) : null,
-      placeholder: `Message #${channel.name}`,
-      items,
-      visibility: channel.visibility ?? 'default',
-      social: items.some((m) => m.reactions !== null),
-      files: items.some((m) => m.attachments !== null),
-    };
-  }
+// A server channel's messages as rows. `meId` marks this person's own.
+export function channelItems(messages: ChannelMessage[], meId: Id | null): ViewItem[] {
+  return messages.map((m) => ({
+    id: m.id,
+    author: m.author,
+    authorName: m.author_name,
+    text: m.text,
+    ms: Number(m.ms),
+    edited: Boolean(m.edited),
+    deleted: Boolean(m.deleted),
+    locked: Boolean(m.locked),
+    beforeJoin: Boolean(m.before_join),
+    own: m.author === meId,
+    pending: false,
+    queued: Boolean(m.queued),
+    failed: false,
+    failReason: null,
+    retryable: false,
+    system: false,
+    replyTo: m.reply_to ?? null,
+    reactions: Array.isArray(m.reactions) ? m.reactions : null,
+    attachments: Array.isArray(m.attachments) ? m.attachments : null,
+    embeds: Array.isArray(m.embeds) ? m.embeds : [],
+    mentions: Array.isArray(m.mentions) ? m.mentions : [],
+    mentionsMe: m.mentions_me === true,
+    mentionsEveryone: m.mentions_everyone === true,
+  }));
+}
 
-  const peer = target.kind === 'dm' ? target.peer : target.groupId;
-  const name = target.kind === 'group' ? shell.peerName : peerNameOf(shell, peer);
-  const members = shell.group?.members ?? [];
-  const items: ViewItem[] = dmMessages.map((m) => {
+// A direct conversation's or a group's messages as rows. `nameOf` names an author who is not this person.
+export function conversationItems(
+  messages: ConversationMessage[],
+  me: { root_id: Id; display_name: string } | null,
+  nameOf: (id: Id) => string,
+): ViewItem[] {
+  return messages.map((m) => {
     const own = m.from === me?.root_id;
     return {
       id: m.id,
       author: m.from,
-      authorName: own ? (me?.display_name ?? '') : (members.find((x) => x.root_id === m.from)?.display_name ?? name),
+      authorName: own ? (me?.display_name ?? '') : nameOf(m.from),
       text: m.text,
       ms: Number(m.ms),
       edited: Boolean(m.edited),
@@ -154,6 +140,35 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       mentionsEveryone: m.mentions_everyone === true,
     };
   });
+}
+
+// The view of `target`'s messages. The open chat and the call chat both build theirs here.
+export function buildView(shell: ShellSlice, target: ChatTarget | null, messages: ChannelMessage[], dmMessages: ConversationMessage[]): ChatView | null {
+  if (!target) return null;
+  const me = shell.me;
+  if (target.kind === 'channel') {
+    const channel = shell.community?.channels.find((c) => c.id === target.channelId);
+    if (!channel) return null;
+    const items = channelItems(messages, me?.root_id ?? null);
+    return {
+      target,
+      dm: false,
+      group: false,
+      title: channel.name,
+      peer: null,
+      topic: has('topics') ? (channel.topic ?? null) : null,
+      placeholder: `Message #${channel.name}`,
+      items,
+      visibility: channel.visibility ?? 'default',
+      social: items.some((m) => m.reactions !== null),
+      files: items.some((m) => m.attachments !== null),
+    };
+  }
+
+  const peer = target.kind === 'dm' ? target.peer : target.groupId;
+  const name = target.kind === 'group' ? shell.peerName : peerNameOf(shell, peer);
+  const members = shell.group?.members ?? [];
+  const items = conversationItems(dmMessages, me, (id) => members.find((x) => x.root_id === id)?.display_name ?? name);
   return {
     target,
     dm: true,

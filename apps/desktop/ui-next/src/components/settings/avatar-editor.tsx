@@ -38,14 +38,15 @@ const maskOf = (side: number, shape: CropShape) => {
 export type ApplyImage = (base64: string, animated?: { poster: string }) => unknown;
 
 // Opens a file picker. `onApply` gets the finished picture, once the user applies a crop.
-// shape: 'circle' for people, 'rounded' for server icons, 'banner' for the 16:9 server banner.
-export function chooseImage({ shape, onApply }: { shape: CropShape; onApply: ApplyImage }): void {
+// shape: 'circle' for people, 'rounded' for server icons, 'banner' for the 16:9 server banner. `animated` lets a server
+// icon keep an animated GIF: its `onApply` then also gets the poster frame.
+export function chooseImage({ shape, onApply, animated = false }: { shape: CropShape; onApply: ApplyImage; animated?: boolean }): void {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = TYPES.join(',');
   input.addEventListener('change', () => {
     const file = input.files?.[0];
-    if (file) acceptFile(file, shape, onApply);
+    if (file) acceptFile(file, shape, onApply, animated);
   });
   input.click();
 }
@@ -60,7 +61,7 @@ export function isAnimatedGif(bytes: Uint8Array): boolean {
   return false;
 }
 
-function acceptFile(file: File, shape: CropShape, onApply: ApplyImage): void {
+function acceptFile(file: File, shape: CropShape, onApply: ApplyImage, animated: boolean): void {
   if (!TYPES.includes(file.type)) {
     toast('Pick a PNG, JPEG, WebP or GIF image');
     return;
@@ -72,10 +73,11 @@ function acceptFile(file: File, shape: CropShape, onApply: ApplyImage): void {
   const url = URL.createObjectURL(file);
   const picture = new Image();
   picture.src = url;
-  const animated = shape === 'banner' && file.type === 'image/gif'
+  const keepsGif = (shape === 'banner' || (shape === 'rounded' && animated)) && file.type === 'image/gif';
+  const gifBytes = keepsGif
     ? file.arrayBuffer().then((buf) => (isAnimatedGif(new Uint8Array(buf)) ? new Uint8Array(buf) : null))
     : Promise.resolve(null);
-  Promise.all([picture.decode(), animated]).then(
+  Promise.all([picture.decode(), gifBytes]).then(
     ([, gif]) => {
       openDialog({
         title: 'Edit Image',
@@ -264,7 +266,8 @@ function CropEditor({
   };
   const applyAnimated = async (bytes: Uint8Array) => {
     try {
-      const prepared = await api.prepareAnimatedBanner(base64(bytes.slice().buffer), cropRect());
+      const source = base64(bytes.slice().buffer);
+      const prepared = shape === 'rounded' ? await api.prepareAnimatedIcon(source, cropRect()) : await api.prepareAnimatedBanner(source, cropRect());
       close();
       await onApply(prepared.gif, { poster: prepared.poster });
     } catch (err) {

@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 
-use crate::dsp::{soft_limit, Agc, EchoCanceller, NoiseSuppressor, DENOISE_BLOCK};
+use crate::dsp::{soft_limit, Agc, EchoCanceller, EchoStats, NoiseSuppressor, DENOISE_BLOCK};
 use crate::gate::{Threshold, VoiceGate};
 use crate::meter::LevelMeter;
 
@@ -84,6 +84,10 @@ pub struct CaptureChain {
     /// Raw samples, delayed by the denoiser's latency so the dry mix lines up with its output.
     dry_delay: VecDeque<f32>,
     dry: Vec<f32>,
+    /// Samples at or above full scale after the input gain, before the soft limiter. Counts from the start.
+    clipped: u64,
+    /// Changes of the voice gate, open to closed or back. Chatter here is audible as static.
+    gate_flips: u64,
 }
 
 impl CaptureChain {
@@ -99,11 +103,18 @@ impl CaptureChain {
             meter: LevelMeter::new(),
             dry_delay: VecDeque::from(vec![0.0; DENOISE_BLOCK]),
             dry: Vec::new(),
+            clipped: 0,
+            gate_flips: 0,
         }
     }
 
     /// Replaces the settings. Filter state is kept, so changes apply from the next frame.
     pub fn set_settings(&mut self, settings: ChainSettings) {
+        // Turning echo cancellation off and on again starts from a new canceller, as a call does. A kept one would
+        // hold a reference that ran on while it was off, so it would read the far end from the wrong moment.
+        if settings.echo_cancellation != self.settings.echo_cancellation {
+            self.echo = None;
+        }
         self.settings = settings;
         self.gate.set_threshold(settings.threshold);
     }
@@ -111,6 +122,21 @@ impl CaptureChain {
     /// The settings in effect.
     pub fn settings(&self) -> ChainSettings {
         self.settings
+    }
+
+    /// What the echo canceller has done, or `None` while it is off or not yet built.
+    pub fn echo_stats(&self) -> Option<EchoStats> {
+        self.echo.as_ref().map(EchoCanceller::stats)
+    }
+
+    /// Samples at or above full scale after the input gain, before the soft limiter. Counts from the start.
+    pub fn clipped_samples(&self) -> u64 {
+        self.clipped
+    }
+
+    /// Changes of the voice gate since the start.
+    pub fn gate_flips(&self) -> u64 {
+        self.gate_flips
     }
 
     /// Feeds the far-end audio that was just played, the echo canceller's reference. Call it for
@@ -133,6 +159,7 @@ impl CaptureChain {
         for s in frame.iter_mut() {
             *s *= self.settings.input_gain;
         }
+        self.clipped += frame.iter().filter(|s| s.abs() >= 1.0).count() as u64;
 
         // The canceller is linear, so it runs before the soft limit, which bends loud samples.
         if self.settings.echo_cancellation {
@@ -151,6 +178,9 @@ impl CaptureChain {
         // Otherwise AGC would lift room noise past the gate and then pass it.
         let level_db = self.meter.push(frame);
         let open = self.gate.update(level_db) && allowed;
+        if open != self.gate_open {
+            self.gate_flips += 1;
+        }
         if self.settings.agc {
             self.agc.process_while(frame, open);
             soft_limit(frame);

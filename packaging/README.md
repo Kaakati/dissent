@@ -192,6 +192,33 @@ dissent-relay.exe service install --system -- --data-dir "C:\ProgramData\Dissent
 Stopping the service asks the program to shut down cleanly, as the Linux and macOS services do. Logs go to the
 `--log-dir` you give, or to the `logs` folder inside the data directory.
 
+## Relay for my servers
+
+A relay can serve only the members of your own servers. It refuses everyone else, and it caps how many
+connections it holds open and how fast each client can send to it. Settings and the reasons for each
+are in `docs/design/06-threat-model.md`.
+
+- **Who can host.** The service does not check its own reachability: a machine cannot see from inside
+  its network whether the internet can reach it. Before you announce the relay, check it yourself. In
+  Settings › Network, use "Check my relay" with the relay's address. A member on another network then
+  connects to it and reports the result. If the check fails, the reason says what to fix, for example
+  "your router blocks incoming connections" or "not reachable over TLS from this device". Announce the
+  relay only after a check passes. The check is only feedback, and it never counts toward a server's level.
+- **Who may use it.** Only the device keys of current members of your servers. Joins, leaves and bans
+  update the list. A ban stops new connections at once. An open connection stays open until the client
+  it closes that member's open connections at once. Other members' connections are not touched.
+- **Run it for your servers.** Give the service `--join <invite>` (repeat it, or separate invites with
+  commas), `--data-dir` and `--passphrase-file`. Each invite joins the server as storage, as the seeder
+  does, and the relay admits only the devices of that server's current members. Joins, leaves and bans
+  update the list within a few seconds. A ban closes the banned device's open connections at once, and
+  the relay keeps running for everyone else.
+- **Limits.** `--bandwidth` sets the total bytes per second the relay reads from its clients (default 2 MiB/s),
+  and `--max-connections` the most connections it holds at once (default 16). Each client gets an equal
+  share of the total. The total is an upper bound, not a guarantee: a client can use its share only while
+  it sends.
+  The total is an upper bound, not a guarantee: a client can use its share only while it sends.
+- **Ports.** Same as the relay above: TCP 443 inbound, and 3340 for the captive-portal probe.
+
 ## Notes
 
 - Both programs shut down cleanly on SIGTERM (Linux and macOS) and on a Windows service stop. The seeder sends its

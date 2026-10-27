@@ -12,6 +12,8 @@
 //! take effect after a few samples below the threshold, and steps up need a margin above it
 //! for several samples, so a link that hovers near a threshold does not flap.
 
+use std::time::{Duration, Instant};
+
 use crate::codec::Codec;
 
 /// Fixed overhead on top of the audio payload: packet headers, SFrame and digests.
@@ -53,8 +55,26 @@ pub struct Rung {
 }
 
 /// Camera steps, best first. Frame rate drops before resolution. The lowest rung is H.264 at
-/// 360p, so a slow AV1 encoder can fall back to a codec that is cheaper to encode.
-const CAMERA: [Rung; 4] = [
+/// 360p, so a slow AV1 encoder can fall back to a codec that is cheaper to encode. 1080p60 is
+/// AV1 only: at 1080p, H.264 took about 84% of a 60 fps frame on the measuring machine, which
+/// leaves no margin, while AV1 took about 55%.
+const CAMERA: [Rung; 6] = [
+    Rung {
+        codec: Codec::Av1,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        min_kbps: 4000,
+        max_kbps: 6000,
+    },
+    Rung {
+        codec: Codec::Av1,
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        min_kbps: 2000,
+        max_kbps: 4000,
+    },
     Rung {
         codec: Codec::Av1,
         width: 1280,
@@ -90,8 +110,25 @@ const CAMERA: [Rung; 4] = [
 ];
 
 /// Screen steps, best first. Frame rate drops first, and resolution holds until the bitrate
-/// runs out, so text stays sharp. The lowest rung is H.264 at 360p.
-const SCREEN: [Rung; 6] = [
+/// runs out, so text stays sharp. The lowest rung is H.264 at 360p. 1080p60 and 1080p30 are AV1
+/// only, for the same reason as the camera's.
+const SCREEN: [Rung; 8] = [
+    Rung {
+        codec: Codec::Av1,
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        min_kbps: 3000,
+        max_kbps: 6000,
+    },
+    Rung {
+        codec: Codec::Av1,
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        min_kbps: 2000,
+        max_kbps: 3000,
+    },
     Rung {
         codec: Codec::Av1,
         width: 1920,
@@ -142,10 +179,41 @@ const SCREEN: [Rung; 6] = [
     },
 ];
 
+/// Camera steps when AV1 is off: H.264 at 720p, then the 360p fallback. The AV1 ladder cannot
+/// hold an H.264 720p rung, because the AV1 360p rung falls back to H.264 360p in cost order, and
+/// H.264 720p costs more per frame than AV1 720p, so it would be a step up in cost.
+const CAMERA_H264: [Rung; 2] = [
+    Rung {
+        codec: Codec::H264,
+        width: 1280,
+        height: 720,
+        fps: 30,
+        min_kbps: 1000,
+        max_kbps: 2500,
+    },
+    Rung {
+        codec: Codec::H264,
+        width: 640,
+        height: 360,
+        fps: 15,
+        min_kbps: 150,
+        max_kbps: 400,
+    },
+];
+
 pub fn ladder(content: Content) -> &'static [Rung] {
     match content {
         Content::Camera => &CAMERA,
         Content::Screen => &SCREEN,
+    }
+}
+
+/// The table an adapter built for `codecs` draws its rungs from. Calls without AV1 get the H.264
+/// camera ladder, and everything else gets the full ladder.
+fn table_for(content: Content, codecs: &[Codec]) -> &'static [Rung] {
+    match content {
+        Content::Camera if !codecs.contains(&Codec::Av1) => &CAMERA_H264,
+        _ => ladder(content),
     }
 }
 
@@ -203,7 +271,7 @@ impl VideoAdapter {
     /// Starts paused, with rungs only for `codecs`. `None` when no rung uses one of them,
     /// which means the peers share no video codec.
     pub fn with_codecs(content: Content, codecs: &[Codec]) -> Option<Self> {
-        let ladder: Vec<Rung> = ladder(content)
+        let ladder: Vec<Rung> = table_for(content, codecs)
             .iter()
             .copied()
             .filter(|rung| codecs.contains(&rung.codec))
@@ -224,6 +292,18 @@ impl VideoAdapter {
     /// The rungs this adapter moves between, best first.
     pub fn rungs(&self) -> &[Rung] {
         &self.ladder
+    }
+
+    /// Drops the rungs larger than `width` by `height` or faster than `fps`, as a server's boost
+    /// ceiling sets them. The lowest rung always stays, so a ceiling never stops video.
+    pub fn cap(&mut self, width: u32, height: u32, fps: u32) {
+        let lowest = self.ladder[self.ladder.len() - 1];
+        self.ladder.retain(|r| r.width <= width && r.height <= height && r.fps <= fps);
+        if self.ladder.is_empty() {
+            self.ladder.push(lowest);
+        }
+        self.rung = self.rung.map(|i| i.min(self.ladder.len() - 1));
+        self.cpu_floor = self.cpu_floor.min(self.ladder.len() - 1);
     }
 
     /// The plan as of the last update.
@@ -315,11 +395,21 @@ impl VideoAdapter {
     }
 
     /// Applies a CPU verdict by moving the quality floor one rung.
+    /// Whether the stream is below its best rung because the encoder could not keep up.
+    pub fn cpu_stepped_down(&self) -> bool {
+        self.cpu_floor > 0
+    }
+
     pub fn apply_cpu(&mut self, verdict: CpuVerdict) {
         let last = self.ladder.len() - 1;
         match verdict {
             CpuVerdict::Keep => {}
-            CpuVerdict::Downgrade => self.cpu_floor = (self.cpu_floor + 1).min(last),
+            // One rung below where the stream is now, not below the old floor. A floor left above
+            // the bandwidth's rung would otherwise need several verdicts before the plan moved.
+            CpuVerdict::Downgrade => {
+                let current = self.effective_rung().unwrap_or(self.cpu_floor);
+                self.cpu_floor = (current + 1).min(last);
+            }
             CpuVerdict::Upgrade => self.cpu_floor = self.cpu_floor.saturating_sub(1),
         }
     }
@@ -428,6 +518,90 @@ impl CpuGovernor {
     }
 }
 
+/// The encoder's share of the frame interval above which a rung is too slow.
+pub const CPU_SLOW_SHARE: f64 = 0.8;
+/// The share below which the encoder has headroom to climb a rung again.
+pub const CPU_HEADROOM_SHARE: f64 = 0.5;
+/// The headroom a climb needs first. A climb that fails doubles the wait, up to `CLIMB_WAIT_MAX`.
+const CLIMB_WAIT: Duration = Duration::from_secs(30);
+const CLIMB_WAIT_MAX: Duration = Duration::from_secs(300);
+/// A downgrade is not repeated within this time, so one slow spell steps down one rung at a time.
+const STEP_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// Decides when a stream that stepped down may climb back. It works on the encoder's share of the
+/// frame interval, measured now, and on the time, so tests can drive it with fixed instants.
+///
+/// A climb needs `wait` of headroom in a row. A slow spell within `CLIMB_WAIT` of a climb counts the
+/// climb as failed, which doubles `wait`, up to five minutes. A climb that holds for `CLIMB_WAIT`
+/// resets `wait`.
+#[derive(Debug)]
+pub struct CpuRecovery {
+    wait: Duration,
+    headroom_since: Option<Instant>,
+    last_climb: Option<Instant>,
+    last_step: Option<Instant>,
+}
+
+impl Default for CpuRecovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CpuRecovery {
+    pub fn new() -> Self {
+        Self {
+            wait: CLIMB_WAIT,
+            headroom_since: None,
+            last_climb: None,
+            last_step: None,
+        }
+    }
+
+    /// Takes one measurement and returns the verdict for the adapter. `stepped_down` says whether
+    /// the stream is below its best rung, since a climb is only possible from there.
+    pub fn observe(&mut self, now: Instant, share: f64, stepped_down: bool) -> CpuVerdict {
+        if self
+            .last_climb
+            .is_some_and(|climbed| now.duration_since(climbed) >= CLIMB_WAIT)
+        {
+            self.last_climb = None;
+            self.wait = CLIMB_WAIT;
+        }
+        if share > CPU_SLOW_SHARE {
+            self.headroom_since = None;
+            let cooling = self
+                .last_step
+                .is_some_and(|step| now.duration_since(step) < STEP_COOLDOWN);
+            if cooling {
+                return CpuVerdict::Keep;
+            }
+            if self.last_climb.take().is_some() {
+                // The climb did not hold, so the next one waits longer.
+                self.wait = (self.wait * 2).min(CLIMB_WAIT_MAX);
+            }
+            self.last_step = Some(now);
+            return CpuVerdict::Downgrade;
+        }
+        if share < CPU_HEADROOM_SHARE && stepped_down {
+            let since = *self.headroom_since.get_or_insert(now);
+            if now.duration_since(since) >= self.wait {
+                self.headroom_since = None;
+                self.last_climb = Some(now);
+                return CpuVerdict::Upgrade;
+            }
+        } else {
+            self.headroom_since = None;
+        }
+        CpuVerdict::Keep
+    }
+
+    /// The headroom a climb needs now. Doubles after each failed climb.
+    pub fn wait(&self) -> Duration {
+        self.wait
+    }
+}
+
 fn frame_period_ms(fps: u32) -> f64 {
     1_000.0 / fps as f64
 }
@@ -440,8 +614,22 @@ fn pixel_rate(rung: Rung) -> f64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_ceiling_drops_larger_rungs_and_keeps_the_lowest() {
+        let mut a = VideoAdapter::new(Content::Screen);
+        a.cap(1280, 720, 30);
+        assert!(a.rungs().iter().all(|r| r.height <= 720));
+        assert!(!a.rungs().is_empty());
+        let mut tiny = VideoAdapter::new(Content::Camera);
+        tiny.cap(16, 16, 1);
+        assert_eq!(tiny.rungs().len(), 1, "the lowest rung stays");
+    }
+
     const AUDIO: u32 = 32;
     const RESERVE: u32 = 56;
+    /// Camera rungs by position: 1080p60, 1080p30, then 720p30 and 720p15, then the lower ones.
+    const CAM_720_30: usize = 2;
+    const CAM_720_15: usize = 3;
 
     /// The ladder logic is the same for every codec, so these tests use all of them, AV1 included,
     /// even when this build cannot encode AV1.
@@ -546,16 +734,16 @@ mod tests {
     fn a_single_dip_does_not_drop_a_rung() {
         let mut adapter = adapter(Content::Camera);
         run(&mut adapter, RESERVE + 2_000, 10);
-        assert_eq!(adapter.plan().rung, Some(0));
+        assert_eq!(adapter.plan().rung, Some(CAM_720_30));
 
         adapter.update(RESERVE + 500, AUDIO);
         assert_eq!(
             adapter.plan().rung,
-            Some(0),
+            Some(CAM_720_30),
             "one low sample must not change rung"
         );
         run(&mut adapter, RESERVE + 2_000, 1);
-        assert_eq!(adapter.plan().rung, Some(0));
+        assert_eq!(adapter.plan().rung, Some(CAM_720_30));
     }
 
     #[test]
@@ -563,7 +751,7 @@ mod tests {
         let mut adapter = adapter(Content::Camera);
         run(&mut adapter, RESERVE + 2_000, 10);
         let plan = run(&mut adapter, RESERVE + 700, DOWN_SAMPLES);
-        assert_eq!(plan.rung, Some(1));
+        assert_eq!(plan.rung, Some(CAM_720_15));
         assert_eq!(plan.fps, 15, "camera drops frame rate before resolution");
         assert_eq!(plan.height, 720);
     }
@@ -573,7 +761,7 @@ mod tests {
         let mut adapter = adapter(Content::Camera);
         run(&mut adapter, RESERVE + 1_300, 10);
         let start = adapter.plan().rung;
-        assert_eq!(start, Some(0));
+        assert_eq!(start, Some(CAM_720_30));
         let mut changes = 0;
         let mut last = start;
         for i in 0..200 {
@@ -671,7 +859,7 @@ mod tests {
         let steps = ladder(Content::Camera);
         let mut governor = CpuGovernor::new();
         for sample in 1..=CPU_FAST_SAMPLES {
-            let verdict = governor.observe(5.0, steps, 1);
+            let verdict = governor.observe(5.0, steps, CAM_720_30);
             if sample < CPU_FAST_SAMPLES {
                 assert_eq!(verdict, CpuVerdict::Keep);
             } else {
@@ -695,7 +883,7 @@ mod tests {
         let mut governor = CpuGovernor::new();
         for i in 0..500 {
             let cost = if i % 2 == 0 { 20.0 } else { 30.0 };
-            assert_eq!(governor.observe(cost, steps, 0), CpuVerdict::Keep);
+            assert_eq!(governor.observe(cost, steps, CAM_720_30), CpuVerdict::Keep);
         }
     }
 
@@ -703,16 +891,143 @@ mod tests {
     fn cpu_downgrade_lowers_the_plan_even_with_bandwidth_to_spare() {
         let mut adapter = adapter(Content::Camera);
         run(&mut adapter, RESERVE + 2_000, 10);
-        assert_eq!(adapter.plan().rung, Some(0));
+        assert_eq!(adapter.plan().rung, Some(CAM_720_30));
 
         adapter.apply_cpu(CpuVerdict::Downgrade);
         let plan = adapter.update(RESERVE + 2_000, AUDIO);
-        assert_eq!(plan.rung, Some(1));
+        assert_eq!(plan.rung, Some(CAM_720_15));
         assert_eq!(plan.fps, 15);
 
         adapter.apply_cpu(CpuVerdict::Upgrade);
         let plan = adapter.update(RESERVE + 2_000, AUDIO);
-        assert_eq!(plan.rung, Some(0));
+        assert_eq!(plan.rung, Some(CAM_720_30));
+    }
+
+    /// Each boost level's ceiling keeps the rungs at or below it. The camera ladder has 6 rungs,
+    /// the screen ladder 8, and the lowest rung always stays.
+    #[test]
+    fn a_slow_encoder_steps_down_and_a_headroom_run_climbs_back() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut recovery = CpuRecovery::new();
+        assert_eq!(recovery.observe(at(0), 0.9, false), CpuVerdict::Downgrade, "a slow encoder steps down");
+        assert_eq!(recovery.observe(at(1), 0.9, true), CpuVerdict::Keep, "no second step inside the cooldown");
+
+        for s in (6..36).step_by(5) {
+            assert_eq!(recovery.observe(at(s), 0.3, true), CpuVerdict::Keep, "headroom is not 30 s yet at {s} s");
+        }
+        assert_eq!(recovery.observe(at(36), 0.3, true), CpuVerdict::Upgrade, "30 s of headroom climbs back");
+    }
+
+    #[test]
+    fn no_climb_without_headroom_or_without_a_step_down() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // Headroom at the best rung has nothing to climb to.
+        let mut recovery = CpuRecovery::new();
+        for s in 0..60 {
+            assert_eq!(recovery.observe(at(s), 0.3, false), CpuVerdict::Keep);
+        }
+        // A share between the two limits resets the headroom run.
+        let mut recovery = CpuRecovery::new();
+        assert_eq!(recovery.observe(at(0), 0.9, false), CpuVerdict::Downgrade);
+        assert_eq!(recovery.observe(at(10), 0.3, true), CpuVerdict::Keep);
+        assert_eq!(recovery.observe(at(20), 0.6, true), CpuVerdict::Keep);
+        assert_eq!(recovery.observe(at(25), 0.3, true), CpuVerdict::Keep, "the run restarted at 25 s");
+        assert_eq!(recovery.observe(at(54), 0.3, true), CpuVerdict::Keep);
+        assert_eq!(recovery.observe(at(56), 0.3, true), CpuVerdict::Upgrade);
+    }
+
+    #[test]
+    fn a_failed_climb_doubles_the_wait_up_to_five_minutes() {
+        let t0 = Instant::now();
+        let mut now = 0u64;
+        let mut recovery = CpuRecovery::new();
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            // Step down, wait out the headroom, climb, then fail straight away.
+            assert_eq!(recovery.observe(t0 + Duration::from_secs(now), 0.9, true), CpuVerdict::Downgrade);
+            now += 10;
+            waits.push(recovery.wait().as_secs());
+            let mut climbed = false;
+            while !climbed {
+                now += 1;
+                climbed = recovery.observe(t0 + Duration::from_secs(now), 0.3, true) == CpuVerdict::Upgrade;
+                assert!(now < 10_000, "the climb must come");
+            }
+            now += 5; // A slow spell 5 s after the climb: the climb failed.
+        }
+        assert_eq!(waits, [30, 60, 120, 240, 300, 300], "the wait doubles, then stops at five minutes");
+    }
+
+    #[test]
+    fn a_climb_that_holds_resets_the_wait() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut recovery = CpuRecovery::new();
+        assert_eq!(recovery.observe(at(0), 0.9, true), CpuVerdict::Downgrade);
+        assert_eq!(recovery.observe(at(30), 0.3, true), CpuVerdict::Keep);
+        assert_eq!(recovery.observe(at(60), 0.3, true), CpuVerdict::Upgrade);
+        assert_eq!(recovery.observe(at(100), 0.3, true), CpuVerdict::Keep, "the climb held for 30 s");
+        assert_eq!(recovery.wait(), Duration::from_secs(30));
+        assert_eq!(recovery.observe(at(200), 0.9, true), CpuVerdict::Downgrade);
+        assert_eq!(recovery.wait(), Duration::from_secs(30), "a slow spell after a held climb is not a failure");
+    }
+
+    #[test]
+    fn each_boost_level_keeps_the_rungs_it_allows() {
+        let cases = [
+            (
+                Content::Camera,
+                [(1280, 720, 30, 4), (1920, 1080, 30, 5), (1920, 1080, 30, 5), (1920, 1080, 60, 6)],
+            ),
+            (
+                Content::Screen,
+                [(1920, 1080, 15, 6), (1920, 1080, 30, 7), (1920, 1080, 30, 7), (1920, 1080, 60, 8)],
+            ),
+        ];
+        for (content, levels) in cases {
+            for (width, height, fps, kept) in levels {
+                let mut adapter = adapter(content);
+                adapter.cap(width, height, fps);
+                let rungs = adapter.rungs();
+                assert_eq!(rungs.len(), kept, "{content:?} at {width}x{height} {fps} fps");
+                assert!(rungs
+                    .iter()
+                    .all(|r| r.width <= width && r.height <= height && r.fps <= fps));
+                assert_eq!(rungs.last().unwrap().codec, Codec::H264, "the lowest rung is H.264");
+            }
+        }
+    }
+
+    #[test]
+    fn calls_without_av1_can_reach_720p_and_fall_back_to_360p() {
+        let adapter = VideoAdapter::with_codecs(Content::Camera, &[Codec::H264]).unwrap();
+        let sizes: Vec<_> = adapter.rungs().iter().map(|r| (r.codec, r.width, r.height, r.fps)).collect();
+        assert_eq!(
+            sizes,
+            [(Codec::H264, 1280, 720, 30), (Codec::H264, 640, 360, 15)],
+            "H.264 720p30, then the 360p step down"
+        );
+    }
+
+    #[test]
+    fn av1_calls_keep_the_cost_ordered_ladder() {
+        let adapter = VideoAdapter::with_codecs(Content::Camera, &Codec::ALL).unwrap();
+        let last = adapter.rungs().last().unwrap();
+        assert_eq!((last.codec, last.width, last.fps), (Codec::H264, 640, 15), "the AV1 ladder falls back to H.264 360p");
+        assert!(
+            adapter.rungs().iter().all(|r| !(r.codec == Codec::H264 && r.width == 1280)),
+            "no H.264 720p rung sits below an AV1 rung"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_below_every_rung_still_keeps_the_lowest() {
+        let mut adapter = adapter(Content::Camera);
+        adapter.cap(0, 0, 0);
+        assert_eq!(adapter.rungs().len(), 1);
+        assert_eq!((adapter.rungs()[0].width, adapter.rungs()[0].fps), (640, 15));
     }
 
     #[test]

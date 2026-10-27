@@ -110,12 +110,14 @@ function InviteCard({ link }: { link: string }) {
       id={preview.community}
       name={preview.name}
       icon={preview.icon ? imageSrc(preview.icon) : null}
+      iconPoster={preview.icon_poster ? imageSrc(preview.icon_poster) : null}
       banner={banner}
       memberCount={preview.member_count}
       onlineCount={preview.online_count}
       createdMs={preview.created_ms}
       description={preview.description}
       traits={preview.traits}
+      boost={{ level: preview.boost_level ?? 0, hosts: preview.boost_hosts ?? 0 }}
       footer={
         <Button
           className={cn(

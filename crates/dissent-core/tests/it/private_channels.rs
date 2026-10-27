@@ -590,3 +590,74 @@ async fn a_banned_member_cannot_read_a_private_channels_name_after_the_rotation(
     })
     .await;
 }
+
+/// Counts the message announcements for one channel that a receiver holds.
+fn message_announcements(rx: &mut tokio::sync::broadcast::Receiver<dissent_core::EngineEvent>, channel: ChannelId) -> usize {
+    let mut n = 0;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(&ev, dissent_core::EngineEvent::Message { channel_id, .. } if *channel_id == channel.to_string()) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A private message is announced once to a listed reader. A member who is not listed gets no announcement for it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_private_message_is_announced_to_its_readers_only() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let carol = peer("carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+
+        alice
+            .engine
+            .create_channel(id, "vault".into())
+            .await
+            .expect("vault");
+        let vault = channel_named(&alice.engine, id, "vault");
+        alice
+            .engine
+            .set_channel_access(id, vault, true, vec![], vec![bob.identity.root_id()])
+            .await
+            .expect("alice makes vault private for bob");
+        eventually("bob lists the private channel", || {
+            lists_channel(&bob.engine, id, "vault").then_some(())
+        })
+        .await;
+        let mut bob_events = bob.engine.subscribe();
+        let mut carol_events = carol.engine.subscribe();
+
+        alice
+            .engine
+            .send_message(id, vault, "for bob only".into())
+            .await
+            .expect("send into the private channel");
+        wait_seen(&bob, id, vault, "for bob only").await;
+
+        // Carol's marker shows that the channel traffic has reached her, so her silence is meaningful.
+        alice
+            .engine
+            .create_channel(id, "lounge".into())
+            .await
+            .expect("lounge");
+        let lounge = channel_named(&alice.engine, id, "lounge");
+        alice
+            .engine
+            .send_message(id, lounge, "marker".into())
+            .await
+            .expect("send marker");
+        wait_seen(&carol, id, lounge, "marker").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(message_announcements(&mut bob_events, vault), 1, "bob is announced once");
+        assert_eq!(message_announcements(&mut carol_events, vault), 0, "carol is not announced");
+
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}

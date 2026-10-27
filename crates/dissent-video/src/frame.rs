@@ -105,26 +105,39 @@ impl Frame {
 
 impl Frame {
     /// A preview of this frame as packed RGB, scaled down to at most `max_width` wide. The
-    /// returned size is `(width, height, pixels)`. Scaling is nearest neighbour, and the
-    /// conversion uses BT.601 limited-range coefficients, the inverse of [`from_packed_rgb`].
+    /// returned size is `(width, height, pixels)`. Scaling is a box average: each preview pixel is
+    /// the mean of the source pixels it covers, at any ratio, so a downscaled picture keeps its
+    /// detail without shimmer. Chroma is taken from the source's half-resolution planes, and the
+    /// colour conversion is the BT.601 limited-range inverse of [`from_packed_rgb`].
     pub fn to_rgb_preview(&self, max_width: u32) -> (u32, u32, Vec<u8>) {
         let i420 = self.to_i420();
         let (w, h) = (i420.width as usize, i420.height as usize);
-        let scale = (w as u32).div_ceil(max_width.max(1)).max(1) as usize;
-        let (out_w, out_h) = (w / scale, h / scale);
+        let out_w = (max_width.max(1) as usize).min(w);
+        let out_h = (h * out_w / w).max(1);
         let luma = i420.luma();
         let chroma_w = w / 2;
         let u_plane = &i420.data[w * h..w * h + chroma_w * (h / 2)];
         let v_plane = &i420.data[w * h + chroma_w * (h / 2)..];
         let mut rgb = Vec::with_capacity(out_w * out_h * 3);
-        for y in 0..out_h {
-            let sy = y * scale;
-            for x in 0..out_w {
-                let sx = x * scale;
-                let yy = f32::from(luma[sy * w + sx]) - 16.0;
-                let c = (sy / 2) * chroma_w + sx / 2;
-                let u = f32::from(u_plane[c]) - 128.0;
-                let v = f32::from(v_plane[c]) - 128.0;
+        for oy in 0..out_h {
+            let (sy0, sy1) = box_span(oy, out_h, h);
+            for ox in 0..out_w {
+                let (sx0, sx1) = box_span(ox, out_w, w);
+                let (mut y_sum, mut u_sum, mut v_sum) = (0u32, 0u32, 0u32);
+                for sy in sy0..sy1 {
+                    let row = sy * w;
+                    let chroma_row = (sy / 2) * chroma_w;
+                    for sx in sx0..sx1 {
+                        y_sum += u32::from(luma[row + sx]);
+                        let c = chroma_row + sx / 2;
+                        u_sum += u32::from(u_plane[c]);
+                        v_sum += u32::from(v_plane[c]);
+                    }
+                }
+                let count = ((sy1 - sy0) * (sx1 - sx0)) as f32;
+                let yy = y_sum as f32 / count - 16.0;
+                let u = u_sum as f32 / count - 128.0;
+                let v = v_sum as f32 / count - 128.0;
                 let r = 1.164 * yy + 1.596 * v;
                 let g = 1.164 * yy - 0.392 * u - 0.813 * v;
                 let b = 1.164 * yy + 2.017 * u;
@@ -133,6 +146,14 @@ impl Frame {
         }
         (out_w as u32, out_h as u32, rgb)
     }
+}
+
+/// The source columns or rows `[start, end)` that output index `i` of `out` covers, out of `src`.
+/// Always at least one source pixel.
+fn box_span(i: usize, out: usize, src: usize) -> (usize, usize) {
+    let start = i * src / out;
+    let end = ((i + 1) * src / out).max(start + 1);
+    (start, end)
 }
 
 fn clamp8(v: f32) -> u8 {
@@ -281,5 +302,19 @@ mod preview_tests {
         assert!((i32::from(r) - 220).abs() <= 4, "red {r}");
         assert!((i32::from(g) - 30).abs() <= 4, "green {g}");
         assert!((i32::from(b) - 30).abs() <= 4, "blue {b}");
+    }
+
+    #[test]
+    fn a_downscale_averages_the_pixels_it_covers() {
+        // Two luma rows of [black, white, white, white] with neutral chroma. Two output pixels cover
+        // [black, white] and [white, white], so the first is mid-grey, not either sample.
+        let luma = [0u8, 255, 255, 255, 0, 255, 255, 255];
+        let chroma = [128u8; 4];
+        let data: Vec<u8> = luma.iter().chain(chroma.iter()).copied().collect();
+        let frame = Frame::new(4, 2, PixelFormat::I420, 0, data).unwrap();
+        let (w, h, out) = frame.to_rgb_preview(2);
+        assert_eq!((w, h), (2, 1));
+        assert!((i32::from(out[0]) - 129).abs() <= 2, "a half-black pair is mid-grey: {}", out[0]);
+        assert_eq!(out[3], 255, "a white pair stays white");
     }
 }

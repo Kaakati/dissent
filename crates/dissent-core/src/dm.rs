@@ -5,6 +5,7 @@
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::groups::{dm_conv_id, ConvId, ConvKind, ConvMeta};
+use crate::local::hidden_by_close;
 use crate::views::{ConvMember, ConversationSummary, DmItem};
 use crate::world::World;
 use dissent_events::{Hlc, SignedDm};
@@ -165,7 +166,8 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
 }
 
 impl Engine {
-    /// One summary per conversation: 1:1 DMs and group DMs, newest first.
+    /// One summary per conversation: 1:1 DMs and group DMs, newest first. A closed conversation is still here: the
+    /// sidebar leaves it out (see `sidebar_conversations`).
     pub fn conversations(&self) -> Vec<ConversationSummary> {
         let live_peers = self.live_dm_peers();
         let mut list = conversations(&self.read(), &live_peers);
@@ -176,6 +178,16 @@ impl Engine {
                 c.id.parse().ok().and_then(|conv| self.live_call_of_group(conv))
             };
         }
+        list
+    }
+
+    /// The conversations the sidebar lists: `conversations()` without the DMs and groups that were closed and have had
+    /// no message arrive on this device since. Their history stays, and they come back on a new arrival.
+    pub fn sidebar_conversations(&self) -> Vec<ConversationSummary> {
+        let closed = self.closed_conversations();
+        let arrived = self.arrivals();
+        let mut list = self.conversations();
+        list.retain(|c| !hidden_by_close(&closed, &arrived, c));
         list
     }
 

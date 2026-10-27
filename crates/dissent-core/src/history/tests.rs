@@ -4,6 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::membership::tests::{eventually, general, readable, Node};
+use crate::rpc::Response;
 use crate::testutil::on_own_thread;
 
 #[test]
@@ -163,5 +164,26 @@ fn a_member_admitted_by_us_is_counted_before_the_welcome_goes_out() {
         })
         .await;
         assert!(alice.engine.history_seal(id, "no check to wait for").is_some());
+    });
+}
+
+/// A member who left gets no history keys: no push reaches their device, and a fetch from them is refused.
+#[test]
+fn a_member_who_left_gets_no_history_keys() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-left-keys").await;
+        let id = alice.engine.create_community("Left".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-left-keys").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        let bob_device = bob.identity.device_id();
+        eventually("alice admits bob's device", || alice.engine.person_device(id, bob_device)).await;
+
+        bob.engine.leave_community(id).await.expect("bob leaves");
+        eventually("alice sees bob leave", || !alice.engine.person_device(id, bob_device)).await;
+        assert!(
+            matches!(alice.engine.serve_history_keys(bob_device, id), Response::Error(_)),
+            "keys are not served to a departed member"
+        );
     });
 }

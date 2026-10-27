@@ -1,14 +1,22 @@
 <p align="center">
-  <img src="assets/icon/app_icon.png" alt="Dissent logo" width="140">
+  <img src="assets/icon/app_icon.svg" alt="Dissent logo" width="140">
 </p>
 
 <h1 align="center">Dissent</h1>
 
 <p align="center"><strong>A place to talk with your communities that no company owns and nobody can switch off.</strong></p>
 
+<p align="center">
+
+[![Join on Dissent][join-badge]][join]
+
+Have the app? Open **Join server** and paste this link: `dissent://invite/dss1pwq48a5vtxxfqgp8q23ztvvyx4wcnc7qewvpf7z3zex00sg66dnq0hf6cs.cmyq6evdjk6kl64a73qtdvqdkxhl646nu2mp3gggjhsxjbc56giq.0.gl4mkxwx4mqhyhjqhakel2j47u`
+
+</p>
+
 Dissent is a free, open-source chat app in the spirit of Discord. You can create servers, organise them into channels, invite friends, chat in real time and send private direct messages. The difference is underneath. Dissent has no central company server holding everyone's conversations. Your servers live on the computers of the people who use them, and the app connects those people to each other directly.
 
-> **Status: early but usable (v0.1.8).** Servers, encrypted chat, direct messages, voice and video calls and screen sharing all work today between people who have Dissent installed. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
+> **Status: early but usable (v0.1.12).** Servers, encrypted chat, direct messages, voice and video calls and screen sharing all work today between people who have Dissent installed. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
 
 ---
 
@@ -53,6 +61,8 @@ Dissent uses a giant public "phone book" that already exists. It is shared by mi
 
 When two people can't connect directly, often because of home routers or mobile networks, their apps hand messages to a **relay**. A relay is a helper computer that passes along sealed envelopes it can't open. Anyone can run one, and you can choose your own relays in the app's settings.
 
+Out of the box, Dissent also uses number0's public relays, and number0's directory to find devices faster. Both are optional: you can run on your own relays alone and switch the directory off in Settings › Network. The app always keeps at least one relay on, yours or number0's, because it can't go online without one.
+
 ### Private conversations, directly
 
 **Direct messages** go straight from your device to the other person's device over an encrypted connection. If they're offline, your app holds the message and keeps trying until it gets through. You can message anyone you share a server with. You can also swap **contact links** with someone you've never shared a server with.
@@ -73,6 +83,8 @@ Some things Discord keeps behind Nitro or server boosts are simply part of Disse
 | Server banner | Needs server boost level 2 | Free for every server |
 | Animated server banner | Needs server boost level 3 | Free (looping GIF) |
 | Invite card with the server's banner | Needs server boosts | Free: every invite link shows the server's banner, icon, counts and description |
+| Animated server icon | Needs server boosts | Free: a looping GIF, cropped to a square |
+| Server boost levels | Bought, for perks | Free and earned: members who host a relay raise the level, and nothing basic is locked |
 | How many servers you can join | 100, or 200 with Nitro | No limit set by Dissent |
 | Downloads from several sources at once | No | Free: big files come from every member who has them |
 | Message history kept for you | On Discord's servers | On your own devices and your friends' |
@@ -83,12 +95,28 @@ Dissent doesn't have everything Discord sells: there are no custom emoji, sticke
 
 - **Create and join servers** from invite links, and switch between them from the side rail. Drag servers to reorder them; the order is yours alone.
 - **Invite cards.** An invite link pasted in chat shows a card with the server's banner, icon, name, member and online counts, and a Join button. Short invite links fit in a message, and a full link is offered for older versions.
-- **Server Profile.** Owners set the name, icon, a banner (a preset colour, an image or a looping GIF), up to five traits and a description, with a live preview. Admins can change everything except the name. The banner shows at the top of the channel list for every member.
+- **Server Profile.** Owners set the name, an icon (a picture, or a looping GIF cropped to a square), a banner (a preset colour, an image or a looping GIF), up to five traits and a description, with a live preview. Admins can change everything except the name. The banner shows at the top of the channel list for every member.
 - **Text and voice channels**, with slow mode and per-channel settings. Unread channels are marked, and a "New messages" line shows where you left off.
-- **Encrypted servers.** Server messages are sealed so that only members can read them. A banned or removed member can't read anything new. Owners can switch on member-only mode, which also hides settings and moderation from people who have left.
+- **Encrypted servers.** Server messages are sealed so that only members can read them. A banned or removed member can't read anything new, and someone who has left can't post until they rejoin. Owners can switch on member-only mode, which also hides settings and moderation from people who have left.
+- **Private channels**, seen only by the members and roles you choose. Their messages, replies, edits, reactions and files are sealed with the channel's own key. Removing someone cuts them off from new messages, and a reader added "since joining" can't read older ones. Seeders never see or keep a private channel's files.
 - **Message history for new members**, following the server's history setting: new members either see only what was sent after they joined (the default for new servers) or the whole history.
 - **Moderation:** owner, admin and moderator roles, banning and unbanning, and an audit trail every member's app checks for itself.
 - **Right-click a server** to mark it read, invite people, mute it for a while or for good, choose its notification level (all messages, mentions only or nothing), hide muted channels, open its settings, create a channel or leave.
+
+### Boosts, earned rather than bought
+
+A server's boost level rises with the number of **relay hosts** it has: members whose relay your own app has checked and found working within the last 72 hours. Each level is something your app verifies from your own network, so nobody can buy or fake one. Nothing is paid for, and nothing is ever locked.
+
+| Level | Verified hosts | What it raises |
+|---|---|---|
+| 0 | none | Nothing extra |
+| 1 | 1 | Camera at 1080p 30 fps, and screen sharing at 1080p 30 fps |
+| 2 | 3 | Voice up to 128 kbps, and calls stay direct for up to 8 people |
+| 3 | 5 or more | Voice up to 256 kbps, camera and screen sharing at 1080p 60 fps, and calls stay direct for up to 10 people |
+
+Level 0 already gives 720p camera video, screen sharing at 1080p 15 fps, voice at 96 kbps and direct calls for up to 6 people, so no level takes anything away. Chat, files, calls and screen sharing work the same at level 0. A level only raises what your app sends: two members may briefly see different levels, and a call never breaks over it.
+
+The level shows beside the server name and on its invite cards, as "Level 2 · 3 relay hosts". Server Settings › Boosts lists the hosts, the level and what the next level needs. To become a host, run a relay for the server (see [Relays](#relays)).
 
 ### Messages
 
@@ -98,6 +126,9 @@ Dissent doesn't have everything Discord sells: there are no custom emoji, sticke
 - **Replies and reactions**, with quick reactions from your most-used emoji.
 - **Files of up to 10 GB**, encrypted, downloaded from several members at once, and resumed after a restart. Pictures get a small preview. Downloads go to your Downloads folder unless you choose another.
 - **Link previews** with the page's title, description and picture. They're fetched by the sender, after asking once, so the people reading never contact the website.
+- **Saved Messages** shows each bookmarked message as it looks in the chat, with its formatting, link previews, invite cards and files, and a Jump back to it. A message from a spoiler channel stays blurred until you click it.
+- **Scroll back** through a conversation's whole history. Older messages load a page at a time as you reach the top, and the message you were reading stays where it was.
+- **Notifications** for channels, private channels, direct and group messages, once per message. An edit, a reaction, or the same message arriving again doesn't alert a second time.
 
 ### People and direct messages
 
@@ -105,11 +136,16 @@ Dissent doesn't have everything Discord sells: there are no custom emoji, sticke
 - **Profiles** with your avatar, a banner and a status (online, idle, do not disturb or invisible). Profile cards show mutual servers and, if you allow it, mutual friends.
 - **Direct and group messages**, encrypted, and delivered to every device of both people. Messages to someone offline are held, or left at their inbox, and sent when they're back. A message an inbox refuses shows as failed, with a Retry.
 - **Unread conversations** appear on the side rail with a count, like Discord.
+- **Close DM** takes a conversation out of the list. It comes back when you open it again or a new message arrives; old history syncing in doesn't bring it back.
+- **`dissent://` links open the app.** An invite or a contact link opens a dialog that shows what it would do, and nothing happens until you confirm. A message link jumps to the message, and a device link opens Settings › Devices with its code filled in.
 
 ### Calls
 
 - **Voice calls** one to one, in groups, and in voice channels. Small calls connect everyone directly. Bigger ones elect the strongest computer to forward everyone's sealed streams, and a backup takes over if it drops.
 - **Video and screen sharing** during a call, with a camera preview before you join. Audio always keeps its share of the connection, so video can't crowd it out.
+- **Video quality.** When everyone in a call decodes AV1, a camera can be sent at 1080p 30 fps. If anyone in the call can't decode AV1, the call uses H.264, which tops out at 720p 30 fps. That's the best case: on a typical computer the encoder often can't keep up at 1080p, so the sender steps down to 720p. When the connection is short of room, video drops to 360p at 15 fps. After a slowdown, quality climbs back once there's room again.
+- **Video at the size you see it.** Each person's video is drawn at the size of their tile on your screen, so a large tile stays sharp and a small one costs little.
+- **Call chat** works like any other chat: formatting, mentions, link previews, invite cards, files, replies and reactions. Its messages go to the call's conversation, so everyone who can read that DM, group or channel can read them, and the call chat says so.
 - **Clean audio:** noise suppression, echo cancellation, automatic gain, push-to-talk, and a mic test.
 - Calls are encrypted end to end, and forwarders can't open what they pass along.
 
@@ -120,7 +156,9 @@ Dissent doesn't have everything Discord sells: there are no custom emoji, sticke
 - **Recovery with friends.** Choose guardians, and if you lose your recovery phrase, enough of them can vouch for your new identity.
 - **Safety numbers** to compare with a friend, with a warning if their key changes.
 - **Quick switcher:** press Ctrl+K to jump anywhere. The app is fully usable from the keyboard.
-- **Network:** use the public relays or your own, and see live network health.
+- **Relays.** Your app uses up to 30 relays, fastest first, measured by latency. They come from three places: relays you add, relays your servers offer, and the public defaults. Settings › Network shows each one's latency. **Pin** keeps a relay in the list when the list is cut down, and **Turn off** drops it on this device. Pins and turn-offs are never sent to anyone.
+- **Use relays offered by my servers.** A switch in Settings › Network. Off, your app neither measures nor uses the relays your servers offer, and it stops asking them for anything. Each relay you use can see your IP address, and the settings page says so next to the switch.
+- **Network health.** Live status for your connections, and the probe in [Things anyone can run](#things-anyone-can-run) to see how two people connect.
 - **Updates** are offered in the app and installed with one click. Every update is checked against Dissent's signing key.
 
 ## Portable version
@@ -143,8 +181,6 @@ Whichever you choose:
 
 ## Built underneath, not in the app yet
 
-- **Private channels.** Channels only chosen members and roles can see, each with its own key. The rules are built and tested, but the keys, the Private Channel switch and the member picker aren't finished, so the app doesn't offer them yet.
-- **AV1 video in the installers.** Calls can use AV1 when every computer in the call supports it, but the installers ship without the AV1 encoder for now and send H.264.
 - **Website-verified handles:** if you own a website, prove a handle like `@example.com`. Every viewer's app checks it for itself.
 - **Push relay** for waking phones, as a prototype.
 
@@ -154,6 +190,7 @@ Dissent works with no servers at all, but these optional helpers make it better,
 
 - **Seeder.** An always-on member that keeps a server's history available, even when everyone else is offline. To run one as a service on a home server, NAS or VPS, see [`packaging/README.md`](packaging/README.md).
 - **Relay.** A helper that passes sealed traffic between people who can't connect directly. Running one near your community, for example in your country, makes relayed connections faster. A guide is in [`apps/relay/README.md`](apps/relay/README.md), and the service install is in [`packaging/README.md`](packaging/README.md).
+- **Relay for your own servers.** Run `dissent-relay --join <invite> --data-dir <folder>` to host a relay for a server you're in. It joins the server as storage and admits only its members. Your relay counts toward the server's boost level once members' apps can reach it, which needs a domain name with a valid TLS certificate. Members can see the relay's address.
 - **Probe.** A small tool that two people on different networks can run to see whether they connect directly or through a relay, and how fast. See [`apps/probe/README.md`](apps/probe/README.md).
 - **Push relay.** A prototype that wakes sleeping phones with an empty notification, without ever learning who is talking to whom. It's in progress.
 
@@ -164,7 +201,14 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 - **No security audit has been done.** The design notes in [`docs/design/06-threat-model.md`](docs/design/06-threat-model.md) list what each part protects against and what it doesn't.
 - **History needs someone online.** You can only catch up on a server when at least one other member, or a seeder, is online.
 - **New members can't read messages from before 0.1.7**, even when the server shares its full history. Those were sealed before history keys existed.
-- **Older versions miss newer features.** Someone on an older Dissent sees plain `@names` instead of highlighted mentions, no banners, and server changes such as a rename show for them only once they update.
+- **Older versions miss newer features.** Someone on an older Dissent sees plain `@names` instead of highlighted mentions, no banners or animated icons, no boost levels, and server changes such as a rename show for them only once they update.
+- **Video is often 720p.** 1080p is the best case, not the usual one.
+- **Boost levels need hosts with a domain and TLS.** A relay counts only when members' apps can reach it over a valid HTTPS certificate, so a home machine without a domain can't count as a host.
+- **Bigger direct calls need everyone on this version.** A level's limit of 8 or 10 people for a direct call applies only while everyone in the call runs Dissent 0.1.12 or newer and has the upload for it. Otherwise the call is forwarded from 7 people, as at level 0. Upload is judged by what each computer sends now, not by what it could send.
+- **Relay hosts see member devices connect.** A host's relay learns when each member's device connects to it, and its address is visible to the server's members. Non-members see nothing.
+- **When both people talk at once, your voice comes through about 6 dB quieter.** The echo canceller can't yet tell your voice from the other person's speaker. Headphones avoid the problem, since there is no speaker to echo.
+- **Someone who leaves a server keeps some access for a while.** They can't post. They stop being able to read new messages once their devices are removed from the server's encryption group, which happens when another member's app is online. In this version, leaving doesn't change the server's shared secret, so its settings, roles and member changes stay readable to them. Member-only mode avoids that, and the next version changes the secret on leave too. The details are in [Leaving and the secret](docs/design/05-encrypted-servers.md#leaving-and-the-secret).
+- **Until the secret changes, someone who left or was banned can come back under a new identity**, as a member or as a storage helper like a seeder. Dissent refuses a storage join from anyone who has been a person in the server, but not from a new identity. Admin-signed storage grants will close this in two steps, and changing the secret on every ban, and soon on every leave, ends the window.
 - **A sudden power cut can lose your last quarter-second of sent messages.** Other members usually already have them, so they come back when you sync.
 - **Mutual friends shares your whole friends list with your friends**, not just the people you have in common. You can turn this off in Settings › Privacy.
 - **Linux builds need Ubuntu 24.04 or newer**, or another distribution of the same age (glibc 2.39 and PipeWire 1.0). That covers the desktop app, the seeder and the relay. Older systems such as Ubuntu 22.04 and Debian 12 can't run them.
@@ -173,11 +217,10 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 
 ## What's next
 
-1. Private channels in the app.
-2. AV1 video in the installers, and screen sharing and camera on Linux.
-3. Measure direct connections across real home and mobile networks, and run relays where they help most.
-4. Phone notifications through push relays, and a mobile app.
-5. A security review.
+1. Change the server's secret when someone leaves, not only on a ban, once every member's app accepts it.
+2. Measure direct connections across real home and mobile networks, and run relays where they help most.
+3. Phone notifications through push relays, and a mobile app.
+4. A security review.
 
 ## Questions people ask
 
@@ -236,4 +279,8 @@ Ideas, bug reports and code are all welcome. Please open an issue to talk about 
 
 ## License
 
-Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. The interface icons come from [Lucide](https://lucide.dev) and are used under the ISC License. The Poppins typeface is bundled under the SIL Open Font License in `apps/desktop/ui-next/public/fonts`. Voice calls use the [Opus](https://opus-codec.org) codec, included under its BSD license in `crates/dissent-audio/vendor/libopus`.
+Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. The interface icons come from [Lucide](https://lucide.dev) and are used under the ISC License. The Google Sans Flex typeface is bundled under the SIL Open Font License in `apps/desktop/ui-next/public/fonts`. Voice calls use the [Opus](https://opus-codec.org) codec, included under its BSD license in `crates/dissent-audio/vendor/libopus`.
+
+<!-- The join badge's landing page. This is a placeholder until GitHub Pages is enabled for the repository: change this line. -->
+[join]: https://kaakati.github.io/dissent/invite/#dss1pwq48a5vtxxfqgp8q23ztvvyx4wcnc7qewvpf7z3zex00sg66dnq0hf6cs.cmyq6evdjk6kl64a73qtdvqdkxhl646nu2mp3gggjhsxjbc56giq.0.gl4mkxwx4mqhyhjqhakel2j47u
+[join-badge]: assets/badges/join.svg

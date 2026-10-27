@@ -72,6 +72,7 @@ mod tests {
             owner: String::new(),
             my_role: "member".into(),
             icon: None,
+            icon_poster: None,
             mentions: 0,
             can_mention_everyone: false,
         }

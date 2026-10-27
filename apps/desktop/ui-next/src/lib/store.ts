@@ -16,6 +16,7 @@ import type {
   GroupSummary,
   Id,
   Me,
+  NetLatency,
   NetworkSettings,
   Page,
   Route,
@@ -155,6 +156,8 @@ export interface ShellState {
   openChannel: (channelId: Id) => Promise<void>;
   openPage: (page: Page) => Promise<void>;
   openDm: (peer: Id, name: string) => Promise<void>;
+  // Drops what the UI keeps for a direct conversation that has left the list: its unread marker and typing names.
+  clearDmState: (peer: Id) => void;
   openGroup: (conv: GroupSummary) => Promise<void>;
   openConversation: (conv: ConversationSummary) => Promise<void>;
   goBack: () => Promise<void>;
@@ -180,6 +183,10 @@ export interface ShellState {
 
   openSettings: (section?: SettingsSection) => void;
   closeSettings: () => void;
+  // A device-link code from a dissent://link/ link, waiting for Settings › Devices to show it. Never approved by itself.
+  pendingDeviceLink: string | null;
+  // The latest DHT and relay readings for the title bar, from net_latency. Null until the first probe.
+  netLatency: NetLatency | null;
   dismissUpdate: () => void;
   startFirstRun: () => void;
   finishFirstRun: () => Promise<boolean>;
@@ -218,6 +225,8 @@ export const useShell = create<ShellState>()((set, get) => ({
   version: '',
   communities: [],
   conversations: [],
+  pendingDeviceLink: null,
+  netLatency: null,
   route: { kind: 'home' },
   community: null,
   channelId: null,
@@ -467,9 +476,23 @@ export const useShell = create<ShellState>()((set, get) => ({
   openDm: (peer, name) =>
     navigate(() =>
       guard(async () => {
+        // A conversation that Close DM hid comes back into the list when it is opened again.
+        if (!get().conversations.some((c) => convKey(c) === `dm:${peer}`)) {
+          await api.reopenConversation(`dm:${peer}`);
+          await get().loadConversations();
+        }
         set({ route: { kind: 'home' }, page: null, group: null, peer, peerName: name, channelId: null });
       }),
     ),
+
+  clearDmState: (peer) =>
+    set((s) => {
+      const unread = new Set(s.unread);
+      unread.delete(`dm:${peer}`);
+      const typing = { ...s.typing };
+      delete typing[typingKey({ kind: 'dm', peer })];
+      return { unread, typing };
+    }),
 
   openGroup: (conv) =>
     navigate(() =>
@@ -576,6 +599,9 @@ export const useShell = create<ShellState>()((set, get) => ({
           set({ videoFrames: { ...get().videoFrames, [key]: { width: ev.width, height: ev.height, jpeg: ev.jpeg } } });
           return;
         }
+        case 'net_latency':
+          set({ netLatency: { dht_ms: ev.dht_ms, relay_ms: ev.relay_ms } });
+          return;
         case 'contacts':
           await get().loadContacts();
           return;

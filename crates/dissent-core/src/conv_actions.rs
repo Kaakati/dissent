@@ -23,7 +23,7 @@ use crate::engine::{clean_message, now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::groups::{msg_id, packet_conv, Action, Body, ConvBook, ConvId, ConvKind, ConvMeta, ConvMsg, Delivery};
 use crate::store::{append_record, read_records, rewrite_records, Paths};
-use crate::views::{DmItem, ReactionView, ReplyPreview};
+use crate::views::{DmItem, EngineEvent, ReactionView, ReplyPreview};
 use crate::world::World;
 
 /// How long a send waits for the queues to flush before it returns as queued. A peer that answers
@@ -258,6 +258,9 @@ impl Engine {
         if meta.kind == ConvKind::Dm {
             self.note_seen(meta.members.iter().copied().find(|m| *m != me));
         }
+        if is_message {
+            self.note_conv_arrival(&meta, body.hlc.wall_ms);
+        }
         if meta.ready {
             self.seal_and_queue(body)?;
         } else {
@@ -425,7 +428,36 @@ impl Engine {
             self.note_seen(Some(from));
         }
         self.notify_conv(meta);
+        self.announce_text(meta, hlc.wall_ms);
         self.queue_receipt(conv, id, device, root)
+    }
+
+    /// Records on this device that a message reached `meta`'s conversation now. A closed conversation comes back on this.
+    fn note_conv_arrival(&self, meta: &ConvMeta, sent_ms: u64) {
+        let key = match meta.kind {
+            ConvKind::Dm => match meta.members.iter().copied().find(|m| *m != self.inner.me) {
+                Some(peer) => format!("dm:{peer}"),
+                None => return,
+            },
+            ConvKind::Group => format!("group:{}", meta.id),
+        };
+        if let Err(e) = self.note_arrival(key, sent_ms) {
+            tracing::warn!(error = %e, "could not record a message's arrival");
+        }
+    }
+
+    /// Tells listeners that a new text message came in this conversation. Each kind has its own event, so a
+    /// change to the conversation's details never alerts (see `notify_conv`).
+    fn announce_text(&self, meta: &ConvMeta, sent_ms: u64) {
+        self.note_conv_arrival(meta, sent_ms);
+        match meta.kind {
+            ConvKind::Dm => {
+                if let Some(peer) = meta.members.iter().copied().find(|m| *m != self.inner.me) {
+                    self.emit(EngineEvent::Dm { peer: peer.to_string() });
+                }
+            }
+            ConvKind::Group => self.emit(EngineEvent::Group { group_id: meta.id.to_string() }),
+        }
     }
 
     /// Fails unless the conversation has its group, which reactions, edits and deletes need.

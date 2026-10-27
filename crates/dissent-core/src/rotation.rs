@@ -6,7 +6,9 @@
 //! When two admins rotate at once, the replay picks one winner (the lowest event id), and every
 //! device converges on it. See `docs/design/06-threat-model.md`, finding 2.
 
-use dissent_events::{ChannelId, Payload, Role};
+use std::collections::BTreeSet;
+
+use dissent_events::{ChannelId, CommunityState, Payload, Role};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use tracing::{debug, warn};
 
@@ -16,7 +18,57 @@ use crate::rpc::{Request, Response};
 /// How long a community keeps its old topic running after a secret rotation.
 const TOPIC_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Whether an admin rotates the secret when a member leaves, not only when one is banned.
+///
+/// Off in this release. Older clients reject a `SecretRotation` that covers a person who left, so turning this on
+/// before every member runs a client that accepts it would leave those members unable to read new messages.
+/// Turn it on in the release after the one where every member's client accepts such a rotation, and check that
+/// with `RotationSupport` before (see `docs/design/05-encrypted-servers.md`, "Leaving and the secret").
+/// Tests run with it on, through `leave_rotation_on`.
+pub(crate) const ROTATE_ON_LEAVE: bool = false;
+
+/// Whether leave rotations are issued now. Tests always issue them, so the leave path is exercised.
+pub(crate) fn leave_rotation_on() -> bool {
+    ROTATE_ON_LEAVE || cfg!(test)
+}
+
+/// How often a departure's rotation is retried while the removal commit is on its way, and how many times.
+/// After that the maintenance pass takes over.
+const ROTATE_STEP: std::time::Duration = std::time::Duration::from_secs(1);
+const ROTATE_TRIES: u32 = 10;
+
+/// The members a rotation issued now would cover: the banned ones not yet covered, and, with leave rotation on,
+/// the departed ones too.
+pub(crate) fn pending_rotation(st: &CommunityState, on_leave: bool) -> BTreeSet<RootId> {
+    if on_leave {
+        return st.rotation_due();
+    }
+    st.banned.iter().copied().filter(|r| !st.secret_covered.contains(r)).collect()
+}
+
 impl Engine {
+    /// Removes a departed member's devices from the group, then issues the rotation they are owed. The removal commit
+    /// may come from another member, so the rotation is retried for a short while, not left to the next maintenance
+    /// pass.
+    pub(crate) async fn rotate_after_departure(&self, community: CommunityId) {
+        for _ in 0..ROTATE_TRIES {
+            self.mls_reconcile(community).await;
+            self.rotate_if_due(community).await;
+            if !self.rotation_pending(community) {
+                return;
+            }
+            tokio::time::sleep(ROTATE_STEP).await;
+        }
+    }
+
+    /// Whether some departure or ban is still waiting for a rotation, as this device sees the state.
+    fn rotation_pending(&self, community: CommunityId) -> bool {
+        let w = self.read();
+        w.communities
+            .get(&community)
+            .is_some_and(|c| !pending_rotation(c.state(), leave_rotation_on()).is_empty())
+    }
+
     /// Installs a community secret from rotation event `source`, saves it, and moves the
     /// community's gossip topic to it. Returns whether it replaced ours.
     pub(crate) async fn install_secret(
@@ -248,8 +300,9 @@ impl Engine {
         }
     }
 
-    /// Issues a rotation for bans it does not yet answer, once the banned devices are out of the
-    /// group. Only the owner and admins issue one, and storage members never do.
+    /// Issues a rotation for the bans and departures it does not yet answer, once the removed devices are out of
+    /// the group. Only the owner and admins issue one, and storage members never do. A departed member is
+    /// covered like a banned one, so one rotation covers every departure since the last.
     pub(crate) async fn rotate_if_due(&self, community: CommunityId) {
         let me = self.inner.me;
         let (pending, generation, allowed) = {
@@ -260,12 +313,7 @@ impl Engine {
             let st = c.state();
             let allowed = st.owner == me
                 || st.roles.get(&me).is_some_and(|r| r.contains(&Role::Admin));
-            let pending: Vec<RootId> = st
-                .banned
-                .iter()
-                .filter(|r| !st.secret_covered.contains(*r))
-                .copied()
-                .collect();
+            let pending: Vec<RootId> = pending_rotation(st, leave_rotation_on()).into_iter().collect();
             (pending, st.secret_generation + 1, allowed)
         };
         if pending.is_empty() || !allowed || self.is_storage_here(community) {

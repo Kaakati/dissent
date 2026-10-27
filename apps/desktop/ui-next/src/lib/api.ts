@@ -19,6 +19,7 @@ import type {
   MessageRef,
   Me,
   NetStatus,
+  RelayStatus,
   ServerPrefs,
   NetworkSettings,
   StoreStats,
@@ -86,6 +87,11 @@ export const api = {
   setProfileBannerPreset: (preset: number) => call<void>('set_profile_banner_preset', { preset }),
   clearProfileBanner: () => call<void>('clear_profile_banner'),
   setCommunityIcon: (communityId: Id, bytes: string) => call<void>('set_community_icon', { communityId, bytes }),
+  // An animated server icon: the engine crops it to a square and loops it, and the poster is its still frame.
+  prepareAnimatedIcon: (bytes: string, crop: { x: number; y: number; w: number; h: number; rot: number }) =>
+    call<{ gif: string; poster: string }>('prepare_animated_icon', { bytes, crop }),
+  setCommunityIconAnimated: (communityId: Id, gif: string, poster: string) =>
+    call<void>('set_community_icon_animated', { communityId, gif, poster }),
   clearCommunityIcon: (communityId: Id) => call<void>('clear_community_icon', { communityId }),
   // Server Settings: the owner renames; owners and admins set the banner (a 16:9 WebP or PNG as base64, or a preset id)
   // and the profile (a description and up to five traits).
@@ -96,6 +102,11 @@ export const api = {
   setCommunityBannerAnimated: (communityId: Id, gif: string, poster: string) =>
     call<void>('set_community_banner_animated', { communityId, gif, poster }),
   setProfileBannerAnimated: (gif: string, poster: string) => call<void>('set_profile_banner_animated', { gif, poster }),
+  // Boosts: the relays this person hosts for a server. An empty list withdraws.
+  setHostedRelays: (communityId: Id, relays: string[]) => call<void>('set_hosted_relays', { communityId, relays }),
+  setMembersHostRelays: (communityId: Id, on: boolean) => call<void>('set_members_host_relays', { communityId, on }),
+  // Feedback for the host: a member of the server runs the relay check. Resolves to the latency in ms, or rejects with why.
+  checkRelay: (communityId: Id, url: string) => call<number>('check_relay', { communityId, url }),
   setCommunityBannerPreset: (communityId: Id, preset: number) => call<void>('set_community_banner_preset', { communityId, preset }),
   setCommunityProfile: (communityId: Id, description: string, traits: Trait[]) =>
     call<void>('set_community_profile', { communityId, description, traits }),
@@ -125,6 +136,11 @@ export const api = {
   deleteChannel: (communityId: Id, channelId: Id) => call<void>('delete_channel', { communityId, channelId }),
   listInvites: (communityId: Id) => call<unknown>('list_invites', { communityId }),
   revokeInvite: (communityId: Id, inviteId: Id) => call<void>('revoke_invite', { communityId, inviteId }),
+  // Paged reads: the `limit` messages before `beforeId` (the newest when it is null), oldest first.
+  channelMessagesBefore: (communityId: Id, channelId: Id, beforeId: Id | null, limit: number) =>
+    call<unknown[]>('channel_messages_before', { communityId, channelId, beforeId, limit }),
+  dmMessagesBefore: (peer: Id, beforeId: Id | null, limit: number) => call<unknown[]>('dm_messages_before', { peer, beforeId, limit }),
+  groupMessagesBefore: (groupId: Id, beforeId: Id | null, limit: number) => call<unknown[]>('group_messages_before', { groupId, beforeId, limit }),
   channelMessages: (communityId: Id, channelId: Id, limit: number) =>
     call<unknown[]>('channel_messages', { communityId, channelId, limit }),
   // mentions is sent only when the text mentions someone (see lib/mentions.ts mentionArg).
@@ -218,6 +234,7 @@ export const api = {
   appVersion: () => call<string>('app_version'),
   netStatus: () => call<NetStatus>('net_status'),
   getNetworkSettings: () => call<NetworkSettings>('get_network_settings'),
+  relayStatus: () => call<RelayStatus>('relay_status'),
   shellSettings: () => call<ShellSettings>('shell_settings'),
   setShellSettings: (settings: Omit<ShellSettings, 'start_at_login_available' | 'start_at_login_note'>) =>
     call<ShellSettings>('set_shell_settings', { settings }),
@@ -243,6 +260,9 @@ export const api = {
   blockUser: (rootId: Id) => call<void>('block_user', { rootId }),
   unblockUser: (rootId: Id) => call<void>('unblock_user', { rootId }),
   closeConversation: (key: string) => call<void>('close_conversation', { key }),
+  reopenConversation: (key: string) => call<void>('reopen_conversation', { key }),
+  // dissent:// links that arrived before the UI was listening. The first call tells the backend the UI is ready.
+  takeDeepLinks: () => call<string[]>('take_deep_links'),
   ignoreUser: (user: Id) => call<void>('ignore_user', { user }),
   unignoreUser: (user: Id) => call<void>('unignore_user', { user }),
   ignoredUsers: () => call<Id[]>('ignored_users'),
@@ -265,6 +285,8 @@ export const api = {
   setDeafened: (deafened: boolean) => call<void>('set_deafened', { deafened }),
   setCamera: (on: boolean) => call<void>('set_camera', { on }),
   setCameraPreview: (on: boolean) => call<void>('set_camera_preview', { on }),
+  // How many CSS pixels wide a remote tile is drawn, times the screen's density, so its preview is that wide.
+  setVideoTile: (rootId: string, screen: boolean, width: number) => call<void>('set_video_tile', { rootId, screen, width }),
   setScreenShare: (on: boolean, target?: ShareSource['target']) => call<void>('set_screen_share', { on, target: target ?? null }),
   listShareSources: () => call<ShareSource[]>('list_share_sources'),
   sendCallMessage: (text: string) => call<unknown>('send_call_message', { text }),

@@ -4,6 +4,7 @@ import { api, listenTo, onEngineEvent } from './api';
 import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
 import { attachmentProgress, clearMentions, reloadForEvent, startChat, useChat } from './chat';
+import { handleDeepLinks } from './deep-link';
 import { has } from './features';
 import { useShell, type ShellState } from './store';
 import type { CallState, EngineEvent, ShellSettings, TypingTarget, UpdateInfo, UserStatus } from './types';
@@ -73,6 +74,12 @@ export function startShellEvents(): void {
     else void openNotifiedConversation(conv);
   }).catch(() => {});
   listenTo<UpdateInfo>('dissent://update-available', (info) => shell().setUpdate(info)).catch(() => {});
+  // dissent:// links: live ones as events, then the batch that arrived before this listener (a cold start). The batch is
+  // taken after the listener is attached, so no link falls between the two.
+  listenTo<string[]>('dissent://deep-link', (links) => handleDeepLinks(links))
+    .then(() => api.takeDeepLinks())
+    .then(handleDeepLinks)
+    .catch(() => {});
   listenTo<Parameters<ShellState['handleTransfersEvent']>[0]>('dissent://transfers', (p) => shell().handleTransfersEvent(p)).catch(() => {});
   listenTo<CallState | null>('dissent://call-state', (c) => shell().handleCallEvent(c)).catch(() => {});
   listenTo<UserStatus>('dissent://status-changed', (s) => shell().applyStatus(s)).catch(() => {});

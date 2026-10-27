@@ -25,6 +25,10 @@ pub mod state;
 #[cfg(test)]
 mod private_tests;
 #[cfg(test)]
+mod relay_host_tests;
+#[cfg(test)]
+mod wire_order;
+#[cfg(test)]
 pub(crate) mod testutil;
 pub mod wire;
 
@@ -43,8 +47,8 @@ pub use event::{
 };
 pub use hlc::{Hlc, HlcClock};
 pub use names::{confusable, normalize_handle, skeleton, NameError};
-pub use picture::{Banner, Picture, BANNER_PRESETS, MAX_ANIMATED_BANNER_BYTES, MAX_BANNER_BYTES, MAX_PICTURE_BYTES};
-pub use relay::{valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
+pub use picture::{AnimatedIcon, Banner, Picture, BANNER_PRESETS, MAX_ANIMATED_BANNER_BYTES, MAX_ANIMATED_ICON_BYTES, MAX_BANNER_BYTES, MAX_PICTURE_BYTES};
+pub use relay::{loopback_relay_host, public_relay_host, valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
 pub use replayer::{ReplayStats, Replayer};
 pub use state::{replay, replay_keyed, replay_with, CommunityState, Member, MessageView, Rejection};
 pub use wire::SignedEvent;

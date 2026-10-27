@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::groups::ConvBook;
 use crate::identity_watch;
 use crate::identity_watch::IdentityChange;
-use crate::messages::event_for;
+use crate::messages::{event_for, private_notice};
 use crate::rpc::{Request, Response, decode};
 use crate::store::{append_records, append_records_deferred, Paths};
 use crate::typing::TypingTarget;
@@ -79,7 +79,7 @@ pub(crate) fn control_effects(
                 }
             }
         }
-        let notice = event_for(&community, &se.event);
+        let notice = private_notice(&community, c, &se.event).unwrap_or_else(|| event_for(&community, &se.event));
         if !fx.emitted.contains(&notice) {
             fx.emitted.push(notice);
         }
@@ -202,6 +202,17 @@ impl Engine {
             warn!(community = %community, error = %e, "could not persist events");
         }
         let fresh = c.take_unhandled(&batch.stored);
+        // A departure can make a rotation due. Run the MLS removal and the rotation now, not on the next maintenance
+        // pass, which is up to `RETRY_EVERY` away.
+        if batch.stored.iter().any(|se| matches!(se.event.body.payload, Payload::Leave)) {
+            let engine = self.clone();
+            self.spawn_task(async move {
+                engine.rotate_after_departure(community).await;
+            });
+        }
+        for se in &fresh {
+            c.note_private_pending(se, self.inner.me);
+        }
         for se in &fresh {
             // A private message is stored as a carrier, so the payload that counts is the opened one.
             let opened = c.open(&se.event);
@@ -253,12 +264,12 @@ impl Engine {
         Ok(batch.stalled)
     }
 
-    /// Performs what accepted events asked for, after the lock is released. A `SetRelays` adopts
-    /// its relays, and every notice is emitted.
+    /// Performs what accepted events asked for, after the lock is released. A `SetRelays`
+    /// reconciles this node's relays with the communities' lists, and every notice is emitted.
     pub(crate) fn perform_effects(&self, fx: ControlEffects) {
-        for relays in fx.relay_sets {
+        if !fx.relay_sets.is_empty() {
             let engine = self.clone();
-            self.spawn_task(async move { engine.adopt_relays(&relays).await });
+            self.spawn_task(async move { engine.reconcile_relays(!engine.in_call()).await });
         }
         if fx.renamed {
             self.after_rename();
@@ -327,6 +338,12 @@ impl Engine {
         if let Err(e) = self.check_request(&env, conn_from) {
             return Response::Error(e.to_string());
         }
+        // A test models a released device, which fails to decode `Features` as above.
+        if self.inner.legacy_calls.load(std::sync::atomic::Ordering::Relaxed)
+            && matches!(&env.req, Request::Call(msg) if matches!(**msg, crate::calls::CallMsg::Features { .. }))
+        {
+            return Response::Error("bad request: unknown call message".into());
+        }
         match env.req {
             Request::Genesis { community } => {
                 let genesis = self
@@ -358,6 +375,7 @@ impl Engine {
             }
             Request::Fetch { community, ids } => Response::Events(self.events_for(community, &ids)),
             Request::ChannelKeys { community, channel } => self.serve_channel_keys(conn_from, community, channel),
+            Request::RelayCheck { community, url } => self.answer_relay_check(conn_from, community, url).await,
             Request::FetchRaw { community, ids } => Response::EventsRaw(
                 self.events_for(community, &ids).iter().map(|se| se.encode()).collect(),
             ),
@@ -429,6 +447,11 @@ impl Engine {
                 Err(e) => Response::Error(format!("invalid profile: {e}")),
             },
             Request::ProfileSync(sp) => self.answer_profile_sync(conn_from, *sp),
+            Request::InvitePreviewMore {
+                community,
+                token,
+                invite_id,
+            } => self.answer_invite_preview_more(conn_from, community, token, invite_id),
             Request::ProfileBanner(sb) => match self.accept_profile_banner(*sb) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile banner: {e}")),
@@ -466,6 +489,7 @@ impl Engine {
             return Response::Error("invalid direct message".into());
         }
         let peer: RootId = sd.dm.body.from;
+        let sent_ms = sd.dm.body.hlc.wall_ms;
         let device_notice: Option<EngineEvent>;
         let is_new = {
             let mut guard = self.write();
@@ -511,6 +535,9 @@ impl Engine {
             self.emit(ev);
         }
         if is_new {
+            if let Err(e) = self.note_arrival(format!("dm:{peer}"), sent_ms) {
+                tracing::warn!(error = %e, "could not record a message's arrival");
+            }
             self.emit(EngineEvent::Dm {
                 peer: peer.to_string(),
             });
@@ -566,7 +593,7 @@ impl Engine {
                     warn!(error = %e, "could not persist outbox");
                 }
             }
-            self.emit(EngineEvent::Dm {
+            self.emit(EngineEvent::DmChanged {
                 peer: peer.to_string(),
             });
         }
@@ -781,6 +808,7 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         }
         engine.refresh_lan_keys();
         engine.anti_entropy().await;
+        engine.check_relay_hosts().await;
         engine.mls_maintenance().await;
         engine.flush_mls(false);
         rounds += 1;

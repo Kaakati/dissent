@@ -31,7 +31,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' blob: asset: http://asset.localhost",
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": []
@@ -52,6 +52,11 @@
     ]
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["dissent"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDExNDM4NjRDRDg2QUM4RDEKUldUUnlHcllUSVpERWM5MGx5TDRCNUl6ek9pZ004NXQwT0FPdHg3RjNUYURmQk5tT2pNSTVxRlYK",
       "endpoints": [

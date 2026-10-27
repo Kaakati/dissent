@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>Join a server on Dissent</title>
+  <link rel="stylesheet" href="invite.css">
+</head>
+<body>
+  <main class="card">
+    <h1>Join a server on Dissent</h1>
+    <p id="status" role="status">Opening Dissent…</p>
+    <p id="hint" hidden>If Dissent didn't open, install it below and then open this link again.</p>
+    <p id="invalid" class="problem" hidden>This invite link isn't valid. Ask for a new one.</p>
+    <div class="actions">
+      <a class="button primary" href="https://github.com/kaakati/dissent/releases/latest" rel="noopener">Download Dissent</a>
+      <button class="button" id="copy" type="button" hidden>Copy invite link</button>
+    </div>
+    <p class="note">The invite is read from the part of this address after the <code>#</code>, which browsers never send to a server.</p>
+  </main>
+  <script src="invite.js"></script>
+</body>
+</html>

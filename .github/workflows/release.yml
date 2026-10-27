@@ -18,6 +18,8 @@ on:
       - "docs/**"
       - "**/*.md"
       - ".github/FUNDING.yml"
+      - "site/**"
+      - ".github/workflows/pages.yml"
       - "LICENSE-*"
   workflow_dispatch:
     inputs:
@@ -119,7 +121,7 @@ jobs:
       # matches a substring, so `internet` skips both.
       - name: Loopback networked tests
         timeout-minutes: 40
-        run: "cargo test -p dissent-core --test it -- --ignored --skip internet"
+        run: "cargo test -p dissent-core --test it -- --ignored --skip internet && cargo test -p dissent-relay --test ban_disconnect -- --ignored"
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.
       - uses: actions/setup-node@v4

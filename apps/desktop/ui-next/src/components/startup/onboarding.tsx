@@ -6,7 +6,7 @@ import { Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Callout } from '@/components/startup/gate';
-import { DissentMark } from '@/components/dissent-mark';
+import { OwlMark } from '@/components/owl-mark';
 import { UserAvatar } from '@/components/user-avatar';
 import { openDialog } from '@/lib/dialog';
 import { copyText } from '@/lib/clipboard';
@@ -119,7 +119,7 @@ function FirstRun() {
       <section className="flex flex-col gap-s-6 overflow-hidden rounded-lg border border-border bg-sidebar px-[72px] py-20">
         <div className="flex items-center gap-3.5 text-[27px] leading-[34px] font-bold text-text-strong">
           <span className="grid size-14 place-items-center rounded-2xl bg-accent text-white">
-            <DissentMark className="size-8" />
+            <OwlMark className="size-8" />
           </span>
           <span>Dissent</span>
         </div>

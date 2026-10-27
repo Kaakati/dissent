@@ -29,6 +29,8 @@ pub struct Timings {
     /// How long a joiner waits before its first request for epoch keys, and the base of the backoff
     /// after a request that no member answers. Invite-card key requests start the same way.
     pub history_first_retry: Duration,
+    /// How often the DHT latency shown in the status bar is measured. Whole seconds.
+    pub dht_probe_every: Duration,
 }
 
 impl Default for Timings {
@@ -45,6 +47,7 @@ impl Default for Timings {
             typing_expiry: Duration::from_secs(6),
             typing_every: Duration::from_secs(3),
             history_first_retry: Duration::from_secs(1),
+            dht_probe_every: Duration::from_secs(15),
         }
     }
 }
@@ -73,6 +76,7 @@ mod tests {
         assert_eq!(t.call_presence_ttl, Duration::from_secs(90));
         assert_eq!(t.typing_expiry, Duration::from_secs(6));
         assert_eq!(t.typing_every, Duration::from_secs(3));
+        assert_eq!(t.dht_probe_every, Duration::from_secs(15));
     }
 
     #[test]

@@ -1,22 +1,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Poppins, bundled (SIL OFL 1.1, public/fonts/OFL.txt). Served locally: no request ever leaves the app for fonts. */
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/poppins-400-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/poppins-400-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/poppins-500-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/poppins-500-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/poppins-600-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/poppins-600-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/poppins-700-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF
-; }
-@font-face { font-family: 'Poppins'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/poppins-700-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD }
+/* Google Sans Flex, bundled (SIL OFL 1.1, public/fonts/OFL-GoogleSansFlex.txt). One variable file per subset covers
+   weights 400 to 700. Served locally: no request ever leaves the app for fonts. */
+@font-face { font-family: 'Google Sans Flex'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/fonts/google-sans-flex-latin-ext.woff2') format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: 'Google Sans Flex'; font-style: normal; font-weight: 400 700; font-display: swap; src: url('/fonts/google-sans-flex-latin.woff2') format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 
 /* Dissent theme. The values are the ones in the old UI's style.css, mapped onto shadcn/ui's variable names.
    Dissent is dark only, so there is one palette and no light theme. Components read the colours through the
@@ -32,29 +20,29 @@
   --card-foreground: #f2f3f5; /* --text-strong */
   --popover: #111214; /* --ink: menus and tooltips */
   --popover-foreground: #dbdee1;
-  --primary: #d2452f; /* --accent */
+  --primary: #d93f00; /* the accent fill under white labels: #d93f00 passes 4.5:1 with white text */
   --primary-foreground: #ffffff;
   --secondary: #2a2b30; /* --elevated */
   --secondary-foreground: #f2f3f5;
   --muted: rgb(255 255 255 / 0.05); /* --hover */
   --muted-foreground: #a0a6b0; /* --muted in style.css */
-  --accent: #d2452f; /* menu highlight, as .menu-item in style.css */
+  --accent: #d93f00; /* the accent fill (menu highlight, badges, selected): white text on it passes 4.5:1 */
   --accent-foreground: #ffffff;
-  --destructive: #d33639; /* --danger */
+  --destructive: #e0163a; /* --danger: a crimson, further in hue from the orange accent */
   --destructive-foreground: #ffffff;
   --border: #252529;
   --input: #222327; /* the field background; --input-border is the field edge */
-  --ring: #ff8266; /* --focus */
+  --ring: #ff4f00; /* --focus: the brand accent, for rings and outlines (non-text, 3:1 is enough) */
   --radius: 8px; /* --r-2; radius-sm and radius-md are 4 px and 6 px, as --r-1 and --r-3 */
 
   --sidebar: #121214;
   --sidebar-foreground: #dbdee1;
-  --sidebar-primary: #d2452f;
+  --sidebar-primary: #d93f00;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: rgb(255 255 255 / 0.05);
   --sidebar-accent-foreground: #f2f3f5;
   --sidebar-border: #222225; /* --divider */
-  --sidebar-ring: #ff8266;
+  --sidebar-ring: #ff4f00;
 
   /* ---- Dissent surfaces, text and states ---- */
   --rail: #121214;
@@ -74,15 +62,16 @@
   --text-strong: #f2f3f5;
   --faint: #6b6f78;
   --offline: #80848e;
-  --accent-hover: #c23f2a;
-  --accent-text: #ff8266;
-  --accent-tint: rgb(210 69 47 / 0.18);
-  --accent-tint-soft: rgb(210 69 47 / 0.14);
-  --brand: #e8553a;
-  --danger: #d33639;
-  --danger-hover: #c43035;
-  --danger-text: #fa7679;
-  --danger-tint: rgb(211 54 57 / 0.15);
+  --accent-hover: #c23800; /* the fill, one step darker: 5.4:1 with white */
+  --accent-active: #b83400; /* the fill, pressed: 6.0:1 with white */
+  --accent-text: #ff8a5c; /* the accent as text on the dark surfaces: 4.5:1 or more on every one, the elevated one included */
+  --accent-tint: rgb(255 79 0 / 0.18);
+  --accent-tint-soft: rgb(255 79 0 / 0.14);
+  --brand: #ff4f00; /* the brand accent: the logo and the focus ring */
+  --danger: #e0163a;
+  --danger-hover: #c0102f;
+  --danger-text: #ff7a8a;
+  --danger-tint: rgb(224 22 58 / 0.15);
   --warn: #f0b232;
   --warn-tint: rgb(240 178 50 / 0.15);
   --success: #23a55a;
@@ -94,7 +83,7 @@
   --role-owner: #f0b232;
   --role-admin: #ff8a72;
   --role-mod: #7cb7ff;
-  --focus: #ff8266;
+  --focus: #ff4f00;
   --motion: 150ms ease-out;
 
   /* ---- spacing, 4 px grid ---- */
@@ -109,7 +98,7 @@
   --fs-tiny: 10px; --lh-tiny: 16px;
   --fs-head: 19px; --lh-head: 24px;
   --fs-title: 23px; --lh-title: 30px;
-  --font: "Poppins", ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font: "Google Sans Flex", ui-sans-serif, "Segoe UI", system-ui, -apple-system, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
   --mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
   --emoji: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif;
 
@@ -178,6 +167,7 @@
   --color-faint: var(--faint);
   --color-offline: var(--offline);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
   --color-accent-text: var(--accent-text);
   --color-accent-tint: var(--accent-tint);
   --color-brand: var(--brand);
@@ -246,7 +236,7 @@
   }
 }
 
-/* No font-size-adjust: the shipped UI renders Poppins at its nominal sizes (already 1px smaller than the design). */
+/* No font-size-adjust: the UI renders Google Sans Flex at its nominal sizes. */
 
 /* Scrollbars match the current UI: thin, rail-coloured thumbs. */
 .dissent-scroll {

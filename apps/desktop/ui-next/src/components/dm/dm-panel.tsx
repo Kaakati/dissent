@@ -1,5 +1,5 @@
 // The DM profile panel in the right column: a banner with the contact status and More, the 80 px avatar with presence,
-// the name and tag, the mutual servers (folded behind a count), "Contact since", and View full profile. Ported from
+// the name and tag, the mutual servers (folded behind a count), "Member Since", and View Full Profile. Ported from
 // the old UI's views/dmpanel.js. The panel is open while the profile panel toggle (lib/right.ts) is on.
 import { Check, Clock, Ellipsis, type LucideIcon } from 'lucide-react';
 import { openConversationMenu } from '@/components/menus/conversation-menu';
@@ -80,7 +80,7 @@ export function DmPanel({ peer }: { peer: string }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col px-s-4 pb-s-4">
-        <UserAvatar name={view.display_name} seed={peer} size="xl" presence={presence} className="-mt-10 ring-[6px] ring-panel" />
+        <UserAvatar name={view.display_name} seed={peer} size="xl" presence={presence} presenceClass="right-[-3px] bottom-[-3px] size-[18px]" className="-mt-10 ring-[6px] ring-panel" />
         <h3 className="mt-s-4 text-[18px] leading-6 font-semibold break-words text-text-strong">{view.display_name}</h3>
         <div className="mt-1 font-mono text-sm leading-5 break-all text-muted-foreground" title={addressOf('user', peer)}>
           {`${view.display_name}·${shortOf('user', peer)}`}
@@ -91,13 +91,13 @@ export function DmPanel({ peer }: { peer: string }) {
         </div>
         {since ? (
           <>
-            <h4 className="mt-s-4 pt-s-4 text-meta font-semibold text-text-strong shadow-[inset_0_1px_0_var(--border)]">Contact since</h4>
+            <h4 className="mt-s-4 pt-s-4 text-meta font-semibold text-text-strong shadow-[inset_0_1px_0_var(--border)]">Member Since</h4>
             <p className="mt-1 text-ui text-text">{longDate(since)}</p>
           </>
         ) : null}
         <div className="mt-auto flex flex-col gap-s-2 pt-s-4">
           <Button variant="outline" className="w-full" onClick={() => void openFullProfile(peer)}>
-            View full profile
+            View Full Profile
           </Button>
         </div>
       </div>

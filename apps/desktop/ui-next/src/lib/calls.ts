@@ -115,6 +115,19 @@ export async function startConversationCall(target: { groupId: Id } | { peer: Id
   }
 }
 
+// Starts a call with a person and turns the camera on as it starts. The camera is the call's own toggle, so a camera
+// that cannot start is reported, and the call stays up.
+export async function startVideoConversationCall(peer: Id): Promise<boolean> {
+  const started = await startConversationCall({ peer });
+  if (!started) return false;
+  try {
+    await api.setCamera(true);
+  } catch (err) {
+    toast(err);
+  }
+  return true;
+}
+
 // Answers a ringing call. Answering with the mic muted mutes it once the call connects.
 export async function acceptIncoming(call: IncomingCall, muted: boolean): Promise<boolean> {
   try {

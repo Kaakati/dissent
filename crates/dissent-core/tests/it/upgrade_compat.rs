@@ -4,7 +4,7 @@
 //! (see that folder's README for how, and for the expected contents).
 
 use crate::common::*;
-use dissent_core::{ConvId, Engine, Identity, NodeConfig, RelayChoice, Status};
+use dissent_core::{CommunityId, ConvId, Engine, Identity, NodeConfig, RelayChoice, Status};
 use dissent_identity::{keystore, Vault};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -148,6 +148,63 @@ async fn v014_profile_loads_and_views_match() {
         for run in 1..=3 {
             let engine = start(&identity, &work.join("engine"), &vault).await;
             assert_profile(&engine);
+            engine
+                .shutdown()
+                .await
+                .unwrap_or_else(|e| panic!("clean shutdown after run {run}: {e}"));
+        }
+        let _ = fs::remove_dir_all(&work);
+    })
+    .await;
+}
+
+const PASSPHRASE_V0111: &str = "dissent fixture v0.1.11";
+const SALT_V0111: [u8; 16] = *b"dissent-fixture2";
+
+fn fixture_v0111() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/profile-v0.1.11")
+}
+
+/// A profile written by v0.1.11, which still has a server, a channel and its messages. Each start must show
+/// the same thing, and the engine's own writes must keep it readable.
+#[tokio::test(flavor = "multi_thread")]
+async fn v0111_profile_loads_and_views_match() {
+    bounded(async {
+        let work = scratch("upgrade-compat-v0111");
+        copy_dir(&fixture_v0111().join("engine"), &work.join("engine"));
+        fs::copy(fixture_v0111().join("identity.bin"), work.join("identity.bin")).unwrap();
+
+        let vault = Arc::new(Vault::from_passphrase(PASSPHRASE_V0111, &SALT_V0111).unwrap());
+        let identity = keystore::load(&work.join("identity.bin"), &vault)
+            .expect("the v0.1.11 identity opens with the fixture passphrase");
+
+        for run in 1..=2 {
+            let engine = start(&identity, &work.join("engine"), &vault).await;
+            let communities = engine.communities();
+            assert_eq!(communities.len(), 1, "run {run}: one community");
+            assert_eq!(communities[0].name, "Fixture Server");
+            assert_eq!(communities[0].my_role, "owner");
+            let id: CommunityId = communities[0].id.parse().expect("community id parses");
+            let view = engine.community_view(id).expect("the community opens");
+            let general = view
+                .channels
+                .iter()
+                .find(|c| c.name == "general")
+                .expect("general exists")
+                .id
+                .parse()
+                .expect("channel id parses");
+            let mut texts: Vec<String> = engine
+                .channel_messages(id, general, 10)
+                .into_iter()
+                .map(|m| m.text)
+                .collect();
+            texts.sort();
+            assert_eq!(
+                texts,
+                ["second message from alice", "welcome to the fixture server"],
+                "run {run}: both messages still read"
+            );
             engine
                 .shutdown()
                 .await

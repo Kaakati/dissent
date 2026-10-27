@@ -101,7 +101,11 @@ impl Engine {
             return Err(CoreError::Invalid("bitrate, user limit and relay are for voice channels".into()));
         }
         if patch.bitrate_kbps.is_some_and(|b| !BITRATE_RANGE.contains(&b)) {
-            return Err(CoreError::Invalid("bitrate must be between 8 and 96 kbps".into()));
+            return Err(CoreError::Invalid(format!(
+                "bitrate must be between {} and {} kbps",
+                BITRATE_RANGE.start(),
+                BITRATE_RANGE.end()
+            )));
         }
         if patch.user_limit.is_some_and(|u| u > MAX_USER_LIMIT) {
             return Err(CoreError::Invalid("user limit must be at most 99".into()));
@@ -115,13 +119,72 @@ impl Engine {
             user_limit: patch.user_limit,
             relay: patch.relay,
         };
-        self.author_publish(community, ChannelId::CONTROL, payload).await?;
+        for payload in split_for_older_clients(payload) {
+            self.author_publish(community, ChannelId::CONTROL, payload).await?;
+        }
         self.emit(crate::views::EngineEvent::CommunityUpdated {
             community_id: community.to_string(),
         });
         Ok(())
     }
 
+}
+
+/// The most a voice channel's bitrate could be set to before boosts. A client from before them
+/// rejects a higher setting as malformed. See `docs/design/12-boosts.md`.
+pub(crate) const LEGACY_MAX_BITRATE_KBPS: u32 = 96;
+
+/// An update that raises the bitrate above what older clients accept, and also changes other
+/// fields, becomes two: the other fields first, then the bitrate alone. An older client then
+/// rejects only the bitrate event and still applies the rest. Every other update stays one event.
+pub(crate) fn split_for_older_clients(payload: Payload) -> Vec<Payload> {
+    let Payload::ChannelUpdate {
+        channel,
+        name,
+        slowmode_s,
+        visibility,
+        bitrate_kbps: Some(bitrate),
+        user_limit,
+        relay,
+    } = payload
+    else {
+        return vec![payload];
+    };
+    let others = name.is_some() || slowmode_s.is_some() || visibility.is_some() || user_limit.is_some() || relay.is_some();
+    if bitrate <= LEGACY_MAX_BITRATE_KBPS || !others {
+        return vec![Payload::ChannelUpdate {
+            channel,
+            name,
+            slowmode_s,
+            visibility,
+            bitrate_kbps: Some(bitrate),
+            user_limit,
+            relay,
+        }];
+    }
+    vec![
+        Payload::ChannelUpdate {
+            channel,
+            name,
+            slowmode_s,
+            visibility,
+            bitrate_kbps: None,
+            user_limit,
+            relay,
+        },
+        Payload::ChannelUpdate {
+            channel,
+            name: None,
+            slowmode_s: None,
+            visibility: None,
+            bitrate_kbps: Some(bitrate),
+            user_limit: None,
+            relay: None,
+        },
+    ]
+}
+
+impl Engine {
     /// Deletes a channel and its messages for everyone. Owner and admins only.
     pub async fn delete_channel(&self, community: CommunityId, channel: ChannelId) -> Result<()> {
         self.may_manage(community)?;
@@ -211,4 +274,95 @@ pub fn parse_invite_id(text: &str) -> Result<[u8; 16]> {
         *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2).ok_or_else(bad)?, 16).map_err(|_| bad())?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use dissent_events::{replay, Dag, Event, EventBody, Hlc};
+    use dissent_identity::{CommunityId, DeviceKey, RootKey};
+
+    fn update(name: Option<&str>, bitrate: Option<u32>, channel: ChannelId) -> Payload {
+        Payload::ChannelUpdate {
+            channel,
+            name: name.map(Into::into),
+            slowmode_s: None,
+            visibility: None,
+            bitrate_kbps: bitrate,
+            user_limit: None,
+            relay: None,
+        }
+    }
+
+    #[test]
+    fn only_a_raised_bitrate_with_other_fields_is_split() {
+        let ch = ChannelId([1; 32]);
+        assert_eq!(split_for_older_clients(update(Some("a"), Some(96), ch)).len(), 1, "96 is fine for older clients");
+        assert_eq!(split_for_older_clients(update(None, Some(128), ch)).len(), 1, "a bitrate alone stays one event");
+        assert_eq!(split_for_older_clients(update(Some("a"), None, ch)).len(), 1);
+        assert_eq!(
+            split_for_older_clients(update(Some("a"), Some(128), ch)),
+            vec![update(Some("a"), None, ch), update(None, Some(128), ch)],
+            "the other fields first, then the bitrate alone"
+        );
+    }
+
+    /// A client from before boosts rejects any update with a bitrate over 96. Replay keeps going after
+    /// a rejected event, so dropping those updates models it.
+    fn older_client_keeps(payload: &Payload) -> bool {
+        !matches!(payload, Payload::ChannelUpdate { bitrate_kbps: Some(b), .. } if *b > LEGACY_MAX_BITRATE_KBPS)
+    }
+
+    #[test]
+    fn a_rename_sent_with_128_kbps_still_renames_on_an_older_client() {
+        let root = RootKey::generate();
+        let device = DeviceKey::generate();
+        let community = CommunityId([2; 32]);
+        let mut parents = Vec::new();
+        let mut wall = 0;
+        let mut sign = |payload: Payload, parents: &mut Vec<dissent_events::EventId>| {
+            wall += 1;
+            let ev = Event::sign(
+                EventBody {
+                    community,
+                    channel: ChannelId::CONTROL,
+                    author: root.id(),
+                    device: device.id(),
+                    parents: std::mem::take(parents),
+                    hlc: Hlc { wall_ms: wall, counter: 0 },
+                    payload,
+                },
+                &device,
+            );
+            parents.push(ev.id);
+            ev
+        };
+        let join = sign(Payload::Join { display_name: "owner".into() }, &mut parents);
+        let create = sign(Payload::VoiceChannelCreate { name: "lounge".into() }, &mut parents);
+        let voice = ChannelId(create.id.0);
+        let split: Vec<Event> = split_for_older_clients(update(Some("lounge-hifi"), Some(128), voice))
+            .into_iter()
+            .map(|p| sign(p, &mut parents))
+            .collect();
+        assert_eq!(split.len(), 2);
+
+        let build = |keep: &dyn Fn(&Payload) -> bool| {
+            let mut dag = Dag::new();
+            for ev in [&join, &create].into_iter().chain(split.iter()) {
+                if keep(&ev.body.payload) {
+                    dag.insert(ev.clone()).unwrap();
+                }
+            }
+            replay(root.id(), &dag)
+        };
+        // The older client drops only the bitrate event, and keeps the rename.
+        let old = build(&older_client_keeps);
+        assert_eq!(old.channels[&voice], "lounge-hifi");
+        assert_eq!(old.settings(&voice).bitrate_kbps, 64, "the old default stays");
+        // A current client applies both.
+        let new = build(&|_| true);
+        assert_eq!(new.channels[&voice], "lounge-hifi");
+        assert_eq!(new.settings(&voice).bitrate_kbps, 128);
+        assert!(new.rejected.is_empty());
+    }
 }

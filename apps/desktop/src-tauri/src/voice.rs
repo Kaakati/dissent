@@ -26,9 +26,11 @@ use crate::voice_settings::{chain_settings, output_gain, parse_key, VoiceSetting
 /// 20 ms of mono audio at 48 kHz, the frame size the engine takes.
 pub const FRAME: usize = 960;
 const TICK: Duration = Duration::from_millis(20);
+/// A tick that wakes this late is counted as a late tick in the counter summary.
+const LATE_TICK: Duration = Duration::from_millis(5);
 const RETRY: Duration = Duration::from_secs(2);
 const FILE: &str = "audio.json";
-const REPORT_EVERY: u64 = 250;
+const REPORT_EVERY: u64 = 500;
 /// The engine's own default for when a forwarded call grows into a cascade.
 pub const DEFAULT_CASCADE_AT: usize = 50;
 const CASCADE_MIN: usize = 3;
@@ -275,6 +277,10 @@ fn run(
     let mut pending: Vec<f32> = Vec::new();
     let mut play = vec![0f32; FRAME];
     let (mut sent, mut played) = (0u64, 0u64);
+    // Counters for crackle. `late` and `worst_late` cover the last ten seconds. `seen` holds the running totals at the
+    // last summary, in the order of the summary below, so each summary logs what changed since.
+    let (mut late, mut worst_late) = (0u64, Duration::ZERO);
+    let mut seen = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut next = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
@@ -333,6 +339,29 @@ fn run(
         played += 1;
         if played % REPORT_EVERY == 0 {
             info!(sent, played, "voice frames");
+            let underruns = playout.underruns();
+            let overflows = mic.as_ref().map_or(0, CaptureStream::overflows);
+            let clipped = chain.clipped_samples();
+            let echo = chain.echo_stats().unwrap_or_default();
+            let (lost, concealed, silenced) = engine.playout_loss();
+            let gate_flips = chain.gate_flips();
+            info!(
+                late_ticks = late,
+                worst_late_ms = worst_late.as_secs_f64() * 1000.0,
+                speaker_underruns = underruns.saturating_sub(seen.0),
+                mic_overflows = overflows.saturating_sub(seen.1),
+                clipped_samples = clipped.saturating_sub(seen.2),
+                jitter_lost = lost.saturating_sub(seen.3),
+                plc_frames = concealed.saturating_sub(seen.4),
+                plc_silenced = silenced.saturating_sub(seen.5),
+                gate_flips = gate_flips.saturating_sub(seen.6),
+                echo_divergences_total = echo.divergence_events,
+                echo_bypass_samples_total = echo.bypass_samples,
+                suppressor_flips_total = echo.suppressor_flips,
+                "audio counters: changes over the last ten seconds, totals marked _total"
+            );
+            seen = (underruns, overflows, clipped, lost, concealed, silenced, gate_flips);
+            (late, worst_late) = (0, Duration::ZERO);
         }
 
         next += TICK;
@@ -341,6 +370,11 @@ fn run(
             thread::sleep(next - now);
         } else {
             next = now;
+        }
+        let lag = Instant::now().saturating_duration_since(next);
+        if lag > LATE_TICK {
+            late += 1;
+            worst_late = worst_late.max(lag);
         }
     }
     if let Err(e) = playout.stop() {

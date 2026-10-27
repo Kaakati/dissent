@@ -2,6 +2,7 @@
 // DM profile panel, or nothing; the current UI's call details and lobby come with their batches. Ported from
 // the old UI's views/right.js and the old UI's views/members.js. The shell's grid follows `mode` (see App.tsx and shell.css).
 import type { ReactNode } from 'react';
+import { Radio } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { addressOf, shortOf } from '@/lib/address';
@@ -76,7 +77,8 @@ function ServerMembers({ community }: { community: CommunityView }) {
 
 // A click opens the member's profile card next to the row.
 function MemberRow({ member }: { member: Member }) {
-  const presence: Presence | undefined = member.status ?? (typeof member.online === 'boolean' ? (member.online ? 'online' : 'offline') : undefined);
+  // A member with no presence yet is shown offline, with the ring, as the reference shows every avatar's state.
+  const presence: Presence = member.status ?? (member.online ? 'online' : 'offline');
   return (
     <button
       type="button"
@@ -86,6 +88,11 @@ function MemberRow({ member }: { member: Member }) {
     >
       <UserAvatar name={member.display_name} seed={member.root_id} presence={presence} />
       <span className={cn('flex min-w-0 flex-1 items-center gap-1.5 truncate', ROLE_TEXT[member.role])}>{member.display_name}</span>
+      {member.relay_host ? (
+        <span data-relay-host title="Relay host" aria-label="Relay host" className="grid size-5 shrink-0 place-items-center rounded-full bg-elevated text-link">
+          <Radio className="size-3" aria-hidden="true" />
+        </span>
+      ) : null}
       {member.handle ? <span className="max-w-[40%] shrink-0 truncate text-meta text-muted-foreground">{`@${member.handle}`}</span> : null}
     </button>
   );

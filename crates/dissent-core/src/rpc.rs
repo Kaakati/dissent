@@ -149,6 +149,21 @@ pub(crate) enum Request {
         community: CommunityId,
         channel: dissent_events::ChannelId,
     },
+    /// `InvitePreviewFull`, answered with the part only newer members send: an animated banner and
+    /// the boost. A responder from before it answers with an error, and the requester asks
+    /// `InvitePreviewFull`. Appended, see `invite_preview`.
+    InvitePreviewMore {
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    },
+    /// Asks a member to run the relay check on `url` now, from its own device, and say whether it passed.
+    /// Feedback for the host only: it never counts toward a level. Community-scoped, so the responder
+    /// checks the requester is a current member. Appended, see `boosts::answer_relay_check`.
+    RelayCheck {
+        community: CommunityId,
+        url: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -221,6 +236,11 @@ pub(crate) enum Response {
     },
     /// The `(generation, key)` pairs of a private channel, for a reader. See `Request::ChannelKeys`. Appended.
     ChannelKeys(Vec<(u64, [u8; 32])>),
+    /// The answer to `Request::InvitePreviewMore`. Appended.
+    InvitePreviewMore(Box<crate::invite_preview::SignedPreviewMore>),
+    /// The answer to `Request::RelayCheck`: the relay's latency in milliseconds when it passed, or why it
+    /// did not. Appended.
+    RelayCheck(std::result::Result<u64, String>),
 }
 
 impl Request {
@@ -231,6 +251,7 @@ impl Request {
             Request::Genesis { community }
             | Request::Reconcile { community, .. }
             | Request::Fetch { community, .. }
+            | Request::RelayCheck { community, .. }
             | Request::Push { community, .. }
             | Request::MlsJoin { community, .. }
 
@@ -279,4 +300,161 @@ impl RpcHandler for Handler {
 /// Keeps the handler's `Arc` usable by the engine module without exposing `Inner`.
 pub(crate) fn handler_for(inner: &Arc<Inner>) -> Arc<dyn RpcHandler> {
     Arc::new(Handler(Arc::downgrade(inner)))
+}
+
+#[cfg(test)]
+mod wire_order_tests {
+    // Wire order guard. serde's derive tags each variant of these enums by its position in the enum, and postcard
+    // writes that tag. So the declaration order is the wire format, and a change to it is a wire change.
+    //
+    // The lists pin the order as of v0.1.11. To add a variant, APPEND it at the END of the enum. Never insert,
+    // reorder, rename or remove one: every later tag would shift, and an older peer or an older stored event would
+    // decode the wrong variant. A variant added after v0.1.11 needs no entry here. If a variant must change shape,
+    // bump the wire version rather than editing these lists.
+
+    /// The Request variants as of v0.1.11, in tag order.
+    const V0111_REQUEST: &[&str] = &[
+        "Genesis",
+        "Reconcile",
+        "Fetch",
+        "Push",
+        "Addr",
+        "MlsJoin",
+        "KeyPackages",
+        "MlsCommits",
+        "MlsCommit",
+        "Secret",
+        "Dm",
+        "Contact",
+        "Conv",
+        "Deposit",
+        "Collect",
+        "AckEnvelopes",
+        "DepositKeyPackages",
+        "TakeKeyPackage",
+        "DmKeyPackage",
+        "Call",
+        "Guardians",
+        "Presence",
+        "Typing",
+        "SecretHistory",
+        "Profile",
+        "AddrSync",
+        "AddrPush",
+        "AddrLookup",
+        "EpochHistory",
+        "WriteKeys",
+        "MemberSealedSupport",
+        "Friends",
+        "HistoryKeys",
+        "HistorySupport",
+        "DmDevicesSupport",
+        "MirrorHint",
+        "PushHistoryKeys",
+        "InvitePreview",
+        "FetchRaw",
+        "InvitePreviewFull",
+        "ProfileBanner",
+        "ProfileSync",
+        "ChannelKeys",
+    ];
+
+    /// The Response variants as of v0.1.11, in tag order.
+    const V0111_RESPONSE: &[&str] = &[
+        "Genesis",
+        "Reconcile",
+        "Events",
+        "Welcome",
+        "KeyPackages",
+        "Envelopes",
+        "MlsCommits",
+        "MlsCommit",
+        "Secret",
+        "Ack",
+        "Call",
+        "Refused",
+        "Error",
+        "SecretHistory",
+        "AddrSync",
+        "AddrLookup",
+        "EpochHistory",
+        "WriteKeys",
+        "MemberSealedSupport",
+        "InvitePreview",
+        "EventsRaw",
+        "Friends",
+        "InvitePreviewFull",
+        "HistoryKeys",
+        "HistorySupport",
+        "DmDevicesSupport",
+        "ProfileSync",
+        "ChannelKeys",
+    ];
+
+    /// The CallMsg variants as of v0.1.11, in tag order.
+    const V0111_CALLMSG: &[&str] = &[
+        "Join",
+        "Offer",
+        "Mute",
+        "Decline",
+        "Tier",
+        "Capacity",
+        "AnsweredElsewhere",
+        "Leave",
+        "Presence",
+    ];
+
+    /// The variant names of `enum_name` in declaration order, read from `source`. See the note above.
+    fn variant_names(source: &str, enum_name: &str) -> Vec<String> {
+        let header = format!("enum {enum_name} {{");
+        let mut names = Vec::new();
+        let mut depth = 0i32;
+        let mut inside = false;
+        for line in source.lines() {
+            let code = line.trim_start();
+            if !inside {
+                inside = line.contains(&header);
+                if inside {
+                    depth = 1;
+                }
+                continue;
+            }
+            // A variant is at depth 1, indented by four spaces, and starts with a capital letter.
+            if depth == 1
+                && line.starts_with("    ")
+                && !line.starts_with("     ")
+                && code.starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                names.push(code.chars().take_while(|c| c.is_alphanumeric()).collect());
+            }
+            if !code.starts_with("//") {
+                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn request_order_matches_v0111() {
+        let names = variant_names(include_str!("rpc.rs"), "Request");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(names[..V0111_REQUEST.len()], *V0111_REQUEST, "Request order changed: see the note above");
+    }
+
+    #[test]
+    fn response_order_matches_v0111() {
+        let names = variant_names(include_str!("rpc.rs"), "Response");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(names[..V0111_RESPONSE.len()], *V0111_RESPONSE, "Response order changed: see the note above");
+    }
+
+    #[test]
+    fn call_msg_order_matches_v0111() {
+        let names = variant_names(include_str!("calls.rs"), "CallMsg");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(names[..V0111_CALLMSG.len()], *V0111_CALLMSG, "CallMsg order changed: see the note above");
+    }
 }

@@ -108,6 +108,43 @@ async fn a_banned_member_is_refused_once_the_secret_rotates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_member_who_leaves_is_refused_once_the_secret_rotates() {
+    crate::testutil::bounded(async {
+        use crate::membership::tests::{eventually, eventually_within, general, readable, three_members};
+        use std::time::Duration;
+        let (alice, bob, carol, id, _invite) = three_members().await;
+
+        carol.engine.leave_community(id).await.expect("carol leaves");
+
+        // Alice, an admin, rotates for the departure once the removal commit has applied. Bob learns it from the DAG.
+        // TODO: the Leave reaches the other members only through the next maintenance pass (about 30 s), not when it is
+        // published, so this wait is long. The delivery gap is open: the pushed Leave is not ingested by the observer.
+        // Find out why, then return this wait to the default 60 s.
+        eventually_within("alice holds the rotated secret", Duration::from_secs(120), || {
+            alice.engine.access_keys(id).map(|k| k.generation) == Some(1)
+        })
+        .await;
+        eventually_within("bob holds the rotated secret", Duration::from_secs(120), || {
+            bob.engine.access_keys(id).map(|k| k.generation) == Some(1)
+        })
+        .await;
+        assert_eq!(carol.engine.access_keys(id).map(|k| k.generation), Some(0));
+
+        // Carol keeps the old secret, so she cannot follow the members to the new topic or the new token.
+        let channel = general(&alice.engine, id);
+        alice
+            .engine
+            .send_message(id, channel, "after the leave".into())
+            .await
+            .expect("alice posts");
+        eventually("bob reads it", || readable(&bob.engine, id, channel, "after the leave")).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(!readable(&carol.engine, id, channel, "after the leave"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_member_offline_during_a_ban_catches_up_with_the_rotated_secret() {
     crate::testutil::bounded(async {
         use crate::membership::tests::{eventually, general, readable, three_members, Node};

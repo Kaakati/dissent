@@ -328,3 +328,100 @@ async fn wait_epoch(engine: &Engine, id: CommunityId, want: Option<u64>) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// Drains every event a receiver holds now.
+fn drain(rx: &mut broadcast::Receiver<EngineEvent>) -> Vec<EngineEvent> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+/// Counts the events of one kind for one channel.
+fn count_for(events: &[EngineEvent], channel: ChannelId, kind: fn(&EngineEvent, &str) -> bool) -> usize {
+    events.iter().filter(|ev| kind(ev, &channel.to_string())).count()
+}
+
+/// Waits until `engine` holds `text` in `channel`.
+async fn wait_text(engine: &Engine, id: CommunityId, channel: ChannelId, text: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !has_message(engine, id, channel, text) {
+        assert!(Instant::now() < deadline, "no message {text:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The event for a stored message is emitted before the store is read back; let it land.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// A message that arrives by gossip, and is then offered again by a sync round, is announced once. An edit and a
+/// reaction change a message that exists, so they announce no new one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_is_announced_once_however_it_arrives() {
+    crate::testutil::bounded(async {
+    let alice = Node::boot(Identity::create(now()), scratch("once-alice"), free_port()).await;
+    alice.engine.set_display_name("alice".into()).await.expect("name");
+    let id: CommunityId = alice
+        .engine
+        .create_community("Once".into())
+        .await
+        .expect("create")
+        .id
+        .parse()
+        .unwrap();
+    let invite = alice.engine.create_invite(id).await.expect("invite");
+    let bob = Node::boot(Identity::create(now()), scratch("once-bob"), free_port()).await;
+    bob.engine.set_display_name("bob".into()).await.expect("name");
+    bob.engine.join_community(&invite).await.expect("bob joins");
+    wait_for_members(&alice.engine, id, 2).await;
+    wait_for_members(&bob.engine, id, 2).await;
+    let general = general_channel(&alice.engine, id);
+    let mut events = bob.engine.subscribe();
+    let is_message = |ev: &EngineEvent, channel: &str| {
+        matches!(ev, EngineEvent::Message { channel_id, .. } if channel_id == channel)
+    };
+    let is_changed = |ev: &EngineEvent, channel: &str| {
+        matches!(ev, EngineEvent::MessagesChanged { channel_id, .. } if channel_id == channel)
+    };
+
+    // Gossip delivers the message while Bob is online: one new message.
+    let sent = alice
+        .engine
+        .send_message(id, general, "announced-once".into())
+        .await
+        .expect("alice posts");
+    wait_text(&bob.engine, id, general, "announced-once").await;
+    let by_gossip = drain(&mut events);
+    assert_eq!(count_for(&by_gossip, general, is_message), 1, "one new message from gossip");
+
+    // A sync round offers the same message again. Bob holds it already, so nothing new is announced.
+    bob.engine.anti_entropy().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let by_sync = drain(&mut events);
+    assert_eq!(count_for(&by_sync, general, is_message), 0, "a sync of a held message announces nothing");
+
+    // An edit and a reaction change the message. They re-read the channel, and announce no new message.
+    let target: dissent_events::EventId = sent.id.parse().expect("message id");
+    alice
+        .engine
+        .edit_message(id, general, target, "announced-once (edited)".into())
+        .await
+        .expect("alice edits");
+    wait_text(&bob.engine, id, general, "announced-once (edited)").await;
+    alice
+        .engine
+        .react(id, general, target, "\u{1F44D}".into())
+        .await
+        .expect("alice reacts");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let by_change = drain(&mut events);
+    assert_eq!(count_for(&by_change, general, is_message), 0, "an edit or a reaction is not a new message");
+    assert!(count_for(&by_change, general, is_changed) >= 2, "views re-read on the edit and the reaction");
+
+    let (_, a_dir, _) = alice.stop().await;
+    let (_, b_dir, _) = bob.stop().await;
+    for dir in [a_dir, b_dir] {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    }).await;
+}

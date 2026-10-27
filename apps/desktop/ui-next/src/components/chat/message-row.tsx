@@ -10,7 +10,7 @@ import { splitMentions } from '@/lib/mentions';
 import { editMessage, retryMessage } from '@/lib/chat-actions';
 import { has } from '@/lib/features';
 import { hueOf } from '@/lib/identity';
-import { clockLabel, stampLabel, whenLabel } from '@/lib/time';
+import { clockLabel, headStampLabel, stampLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
 import type { ChatTarget, ReplyRef } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -201,20 +201,23 @@ function RowActions({ item, view }: { item: ViewItem; view: ChatView }) {
   );
 }
 
+// `readOnly` shows the message as a copy (Saved Messages): no actions, menu, editor or reactions.
 export function MessageRow({
   item,
   view,
   start,
   communityId,
+  readOnly = false,
 }: {
   item: ViewItem;
   view: ChatView;
   start: boolean;
   communityId: string | null;
+  readOnly?: boolean;
 }) {
   const ignored = useShell((s) => s.ignored.includes(item.author));
   const revealedIgnored = useChat((s) => s.revealedIgnored.has(item.id));
-  const editing = useChat((s) => s.editingId === item.id);
+  const editing = useChat((s) => s.editingId === item.id) && !readOnly;
   const filter = useChat((s) => s.filter);
   // Attachments and link previews of a spoiler message are blurred with its text, and one click reveals them all.
   const mediaHidden = useChat((s) => view.visibility === 'spoiler' && !s.revealed.has(item.id));
@@ -249,7 +252,7 @@ export function MessageRow({
       {view.dm ? `${view.title} is offline. Dissent will deliver this when they're back.` : 'Waiting for a member to come online'}
     </span>
   ) : null;
-  const reactions = view.social && item.reactions?.length && !item.deleted ? (
+  const reactions = !readOnly && view.social && item.reactions?.length && !item.deleted ? (
     <Reactions target={view.target} messageId={item.id} reactions={item.reactions} />
   ) : null;
   const files = view.files && item.attachments?.length && !item.deleted ? (
@@ -285,7 +288,7 @@ export function MessageRow({
       data-id={item.id}
       tabIndex={-1}
       onContextMenu={
-        editing
+        editing || readOnly
           ? undefined
           : (e) => {
             e.preventDefault();
@@ -305,12 +308,12 @@ export function MessageRow({
         {start ? (
           <div className="msg-head">
             <AuthorButton item={item} />
-            <time title={stampLabel(item.ms)}>{whenLabel(item.ms)}</time>
+            <time title={stampLabel(item.ms)}>{headStampLabel(item.ms)}</time>
           </div>
         ) : null}
         {lines}
       </div>
-      {editing ? null : <RowActions item={item} view={view} />}
+      {editing || readOnly ? null : <RowActions item={item} view={view} />}
     </article>
   );
 }

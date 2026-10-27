@@ -185,26 +185,103 @@ pub fn copy_pending(mode: Mode) -> bool {
     mode == Mode::Portable && choice() == Some(Choice::Copy) && fixed_dir(mode).is_ok_and(|dir| !dir.exists())
 }
 
+/// The credential-store app name for the profile key.
+const KEYCHAIN_APP: &str = "dissent";
+/// The sealed identity file in the data dir. Its presence means a key must already exist for the folder.
+const SEALED_IDENTITY: &str = "identity.bin";
+
 /// Credential-store entry name for this data dir. The default dir uses "identity". A `DISSENT_DATA_DIR`
-/// gets its own entry, so two test instances on one machine don't share a key.
+/// gets its own entry, named from the folder as `normal_dir` spells it, so the same folder typed another way
+/// (slashes, case, a trailing slash, relative or absolute) finds the same key.
 pub fn vault_profile(data_dir: &Path) -> String {
     if std::env::var_os("DISSENT_DATA_DIR").is_some_and(|d| !d.is_empty()) {
-        let hash = blake3::hash(data_dir.to_string_lossy().as_bytes()).to_hex();
-        format!("identity-{}", &hash.as_str()[..16])
+        keyed_name(&dissent_identity::vault::normal_dir(data_dir))
     } else {
         "identity".to_string()
     }
 }
 
+/// The entry names a folder's key may have had under an older build, from every spelling of the folder that
+/// build could have been given: the path as typed, with either kind of slash, with and without a trailing slash, and
+/// with the drive letter in either case. The key that sealed the data is one of these.
+pub fn legacy_names(data_dir: &Path) -> Vec<String> {
+    if !std::env::var_os("DISSENT_DATA_DIR").is_some_and(|d| !d.is_empty()) {
+        return Vec::new();
+    }
+    dissent_identity::vault::spellings(data_dir).iter().map(|t| keyed_name(t)).collect()
+}
+
+fn keyed_name(text: &str) -> String {
+    let hash = blake3::hash(text.as_bytes()).to_hex();
+    format!("identity-{}", &hash.as_str()[..16])
+}
+
+/// The data key for this data dir. With no sealed identity yet, a new key is made under `vault_profile`'s name.
+/// With one, the key is the entry that opens it: the normalised name first, then each legacy name. The key that
+/// opens the data is never replaced by another, so a stray entry cannot take its place. When none opens the data,
+/// this refuses and creates nothing.
+pub fn open_vault(data_dir: &Path) -> Result<Vault, String> {
+    open_vault_in(KEYCHAIN_APP, data_dir, &vault_profile(data_dir), &legacy_names(data_dir))
+}
+
+/// `open_vault` for one credential-store app and the names it should use. Tests pass their own.
+fn open_vault_in(app: &str, data_dir: &Path, name: &str, legacy: &[String]) -> Result<Vault, String> {
+    let identity = data_dir.join(SEALED_IDENTITY);
+    if !identity.exists() {
+        // A new key beside sealed data would leave that data unreadable, so it is refused before any key is made.
+        if dissent_core::sealed_data_present(data_dir) {
+            return Err(dissent_core::SEALED_WITHOUT_IDENTITY.into());
+        }
+        return Vault::open(app, name).map_err(|e| e.to_string());
+    }
+    // The normalised entry stays as it is when it opens the data.
+    if let Some(vault) = opens(app, name, &identity)? {
+        return Ok(vault);
+    }
+    for candidate in legacy.iter().filter(|c| c.as_str() != name) {
+        if let Some(vault) = opens(app, candidate, &identity)? {
+            // Copied to the normalised name, which did not open the data. The old entry is kept. A copy that fails
+            // is an error: the normalised name must hold the key before the profile opens.
+            Vault::replace_key(app, candidate, name).map_err(|e| format!("could not copy the profile key to its new name: {e}"))?;
+            return Ok(vault);
+        }
+    }
+    Err("This profile's key isn't in this computer's credential store. Open the profile on the computer that made it, or restore its key there.".into())
+}
+
+/// The key in the entry `profile`, when it opens the identity file. `None` when the entry is missing or does not open it.
+/// A credential store that cannot be read (locked, access denied, or not available) is an error, not a missing key, so
+/// the message says that instead.
+fn opens(app: &str, profile: &str, identity: &Path) -> Result<Option<Vault>, String> {
+    opens_read(Vault::open_existing(app, profile), identity)
+}
+
+/// `opens` once the store has answered: a key, no entry, or a read error. A read error is not a missing key.
+fn opens_read(read: Result<Option<Vault>, dissent_identity::IdentityError>, identity: &Path) -> Result<Option<Vault>, String> {
+    let vault = match read {
+        Ok(Some(vault)) => vault,
+        Ok(None) => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "This computer's credential store couldn't be read ({e}). It may be locked, or Dissent may not be allowed to use it. \
+                 Unlock it or allow access, then start Dissent again. Nothing was changed."
+            ))
+        }
+    };
+    Ok(keystore::load(identity, &vault).ok().map(|_| vault))
+}
+
 /// The default profile is one window per machine: a second launch focuses the first and exits.
 /// Dev, installed-choice and portable profiles don't register this plugin, so they can run beside it.
 pub fn single_instance<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri_plugin_single_instance::init(|app: &AppHandle<R>, _args, _cwd| {
+    tauri_plugin_single_instance::init(|app: &AppHandle<R>, args, _cwd| {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.unminimize();
             let _ = window.show();
             let _ = window.set_focus();
         }
+        // A second launch from a dissent:// link: the link goes to the running window, which asks before it does anything.
+        crate::deep_link::offer(app, crate::deep_link::links_in(args.iter().map(String::as_str)));
     })
 }
 
@@ -555,6 +632,116 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
 }
 
 #[cfg(test)]
+mod key_name_tests {
+    use super::*;
+    use dissent_identity::Identity;
+
+    const APP: &str = "dissent-profile-test";
+    /// The keychain tests share one credential store, so they run one at a time even under the parallel runner.
+    static KEYCHAIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("dissent-key-{tag}-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn forget(names: &[&str]) {
+        for name in names {
+            let _ = Vault::delete_key(APP, name);
+        }
+    }
+
+    #[test]
+    fn one_folder_has_one_key_name_however_it_is_typed() {
+        assert_eq!(
+            keyed_name(&dissent_identity::vault::normal_dir(Path::new(r"C:\Dissent\dev"))),
+            keyed_name(&dissent_identity::vault::normal_dir(Path::new("C:/Dissent/dev/")))
+        );
+    }
+
+    #[test]
+    fn the_legacy_names_cover_the_spellings_of_the_folder() {
+        // The spelling the old build hashed, and the other spellings of the same folder, are all candidates.
+        let names = legacy_names_for_text(r"C:\Dissent\dev\");
+        assert!(names.contains(&keyed_name(r"C:\Dissent\dev\")));
+        assert!(names.contains(&keyed_name("C:/Dissent/dev")));
+        assert!(names.contains(&keyed_name("c:/Dissent/dev/")));
+    }
+
+    /// The candidate names for one spelling, without the environment: the same expansion `legacy_names` does.
+    fn legacy_names_for_text(raw: &str) -> Vec<String> {
+        dissent_identity::vault::spellings(Path::new(raw)).iter().map(|t| keyed_name(t)).collect()
+    }
+
+    /// Touches the credential store under a test app name, so it is ignored by default. A real identity sealed under
+    /// the forward-slash name, a stray empty key under the backslash name, and the normalised name missing: the real key
+    /// is chosen whatever order the candidates come in, and it is copied to the normalised name.
+    #[test]
+    #[ignore]
+    fn the_key_that_opens_the_data_wins_over_a_stray_one() {
+        let _serial = KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("choose");
+        let (norm, back, fwd) = ("key-norm-test", "key-back-test", "key-fwd-test");
+        forget(&[norm, back, fwd]);
+        let real = Vault::open(APP, fwd).unwrap();
+        keystore::save(&Identity::create(1), &dir.join(SEALED_IDENTITY), &real).unwrap();
+        let _stray = Vault::open(APP, back).unwrap();
+        for order in [vec![back.to_string(), fwd.to_string()], vec![fwd.to_string(), back.to_string()]] {
+            forget(&[norm]);
+            let vault = open_vault_in(APP, &dir, norm, &order).unwrap();
+            assert!(keystore::load(&dir.join(SEALED_IDENTITY), &vault).is_ok(), "the chosen key opens the identity");
+            let copied = Vault::open_existing(APP, norm).unwrap().expect("copied to the normalised name");
+            assert!(keystore::load(&dir.join(SEALED_IDENTITY), &copied).is_ok());
+        }
+        forget(&[norm, back, fwd]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Touches the credential store under a test app name, so it is ignored by default. A normalised entry that
+    /// already opens the data is kept as it is, even when a stray legacy entry is also present.
+    #[test]
+    #[ignore]
+    fn a_normalised_key_that_opens_the_data_is_never_overwritten() {
+        let _serial = KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("keep");
+        let (norm, fwd) = ("key-keep-norm-test", "key-keep-fwd-test");
+        forget(&[norm, fwd]);
+        let real = Vault::open(APP, norm).unwrap();
+        keystore::save(&Identity::create(1), &dir.join(SEALED_IDENTITY), &real).unwrap();
+        let other = Vault::open(APP, fwd).unwrap();
+        let _ = other;
+        let before = Vault::open_existing(APP, norm).unwrap().unwrap();
+        let vault = open_vault_in(APP, &dir, norm, &[fwd.to_string()]).unwrap();
+        assert!(keystore::load(&dir.join(SEALED_IDENTITY), &vault).is_ok());
+        let after = Vault::open_existing(APP, norm).unwrap().unwrap();
+        assert!(keystore::load(&dir.join(SEALED_IDENTITY), &after).is_ok());
+        assert!(keystore::load(&dir.join(SEALED_IDENTITY), &before).is_ok());
+        forget(&[norm, fwd]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Touches the credential store under a test app name, so it is ignored by default. When no entry opens the
+    /// data, the open refuses, and no entry is created under the normalised name.
+    #[test]
+    #[ignore]
+    fn sealed_data_that_no_key_opens_refuses_and_creates_nothing() {
+        let _serial = KEYCHAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir("refuse");
+        let (norm, stray) = ("key-refuse-norm-test", "key-refuse-stray-test");
+        forget(&[norm, stray]);
+        std::fs::write(dir.join(SEALED_IDENTITY), b"sealed").unwrap();
+        let _ = Vault::open(APP, stray).unwrap();
+        let err = open_vault_in(APP, &dir, norm, &[stray.to_string()]).expect_err("refused");
+        assert!(err.contains("isn't in this computer's credential store"), "{err}");
+        assert!(Vault::open_existing(APP, norm).unwrap().is_none(), "no key was created");
+        forget(&[norm, stray]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -563,6 +750,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dissent-profile-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_missing_identity_beside_sealed_data_is_refused_and_no_key_is_made() {
+        const APP: &str = "dissent-profile-test";
+        let dir = scratch("sealed");
+        std::fs::create_dir_all(dir.join("profiles").join("root")).unwrap();
+        std::fs::write(dir.join("profiles").join("root").join("store.bin"), b"sealed").unwrap();
+        let name = "dissent-profile-test-sealed";
+        let err = open_vault_in(APP, &dir, name, &[]).expect_err("refused");
+        assert_eq!(err, dissent_core::SEALED_WITHOUT_IDENTITY);
+        assert!(Vault::open_existing(APP, name).unwrap().is_none(), "no key was made under the test name");
+        assert!(!dir.join(SEALED_IDENTITY).exists(), "no identity file was made");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_keychain_read_error_is_not_reported_as_a_missing_key() {
+        let identity = scratch("unreadable").join(SEALED_IDENTITY);
+        let denied = dissent_identity::IdentityError::Keychain("access denied".into());
+        let err = opens_read(Err(denied), &identity).expect_err("a store that cannot be read is an error");
+        assert!(err.contains("couldn't be read") && err.contains("access denied"), "{err}");
+        assert!(!err.contains("isn't in this computer"), "{err}");
+        assert!(opens_read(Ok(None), &identity).unwrap().is_none(), "no entry is still just a missing key");
     }
 
     #[test]

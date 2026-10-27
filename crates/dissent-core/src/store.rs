@@ -372,6 +372,32 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Reads a postcard `.bin` file. A missing file is `None`.
+/// Folders under the data dir whose files are sealed with the profile key: the profile folders, which hold the store, the
+/// communities and their logs, and the avatars.
+const SEALED_FOLDERS: [&str; 2] = ["profiles", "avatars"];
+
+/// The refusal when `identity.bin` is missing but sealed data is present.
+pub const SEALED_WITHOUT_IDENTITY: &str = "This profile has sealed data, but its identity.bin is missing, and the key that sealed the data isn't in this \
+    computer's credential store. A new key would leave that data unreadable, so nothing was created. Restore identity.bin, \
+    or open the profile on the computer that made it.";
+
+/// Whether the data dir holds any sealed file. A new key must not be made beside sealed data, because that data would never
+/// open. The desktop app and the seeder check this when `identity.bin` is missing.
+pub fn sealed_data_present(data_dir: &Path) -> bool {
+    SEALED_FOLDERS.iter().any(|folder| holds_a_file(&data_dir.join(folder)))
+}
+
+fn holds_a_file(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| match entry.file_type() {
+        Ok(kind) if kind.is_dir() => holds_a_file(&entry.path()),
+        Ok(kind) => kind.is_file(),
+        Err(_) => false,
+    })
+}
+
 pub(crate) fn read_bin<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match fs::read(path) {
         Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(encoding),
@@ -521,6 +547,26 @@ mod tests {
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn sealed_data_is_found_in_the_profile_folders_and_not_in_the_identity_alone() {
+        let dir = std::env::temp_dir().join(format!("dissent-sealed-{}-{}", std::process::id(), crate::engine::now_ms()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!sealed_data_present(&dir), "an empty folder holds no sealed data");
+        fs::write(dir.join("identity.bin"), b"key file").unwrap();
+        assert!(!sealed_data_present(&dir), "the identity file itself is not the data it opens");
+        fs::create_dir_all(dir.join("profiles").join("root").join("communities")).unwrap();
+        assert!(!sealed_data_present(&dir), "empty profile folders hold nothing");
+        fs::write(dir.join("profiles").join("root").join("communities").join("content.log"), b"log").unwrap();
+        assert!(sealed_data_present(&dir), "a file under profiles/ is sealed data");
+        fs::remove_dir_all(&dir).ok();
+
+        let avatars = std::env::temp_dir().join(format!("dissent-sealed-av-{}-{}", std::process::id(), crate::engine::now_ms()));
+        fs::create_dir_all(avatars.join("avatars")).unwrap();
+        fs::write(avatars.join("avatars").join("a.bin"), b"avatar").unwrap();
+        assert!(sealed_data_present(&avatars), "an avatar file is sealed data");
+        fs::remove_dir_all(&avatars).ok();
     }
 
     #[test]

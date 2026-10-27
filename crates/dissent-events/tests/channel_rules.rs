@@ -212,7 +212,7 @@ fn voice_fields_are_refused_on_a_text_channel_and_limited_in_range() {
             name: None,
             slowmode_s: None,
             visibility: None,
-            bitrate_kbps: Some(200),
+            bitrate_kbps: Some(300),
             user_limit: None,
             relay: None,
         },
@@ -325,4 +325,41 @@ fn only_an_admin_can_revoke_an_invite() {
     let st = log.replay();
     assert_eq!(rejected_as(&st, member_revoke), Some(Rejection::NoPermission));
     assert!(!st.invites[&invite].revoked);
+}
+
+/// A client whose range stops at 96 kbps (the releases before boosts) rejects a higher setting as
+/// malformed. Modelled here with a setting over today's limit: only that one update is dropped, and
+/// the updates and posts after it still apply.
+#[test]
+fn an_out_of_range_bitrate_drops_only_that_update() {
+    let mut log = Log::new();
+    let voice = log.channel("lounge", true, 1);
+    let too_high = log.update(OWNER, 2,
+        Payload::ChannelUpdate {
+            channel: voice,
+            name: Some("too-loud".into()),
+            slowmode_s: None,
+            visibility: None,
+            bitrate_kbps: Some(300),
+            user_limit: None,
+            relay: None,
+        },
+    );
+    let later = log.update(OWNER, 3,
+        Payload::ChannelUpdate {
+            channel: voice,
+            name: Some("lounge-2".into()),
+            slowmode_s: None,
+            visibility: None,
+            bitrate_kbps: Some(80),
+            user_limit: None,
+            relay: None,
+        },
+    );
+    let st = log.replay();
+    assert_eq!(rejected_as(&st, too_high), Some(Rejection::Malformed));
+    assert_eq!(rejected_as(&st, later), None, "the next update is not dragged down with it");
+    assert_eq!(st.channels[&voice], "lounge-2");
+    assert_eq!(st.settings(&voice).bitrate_kbps, 80);
+    assert_eq!(st.rejected.len(), 1);
 }

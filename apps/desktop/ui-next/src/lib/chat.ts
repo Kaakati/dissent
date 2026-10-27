@@ -61,6 +61,7 @@ interface ChatState {
   messages: ChannelMessage[]; // a channel's messages, oldest first
   dmMessages: ConversationMessage[]; // a direct conversation's or a group's messages, oldest first
   historyStart: boolean; // the loaded history reaches the first message
+  loadingOlder: boolean; // a page of older history is on its way
   loading: boolean; // skeleton rows while the conversation loads
   newFromId: string | null; // first message after the last-seen point, for the divider
   peerProfile: PeerProfile | null; // the open direct conversation's peer
@@ -96,6 +97,7 @@ export const useChat = create<ChatState>()((set, get) => ({
   messages: [],
   dmMessages: [],
   historyStart: false,
+  loadingOlder: false,
   loading: false,
   newFromId: null,
   peerProfile: null,
@@ -130,22 +132,53 @@ export const useChat = create<ChatState>()((set, get) => ({
 // Same conversation: a channel by its ids, a direct or group conversation by its key.
 const sameTarget = (a: ChatTarget | null, b: ChatTarget | null): boolean => (a?.key ?? null) === (b?.key ?? null);
 
-// The conversation's messages from the engine, oldest first.
-async function readTarget(target: ChatTarget): Promise<ChannelMessage[] | ConversationMessage[]> {
+// One message of the open conversation, as the store holds it.
+type Item = ChannelMessage | ConversationMessage;
+
+// A page of the conversation's messages, oldest first: the `limit` messages before `before`, or the newest when `before` is
+// null. The engine pages by message id, so a live update reads the newest page and older history is read a page at a time.
+async function fetchPage(target: ChatTarget, before: string | null, limit = MSG_LIMIT): Promise<Item[]> {
   switch (target.kind) {
-    case 'channel': return (await api.channelMessages(target.communityId, target.channelId, MSG_LIMIT)) as ChannelMessage[];
-    case 'dm': return (await api.dmMessages(target.peer, MSG_LIMIT)) as ConversationMessage[];
-    case 'group': return (await api.groupMessages(target.groupId, MSG_LIMIT)) as ConversationMessage[];
+    case 'channel': return (await api.channelMessagesBefore(target.communityId, target.channelId, before, limit)) as ChannelMessage[];
+    case 'dm': return (await api.dmMessagesBefore(target.peer, before, limit)) as ConversationMessage[];
+    case 'group': return (await api.groupMessagesBefore(target.groupId, before, limit)) as ConversationMessage[];
   }
 }
 
-// Puts the items into the store, unless the user has moved to another conversation meanwhile.
-function apply(target: ChatTarget, items: ChannelMessage[] | ConversationMessage[]): boolean {
+// The messages the store holds for the open conversation.
+const shownItems = (target: ChatTarget): Item[] => (target.kind === 'channel' ? useChat.getState().messages : useChat.getState().dmMessages);
+
+// Puts the items into the store, unless the user has moved to another conversation meanwhile. `reachedStart` says whether
+// the first message of the conversation is among them.
+function apply(target: ChatTarget, items: Item[], reachedStart: boolean): boolean {
   if (!sameTarget(useChat.getState().target, target)) return false;
   if (target.kind === 'channel') useChat.setState({ messages: items as ChannelMessage[] });
   else useChat.setState({ dmMessages: items as ConversationMessage[] });
-  useChat.setState({ historyStart: items.length < MSG_LIMIT });
+  useChat.setState({ historyStart: reachedStart });
   return true;
+}
+
+// The most messages a conversation keeps loaded while it is paged back to a message (a pin, for one).
+export const HISTORY_CAP = 3200;
+
+// The cap in use. The mock lowers it, so the driver can reach the "not found" path without thousands of messages.
+const historyCap = (): number => (window as { __mockHistoryCap?: number }).__mockHistoryCap ?? HISTORY_CAP;
+
+// Pages back through a channel's history until `messageId` is loaded, up to HISTORY_CAP loaded messages. Resolves to whether
+// it is loaded: false at the cap, or at the first message of the channel.
+export async function widenHistoryTo(target: ChatTarget, messageId: string): Promise<boolean> {
+  if (target.kind !== 'channel') return false;
+  for (;;) {
+    const { target: now, messages, historyStart, loadingOlder } = useChat.getState();
+    if (!sameTarget(now, target)) return false;
+    if (messages.some((m) => m.id === messageId)) return true;
+    if (loadingOlder) {
+      await new Promise((resolve) => setTimeout(resolve, 100)); // a page is already coming in; wait for it
+      continue;
+    }
+    if (historyStart || messages.length >= historyCap()) return false;
+    if (!(await loadOlder())) return false;
+  }
 }
 
 // A direct conversation whose newest messages are still pending is read again, as the engine delivers them.
@@ -216,14 +249,14 @@ function enter(next: ChatTarget | null): void {
       .catch(() => {});
   }
   void (async () => {
-    let items: ChannelMessage[] | ConversationMessage[] = [];
+    let items: Item[] = [];
     try {
-      items = await readTarget(next);
+      items = await fetchPage(next, null);
     } catch (err) {
       toast(err);
     }
     if (seq !== generation) return;
-    apply(next, items);
+    apply(next, items, items.length < MSG_LIMIT);
     // The divider is for server channels only, as the current UI has it: a conversation's messages carry no divider.
     const newFromId = seenBefore === null || next.kind !== 'channel'
       ? null
@@ -234,13 +267,40 @@ function enter(next: ChatTarget | null): void {
   })();
 }
 
-// Re-reads the open conversation (after a send, an edit, a reaction, or an engine event for it).
+// Re-reads the open conversation's newest page (after a send, an edit, a reaction, or an engine event for it), and merges it
+// in: the older history already shown stays above it, so a live update never pulls back a page of scroll-back.
 export async function reloadOpen(): Promise<void> {
   const target = useChat.getState().target;
   if (!target) return;
-  const items = await readTarget(target);
-  if (!apply(target, items)) return;
-  schedulePending(target, items as { pending?: boolean }[]);
+  const newest = await fetchPage(target, null);
+  if (!sameTarget(useChat.getState().target, target)) return;
+  const shown = shownItems(target);
+  const at = newest[0] ? shown.findIndex((m) => m.id === newest[0].id) : -1;
+  const older = at >= 0 ? shown.slice(0, at) : [];
+  const reachedStart = older.length > 0 ? useChat.getState().historyStart : newest.length < MSG_LIMIT;
+  if (!apply(target, [...older, ...newest], reachedStart)) return;
+  schedulePending(target, newest as { pending?: boolean }[]);
+}
+
+// Loads one page of the open conversation's older history, before the oldest message shown, and puts it above them. The
+// caller keeps its scroll position. Resolves to whether any message came in.
+export async function loadOlder(): Promise<boolean> {
+  const { target, historyStart, loadingOlder } = useChat.getState();
+  if (!target || historyStart || loadingOlder) return false;
+  const oldest = shownItems(target)[0]?.id ?? null;
+  useChat.setState({ loadingOlder: true });
+  let added = false;
+  try {
+    const page = await fetchPage(target, oldest);
+    if (!sameTarget(useChat.getState().target, target)) return false;
+    apply(target, [...page, ...shownItems(target)], page.length < MSG_LIMIT);
+    added = page.length > 0;
+  } catch (err) {
+    toast(err);
+  } finally {
+    useChat.setState({ loadingOlder: false });
+  }
+  return added;
 }
 
 // Marks the open conversation read after an action of ours, so no "New messages" line appears above our own message.
@@ -259,11 +319,11 @@ export async function reloadForEvent(ev: EngineEvent): Promise<void> {
     await reloadOpen();
     return;
   }
-  if (ev.kind === 'message' && target.kind === 'channel' && target.communityId === ev.community_id && target.channelId === ev.channel_id) {
+  if ((ev.kind === 'message' || ev.kind === 'messages_changed') && target.kind === 'channel' && target.communityId === ev.community_id && target.channelId === ev.channel_id) {
     await reloadOpen();
     markOpenRead();
   }
-  if (ev.kind === 'dm' && target.kind === 'dm' && target.peer === ev.peer) {
+  if ((ev.kind === 'dm' || ev.kind === 'dm_changed') && target.kind === 'dm' && target.peer === ev.peer) {
     await reloadOpen();
     markOpenRead();
   }

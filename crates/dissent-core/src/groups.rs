@@ -634,7 +634,7 @@ impl Engine {
         });
         if meta.kind == ConvKind::Dm {
             if let Some(peer) = meta.members.iter().copied().find(|m| *m != self.inner.me) {
-                self.emit(EngineEvent::Dm {
+                self.emit(EngineEvent::DmChanged {
                     peer: peer.to_string(),
                 });
             }

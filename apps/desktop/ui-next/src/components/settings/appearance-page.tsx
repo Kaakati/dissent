@@ -1,4 +1,5 @@
-// Settings > Appearance: message density and font scale. Both are saved on this device and applied at once. Ported from
+// Settings > Appearance: message density and font scale, and whether emoticons become emoji. All are saved on this device
+// and applied at once. Ported from
 // the appearance section of views/settings.js and appearance.js.
 import { useState } from 'react';
 import { Block, Choices, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
@@ -19,8 +20,28 @@ export function AppearancePage() {
           <Radio key={scale} name="scale" value={String(scale)} label={`${scale}%`} checked={current.scale === scale} onPick={() => pick({ scale })} />
         ))}
       </Choices>
+      <MessagesBlock />
       <WindowBlock />
     </div>
+  );
+}
+
+// How the composer treats what you type. Saved with the desktop settings; the browser preview keeps it for the session.
+function MessagesBlock() {
+  const convert = useShellPrefs((s) => s.convertEmoticons);
+  return (
+    <Block title="Text & messages">
+      <CheckRow>
+        <input
+          type="checkbox"
+          checked={convert}
+          onChange={(e) => void setShellPrefs({ emoticons_as_text: !e.target.checked })}
+          className={CHECK_CLASS}
+        />
+        <span>Convert emoticons to emoji</span>
+      </CheckRow>
+      <Hint>Typing :D, :P or &lt;3 sends 😄, 😛 or ❤️. Put a backslash before one to keep it as typed, like \:D.</Hint>
+    </Block>
   );
 }
 

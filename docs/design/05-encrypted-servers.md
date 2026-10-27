@@ -56,6 +56,50 @@ Sizes with this suite, measured in `dissent-mls` tests: a key package is about 2
 
 A ban, leave or departure removes every device of that member. Any member runs this check, after its turn to act when control events change and on each maintenance pass. The removal commit is delivered to everyone, including the removed device, which then drops the group. Messages sent after that epoch are locked for it.
 
+## Leaving and the secret
+
+Two things protect a community, and they are removed at different times.
+
+- **Message text** is sealed with the MLS group. A departed device is removed by a removal commit, and every
+  later epoch's keys exclude it. Messages from before its removal stay readable to it. The removal commit is
+  issued by whichever member's turn comes first, and it does not wait for an admin. An admin is not needed for it.
+- **The community secret** is held by every member, and it keys the gossip topic (`topic_salt`) and the RPC
+  token (`community_token`). A departed member who keeps the secret can still compute both. Until a rotation, it
+  can also receive control events on the topic.
+
+What a departed member can do, after a leave:
+
+- It cannot post. Replay refuses every event from a left member, except a rejoin (`Join`, `JoinVia`,
+  `JoinAsStorage`) or another `Leave`.
+- It cannot read message text sent after its removal commit. A stock client has also deleted its local data.
+- It can still read sealed control events and reach the topic and token, until the secret rotates.
+
+**Rotation on leave (`ROTATE_ON_LEAVE`).** A rotation covers departed members as well as banned ones, using the same
+`SecretRotation` payload. The replay accepts it from this release. Issuing one is turned off in this release
+(`rotation::ROTATE_ON_LEAVE = false`), because older clients reject a rotation that covers a leaver, and would
+then be unable to read messages sent after it. Phase 2 turns it on, in the release after the one where every
+member's client accepts such a rotation. Nothing in the protocol tells a client the version of another member,
+so phase 2 needs a probe: a `RotationSupport` request, answered by new clients and refused by older ones, sent to
+every current member's devices, as `HistorySupport` does. Phase 2 is gated on that probe, and the flag can then go.
+Until then, a departed member keeps the secret, and a rotation by ban still covers only the banned.
+
+**Storage joins: a known gap.** `JoinAsStorage` carries no invite, and any holder of the secret can publish one under
+a fresh root. A storage member is served the secret and the ciphertext, so a departed member could rejoin as
+storage under a new root and receive both. This release refuses a storage join from any root that is a person here,
+active or departed, and from the owner. It does not stop a fresh root. Planned fix:
+
+- *Phase 1:* new clients accept an admin-signed `StorageGrant { root }`, appended as a sealed control payload, so
+  older clients show it as locked. The seeder asks for a grant when it joins.
+- *Phase 2:* a storage join needs a grant, once released seeders are old enough to have asked for one.
+
+**Plain `Join` and `JoinVia`.** These have the same exposure. `Join` has no invite at all: replay accepts it from any
+root that can publish under the secret, and the only check is a non-empty name. `JoinVia` names an invite id,
+which is looked up in the state and must be unrevoked and unexpired, but the invite carries no signature that a
+banned member could not reproduce; the secret is the only thing that authenticates it. So before a rotation, a
+banned or departed member can come back as a new root through either. Rotation ends this: after a rotation and the
+grace period, old-secret events are refused, so the window is the time from a ban or leave until the secret rotates.
+Closing it for good needs the same grant idea as storage, applied to people, and is not in this release.
+
 ## Persistence
 
 `openmls_sqlite_storage` is not in the local registry, so this uses OpenMLS's `MemoryStorage` and snapshots it. The storage's `values` map is sealed with XChaCha20-Poly1305 under a per-file subkey of the vault, then written to `mls.bin`. The decrypted content log, `content.sealed`, is sealed the same way, one record at a time under a subkey per community. A plaintext file from before sealing is migrated on first open.

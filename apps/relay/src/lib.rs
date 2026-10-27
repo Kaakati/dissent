@@ -4,7 +4,9 @@
 //! This crate only configures the server. The protocol lives in `iroh-relay`, pinned to the same
 //! version as the `iroh` endpoint the apps use, so both sides speak one protocol.
 
+pub mod hosted;
 pub mod logs;
+pub mod members;
 pub mod run;
 pub mod service;
 

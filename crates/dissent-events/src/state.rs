@@ -61,6 +61,10 @@ pub struct CommunityState {
     /// Relay servers members use, from the latest accepted `SetRelays`, and its HLC.
     pub relays: Vec<String>,
     pub relays_hlc: Hlc,
+    /// Whether members may publish `RelayHostSet`, from the latest accepted `MembersHostRelays`, with its
+    /// HLC. Off until an admin turns it on. See `docs/design/12-boosts.md`.
+    pub members_host_relays: bool,
+    pub members_host_relays_hlc: Hlc,
     /// Whether control events are member-sealed, from the latest accepted `MemberOnlyControl`, and
     /// its HLC. Off until an owner turns it on.
     pub member_only: bool,
@@ -82,6 +86,9 @@ pub struct CommunityState {
     /// The community icon, from the latest accepted `CommunityIconSet`, with its HLC. A `None`
     /// picture is a removed icon.
     pub icon: Option<(Hlc, Option<crate::Picture>)>,
+    /// The animated community icon, from the latest accepted `CommunityIconAnimated`, with its HLC.
+    /// It is shown only while it is at least as new as `icon`; see `shown_icon`.
+    pub animated_icon: Option<(Hlc, Option<crate::picture::AnimatedIcon>)>,
     /// The community name from the latest accepted `CommunityRename`, with its HLC. `None` keeps
     /// the genesis name.
     pub name: Option<(Hlc, String)>,
@@ -93,6 +100,9 @@ pub struct CommunityState {
     /// Each member's profile banner, from their latest accepted `ProfileBannerSet`, with its HLC. A
     /// `None` banner is a removed one. A newer HLC wins, as for `avatars`.
     pub profile_banners: BTreeMap<RootId, (Hlc, Option<crate::picture::Banner>)>,
+    /// The relays each member says they host for this community, from their latest accepted
+    /// `RelayHostSet`, with its HLC. Apps verify them before counting a host. See `boosts`.
+    pub relay_hosts: BTreeMap<RootId, (Hlc, Vec<String>)>,
     /// Settings from the accepted `ChannelUpdate`s. A channel not listed here has the defaults.
     pub channel_settings: BTreeMap<ChannelId, ChannelSettings>,
     /// Invites by id, from `InviteCreate`.
@@ -144,8 +154,9 @@ impl Default for ChannelSettings {
 
 /// The slowmode values a channel may use, in seconds. Matches the UI's list.
 pub const SLOWMODE_STEPS: &[u32] = &[0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600];
-/// Voice bitrate limits, in kbps.
-pub const BITRATE_RANGE: std::ops::RangeInclusive<u32> = 8..=96;
+/// Voice bitrate limits, in kbps. A setting above a server's boost ceiling is sent at the ceiling, so
+/// replay accepts up to the highest one (`docs/design/12-boosts.md`). 96 was the most before boosts.
+pub const BITRATE_RANGE: std::ops::RangeInclusive<u32> = 8..=256;
 /// Most people a voice channel's user limit may be set to.
 pub const MAX_USER_LIMIT: u32 = 99;
 /// Longest community name, in characters. Matches the create dialog's limit.
@@ -389,6 +400,8 @@ impl CommunityState {
             rejected: Vec::new(),
             relays: Vec::new(),
             relays_hlc: Hlc::default(),
+            members_host_relays: false,
+            members_host_relays_hlc: Hlc::default(),
             member_only: false,
             member_only_hlc: Hlc::default(),
             history: HistorySetting::All,
@@ -398,10 +411,12 @@ impl CommunityState {
             secret_winner: None,
             avatars: BTreeMap::new(),
             icon: None,
+            animated_icon: None,
             name: None,
             banner: None,
             profile: None,
             profile_banners: BTreeMap::new(),
+            relay_hosts: BTreeMap::new(),
             channel_settings: BTreeMap::new(),
             invites: BTreeMap::new(),
             last_post: BTreeMap::new(),
@@ -459,6 +474,28 @@ impl CommunityState {
                 && self.members.get(&user).is_some_and(|m| !m.left))
     }
 
+    /// Whether a rotation of the community secret may cover `r`: a banned member, or a person who left. A storage
+    /// member who left is not covered, because the ban path is the only one that covers storage members.
+    fn coverable(&self, r: &RootId) -> bool {
+        self.banned.contains(r) || self.members.get(r).is_some_and(|m| m.left && !m.storage)
+    }
+
+    /// The members whose departure the secret has not yet been rotated for: banned members, and people who left,
+    /// that no rotation covers yet. An admin rotates for all of them at once.
+    pub fn rotation_due(&self) -> BTreeSet<RootId> {
+        let left = self
+            .members
+            .iter()
+            .filter(|(_, m)| m.left && !m.storage)
+            .map(|(root, _)| *root);
+        self.banned
+            .iter()
+            .copied()
+            .chain(left)
+            .filter(|r| !self.secret_covered.contains(r))
+            .collect()
+    }
+
     fn rank(&self, user: &RootId) -> Rank {
         let roles = self.roles.get(user);
         let has = |r| roles.is_some_and(|s| s.contains(&r));
@@ -506,6 +543,15 @@ impl CommunityState {
         }
         if self.banned.contains(&actor) {
             return Err(Rejection::Banned);
+        }
+        // A member who left still holds the community secret, so their sealed events decrypt. Until they join
+        // again, nothing they send is accepted, whatever their role. Joining is how they become active again.
+        let rejoin = matches!(
+            ev.body.payload,
+            Payload::Join { .. } | Payload::JoinVia { .. } | Payload::JoinAsStorage { .. } | Payload::Leave
+        );
+        if !rejoin && self.members.get(&actor).is_some_and(|m| m.left) {
+            return Err(Rejection::NoPermission);
         }
         let rank = self.rank(&actor);
         // A storage member may only join, or leave. Anything else is for people.
@@ -706,6 +752,13 @@ impl CommunityState {
                 if display_name.trim().is_empty() {
                     return Err(Rejection::Malformed);
                 }
+                // A root that is a person here, active or departed, cannot come back as storage. Storage has no
+                // posting, but a storage member is served the secret and the ciphertext, so the switch would
+                // hand a former member the community's data. Only a storage root, or a root new to the community,
+                // may join as storage. The owner is never storage.
+                if actor == self.owner || self.members.get(&actor).is_some_and(|m| !m.storage) {
+                    return Err(Rejection::NoPermission);
+                }
             }
             Payload::Leave => require_control(chan)?,
             Payload::SecretRotation {
@@ -720,14 +773,12 @@ impl CommunityState {
                 // The next generation, or a same-generation rival that sorts before the current
                 // winner. Concurrent rotations converge on the lowest event id.
                 let next = *generation == self.secret_generation + 1
-                    && covers
-                        .iter()
-                        .all(|r| self.banned.contains(r))
+                    && covers.iter().all(|r| self.coverable(r))
                     && covers.iter().any(|r| !self.secret_covered.contains(r));
                 let rival = *generation == self.secret_generation
                     && self.secret_generation > 0
                     && self.secret_winner.is_some_and(|w| ev.id < w)
-                    && covers.iter().all(|r| self.banned.contains(r));
+                    && covers.iter().all(|r| self.coverable(r));
                 if covers.is_empty() || sealed.is_empty() || !(next || rival) {
                     return Err(Rejection::Malformed);
                 }
@@ -848,6 +899,15 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::CommunityIconAnimated { icon } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if icon.is_some_and(|i| !i.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
             Payload::CommunityProfileSet { description, traits } => {
                 require_control(chan)?;
                 if rank < Rank::Admin {
@@ -861,6 +921,21 @@ impl CommunityState {
                 require_control(chan)?;
                 if banner.is_some_and(|b| !b.is_valid()) {
                     return Err(Rejection::Malformed);
+                }
+            }
+            Payload::RelayHostSet { relays } => {
+                require_control(chan)?;
+                if rank < Rank::Admin && !self.members_host_relays {
+                    return Err(Rejection::NoPermission);
+                }
+                if !crate::relay::valid_relays(relays) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::MembersHostRelays { .. } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
                 }
             }
         }
@@ -1022,6 +1097,8 @@ impl CommunityState {
                 });
                 m.display_name = display_name.clone();
                 m.left = false;
+                // A rejoined member gets the current secret, so a later departure needs a rotation of its own.
+                self.secret_covered.remove(&actor);
                 if let Payload::JoinVia { invite_id, .. } = &ev.body.payload {
                     if let Some(invite) = self.invites.get_mut(invite_id) {
                         invite.uses += 1;
@@ -1094,6 +1171,7 @@ impl CommunityState {
                     m.display_name = display_name.clone();
                 }
                 m.left = false;
+                self.secret_covered.remove(&actor);
             }
             Payload::Leave => {
                 if let Some(m) = self.members.get_mut(&actor) {
@@ -1228,6 +1306,11 @@ impl CommunityState {
                     self.banner = Some((ev.body.hlc, *banner));
                 }
             }
+            Payload::CommunityIconAnimated { icon } => {
+                if self.animated_icon.is_none_or(|(hlc, _)| ev.body.hlc > hlc) {
+                    self.animated_icon = Some((ev.body.hlc, *icon));
+                }
+            }
             Payload::CommunityProfileSet { description, traits } => {
                 if self.profile.as_ref().is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     let profile = CommunityProfile {
@@ -1240,6 +1323,17 @@ impl CommunityState {
             Payload::ProfileBannerSet { banner } => {
                 if self.profile_banners.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.profile_banners.insert(actor, (ev.body.hlc, *banner));
+                }
+            }
+            Payload::RelayHostSet { relays } => {
+                if self.relay_hosts.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.relay_hosts.insert(actor, (ev.body.hlc, relays.clone()));
+                }
+            }
+            Payload::MembersHostRelays { on } => {
+                if ev.body.hlc > self.members_host_relays_hlc {
+                    self.members_host_relays = *on;
+                    self.members_host_relays_hlc = ev.body.hlc;
                 }
             }
         }
@@ -1624,6 +1718,102 @@ mod tests {
         assert!(msgs[0].edited);
         assert_eq!(msgs[0].text, "b");
     }
+
+    /// A member who left still holds the community secret, so their sealed events decrypt. Their events after the
+    /// Leave must be refused, including admin actions, until they join again.
+    #[test]
+    fn a_member_who_left_cannot_publish_until_they_rejoin() {
+        let (owner, admin, rival) = (User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        let general = ChannelId(
+            chain(&mut evs, &owner, ctl, Payload::ChannelCreate { name: "g".into() }).0,
+        );
+        chain(&mut evs, &admin, ctl, Payload::Join { display_name: "Ada".into() });
+        chain(
+            &mut evs,
+            &owner,
+            ctl,
+            Payload::RoleGrant {
+                user: admin.id(),
+                role: Role::Admin,
+            },
+        );
+        chain(&mut evs, &admin, ctl, Payload::Leave);
+        let grant_after_leave = chain(
+            &mut evs,
+            &admin,
+            ctl,
+            Payload::RoleGrant {
+                user: rival.id(),
+                role: Role::Moderator,
+            },
+        );
+        let message_after_leave = chain(
+            &mut evs,
+            &admin,
+            general,
+            Payload::Message { text: "still here".into() },
+        );
+        let mut dag = Dag::new();
+        for ev in &evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        let st = replay(owner.id(), &dag);
+        assert!(st.rejected.iter().any(|(id, _)| *id == grant_after_leave), "a grant after leaving is refused");
+        assert!(st.rejected.iter().any(|(id, _)| *id == message_after_leave), "a message after leaving is refused");
+        assert!(!st.roles.get(&rival.id()).is_some_and(|r| r.contains(&Role::Moderator)));
+        assert!(st.messages.get(&general).is_none_or(|m| m.is_empty()));
+
+        // Joining again is what makes the member active. Their next event is accepted.
+        chain(&mut evs, &admin, ctl, Payload::Join { display_name: "Ada".into() });
+        let back = chain(
+            &mut evs,
+            &admin,
+            general,
+            Payload::Message { text: "back".into() },
+        );
+        let mut dag = Dag::new();
+        for ev in &evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        let st = replay(owner.id(), &dag);
+        assert!(!st.rejected.iter().any(|(id, _)| *id == back), "a post after rejoining is accepted");
+        assert_eq!(st.messages[&general].len(), 1);
+    }
+
+    /// A person, active or departed, cannot come back as storage. A storage member can rejoin as storage, and a
+    /// root new to the community can join as storage.
+    #[test]
+    fn a_person_cannot_join_as_storage_but_a_storage_member_can_rejoin() {
+        let (owner, person, seeder, newcomer) = (User::new(), User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(&mut evs, &person, ctl, Payload::Join { display_name: "Pat".into() });
+        let active = chain(&mut evs, &person, ctl, Payload::JoinAsStorage { display_name: "Pat".into() });
+        chain(&mut evs, &person, ctl, Payload::Leave);
+        let departed = chain(&mut evs, &person, ctl, Payload::JoinAsStorage { display_name: "Pat".into() });
+        let owner_storage = chain(&mut evs, &owner, ctl, Payload::JoinAsStorage { display_name: "Own".into() });
+        chain(&mut evs, &seeder, ctl, Payload::JoinAsStorage { display_name: "Seed".into() });
+        chain(&mut evs, &seeder, ctl, Payload::Leave);
+        let seeder_back = chain(&mut evs, &seeder, ctl, Payload::JoinAsStorage { display_name: "Seed".into() });
+        let fresh = chain(&mut evs, &newcomer, ctl, Payload::JoinAsStorage { display_name: "New".into() });
+
+        let mut dag = Dag::new();
+        for ev in &evs {
+            dag.insert(ev.clone()).unwrap();
+        }
+        let st = replay(owner.id(), &dag);
+        for refused in [active, departed, owner_storage] {
+            assert!(st.rejected.iter().any(|(id, _)| *id == refused), "a person may not join as storage");
+        }
+        for accepted in [seeder_back, fresh] {
+            assert!(!st.rejected.iter().any(|(id, _)| *id == accepted), "storage joins by storage roots and new roots are kept");
+        }
+        assert!(!st.members[&person.id()].storage, "the person stays a full member");
+        assert!(st.members[&seeder.id()].storage);
+        assert!(st.members[&newcomer.id()].storage);
+    }
 }
 
 #[cfg(test)]
@@ -1924,6 +2114,40 @@ mod rotation_tests {
         assert!(st.rejected.contains(&(bad_sig, Rejection::Malformed)));
         assert!(st.rejected.contains(&(wrong_author, Rejection::Malformed)));
         assert!(st.aliases.is_empty());
+    }
+
+    /// A rotation may cover a person who left, and a rejoin makes the next departure need a rotation of its own.
+    /// A storage member who left is not covered.
+    #[test]
+    fn a_departure_is_covered_by_one_rotation_and_a_rejoin_is_covered_again() {
+        let (owner, admin, leaver, storage) = (User::new(), User::new(), User::new(), User::new());
+        let ctl = ChannelId::CONTROL;
+        let mut evs = Vec::new();
+        chain(&mut evs, &admin, ctl, Payload::Join { display_name: "Ada".into() });
+        chain(&mut evs, &owner, ctl, Payload::RoleGrant { user: admin.id(), role: Role::Admin });
+        chain(&mut evs, &leaver, ctl, Payload::Join { display_name: "Lee".into() });
+        chain(&mut evs, &storage, ctl, Payload::JoinAsStorage { display_name: "Store".into() });
+        chain(&mut evs, &leaver, ctl, Payload::Leave);
+        chain(&mut evs, &storage, ctl, Payload::Leave);
+        let rotation = |generation: u64, covers: Vec<RootId>| Payload::SecretRotation {
+            generation,
+            covers,
+            sealed: vec![1, 2, 3],
+        };
+        let ok = chain(&mut evs, &admin, ctl, rotation(1, vec![leaver.id()]));
+        let st = replay_all(&owner, &evs);
+        assert_eq!(st.secret_generation, 1, "one rotation covers the leaver");
+        assert!(!st.rejected.iter().any(|(id, _)| *id == ok));
+        assert!(st.rotation_due().is_empty(), "nothing is due after it");
+
+        let refused = chain(&mut evs, &admin, ctl, rotation(2, vec![storage.id()]));
+        let st = replay_all(&owner, &evs);
+        assert!(st.rejected.iter().any(|(id, _)| *id == refused), "a storage member's leave is not covered");
+
+        chain(&mut evs, &leaver, ctl, Payload::Join { display_name: "Lee".into() });
+        chain(&mut evs, &leaver, ctl, Payload::Leave);
+        let st = replay_all(&owner, &evs);
+        assert_eq!(st.rotation_due(), BTreeSet::from([leaver.id()]), "the next departure is due again");
     }
 }
 
@@ -2596,5 +2820,20 @@ mod mention_tests {
         assert!(!flag(after_demotion), "a demoted admin may not, from then on");
         assert!(st.may_mention_everyone(&owner.id()));
         assert!(!st.may_mention_everyone(&user.id()));
+    }
+}
+
+impl CommunityState {
+    /// The icon a community shows: the picture to fetch and, for an animated icon, its poster frame.
+    /// The animated icon shows while its event is at least as new as the still icon's, so a later
+    /// still icon replaces it and a later removal clears both. `None` is no icon.
+    pub fn shown_icon(&self) -> Option<(crate::Picture, Option<crate::Picture>)> {
+        match (self.animated_icon, self.icon) {
+            (Some((animated_hlc, animated)), icon) if icon.is_none_or(|(still_hlc, _)| animated_hlc >= still_hlc) => {
+                animated.map(|a| (a.image, Some(a.poster)))
+            }
+            (_, Some((_, still))) => still.map(|p| (p, None)),
+            _ => None,
+        }
     }
 }

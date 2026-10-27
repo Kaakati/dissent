@@ -1,17 +1,22 @@
 // The chat header: the conversation's title (a channel, a person with their verified state, or a group with its members),
 // the channel topic, the tools of a direct conversation (call, add to group, profile panel), the update button and the
 // in-chat search. Ported from the old UI's views/chat.js (titleNodes, toolNodes, the search box).
-import { Ellipsis, Hash, Phone, PanelRight, Search, UsersRound } from 'lucide-react';
+import type { MouseEvent } from 'react';
+import { Ellipsis, Hash, Phone, PanelRight, Pin, Search, UsersRound, Video } from 'lucide-react';
 import { openNewGroupDialog } from '@/components/dialogs/new-group-dialog';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { UserAvatar } from '@/components/user-avatar';
-import { useChat, type PeerProfile } from '@/lib/chat';
-import { startConversationCall } from '@/lib/calls';
+import { useChat, widenHistoryTo, type PeerProfile } from '@/lib/chat';
+import { startConversationCall, startVideoConversationCall } from '@/lib/calls';
 import { has } from '@/lib/features';
 import { toggleMembers, toggleProfile, useRight } from '@/lib/right';
-import { openContextMenu } from '@/lib/menu';
+import { openContextMenu, type MenuEntry } from '@/lib/menu';
+import { markdownPlain } from '@/lib/markdown';
+import type { ChatTarget } from '@/lib/types';
+import { toast } from '@/lib/toasts';
+import { api } from '@/lib/api';
 import { useShell } from '@/lib/store';
-import { IconBtn } from './parts';
+import { IconBtn, jumpTo } from './parts';
 import { useChatView, type ChatView } from './use-chat-view';
 
 // A group's title: the two members who show first, the name, the member count and the "Members only" pill.
@@ -73,6 +78,9 @@ function DmTools({ view, profile }: { view: ChatView; profile: PeerProfile | nul
           onClick={() => void startConversationCall(view.group ? { groupId: peer } : { peer })}
         />
       ) : null}
+      {has('calls') && !view.group ? (
+        <IconBtn label={`Start video call with ${who}`} icon={Video} onClick={() => void startVideoConversationCall(peer)} />
+      ) : null}
       {has('groups') ? (
         <IconBtn
           label="Add friends to group"
@@ -85,7 +93,50 @@ function DmTools({ view, profile }: { view: ChatView; profile: PeerProfile | nul
   );
 }
 
-// A channel's tools: the overflow menu that shows or hides the member list. The label is the current UI's.
+// Scrolls to a pinned message. One older than the loaded window widens the window first, up to its cap.
+async function jumpToPin(target: ChatTarget, id: string): Promise<void> {
+  if (!useChat.getState().messages.some((m) => m.id === id) && !(await widenHistoryTo(target, id))) {
+    toast("Couldn't find that message in this channel's history.", 'info');
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50)); // the list renders the window before the row is scrolled to
+  jumpTo(id);
+}
+
+// The channel's pinned messages, listed in a menu at the header button. A pick jumps to the message.
+async function openPins(e: MouseEvent<HTMLElement>, view: ChatView): Promise<void> {
+  const r = e.currentTarget.getBoundingClientRect();
+  if (view.target.kind !== 'channel') return;
+  const target = view.target;
+  let pins: { id: string; author_name: string; text: string }[];
+  try {
+    pins = (await api.pinnedMessages(target.communityId, target.channelId)) as typeof pins;
+  } catch (err) {
+    toast(err);
+    return;
+  }
+  const entries: MenuEntry[] = [
+    { header: 'Pinned messages' },
+    ...(pins.length
+      ? pins.map((m) => ({ label: m.author_name, sub: markdownPlain(m.text).slice(0, 90), onPick: () => void jumpToPin(target, m.id) }))
+      : [{ label: 'No pinned messages', disabled: true }]),
+  ];
+  openContextMenu(r.left, r.bottom + 4, entries);
+}
+
+// A channel's tools: the pinned messages, the member list toggle, then the overflow menu, which also shows or hides the member list.
+function ChannelTools({ view }: { view: ChatView }) {
+  const membersOpen = useRight((s) => s.membersOpen);
+  return (
+    <>
+      <IconBtn label="Pinned messages" icon={Pin} onClick={(e) => void openPins(e, view)} />
+      <IconBtn label={membersOpen ? 'Hide member list' : 'Show member list'} icon={UsersRound} pressed={membersOpen} onClick={toggleMembers} />
+      <MoreTools />
+    </>
+  );
+}
+
+// A channel's overflow menu that shows or hides the member list. The label is the current UI's.
 export function MoreTools() {
   const membersOpen = useRight((s) => s.membersOpen);
   return (
@@ -131,7 +182,7 @@ export function HeaderSearch({ placeholder = 'Search' }: { placeholder?: string 
 export function ChatHeader() {
   const view = useChatView();
   const profile = useChat((s) => s.peerProfile);
-  const dmTools = view?.dm ? <DmTools view={view} profile={profile} /> : view ? <MoreTools /> : null;
+  const dmTools = view?.dm ? <DmTools view={view} profile={profile} /> : view ? <ChannelTools view={view} /> : null;
 
   return (
     <header className="chat-header">

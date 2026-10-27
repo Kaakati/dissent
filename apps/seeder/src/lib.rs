@@ -519,8 +519,45 @@ pub fn read_passphrase(path: Option<&Path>) -> Result<Option<String>> {
 /// Opens the vault for `data_dir`. Tries the OS keychain first. When the keychain is unavailable,
 /// uses `passphrase`. When neither works, it fails. It never falls back to plaintext.
 pub fn open_vault(data_dir: &Path, passphrase: Option<&str>) -> Result<Vault> {
-    match Vault::open(KEYCHAIN_APP, &keychain_profile(data_dir)?) {
-        Ok(vault) => Ok(vault),
+    let name = keychain_profile(data_dir)?;
+    let canonical = legacy_keychain_profile(data_dir)?;
+    let spelled: Vec<String> = dissent_identity::vault::spellings(data_dir).iter().map(|t| profile_name(t)).collect();
+    open_vault_in(KEYCHAIN_APP, data_dir, &name, &canonical, &spelled, passphrase)
+}
+
+/// `open_vault` for one credential-store app and the names it should use. Tests pass their own app.
+fn open_vault_in(
+    app: &str,
+    data_dir: &Path,
+    name: &str,
+    canonical: &str,
+    spelled: &[String],
+    passphrase: Option<&str>,
+) -> Result<Vault> {
+    let identity = data_dir.join(IDENTITY_FILE);
+    // A new key beside sealed data would leave that data unreadable, so it is refused before any key is made.
+    if !identity.exists() && dissent_core::sealed_data_present(data_dir) {
+        bail!(dissent_core::SEALED_WITHOUT_IDENTITY);
+    }
+    let keychain = if identity.exists() {
+        let legacy: Vec<&str> = std::iter::once(canonical).chain(spelled.iter().map(String::as_str)).collect();
+        choose_keychain_key(app, &identity, name, &legacy)
+    } else {
+        if let Err(e) = Vault::adopt_key(app, canonical, name) {
+            warn!(error = %e, "could not move the seeder key to its new name");
+        }
+        Vault::open(app, name).map(Some)
+    };
+    // A sealed identity already on disk must be opened with its key or the passphrase. A new key cannot.
+    match keychain {
+        Ok(Some(vault)) => Ok(vault),
+        Ok(None) => match passphrase {
+            Some(passphrase) => passphrase_vault(data_dir, passphrase),
+            None => bail!(
+                "this profile's key isn't in this computer's credential store, and no passphrase was given. \
+                 Pass --passphrase-file <path>, or set {PASSPHRASE_ENV}."
+            ),
+        },
         Err(IdentityError::Keychain(reason)) => {
             info!(reason = %reason, "OS keychain unavailable, using a passphrase");
             let Some(passphrase) = passphrase else {
@@ -534,6 +571,32 @@ pub fn open_vault(data_dir: &Path, passphrase: Option<&str>) -> Result<Vault> {
         }
         Err(e) => Err(e).context("open keychain vault"),
     }
+}
+
+/// The first keychain entry that opens the identity, tried in order: the normalised name, then each legacy name.
+/// The normalised entry stays as it is when it opens the identity. A legacy key that opens it is copied to the
+/// normalised name, which did not open it. The old entry is kept.
+fn choose_keychain_key(app: &str, identity: &Path, name: &str, legacy: &[&str]) -> Result<Option<Vault>, IdentityError> {
+    for candidate in std::iter::once(name).chain(legacy.iter().copied().filter(|c| *c != name)) {
+        let Some(vault) = keychain_opens(app, identity, candidate)? else {
+            continue;
+        };
+        if candidate != name {
+            if let Err(e) = Vault::replace_key(app, candidate, name) {
+                warn!(error = %e, "could not copy the seeder key to its new name");
+            }
+        }
+        return Ok(Some(vault));
+    }
+    Ok(None)
+}
+
+/// The key in the keychain entry `profile`, when it opens the identity file. A keychain error is returned.
+fn keychain_opens(app: &str, identity: &Path, profile: &str) -> Result<Option<Vault>, IdentityError> {
+    let Some(vault) = Vault::open_existing(app, profile)? else {
+        return Ok(None);
+    };
+    Ok(keystore::load(identity, &vault).is_ok().then_some(vault))
 }
 
 /// A vault derived from `passphrase` and the salt in `data_dir`. The salt is created on first use
@@ -568,10 +631,19 @@ fn load_or_create_salt(data_dir: &Path) -> Result<[u8; 16]> {
 fn keychain_profile(data_dir: &Path) -> Result<String> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    Ok(profile_name(&dissent_identity::vault::normal_dir(data_dir)))
+}
+
+/// The name before `normal_dir`, from the canonical path. Kept so an existing key is found and moved.
+fn legacy_keychain_profile(data_dir: &Path) -> Result<String> {
     let abs = std::fs::canonicalize(data_dir)
         .with_context(|| format!("resolve data dir {}", data_dir.display()))?;
-    let digest = blake3::hash(abs.to_string_lossy().as_bytes());
-    Ok(data_encoding::HEXLOWER.encode(&digest.as_bytes()[..8]))
+    Ok(profile_name(&abs.to_string_lossy()))
+}
+
+fn profile_name(text: &str) -> String {
+    let digest = blake3::hash(text.as_bytes());
+    data_encoding::HEXLOWER.encode(&digest.as_bytes()[..8])
 }
 
 fn now_ms() -> u64 {
@@ -585,8 +657,72 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    /// Touches the credential store under a test app name, so it is ignored by default. A real identity sealed under
+    /// one spelling's key, a stray empty key under another spelling, and the normalised name missing: the real key is
+    /// chosen whichever order the legacy names come in, and it is copied to the normalised name.
+    #[test]
+    #[ignore]
+    fn the_seeder_key_that_opens_the_identity_wins_over_a_stray_one() {
+        use dissent_identity::Identity;
+        const APP: &str = "dissent-seeder-test";
+        let dir = std::env::temp_dir().join(format!("dissent-seeder-choose-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (norm, back, fwd) = ("seed-norm-test", "seed-back-test", "seed-fwd-test");
+        let forget = |names: &[&str]| {
+            for name in names {
+                let _ = Vault::delete_key(APP, name);
+            }
+        };
+        forget(&[norm, back, fwd]);
+        let real = Vault::open(APP, fwd).unwrap();
+        keystore::save(&Identity::create(1), &dir.join(IDENTITY_FILE), &real).unwrap();
+        let _stray = Vault::open(APP, back).unwrap();
+        for order in [vec![back.to_string(), fwd.to_string()], vec![fwd.to_string(), back.to_string()]] {
+            forget(&[norm]);
+            let vault = open_vault_in(APP, &dir, norm, "unused-canonical", &order, None).unwrap();
+            assert!(keystore::load(&dir.join(IDENTITY_FILE), &vault).is_ok(), "the chosen key opens the identity");
+            let copied = Vault::open_existing(APP, norm).unwrap().expect("copied to the normalised name");
+            assert!(keystore::load(&dir.join(IDENTITY_FILE), &copied).is_ok());
+        }
+        forget(&[norm, back, fwd]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Touches the credential store under a test app name, so it is ignored by default. When no entry opens the
+    /// identity and no passphrase is given, the open refuses and creates no entry under the normalised name.
+    #[test]
+    #[ignore]
+    fn sealed_identity_that_no_key_opens_refuses_and_creates_nothing() {
+        const APP: &str = "dissent-seeder-test";
+        let dir = std::env::temp_dir().join(format!("dissent-seeder-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (norm, stray) = ("seed-refuse-norm-test", "seed-refuse-stray-test");
+        let _ = Vault::delete_key(APP, norm);
+        let _ = Vault::delete_key(APP, stray);
+        std::fs::write(dir.join(IDENTITY_FILE), b"sealed").unwrap();
+        let _ = Vault::open(APP, stray).unwrap();
+        let err = open_vault_in(APP, &dir, norm, "unused-canonical", &[stray.to_string()], None).expect_err("refused");
+        assert!(err.to_string().contains("isn't in this computer's credential store"), "{err}");
+        assert!(Vault::open_existing(APP, norm).unwrap().is_none(), "no key was created");
+        let _ = Vault::delete_key(APP, stray);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("dissent-seeder").chain(args.iter().copied())).expect("valid")
+    }
+
+    #[test]
+    fn a_missing_identity_beside_sealed_data_is_refused_and_no_key_is_made() {
+        const APP: &str = "dissent-seeder-test";
+        let dir = std::env::temp_dir().join(format!("dissent-seeder-sealed-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("profiles").join("root")).unwrap();
+        std::fs::write(dir.join("profiles").join("root").join("store.bin"), b"sealed").unwrap();
+        let name = "dissent-seeder-test-sealed";
+        let err = open_vault_in(APP, &dir, name, "unused-canonical", &[], None).expect_err("refused");
+        assert!(err.to_string().contains("identity.bin is missing"), "{err}");
+        assert!(dissent_identity::Vault::open_existing(APP, name).unwrap().is_none(), "no key was made under the test name");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

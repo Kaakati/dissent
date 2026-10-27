@@ -278,6 +278,17 @@ pub async fn set_camera(state: State<'_, AppState>, on: bool) -> Result<(), Stri
 
 /// Previews this device's camera in the lobby, before a call.
 #[tauri::command]
+pub async fn set_video_tile(
+    state: State<'_, AppState>,
+    root_id: String,
+    screen: bool,
+    width: u32,
+) -> Result<(), String> {
+    engine(&state).await?.set_video_tile(&root_id, screen, width);
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_camera_preview(state: State<'_, AppState>, on: bool) -> Result<(), String> {
     engine(&state).await?.set_camera_preview(on).map_err(err)
 }

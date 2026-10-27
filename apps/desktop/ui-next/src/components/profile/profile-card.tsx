@@ -4,7 +4,7 @@
 import { type ReactNode, useEffect, useLayoutEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { Ban, MessageSquare, ShieldCheck, ShieldMinus, ShieldPlus, Undo2 } from 'lucide-react';
+import { Ban, MessageSquare, Radio, ShieldCheck, ShieldMinus, ShieldPlus, Undo2 } from 'lucide-react';
 import { openSafetyDialog } from '@/components/dialogs/safety-dialog';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
@@ -155,6 +155,15 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
             <span className={cn('inline-flex h-5 items-center rounded-full bg-border-strong px-s-2 text-meta font-semibold', ROLE_TEXT[member.role])}>
               {ROLE_LABEL[member.role]}
             </span>
+          </div>
+        ) : null}
+        {view.hosts_for?.length ? (
+          <div data-relay-host-badge className="mt-s-2 flex flex-wrap items-center gap-1.5 text-meta text-muted-foreground">
+            <span className="inline-flex h-5 items-center gap-1 rounded-full bg-border-strong px-s-2 font-semibold text-link">
+              <Radio className="size-3" aria-hidden="true" />
+              Relay host
+            </span>
+            <span className="min-w-0 truncate">{`for ${view.hosts_for.map((c) => c.name).join(', ')}`}</span>
           </div>
         ) : null}
         <div className="mt-s-2 flex flex-wrap items-center gap-x-s-3 text-meta text-muted-foreground">

@@ -275,3 +275,42 @@ async fn an_animated_banner_reaches_a_member_still_looping() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_animated_icon_reaches_a_member_as_a_square_with_its_poster() {
+    use image::ImageDecoder;
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        // A 200 by 200 square from the 320 by 200 source: the crop's shorter side, centred.
+        let crop = dissent_core::CropRect { x: 0, y: 0, w: 200, h: 200, rot: 0 };
+        let prepared = alice.engine.prepare_animated_icon(source_gif(3), crop).await.expect("encode");
+        alice
+            .engine
+            .set_community_icon_animated(id, prepared.gif.clone(), prepared.poster.clone())
+            .await
+            .expect("the owner sets an animated icon");
+        let (gif, poster) = eventually("bob fetches the icon GIF and its poster", || {
+            let v = bob.engine.community_view(id).ok()?;
+            Some((v.icon?, v.icon_poster?))
+        })
+        .await;
+        let bytes = std::fs::read(&gif).unwrap();
+        assert_eq!(bytes, prepared.gif);
+        assert!(gif.ends_with(".gif"), "{gif}");
+        assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"), "it still loops");
+        let (w, h) = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&bytes)).unwrap().dimensions();
+        assert_eq!(w, h, "the icon is square");
+        assert!(w <= 256, "{w}");
+        assert_eq!(std::fs::read(&poster).unwrap(), prepared.poster);
+
+        // A later still icon replaces the animated one, so bob shows no poster and the still icon.
+        alice.engine.clear_community_icon(id).await.expect("the owner removes the icon");
+        eventually("bob's icon is removed", || bob.engine.community_view(id).ok()?.icon.is_none().then_some(())).await;
+        assert!(bob.engine.community_view(id).unwrap().icon_poster.is_none());
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}

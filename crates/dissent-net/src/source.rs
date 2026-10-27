@@ -25,6 +25,8 @@ pub const SEEDER: &str = "seeder";
 pub const LAN: &str = "lan";
 /// Label for an address found on the Mainline DHT.
 pub const DHT: &str = "dht";
+/// Label for an address found in number0's DNS directory, which is used only with number0's relays.
+pub const N0_DNS: &str = "n0-dns";
 /// Label for a dial that needed no lookup: the connection was already open.
 pub const OPEN: &str = "open";
 

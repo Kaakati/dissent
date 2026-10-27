@@ -2,7 +2,7 @@
 // channels and voice channels with the people in them. Controls whose views are not ported yet are shown disabled.
 // Ported from the old UI's views/sidebar.js.
 import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
+import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Radio, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
 import { openChannelSettings } from '@/components/channel-settings/channel-settings';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { UserAvatar } from '@/components/user-avatar';
 import { bannerBackground, bannerOf, bannersStill, subscribeBannerMotion } from '@/lib/banners';
+import { boostLabel } from '@/lib/boosts';
 import { has } from '@/lib/features';
 import { markdownPlain } from '@/lib/markdown';
 import { plural } from '@/lib/identity';
@@ -49,9 +50,16 @@ function Count({ value, label }: { value: number; label: string }) {
   );
 }
 
-function SectionHead({ title, action, spaced = false }: { title: string; action?: ReactNode; spaced?: boolean }) {
+// A section's heading. The channel sections are small caps; the direct messages heading is title case, as the reference shows it.
+function SectionHead({ title, action, spaced = false, plain = false }: { title: string; action?: ReactNode; spaced?: boolean; plain?: boolean }) {
   return (
-    <div className={cn('flex h-8 shrink-0 items-center justify-between pl-s-2 text-meta font-semibold tracking-[.02em] text-muted-foreground uppercase', spaced && 'mt-s-2')}>
+    <div
+      className={cn(
+        'flex h-8 shrink-0 items-center justify-between pl-s-2 text-muted-foreground',
+        plain ? 'text-[13px] font-normal' : 'text-meta font-semibold tracking-[.02em] uppercase',
+        spaced && 'mt-s-2',
+      )}
+    >
       <span className="truncate">{title}</span>
       {action}
     </div>
@@ -155,6 +163,17 @@ function ServerTop({ community, scrollTop }: { community: CommunityView; scrollT
             )}
           >
             <span data-server-name className="min-w-0 truncate" title={community.name}>{community.name}</span>
+            {community.boost?.level ? (
+              <span
+                data-boost-level={community.boost.level}
+                title={boostLabel(community.boost.level, community.boost.hosts.length)}
+                aria-label={boostLabel(community.boost.level, community.boost.hosts.length)}
+                className={cn('ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-meta font-semibold', onBanner ? 'bg-black/35 text-white' : 'bg-elevated text-text')}
+              >
+                <Radio className="size-3" aria-hidden="true" />
+                {`Lv ${community.boost.level}`}
+              </span>
+            ) : null}
             <ChevronDown className={cn('size-4 shrink-0', onBanner ? 'text-white' : 'text-muted-foreground')} aria-hidden="true" />
           </button>
         </ServerMenu>
@@ -275,7 +294,8 @@ function HomeList() {
       <QuickLink icon={<Bookmark />} label="Saved Messages" onClick={() => void openPage('saved')} active={page === 'saved'} />
       <Separator className="my-s-2" />
       <SectionHead
-        title="Direct messages"
+        plain
+        title="Direct Messages"
         action={
           has('groups') ? (
             <NewConversationMenu>

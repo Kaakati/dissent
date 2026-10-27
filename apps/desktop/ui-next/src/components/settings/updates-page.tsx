@@ -52,7 +52,7 @@ export function UpdatesPage() {
   return (
     <div className="flex flex-col">
       <Block>
-        <img src="/app-icon-96.png" alt="Dissent logo" width={64} height={64} className="block size-16" />
+        <img src="/app-icon-128.png" alt="Dissent logo" width={64} height={64} className="block size-16" />
         <p>{version}</p>
         <div className="flex items-center gap-s-2">
           <Button variant="outline" disabled={checking} onClick={() => void check()}>

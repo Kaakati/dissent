@@ -236,6 +236,17 @@ mod tests {
         }
     }
 
+    /// The invite the README's join badge links to. It must parse with the real parser, and render back
+    /// to the same URL.
+    #[test]
+    fn the_readme_invite_parses_and_renders_back() {
+        let url = "dissent://invite/dss1pwq48a5vtxxfqgp8q23ztvvyx4wcnc7qewvpf7z3zex00sg66dnq0hf6cs.cmyq6evdjk6kl64a73qtdvqdkxhl646nu2mp3gggjhsxjbc56giq.0.gl4mkxwx4mqhyhjqhakel2j47u";
+        let short = ShortInvite::parse(url).expect("the README invite parses");
+        assert_eq!(short.secret_generation, 0);
+        assert!(short.invite_id.is_some());
+        assert_eq!(short.to_url().as_str(), url);
+    }
+
     #[test]
     fn short_invite_is_far_shorter_than_the_long_form() {
         let short = short_sample(Some([9; 16])).to_url();

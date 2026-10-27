@@ -8,12 +8,14 @@
 //! window as small JPEG previews.
 
 use std::collections::{hash_map::Entry, HashMap};
+use std::time::{Duration, Instant};
 
 use dissent_media::{VideoCodec, VideoFrame};
 
 use crate::error::{CoreError, Result};
 
 use dissent_video::Codec;
+use dissent_video::adapt::{Content, CpuRecovery, VideoAdapter};
 
 /// What a screen share shows: a whole display, or one window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -61,7 +63,13 @@ fn camera_error(e: impl std::fmt::Display) -> CoreError {
 }
 
 /// Width of the decoded previews sent to the window.
-const PREVIEW_WIDTH: u32 = 320;
+pub(crate) const PREVIEW_WIDTH: u32 = 320;
+/// The narrowest preview a tile gets, however small it is drawn.
+const PREVIEW_MIN_WIDTH: u32 = 160;
+/// The fastest a tile's preview is made. Every frame is still decoded, so the picture stays current.
+pub(crate) const PREVIEW_INTERVAL: Duration = Duration::from_millis(1_000 / 15);
+/// The fastest the largest tile's preview is made, so the tile that matters most moves smoothly.
+pub(crate) const LARGE_PREVIEW_INTERVAL: Duration = Duration::from_millis(1_000 / 30);
 /// JPEG quality of the previews, 1 to 100. About 70 keeps a 320 px preview near 15 KB.
 const PREVIEW_QUALITY: u8 = 70;
 /// Frames per second the previews are timed at, when a frame carries no clock of its own.
@@ -79,26 +87,39 @@ pub(crate) struct Encoded {
 
 pub(crate) use capture::{Capture, CaptureKind};
 
-/// Set by tests to send a deterministic test picture instead of the camera. Process-wide, so a
-/// test sets it before it turns the camera on.
-static TEST_PATTERN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Makes the next camera a deterministic test picture, for tests. Off by default.
-pub fn set_test_camera_pattern(on: bool) {
-    TEST_PATTERN.store(on, std::sync::atomic::Ordering::Relaxed);
+/// Where a camera or screen capture takes its pictures from. An engine uses a device unless a test sets it otherwise. A
+/// test engine uses a pattern, or no capture at all, so no test opens a real camera or display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TestCapture {
+    /// A real camera or display.
+    #[default]
+    Device,
+    /// A deterministic test picture, in place of the camera or the screen.
+    Pattern,
+    /// No camera or screen. Turning one on is an error.
+    Unavailable,
 }
 
-/// Starts the camera for this device: the test picture when a test asked for it, else device 0.
-pub(crate) fn start_camera() -> Result<Capture> {
-    if TEST_PATTERN.load(std::sync::atomic::Ordering::Relaxed) {
-        Capture::test_pattern()
-    } else {
-        Capture::camera(0)
+/// Starts the camera for an engine, from `source`.
+pub(crate) fn start_camera(source: TestCapture) -> Result<Capture> {
+    match source {
+        TestCapture::Device => Capture::camera(0),
+        fake => Capture::fake(CaptureKind::Camera, fake),
     }
 }
 
-/// One thing this device sends: a capture, the budget that sizes its bitrate, and whether the
-/// budget has paused it.
+/// What the capture sends next: the bitrate, the codec, and the size and rate of the frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Plan {
+    pub kbps: u32,
+    pub codec: Codec,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+/// One thing this device sends: a capture, the budget that plans it, and whether the budget has
+/// paused it.
 pub(crate) struct Sending {
     pub capture: Capture,
     pub budget: Budget,
@@ -115,29 +136,37 @@ impl Sending {
         }
     }
 
-    /// Takes the link's estimate and the audio target and sizes the capture to fit: the video
-    /// rate is what the estimate leaves after the audio reservation, and a budget too small for
-    /// video pauses it. Without an estimate yet, nothing changes.
+    /// Takes the link's estimate and the audio target and plans the capture to fit: the budget's
+    /// plan goes to the capture, which switches to it. A budget too small for video pauses it.
+    /// Without an estimate yet, nothing changes.
     pub(crate) fn fit(&mut self, available_kbps: Option<u32>, audio_kbps: u32) {
+        if let Some(share) = self.capture.take_cpu_share() {
+            self.budget.observe_cpu(Instant::now(), share);
+        }
         let Some(available) = available_kbps else {
             return;
         };
         match self.budget.update(available, audio_kbps) {
-            Some(kbps) => {
+            Some(plan) => {
                 self.paused = false;
-                self.capture.set_bitrate(kbps);
+                self.capture.set_plan(plan);
             }
             None => self.paused = true,
         }
     }
+
+    /// Whether every peer can decode AV1. The budget plans AV1 only when they all can.
+    pub(crate) fn set_av1(&mut self, on: bool) {
+        self.budget.set_av1(on);
+    }
 }
 
 mod capture {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver, TrySendError};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use dissent_video::encode::{self, EncoderConfig};
     use dissent_video::screen::{Cursor, ScreenSource, ScreenTarget};
@@ -145,31 +174,41 @@ mod capture {
 
     use dissent_media::VideoCodec;
 
-    use super::{encode_jpeg, Encoded, Preview, PREVIEW_WIDTH};
+    use super::{encode_jpeg, Encoded, Plan, Preview, PREVIEW_WIDTH};
     use crate::error::{CoreError, Result};
 
-    /// A camera is 640x360 at 15 fps, which is the H.264 rung of the camera ladder.
-    const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
-        width: 640,
-        height: 360,
-        fps: 15,
-    };
-    /// A screen is 640x360 at 10 fps, the H.264 rung of the screen ladder.
-    const SCREEN_FORMAT: CaptureFormat = CaptureFormat {
-        width: 640,
-        height: 360,
-        fps: 10,
-    };
-    /// A keyframe every two seconds at 15 fps, so a late joiner or a lost frame recovers quickly.
-    const KEYFRAME_INTERVAL: u32 = 30;
+    /// Keyframes every this many seconds, so a late joiner or a lost frame recovers quickly.
+    const KEYFRAME_SECONDS: u32 = 2;
     /// Frames the capture thread may queue for the call loop before it drops one and asks for a
     /// keyframe.
     const QUEUE: usize = 4;
     /// Every this many captured frames, the thread also makes a preview of its own picture for the
     /// window's self tile.
     const PREVIEW_EVERY: u32 = 3;
+    /// The least time between two changes of size, rate or codec. Reopening a camera is slow and
+    /// visible, so a plan that changes faster than this waits for the next interval.
+    const RESHAPE_INTERVAL: Duration = Duration::from_secs(5);
+    /// Frames whose encode time is averaged into one report of the encoder's speed.
+    const SLOW_FRAMES: u32 = 30;
     /// Start rate before the first bandwidth estimate, in kbps. Inside the H.264 rung's range.
     const START_KBPS: u32 = 300;
+
+    /// The plan a camera starts on: H.264 at 640x360, 15 fps, the bottom of its ladder.
+    const CAMERA_START: Plan = Plan {
+        kbps: START_KBPS,
+        codec: Codec::H264,
+        width: 640,
+        height: 360,
+        fps: 15,
+    };
+    /// The plan a screen starts on: H.264 at 640x360, 10 fps, the bottom of its ladder.
+    const SCREEN_START: Plan = Plan {
+        kbps: START_KBPS,
+        codec: Codec::H264,
+        width: 640,
+        height: 360,
+        fps: 10,
+    };
 
     /// Which picture a capture sends, and so how it is paced.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,85 +223,114 @@ mod capture {
         kind: CaptureKind,
         stop: Arc<AtomicBool>,
         key_request: Arc<AtomicBool>,
-        bitrate: Arc<AtomicU32>,
-        /// Whether the capture should encode AV1. Set by the call loop, from what the peers agreed to.
-        av1: Arc<AtomicBool>,
+        /// What the capture should send next. The thread reads it before each frame.
+        plan: Arc<Mutex<Plan>>,
+        /// The encoder's latest share of the frame interval, for the call loop to judge.
+        cpu: Arc<Mutex<Option<f64>>>,
         rx: Receiver<Encoded>,
         previews: Receiver<Preview>,
         thread: Option<JoinHandle<()>>,
     }
 
     impl Capture {
-        /// Starts a capture. `open` runs on the capture thread, because a camera may only be
-        /// used from the thread that opened it, and any error from it comes back here.
+        /// Starts a capture on `initial`. `open` makes a source at a size and rate. It runs on the
+        /// capture thread, because a camera may only be used from the thread that opened it, and it
+        /// runs again each time the size or rate changes. An error from the first open comes back here.
         pub(crate) fn start(
             kind: CaptureKind,
-            open: impl FnOnce() -> Result<Box<dyn VideoSource>> + Send + 'static,
+            initial: Plan,
+            mut open: impl FnMut(CaptureFormat) -> Result<Box<dyn VideoSource>> + Send + 'static,
         ) -> Result<Self> {
-            let format = match kind {
-                CaptureKind::Camera => CAMERA_FORMAT,
-                CaptureKind::Screen => SCREEN_FORMAT,
-            };
             let stop = Arc::new(AtomicBool::new(false));
             let key_request = Arc::new(AtomicBool::new(false));
-            let bitrate = Arc::new(AtomicU32::new(START_KBPS));
+            let plan = Arc::new(Mutex::new(initial));
+            let cpu = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::sync_channel::<Encoded>(QUEUE);
             let (preview_tx, previews) = mpsc::sync_channel::<Preview>(1);
             let screen = kind == CaptureKind::Screen;
             let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
             let thread_stop = stop.clone();
             let thread_key = key_request.clone();
-            let thread_bitrate = bitrate.clone();
-            let av1 = Arc::new(AtomicBool::new(false));
-            let thread_av1 = av1.clone();
+            let thread_plan = plan.clone();
+            let thread_cpu = cpu.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("dissent-{kind:?}").to_lowercase())
                 .spawn(move || {
-                    let config = EncoderConfig {
-                        width: format.width,
-                        height: format.height,
-                        fps: format.fps,
-                        bitrate_kbps: START_KBPS,
-                        keyframe_interval: KEYFRAME_INTERVAL,
-                    };
-                    let (mut source, mut encoder) = match open().and_then(|source| {
-                        let encoder = encode::open(Codec::H264, config).map_err(capture_err)?;
-                        Ok((source, encoder))
-                    }) {
-                        Ok(pair) => {
-                            let _ = ready_tx.send(Ok(()));
-                            pair
-                        }
+                    let mut applied = initial;
+                    let mut source = match open(format_of(applied)) {
+                        Ok(source) => Some(source),
                         Err(e) => {
                             let _ = ready_tx.send(Err(e));
                             return;
                         }
                     };
+                    let mut encoder = match encode::open(applied.codec, encoder_config(applied)) {
+                        Ok(encoder) => encoder,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(capture_err(e)));
+                            return;
+                        }
+                    };
+                    let _ = ready_tx.send(Ok(()));
                     let mut frame_id = 0u32;
                     let mut captured = 0u32;
-                    let mut current = Codec::H264;
-                    // AV1 is dropped for good once it cannot keep up with the frame rate.
-                    let mut av1_failed = false;
-                    let mut av1_ms = 0.0_f64;
-                    let mut av1_frames = 0u32;
-                    // Pace the capture to its frame rate. A device already delivers at that rate; a
-                    // test picture does not, so this keeps both at the same clock.
-                    let period = Duration::from_millis(1_000 / u64::from(format.fps));
-                    let mut due = std::time::Instant::now();
-                    let mut applied = START_KBPS;
+                    let mut period = frame_period(applied.fps);
+                    let mut due = Instant::now();
+                    let mut last_reshape = Instant::now();
+                    // The encoder's speed over the frames since the last verdict or reshape.
+                    let mut ewma_ms: Option<f64> = None;
+                    let mut timed = 0u32;
                     while !thread_stop.load(Ordering::Relaxed) {
-                        let wanted = thread_bitrate.load(Ordering::Relaxed);
-                        if wanted != applied && encoder.set_bitrate(wanted).is_ok() {
-                            applied = wanted;
+                        let wanted = *lock(&thread_plan);
+                        // A bitrate change goes to the open encoder at once.
+                        if wanted.kbps != applied.kbps && encoder.set_bitrate(wanted.kbps).is_ok() {
+                            applied.kbps = wanted.kbps;
                         }
-                        if thread_key.swap(false, Ordering::Relaxed) {
-                            encoder.request_keyframe();
+                        // A size or rate change reopens the camera, so it waits for the interval. A codec change
+                        // only reopens the encoder, which is quick, so it applies at once.
+                        let may_reshape = !resized(wanted, applied) || last_reshape.elapsed() >= RESHAPE_INTERVAL;
+                        if reshaped(wanted, applied) && may_reshape {
+                            if resized(wanted, applied) {
+                                last_reshape = Instant::now();
+                            }
+                            if let Ok(fresh) = encode::open(wanted.codec, encoder_config(wanted)) {
+                                let moved = if resized(wanted, applied) {
+                                    // A camera may be held by one open handle, so the old source goes first.
+                                    drop(source.take());
+                                    match open(format_of(wanted)) {
+                                        Ok(next) => {
+                                            source = Some(next);
+                                            true
+                                        }
+                                        // Back to the old size, so the old encoder still matches.
+                                        Err(_) => {
+                                            source = open(format_of(applied)).ok();
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    true
+                                };
+                                if moved {
+                                    encoder = fresh;
+                                    encoder.request_keyframe();
+                                    applied = wanted;
+                                    period = frame_period(applied.fps);
+                                    due = Instant::now();
+                                    ewma_ms = None;
+                                    timed = 0;
+                                }
+                            }
                         }
+                        // With no source left, the capture cannot continue.
+                        let Some(source) = source.as_mut() else {
+                            break;
+                        };
                         let Ok(frame) = source.next_frame() else {
                             break;
                         };
                         due += period;
-                        let now = std::time::Instant::now();
+                        let now = Instant::now();
                         if due > now {
                             std::thread::sleep(due - now);
                         } else {
@@ -283,36 +351,25 @@ mod capture {
                                 });
                             }
                         }
-                        let wanted_av1 = thread_av1.load(Ordering::Relaxed) && !av1_failed;
-                        if wanted_av1 != (current == Codec::Av1) {
-                            let next = if wanted_av1 { Codec::Av1 } else { Codec::H264 };
-                            match encode::open(next, config) {
-                                Ok(fresh) => {
-                                    encoder = fresh;
-                                    current = next;
-                                    encoder.request_keyframe();
-                                    av1_ms = 0.0;
-                                    av1_frames = 0;
-                                }
-                                Err(_) => av1_failed = true,
-                            }
-                        }
-                        let started = std::time::Instant::now();
+                        let started = Instant::now();
                         let Ok(chunks) = encoder.encode(&frame) else {
                             break;
                         };
-                        if current == Codec::Av1 {
-                            // An exponential average of encode time. AV1 that takes most of a frame
-                            // interval cannot keep up with the capture, so it is dropped.
-                            let ms = started.elapsed().as_secs_f64() * 1_000.0;
-                            av1_ms = if av1_frames == 0 { ms } else { av1_ms * 0.9 + ms * 0.1 };
-                            av1_frames += 1;
-                            let budget_ms = period.as_secs_f64() * 1_000.0 * 0.8;
-                            if av1_frames >= 30 && av1_ms > budget_ms {
-                                av1_failed = true;
-                            }
+                        // Encode time in an exponential moving average, reported as a share of the frame
+                        // interval. The call loop steps down or climbs on that share.
+                        let ms = started.elapsed().as_secs_f64() * 1_000.0;
+                        ewma_ms = Some(match ewma_ms {
+                            None => ms,
+                            Some(prev) => prev * 0.9 + ms * 0.1,
+                        });
+                        timed += 1;
+                        if timed >= SLOW_FRAMES {
+                            let share = ewma_ms.unwrap_or(0.0) / (period.as_secs_f64() * 1_000.0);
+                            *lock(&thread_cpu) = Some(share);
+                            ewma_ms = None;
+                            timed = 0;
                         }
-                        let codec = if current == Codec::Av1 { VideoCodec::Av1 } else { VideoCodec::H264 };
+                        let codec = wire_codec(applied.codec);
                         for chunk in chunks {
                             let encoded = Encoded {
                                 frame_id,
@@ -329,6 +386,9 @@ mod capture {
                                 Err(TrySendError::Disconnected(_)) => return,
                             }
                         }
+                        if thread_key.swap(false, Ordering::Relaxed) {
+                            encoder.request_keyframe();
+                        }
                     }
                 })
                 .map_err(|e| CoreError::Invalid(format!("capture thread: {e}")))?;
@@ -339,8 +399,8 @@ mod capture {
                 kind,
                 stop,
                 key_request,
-                bitrate,
-                av1,
+                plan,
+                cpu,
                 rx,
                 previews,
                 thread: Some(thread),
@@ -349,24 +409,39 @@ mod capture {
 
         /// A camera on device `index`.
         pub(crate) fn camera(index: u32) -> Result<Self> {
-            Self::start(CaptureKind::Camera, move || {
-                let source = dissent_video::camera::CameraSource::open(index, CAMERA_FORMAT)
-                    .map_err(capture_err)?;
+            Self::start(CaptureKind::Camera, CAMERA_START, move |format| {
+                let source = dissent_video::camera::CameraSource::open(index, format).map_err(capture_err)?;
                 Ok(Box::new(source) as Box<dyn VideoSource>)
             })
         }
 
         /// A deterministic test picture instead of a camera. For tests only.
-        pub(crate) fn test_pattern() -> Result<Self> {
-            Self::start(CaptureKind::Camera, || {
-                let source = dissent_video::pattern::PatternSource::new(CAMERA_FORMAT, 7);
+        /// A capture that stands in for a device: the pattern, or an error for an unavailable device.
+        pub(crate) fn fake(kind: CaptureKind, source: super::TestCapture) -> Result<Self> {
+            match source {
+                super::TestCapture::Pattern => Self::test_pattern(kind),
+                _ => Err(CoreError::Invalid("no capture device: a test made it unavailable".into())),
+            }
+        }
+
+        /// The deterministic test picture, as a camera or as a screen.
+        pub(crate) fn test_pattern(kind: CaptureKind) -> Result<Self> {
+            let initial = match kind {
+                CaptureKind::Camera => CAMERA_START,
+                CaptureKind::Screen => SCREEN_START,
+            };
+            Self::start(kind, initial, |format| {
+                let source = dissent_video::pattern::PatternSource::new(format, 7);
                 Ok(Box::new(source) as Box<dyn VideoSource>)
             })
         }
 
         /// A display or a window, shared as a screen. `None` is the primary display.
-        pub(crate) fn screen(target: Option<super::ShareTarget>) -> Result<Self> {
-            Self::start(CaptureKind::Screen, move || {
+        pub(crate) fn screen(target: Option<super::ShareTarget>, source: super::TestCapture) -> Result<Self> {
+            if source != super::TestCapture::Device {
+                return Self::fake(CaptureKind::Screen, source);
+            }
+            Self::start(CaptureKind::Screen, SCREEN_START, move |format| {
                 let target = match target {
                     Some(super::ShareTarget::Window { id }) => ScreenTarget::Window(id),
                     Some(super::ShareTarget::Display { id }) => ScreenTarget::Display(id),
@@ -380,8 +455,7 @@ mod capture {
                         ScreenTarget::Display(display.id)
                     }
                 };
-                let source = ScreenSource::open(target, SCREEN_FORMAT, Cursor::Excluded)
-                    .map_err(capture_err)?;
+                let source = ScreenSource::open(target, format, Cursor::Excluded).map_err(capture_err)?;
                 Ok(Box::new(source) as Box<dyn VideoSource>)
             })
         }
@@ -405,15 +479,18 @@ mod capture {
             self.key_request.store(true, Ordering::Relaxed);
         }
 
-        /// Asks for AV1 when `on`, and H.264 otherwise. The capture switches on its next frame, and
-        /// stays on H.264 when AV1 is not built in or cannot keep up.
-        pub(crate) fn set_av1(&self, on: bool) {
-            self.av1.store(on, Ordering::Relaxed);
+        /// Sets what the capture sends next. A new bitrate applies at once. A new size, rate or
+        /// codec applies once the reshape interval has passed since the last change.
+        pub(crate) fn set_plan(&self, plan: Plan) {
+            *lock(&self.plan) = Plan {
+                kbps: plan.kbps.max(1),
+                ..plan
+            };
         }
 
-        /// Sets the encoder's target rate, in kbps. The thread applies it on its next frame.
-        pub(crate) fn set_bitrate(&self, kbps: u32) {
-            self.bitrate.store(kbps.max(1), Ordering::Relaxed);
+        /// The encoder's share of the frame interval since the last call, if it has reported one.
+        pub(crate) fn take_cpu_share(&self) -> Option<f64> {
+            lock(&self.cpu).take()
         }
     }
 
@@ -426,51 +503,145 @@ mod capture {
         }
     }
 
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn format_of(plan: Plan) -> CaptureFormat {
+        CaptureFormat {
+            width: plan.width,
+            height: plan.height,
+            fps: plan.fps,
+        }
+    }
+
+    fn encoder_config(plan: Plan) -> EncoderConfig {
+        EncoderConfig {
+            width: plan.width,
+            height: plan.height,
+            fps: plan.fps,
+            bitrate_kbps: plan.kbps,
+            keyframe_interval: plan.fps * KEYFRAME_SECONDS,
+        }
+    }
+
+    fn frame_period(fps: u32) -> Duration {
+        Duration::from_millis(1_000 / u64::from(fps.max(1)))
+    }
+
+    fn reshaped(a: Plan, b: Plan) -> bool {
+        (a.width, a.height, a.fps, a.codec) != (b.width, b.height, b.fps, b.codec)
+    }
+
+    fn resized(a: Plan, b: Plan) -> bool {
+        (a.width, a.height, a.fps) != (b.width, b.height, b.fps)
+    }
+
+    fn wire_codec(codec: Codec) -> VideoCodec {
+        match codec {
+            Codec::Av1 => VideoCodec::Av1,
+            Codec::H264 => VideoCodec::H264,
+        }
+    }
+
     fn capture_err(e: impl std::fmt::Display) -> CoreError {
         CoreError::Invalid(format!("capture: {e}"))
     }
-
 }
 
-/// The video budget of one capture: the bitrate it may use, given the link's estimate. It wraps
-/// the adapter, so the audio reservation applies as it does everywhere else.
+/// The video budget of one capture: the plan that fits the link's estimate, after the audio
+/// reservation. AV1 is in the ladder only while every peer can decode it.
 pub(crate) struct Budget {
-    adapter: dissent_video::adapt::VideoAdapter,
+    content: Content,
+    adapter: VideoAdapter,
+    av1: bool,
+    ceiling: Option<crate::boosts::VideoCeiling>,
+    recovery: CpuRecovery,
 }
 
 impl Budget {
-    /// A budget for a camera or a screen, on the H.264 rungs of its ladder.
+    /// A budget for a camera or a screen. It starts with H.264 only.
     pub(crate) fn new(kind: capture::CaptureKind) -> Self {
-        use dissent_video::adapt::Content;
         let content = match kind {
             capture::CaptureKind::Camera => Content::Camera,
             capture::CaptureKind::Screen => Content::Screen,
         };
         Self {
-            adapter: dissent_video::adapt::VideoAdapter::with_codecs(content, &[Codec::H264])
-                .expect("every content ladder has an H.264 rung"),
+            content,
+            adapter: adapter_for(content, false),
+            av1: false,
+            ceiling: None,
+            recovery: CpuRecovery::new(),
         }
     }
 
-    /// Updates the budget from the link's available bandwidth and the audio target, both in
-    /// kbps. Returns the bitrate the capture should use, or `None` while the budget is too small
-    /// for video at all, which pauses the video.
-    pub(crate) fn update(&mut self, available_kbps: u32, audio_target_kbps: u32) -> Option<u32> {
-        let plan = self.adapter.update(available_kbps, audio_target_kbps);
-        plan.codec.map(|_| plan.target_kbps)
+    /// Plans AV1 when `on` and this build can encode it, and H.264 otherwise.
+    pub(crate) fn set_av1(&mut self, on: bool) {
+        if on == self.av1 {
+            return;
+        }
+        self.av1 = on;
+        self.adapter = adapter_for(self.content, on);
+        if let Some(ceiling) = self.ceiling {
+            self.adapter.cap(ceiling.width, ceiling.height, ceiling.fps);
+        }
     }
+
+    /// Holds the ladder to a server's boost ceiling. See `boosts`.
+    pub(crate) fn cap(&mut self, ceiling: crate::boosts::VideoCeiling) {
+        self.ceiling = Some(ceiling);
+        self.adapter.cap(ceiling.width, ceiling.height, ceiling.fps);
+    }
+
+    /// Takes the encoder's share of the frame interval. A slow encoder steps the plan down a rung,
+    /// and a stream that stepped down climbs back after a spell of headroom. See `CpuRecovery`.
+    pub(crate) fn observe_cpu(&mut self, now: Instant, share: f64) {
+        let stepped_down = self.adapter.cpu_stepped_down();
+        let verdict = self.recovery.observe(now, share, stepped_down);
+        self.adapter.apply_cpu(verdict);
+    }
+
+    /// Updates the budget from the link's available bandwidth and the audio target, both in
+    /// kbps. Returns the plan the capture should follow, or `None` while the budget is too small
+    /// for video at all, which pauses the video.
+    pub(crate) fn update(&mut self, available_kbps: u32, audio_target_kbps: u32) -> Option<Plan> {
+        let plan = self.adapter.update(available_kbps, audio_target_kbps);
+        let codec = plan.codec?;
+        Some(Plan {
+            kbps: plan.target_kbps,
+            codec,
+            width: plan.width,
+            height: plan.height,
+            fps: plan.fps,
+        })
+    }
+}
+
+/// The adapter for a camera or a screen. AV1 rungs are kept only when `av1` is set, and this
+/// build can encode AV1.
+fn adapter_for(content: Content, av1: bool) -> VideoAdapter {
+    let codecs: &[Codec] = if av1 { Codec::ENCODABLE } else { &[Codec::H264] };
+    VideoAdapter::with_codecs(content, codecs).expect("every content ladder has an H.264 rung")
 }
 
 /// The decoders of the peers' cameras and screens, one per sender and kind.
 #[derive(Default)]
 pub(crate) struct RemoteVideo {
     decoders: HashMap<(u64, bool, bool), Box<dyn dissent_video::VideoDecoder>>,
+    /// When each peer's picture was last made into a preview, so previews stay within the rate.
+    shown: HashMap<(u64, bool), Instant>,
 }
 
 impl RemoteVideo {
     /// Drops the decoders of a peer who left, so their pictures stop and memory is freed.
     pub(crate) fn forget(&mut self, sender: u64) {
         self.decoders.retain(|(peer, _, _), _| *peer != sender);
+        self.shown.retain(|(peer, _), _| *peer != sender);
+    }
+
+    /// Whether any peer's camera or screen is arriving.
+    pub(crate) fn receiving(&self) -> bool {
+        !self.decoders.is_empty()
     }
 }
 
@@ -489,9 +660,10 @@ pub(crate) struct Preview {
 }
 
 impl RemoteVideo {
-    /// Decodes one received frame and returns its preview, or `None` when the frame does not
-    /// decode yet, such as a delta before its keyframe.
-    pub(crate) fn show(&mut self, frame: &VideoFrame) -> Option<Preview> {
+    /// Decodes one received frame and returns its preview at `max_width`, or `None` when the frame
+    /// does not decode yet, such as a delta before its keyframe, or when the last preview is less
+    /// than `interval` old.
+    pub(crate) fn show(&mut self, frame: &VideoFrame, max_width: u32, interval: Duration) -> Option<Preview> {
         let codec = match frame.codec {
             VideoCodec::H264 => dissent_video::Codec::H264,
             VideoCodec::Av1 => dissent_video::Codec::Av1,
@@ -504,8 +676,19 @@ impl RemoteVideo {
         let pts_us = u64::from(frame.frame_id) * 1_000_000 / PREVIEW_FPS;
         let pictures = decoder.decode(&frame.payload, pts_us).ok()?;
         let picture = pictures.last()?;
-        let (width, height, rgb) = picture.to_rgb_preview(PREVIEW_WIDTH);
+        let now = Instant::now();
+        let key = (frame.sender, frame.screen);
+        if self
+            .shown
+            .get(&key)
+            .is_some_and(|last| now.duration_since(*last) < interval)
+        {
+            return None;
+        }
+        let max_width = max_width.max(PREVIEW_MIN_WIDTH);
+        let (width, height, rgb) = picture.to_rgb_preview(max_width);
         let jpeg = encode_jpeg(width, height, &rgb)?;
+        self.shown.insert(key, now);
         Some(Preview {
             sender: frame.sender,
             screen: frame.screen,
@@ -528,7 +711,147 @@ pub(crate) fn encode_jpeg(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use dissent_video::pattern::PatternSource;
+    use dissent_video::{CaptureFormat, VideoSource};
+
     use super::*;
+
+    /// Starts a capture on a test picture, which records the size and rate of every open.
+    fn recording_capture(initial: Plan) -> (capture::Capture, Arc<Mutex<Vec<CaptureFormat>>>) {
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let record = opened.clone();
+        let capture = capture::Capture::start(capture::CaptureKind::Camera, initial, move |format| {
+            record.lock().unwrap().push(format);
+            Ok(Box::new(PatternSource::new(format, 7)) as Box<dyn VideoSource>)
+        })
+        .expect("the capture starts");
+        (capture, opened)
+    }
+
+    /// Polls `done` until it holds, or until `within` has passed.
+    fn wait_for(within: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    #[test]
+    fn a_plan_change_reopens_the_capture_and_a_bitrate_change_does_not() {
+        let start = Plan {
+            kbps: 300,
+            codec: Codec::H264,
+            width: 640,
+            height: 360,
+            fps: 15,
+        };
+        let (capture, opened) = recording_capture(start);
+
+        // A new bitrate goes to the open encoder, so the capture stays as it was.
+        capture.set_plan(Plan { kbps: 900, ..start });
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(opened.lock().unwrap().len(), 1, "a bitrate change must not reopen the capture");
+
+        // A new size and rate reopen it. The first change waits out the reshape interval.
+        capture.set_plan(Plan {
+            kbps: 900,
+            codec: Codec::H264,
+            width: 1280,
+            height: 720,
+            fps: 30,
+        });
+        assert!(
+            wait_for(Duration::from_secs(15), || opened.lock().unwrap().len() == 2),
+            "a new size and rate reopen the capture"
+        );
+        let format = opened.lock().unwrap()[1];
+        assert_eq!((format.width, format.height, format.fps), (1280, 720, 30));
+        assert!(
+            wait_for(Duration::from_secs(10), || capture.try_next().is_some()),
+            "frames keep coming after the reopen"
+        );
+    }
+
+    #[cfg(feature = "svt-av1")]
+    #[test]
+    fn a_codec_change_reopens_only_the_encoder() {
+        use dissent_media::VideoCodec;
+
+        let start = Plan {
+            kbps: 900,
+            codec: Codec::H264,
+            width: 640,
+            height: 360,
+            fps: 15,
+        };
+        let (capture, opened) = recording_capture(start);
+        capture.set_plan(Plan {
+            codec: Codec::Av1,
+            ..start
+        });
+        assert!(
+            wait_for(Duration::from_secs(15), || matches!(
+                capture.try_next(),
+                Some(frame) if frame.codec == VideoCodec::Av1
+            )),
+            "AV1 frames follow the codec change"
+        );
+        assert_eq!(opened.lock().unwrap().len(), 1, "a codec change keeps the same source");
+    }
+
+    #[test]
+    fn a_slow_encoder_steps_the_plan_down_and_a_headroom_run_climbs_it_back() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut budget = Budget::new(capture::CaptureKind::Camera);
+        let mut plan = None;
+        for _ in 0..40 {
+            plan = budget.update(3_000, 32);
+        }
+        assert_eq!(plan.expect("video").height, 720, "a fat link plans 720p on H.264");
+
+        budget.observe_cpu(at(0), 0.95);
+        let stepped = budget.update(3_000, 32).expect("video");
+        assert_eq!(stepped.height, 360, "the slow encoder drops to 360p");
+
+        for s in (5..40).step_by(5) {
+            budget.observe_cpu(at(s), 0.3);
+        }
+        let climbed = budget.update(3_000, 32).expect("video");
+        assert_eq!(climbed.height, 720, "30 s of headroom climbs back to 720p");
+    }
+
+    #[test]
+    fn av1_is_planned_only_once_it_is_allowed() {
+        let mut budget = Budget::new(capture::CaptureKind::Camera);
+        let mut plan = None;
+        for _ in 0..40 {
+            plan = budget.update(3_000, 32);
+        }
+        assert_eq!(
+            plan.expect("video on a fat link").codec,
+            Codec::H264,
+            "H.264 until every peer can decode AV1"
+        );
+
+        budget.set_av1(true);
+        for _ in 0..40 {
+            plan = budget.update(3_000, 32);
+        }
+        let expected = if cfg!(feature = "svt-av1") { Codec::Av1 } else { Codec::H264 };
+        assert_eq!(
+            plan.expect("video on a fat link").codec,
+            expected,
+            "AV1 is planned once allowed, and only when this build can encode it"
+        );
+    }
 
     #[test]
     fn a_lower_estimate_lowers_the_video_bitrate_and_keeps_the_audio_reservation() {
@@ -536,11 +859,11 @@ mod tests {
         // Let the budget settle on a fat link, then drop to a thin one.
         let mut high = None;
         for _ in 0..40 {
-            high = budget.update(1_000, 32);
+            high = budget.update(1_000, 32).map(|p| p.kbps);
         }
         let mut low = None;
         for _ in 0..40 {
-            low = budget.update(300, 32);
+            low = budget.update(300, 32).map(|p| p.kbps);
         }
         let (high, low) = (high.expect("video on a fat link"), low.expect("video on a thin link"));
         assert!(low < high, "a lower estimate must lower the video rate: {low} vs {high}");
@@ -554,9 +877,95 @@ mod tests {
         let mut budget = Budget::new(capture::CaptureKind::Camera);
         let mut last = Some(0);
         for _ in 0..40 {
-            last = budget.update(60, 32);
+            last = budget.update(60, 32).map(|p| p.kbps);
         }
         assert_eq!(last, None);
+    }
+
+    #[test]
+    #[ignore = "measurement: run in release with --ignored --nocapture"]
+    fn probe_remote_tile_cpu() {
+        use dissent_video::encode::{self, EncoderConfig};
+        use dissent_video::pattern::PatternSource;
+        use dissent_video::source::{CaptureFormat, VideoSource};
+        let (w, h, fps) = (1280u32, 720u32, 30u32);
+        let mut src = PatternSource::new(CaptureFormat { width: w, height: h, fps }, 7);
+        let mut enc = encode::open(
+            Codec::H264,
+            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 2_000, keyframe_interval: 60 },
+        )
+        .unwrap();
+        let mut chunks = Vec::new();
+        for _ in 0..120 {
+            let frame = src.next_frame().unwrap();
+            chunks.extend(enc.encode(&frame).unwrap());
+        }
+        for (tile, interval) in [(320u32, PREVIEW_INTERVAL), (1280, PREVIEW_INTERVAL), (1280, LARGE_PREVIEW_INTERVAL)] {
+            let mut remote = RemoteVideo::default();
+            let mut work = Duration::ZERO;
+            let mut previews = 0;
+            let started = Instant::now();
+            for (i, chunk) in chunks.iter().enumerate() {
+                let frame = VideoFrame {
+                    sender: 1,
+                    frame_id: i as u32,
+                    keyframe: chunk.keyframe,
+                    codec: VideoCodec::H264,
+                    screen: false,
+                    payload: chunk.data.clone(),
+                };
+                let t = Instant::now();
+                if remote.show(&frame, tile, interval).is_some() {
+                    previews += 1;
+                }
+                work += t.elapsed();
+                let due = started + Duration::from_millis(33 * (i as u64 + 1));
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+            }
+            let secs = started.elapsed().as_secs_f64();
+            println!(
+                "PROBE tile {tile} px every {:?}: {previews} previews in {secs:.1} s, show() work {:.1}% of one core",
+                interval,
+                100.0 * work.as_secs_f64() / secs
+            );
+        }
+    }
+
+    #[test]
+    fn a_preview_is_as_wide_as_its_tile_and_no_faster_than_fifteen_a_second() {
+        use dissent_video::encode::{self, EncoderConfig};
+        use dissent_video::pattern::PatternSource;
+        use dissent_video::source::{CaptureFormat, VideoSource};
+        let (w, h, fps) = (640u32, 360u32, 30u32);
+        let mut src = PatternSource::new(CaptureFormat { width: w, height: h, fps }, 7);
+        let mut enc = encode::open(
+            Codec::H264,
+            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 800, keyframe_interval: 60 },
+        )
+        .unwrap();
+        let mut chunks = Vec::new();
+        for _ in 0..3 {
+            chunks.extend(enc.encode(&src.next_frame().unwrap()).unwrap());
+        }
+        let frame = |i: usize| VideoFrame {
+            sender: 1,
+            frame_id: i as u32,
+            keyframe: chunks[i].keyframe,
+            codec: VideoCodec::H264,
+            screen: false,
+            payload: chunks[i].data.clone(),
+        };
+
+        let mut small = RemoteVideo::default();
+        let first = small.show(&frame(0), 160, PREVIEW_INTERVAL).expect("the keyframe shows");
+        assert_eq!(first.width, 160, "a 160 px tile gets a 160 px preview");
+        assert!(small.show(&frame(1), 160, PREVIEW_INTERVAL).is_none(), "a second frame inside the interval makes no preview");
+
+        let mut large = RemoteVideo::default();
+        let wide = large.show(&frame(0), 1_280, PREVIEW_INTERVAL).expect("the keyframe shows");
+        assert_eq!(wide.width, w, "a tile wider than the frame gets the frame's own width");
     }
 
     #[test]

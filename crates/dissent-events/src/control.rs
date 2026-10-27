@@ -314,8 +314,11 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::CommunityBannerSet { .. }
             | Payload::CommunityProfileSet { .. }
             | Payload::ProfileBannerSet { .. }
+            | Payload::RelayHostSet { .. }
+            | Payload::MembersHostRelays { .. }
             | Payload::ChannelAccess { .. }
             | Payload::ChannelCreatePrivate { .. }
+            | Payload::CommunityIconAnimated { .. }
     )
 }
 

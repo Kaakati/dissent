@@ -8,7 +8,7 @@ import { formatBytes } from './format';
 
 // The segment colours are the current UI's, not tokens: accent for shared files, blue for downloads, grey for partials.
 const PARTS = [
-  { key: 'shared_bytes', label: 'Files you shared', color: '#d2452f' },
+  { key: 'shared_bytes', label: 'Files you shared', color: '#ff4f00' },
   { key: 'downloaded_bytes', label: 'Files you downloaded', color: '#4f8cff' },
   { key: 'partial_bytes', label: 'Partial and cancelled', color: '#6b6f78' },
 ] as const;

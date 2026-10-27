@@ -179,6 +179,19 @@ pub async fn set_network_settings(
     Ok(saved)
 }
 
+/// The relays in Settings: the home relay, and each relay with the latency the node measured. Reads the
+/// settings file and the running node. When the node is not running, nothing is measured yet.
+#[tauri::command]
+pub async fn relay_status(state: State<'_, AppState>) -> Result<crate::network::RelayStatus, String> {
+    let settings = crate::network::load(&state.data_dir);
+    let running = state.engine.read().await.clone();
+    let (community, hosted, report) = match running {
+        Some(engine) => (engine.joined_community_relays(), engine.hosted_relays(), engine.relay_report()),
+        None => (Vec::new(), Vec::new(), dissent_core::RelayReport::default()),
+    };
+    Ok(crate::network::status(&settings, &community, &hosted, &report))
+}
+
 #[tauri::command]
 pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -530,7 +543,7 @@ pub async fn unreact(
 
 #[tauri::command]
 pub async fn list_conversations(state: State<'_, AppState>) -> Result<Value, String> {
-    for_ui(&engine(&state).await?.conversations())
+    for_ui(&engine(&state).await?.sidebar_conversations())
 }
 
 #[tauri::command]

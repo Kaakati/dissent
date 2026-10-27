@@ -98,6 +98,17 @@ pub(crate) struct World {
     pub peer_avatars: BTreeMap<RootId, (Hlc, Option<Picture>)>,
     /// This device's profile banner, and the banners contacts sent directly. See `profile_banners`.
     pub banners: crate::profile_banners::BannerBook,
+    /// When each hosted relay last passed this app's check, in ms. In memory: after a restart a host
+    /// counts again once its relay passes. See `boosts`.
+    pub relay_checks: BTreeMap<String, u64>,
+    /// When each hosted relay was last probed, pass or not, so probes take turns. See `boosts`.
+    pub relay_probed: BTreeMap<String, u64>,
+    /// Relays this engine added to its node, so a reconcile can drop the ones no longer wanted.
+    /// Relays the node was configured with are not here. See `relays::reconcile_relays`.
+    pub relays_adopted: std::collections::BTreeSet<String>,
+    /// Relays from an invite or a community record, with when each arrived, kept for a while before
+    /// a community's events name them.
+    pub relays_transient: BTreeMap<String, u64>,
 }
 
 impl World {
@@ -199,6 +210,10 @@ impl World {
             own_avatar,
             peer_avatars,
             banners,
+            relay_checks: BTreeMap::new(),
+            relay_probed: BTreeMap::new(),
+            relays_adopted: std::collections::BTreeSet::new(),
+            relays_transient: BTreeMap::new(),
         })
     }
 
@@ -287,6 +302,7 @@ impl World {
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
             icon: self.icon_of(c),
+            icon_poster: self.icon_poster_of(c),
             mentions: self.community_mentions(c, crate::server_prefs::of(self, c.id()).suppress_everyone),
             can_mention_everyone: c.state().may_mention_everyone(&self.me),
         }
@@ -370,6 +386,7 @@ impl World {
             })
             .collect();
         let now = crate::engine::now_ms();
+        let hosts = self.boost_hosts(c, now);
         let members = c
             .state()
             .members
@@ -384,6 +401,7 @@ impl World {
                 role: c.role_of(root).to_string(),
                 banned: c.state().banned.contains(root),
                 status: self.presence_of(root, now),
+                relay_host: hosts.contains(root),
             })
             .collect();
         CommunityView {
@@ -392,10 +410,12 @@ impl World {
             owner: c.owner().to_string(),
             my_role: c.role_of(&self.me).to_string(),
             icon: self.icon_of(c),
+            icon_poster: self.icon_poster_of(c),
             can_mention_everyone: c.state().may_mention_everyone(&self.me),
             banner: self.banner_of(c),
             banner_poster: self.banner_poster_of(c),
             banner_preset: crate::invite_preview::preset_of(c.state().banner.and_then(|(_, b)| b)),
+            boost: self.boost_view(c, now),
             description: c.state().profile.as_ref().map(|(_, p)| p.description.clone()).unwrap_or_default(),
             traits: c.state().profile.as_ref().map(|(_, p)| p.traits.clone()).unwrap_or_default(),
             created_ms: c.genesis.created_ms,
@@ -457,6 +477,7 @@ impl World {
                     name: c.name().to_string(),
                 })
                 .collect(),
+            hosts_for: self.hosted_by(user, crate::engine::now_ms()),
         }
     }
 

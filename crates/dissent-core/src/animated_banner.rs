@@ -4,10 +4,11 @@
 //! most 960 by 540, and writes a new GIF that loops forever with no metadata. A still JPEG of the
 //! first frame goes beside it, for reduced motion. Over 2 MB or 200 frames, it first drops every
 //! other frame, doubling the delays, then lowers the resolution in steps, and refuses past that.
+//! An animated icon is the same, but cropped to a square, at most 256 by 256, 1 MB and 120 frames.
 
 use std::io::Cursor;
 
-use dissent_events::{Banner, Picture, MAX_ANIMATED_BANNER_BYTES, MAX_BANNER_BYTES};
+use dissent_events::{AnimatedIcon, Banner, Picture, MAX_ANIMATED_BANNER_BYTES, MAX_ANIMATED_ICON_BYTES, MAX_BANNER_BYTES, MAX_PICTURE_BYTES};
 use dissent_identity::CommunityId;
 use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
 use image::codecs::jpeg::JpegEncoder;
@@ -21,9 +22,38 @@ use crate::error::{CoreError, Result};
 pub const MAX_FRAMES: usize = 200;
 /// Most frames read from a source GIF before it is refused as too long.
 const MAX_SOURCE_FRAMES: usize = 2_000;
+/// Most frames an animated icon keeps.
+pub const MAX_ICON_FRAMES: usize = 120;
 /// The widths tried, largest first, when the GIF is over the byte cap. Heights keep 16:9.
 const WIDTHS: [u32; 5] = [960, 720, 540, 400, 320];
+/// The sides tried for an icon, largest first, when its GIF is over the byte cap. Icons are square.
+const ICON_SIDES: [u32; 4] = [256, 192, 128, 96];
 const POSTER_QUALITY: u8 = 85;
+
+/// The shape an animated picture is encoded to: a 16:9 banner, or a square icon.
+struct Fit {
+    square: bool,
+    widths: &'static [u32],
+    max_frames: usize,
+    max_bytes: u64,
+    what: &'static str,
+}
+
+const BANNER: Fit = Fit {
+    square: false,
+    widths: &WIDTHS,
+    max_frames: MAX_FRAMES,
+    max_bytes: MAX_ANIMATED_BANNER_BYTES,
+    what: "a banner",
+};
+
+const ICON: Fit = Fit {
+    square: true,
+    widths: &ICON_SIDES,
+    max_frames: MAX_ICON_FRAMES,
+    max_bytes: MAX_ANIMATED_ICON_BYTES,
+    what: "an icon",
+};
 
 /// The crop of a GIF, in source pixels of the frame after `rot` quarter turns clockwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,12 +86,23 @@ fn is_animated_gif(bytes: &[u8]) -> bool {
 
 /// Decodes, crops, scales and re-encodes an animated GIF as a looping banner. See the module doc.
 pub fn encode_banner(bytes: &[u8], crop: CropRect) -> Result<EncodedBanner> {
+    encode(bytes, crop, &BANNER)
+}
+
+/// Decodes, crops to a square, scales and re-encodes an animated GIF as a looping icon. The square
+/// is the crop's shorter side, centred in the crop. See the module doc.
+pub fn encode_icon(bytes: &[u8], crop: CropRect) -> Result<EncodedBanner> {
+    encode(bytes, crop, &ICON)
+}
+
+fn encode(bytes: &[u8], crop: CropRect, fit: &Fit) -> Result<EncodedBanner> {
     if !bytes.starts_with(b"GIF8") {
         return Err(bad("the file is not a GIF"));
     }
     if crop.w == 0 || crop.h == 0 || crop.rot > 3 {
         return Err(bad("the crop is empty"));
     }
+    let crop = if fit.square { square_of(crop) } else { crop };
     let decoder = GifDecoder::new(Cursor::new(bytes)).map_err(bad)?;
     let mut frames = Vec::new();
     for frame in decoder.into_frames().take(MAX_SOURCE_FRAMES + 1) {
@@ -81,25 +122,42 @@ pub fn encode_banner(bytes: &[u8], crop: CropRect) -> Result<EncodedBanner> {
     if frames.is_empty() {
         return Err(bad("the GIF has no frames"));
     }
-    while frames.len() > MAX_FRAMES {
+    while frames.len() > fit.max_frames {
         frames = halve(frames);
     }
     let crop_w = frames[0].0.width();
-    let widths: Vec<u32> = WIDTHS.iter().map(|w| (*w).min(crop_w).max(16)).collect();
+    let widths: Vec<u32> = fit.widths.iter().map(|w| (*w).min(crop_w).max(16)).collect();
     // All frames at full size first, then every other frame, then smaller sizes.
     let mut plan: Vec<(bool, u32)> = vec![(false, widths[0])];
     plan.extend(widths.iter().map(|w| (true, *w)));
     let halved = halve(frames.clone());
     for (drop, width) in plan {
         let source = if drop && frames.len() > 1 { &halved } else { &frames };
-        let scaled = scale(source, width);
+        let scaled = scale(source, width, fit.square);
         let gif = encode_gif(&scaled)?;
-        if gif.len() as u64 <= MAX_ANIMATED_BANNER_BYTES {
+        if gif.len() as u64 <= fit.max_bytes {
             let poster = encode_poster(&scaled[0].0)?;
             return Ok(EncodedBanner { gif, poster });
         }
     }
-    Err(bad("it does not fit in 2 MB even with fewer frames at 320 px; try a shorter or simpler GIF"))
+    let smallest = widths.last().copied().unwrap_or(16);
+    Err(bad(format!(
+        "{} does not fit in {} MB even with fewer frames at {smallest} px; try a shorter or simpler GIF",
+        fit.what,
+        fit.max_bytes / (1024 * 1024)
+    )))
+}
+
+/// The square an icon is cut to: the crop's shorter side, centred in the crop.
+fn square_of(crop: CropRect) -> CropRect {
+    let side = crop.w.min(crop.h);
+    CropRect {
+        x: crop.x + (crop.w - side) / 2,
+        y: crop.y + (crop.h - side) / 2,
+        w: side,
+        h: side,
+        rot: crop.rot,
+    }
 }
 
 fn rotate(img: RgbaImage, rot: u8) -> RgbaImage {
@@ -123,9 +181,9 @@ fn halve(frames: Vec<(RgbaImage, Delay)>) -> Vec<(RgbaImage, Delay)> {
         .collect()
 }
 
-/// Each frame scaled to `width` by `width * 9 / 16`.
-fn scale(frames: &[(RgbaImage, Delay)], width: u32) -> Vec<(RgbaImage, Delay)> {
-    let height = (width * 9 / 16).max(9);
+/// Each frame scaled to `width` by `width * 9 / 16`, or to a square for an icon.
+fn scale(frames: &[(RgbaImage, Delay)], width: u32, square: bool) -> Vec<(RgbaImage, Delay)> {
+    let height = if square { width } else { (width * 9 / 16).max(9) };
     frames
         .iter()
         .map(|(img, delay)| (imageops::resize(img, width, height, imageops::FilterType::Triangle), *delay))
@@ -171,7 +229,41 @@ fn check_prepared(gif: &[u8], poster: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Checks a prepared icon before it is stored: a square GIF within the cap and at most 256 by 256,
+/// and a JPEG poster within the picture cap.
+fn check_prepared_icon(gif: &[u8], poster: &[u8]) -> Result<()> {
+    if !gif.starts_with(b"GIF8") || gif.is_empty() || gif.len() as u64 > MAX_ANIMATED_ICON_BYTES {
+        return Err(bad("the icon GIF must be at most 1 MB"));
+    }
+    let (w, h) = GifDecoder::new(Cursor::new(gif)).map_err(bad)?.dimensions();
+    if w != h || w > 256 {
+        return Err(bad("the icon GIF must be square, at most 256 by 256"));
+    }
+    if !poster.starts_with(&[0xFF, 0xD8, 0xFF]) || poster.len() as u64 > MAX_PICTURE_BYTES {
+        return Err(bad("the poster must be a JPEG of at most 256 KB"));
+    }
+    Ok(())
+}
+
 impl Engine {
+    /// Re-encodes an animated GIF as a square icon, in a blocking task. The editor calls this while it
+    /// shows its spinner, then hands the result to `set_community_icon_animated`.
+    pub async fn prepare_animated_icon(&self, bytes: Vec<u8>, crop: CropRect) -> Result<EncodedBanner> {
+        tokio::task::spawn_blocking(move || encode_icon(&bytes, crop))
+            .await
+            .map_err(|e| bad(format!("the encoder stopped: {e}")))?
+    }
+
+    /// Sets a community's icon to a prepared animated GIF, with its poster. Owners and admins only.
+    /// A newer icon event replaces the still icon, as a newer still one replaces this.
+    pub async fn set_community_icon_animated(&self, community: CommunityId, gif: Vec<u8>, poster: Vec<u8>) -> Result<()> {
+        self.check_can_set_icon(community)?;
+        check_prepared_icon(&gif, &poster)?;
+        let image = self.store_avatar_picture(gif, MAX_ANIMATED_ICON_BYTES).await?;
+        let poster = self.store_avatar_picture(poster, MAX_PICTURE_BYTES).await?;
+        self.publish_animated_icon(community, Some(AnimatedIcon { image, poster })).await
+    }
+
     /// Re-encodes an animated GIF for a banner, in a blocking task so nothing else waits on it. The
     /// editor calls this while it shows its spinner, then hands the result to one of the setters.
     pub async fn prepare_animated_banner(&self, bytes: Vec<u8>, crop: CropRect) -> Result<EncodedBanner> {
@@ -205,6 +297,30 @@ impl Engine {
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[test]
+    fn an_icon_is_cut_to_a_centred_square_of_at_most_256() {
+        let src = source_gif(3, 400, 300, false);
+        // The shorter side of a 300 by 200 crop is 200, so the square is 200 by 200, centred in it.
+        let out = encode_icon(&src, CropRect { x: 50, y: 0, w: 300, h: 200, rot: 0 }).unwrap();
+        let frames = frames_of(&out.gif);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].buffer().dimensions(), (200, 200));
+        // A larger square is scaled down to 256 by 256, and never up.
+        let big = encode_icon(&src, CropRect { x: 0, y: 0, w: 400, h: 300, rot: 0 }).unwrap();
+        assert_eq!(frames_of(&big.gif)[0].buffer().dimensions(), (256, 256));
+        check_prepared_icon(&big.gif, &big.poster).unwrap();
+    }
+
+    #[test]
+    fn an_icon_over_120_frames_drops_every_other_frame_and_keeps_its_pace() {
+        let src = source_gif(130, 64, 64, false);
+        let out = encode_icon(&src, CropRect { x: 0, y: 0, w: 64, h: 64, rot: 0 }).unwrap();
+        let frames = frames_of(&out.gif);
+        assert_eq!(frames.len(), 65, "130 frames halved to 65");
+        assert!(frames.len() <= MAX_ICON_FRAMES);
+        assert_eq!(frames[0].delay().numer_denom_ms(), (200, 1), "each kept frame lasts twice as long");
+    }
 
     /// A GIF of `frames` solid frames of `w` by `h`, 100 ms each, with a comment and a finite loop
     /// count, as a source from the web might have.

@@ -34,6 +34,13 @@ const MAX_NAME_CHARS: usize = 64;
 /// Shared engine state. Tasks hold `Weak` references to it.
 pub(crate) struct Inner {
     pub identity: Identity,
+    /// Whether communities' relays are added to the node. From `NodeConfig::community_relays`.
+    pub community_relays: bool,
+    /// Whether loopback relays are accepted, for a node that runs on loopback alone. From
+    /// `NodeConfig::loopback_only`. Private and local relay addresses are refused otherwise.
+    pub loopback_relays: bool,
+    /// Held while the node's relays are reconciled, so two reconciles do not interleave.
+    pub relay_reconcile: tokio::sync::Mutex<()>,
     pub me: RootId,
     pub world: RwLock<World>,
     /// This device's MLS state. Every change goes through `Engine::with_mls`, which saves it.
@@ -96,6 +103,9 @@ pub(crate) struct Inner {
     pub files: std::sync::Arc<dissent_files::Files>,
     /// Invite previews this device fetched, and how often each requester asked it for one.
     pub previews: crate::invite_preview::PreviewState,
+    /// Relay checks this device ran for others, per requester, so one device can't make it dial relays
+    /// without limit. See `boosts::RelayAsks`.
+    pub relay_asks: crate::boosts::RelayAsks,
     /// Friend lists fetched from contacts, and how often each requester asked this device for ours.
     pub friends: crate::friends::FriendsState,
     /// Whether this device answers `HistorySupport` with yes. Off only in tests, to model an older device.
@@ -105,6 +115,13 @@ pub(crate) struct Inner {
     /// Set only in tests, to model a device from before `profile_sync` (v0.1.6): it neither syncs nor
     /// answers `ProfileSync`, and takes a pushed profile only.
     pub legacy_profiles: AtomicBool,
+    /// Set only in tests: `Engine::in_call` answers yes, as during a call.
+    pub pretend_in_call: AtomicBool,
+    /// Set only in tests, to model a released device from before `CallMsg::Features`: it sends none,
+    /// and cannot decode one, so it answers it as a bad request.
+    pub legacy_calls: AtomicBool,
+    /// Set only in tests: every community's boost level reads as this. `u8::MAX` means not set.
+    pub boost_level_override: std::sync::atomic::AtomicU8,
     /// Whether every other member device supports history messages, as last checked, per community.
     pub history_ready: Mutex<BTreeMap<CommunityId, crate::history::ReadyAnswer>>,
     /// Communities with a background check of `history_ready` running.
@@ -187,6 +204,9 @@ impl Engine {
         let (events, rx) = broadcast::channel(EVENT_BUFFER);
         let inner = Arc::new(Inner {
             identity,
+            community_relays: net.community_relays,
+            loopback_relays: net.loopback_only,
+            relay_reconcile: tokio::sync::Mutex::new(()),
             me,
             world: RwLock::new(world),
             clock: Mutex::new(HlcClock::new()),
@@ -219,10 +239,14 @@ impl Engine {
             timings,
             files,
             previews: Default::default(),
+            relay_asks: Default::default(),
             friends: Default::default(),
             history_support: AtomicBool::new(true),
             profile_synced: Default::default(),
             legacy_profiles: AtomicBool::new(false),
+            pretend_in_call: AtomicBool::new(false),
+            legacy_calls: AtomicBool::new(false),
+            boost_level_override: std::sync::atomic::AtomicU8::new(u8::MAX),
             history_ready: Mutex::new(crate::history::load_ready(&paths_for_ready)),
             history_checking: Default::default(),
             history_keys: Default::default(),
@@ -277,6 +301,7 @@ impl Engine {
         engine.spawn_task(crate::saved::reminder_clock(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::typing::typing_loop(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::dht_probe::dht_probe_loop(Arc::downgrade(&engine.inner)));
         engine.prune_thumbnails();
         Ok((engine, rx))
     }
@@ -354,8 +379,35 @@ impl Engine {
         out
     }
 
+    /// Devices that may use this device's relay for the servers it belongs to: the devices of every
+    /// current member of every server, plus our own other devices. It changes as members join, leave
+    /// or are banned, so a caller compares the result with the last one it used.
+    pub fn relay_member_devices(&self) -> Vec<DeviceId> {
+        let w = self.read();
+        let mut out: BTreeSet<DeviceId> = BTreeSet::new();
+        for c in w.communities.values() {
+            // A ban does not mark the member as left, so banned roots are skipped here as well.
+            let state = c.state();
+            for (root, member) in &state.members {
+                if member.left || state.banned.contains(root) || *root == w.me {
+                    continue;
+                }
+                out.extend(w.directory.devices_of(root));
+            }
+        }
+        out.extend(w.directory.devices_of(&w.me));
+        out.insert(self.inner.identity.device_id());
+        out.into_iter().collect()
+    }
+
     pub fn user_profile(&self, user: RootId) -> UserView {
         self.read().user_view(&user)
+    }
+
+    /// The latest relay measurements: the home relay and each relay's best latency. Empty before the
+    /// node starts or before the first net report.
+    pub fn relay_report(&self) -> dissent_net::RelayReport {
+        self.inner.node.get().map(|node| node.relay_report()).unwrap_or_default()
     }
 
     /// DHT stats, peer count and home relay, for the status bar. Never fails: a DHT error
@@ -391,7 +443,8 @@ impl Engine {
             .as_ref()
             .and_then(|a| a.relay.as_ref())
             .and_then(|url| url.host_str().map(str::to_string));
-        NetStatusView { dht, peers, relay, dials }
+        let relay_ms = self.relay_ms();
+        NetStatusView { dht, peers, relay, relay_ms, dials }
     }
 
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, World> {

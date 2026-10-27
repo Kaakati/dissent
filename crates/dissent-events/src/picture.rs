@@ -14,6 +14,23 @@ pub const MAX_BANNER_BYTES: u64 = 512 * 1024;
 pub const BANNER_PRESETS: u8 = 10;
 /// Largest animated banner accepted, in plaintext bytes: a looping GIF, at most 960 by 540.
 pub const MAX_ANIMATED_BANNER_BYTES: u64 = 2 * 1024 * 1024;
+/// Largest animated icon accepted, in plaintext bytes: a looping GIF, at most 256 by 256.
+pub const MAX_ANIMATED_ICON_BYTES: u64 = 1024 * 1024;
+
+/// An animated community icon: a looping square GIF, and a still poster frame shown under reduced
+/// motion and while the window is in the background. Appended with `Payload::CommunityIconAnimated`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimatedIcon {
+    pub image: Picture,
+    pub poster: Picture,
+}
+
+impl AnimatedIcon {
+    /// Whether the GIF is non-empty and within the animated icon cap, and the poster within the picture cap.
+    pub fn is_valid(&self) -> bool {
+        (1..=MAX_ANIMATED_ICON_BYTES).contains(&self.image.size) && self.poster.is_valid()
+    }
+}
 
 /// A community banner: one of the preset gradients, which the UI draws, or an uploaded picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +158,31 @@ mod tests {
         let st = replay_with(owner.id(), &dag_of(evs), &[]);
         assert!(st.rejected.is_empty());
         assert_eq!(st.avatars[&bob.id()].1, Some(pic(2)));
+    }
+
+    #[test]
+    fn the_newer_of_an_animated_and_a_still_icon_shows() {
+        let owner = User::new();
+        let member = User::new();
+        let mut evs = Vec::new();
+        chain(&mut evs, &owner, Payload::Join { display_name: "boss".into() });
+        chain(&mut evs, &member, Payload::Join { display_name: "bob".into() });
+        let animated = AnimatedIcon { image: pic(6), poster: pic(7) };
+        chain(&mut evs, &owner, Payload::CommunityIconAnimated { icon: Some(animated) });
+        let refused = chain(&mut evs, &member, Payload::CommunityIconAnimated { icon: None });
+        let too_big = AnimatedIcon {
+            image: Picture { size: MAX_ANIMATED_ICON_BYTES + 1, ..pic(9) },
+            poster: pic(7),
+        };
+        let oversize = chain(&mut evs, &owner, Payload::CommunityIconAnimated { icon: Some(too_big) });
+        let st = replay_with(owner.id(), &dag_of(evs.clone()), &[]);
+        assert!(st.rejected.contains(&(refused, Rejection::NoPermission)));
+        assert!(st.rejected.iter().any(|(id, _)| *id == oversize), "a GIF over the cap is refused");
+        assert_eq!(st.shown_icon(), Some((pic(6), Some(pic(7)))), "the animated icon shows with its poster");
+        // A still icon set after the animated one is the newer event, so it shows, without a poster.
+        chain(&mut evs, &owner, Payload::CommunityIconSet { avatar: Some(pic(8)) });
+        let st = replay_with(owner.id(), &dag_of(evs), &[]);
+        assert_eq!(st.shown_icon(), Some((pic(8), None)));
     }
 
     #[test]

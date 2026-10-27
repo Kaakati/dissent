@@ -6,7 +6,7 @@ use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use dissent_core::CommunityId;
+use dissent_core::{CommunityId, CropRect};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{Manager, State};
@@ -61,6 +61,32 @@ pub async fn clear_community_icon(state: State<'_, AppState>, community_id: Stri
     engine(&state).await?.clear_community_icon(community).await.map_err(err)
 }
 
+/// A prepared animated icon, as base64: the looping square GIF and its still poster frame.
+#[derive(serde::Serialize)]
+pub struct PreparedIcon {
+    gif: String,
+    poster: String,
+}
+
+/// Re-encodes an animated GIF as a square icon: the original bytes and the crop in source pixels. Runs
+/// off the UI's thread; the editor shows a spinner until it answers.
+#[tauri::command]
+pub async fn prepare_animated_icon(state: State<'_, AppState>, bytes: String, crop: CropRect) -> Result<PreparedIcon, String> {
+    let bytes = STANDARD.decode(&bytes).map_err(err)?;
+    let out = engine(&state).await?.prepare_animated_icon(bytes, crop).await.map_err(err)?;
+    Ok(PreparedIcon {
+        gif: STANDARD.encode(out.gif),
+        poster: STANDARD.encode(out.poster),
+    })
+}
+
+#[tauri::command]
+pub async fn set_community_icon_animated(state: State<'_, AppState>, community_id: String, gif: String, poster: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let (gif, poster) = (STANDARD.decode(&gif).map_err(err)?, STANDARD.decode(&poster).map_err(err)?);
+    engine(&state).await?.set_community_icon_animated(community, gif, poster).await.map_err(err)
+}
+
 /// Serialises a view for the UI. Under `avatar`, `icon` and `banner`, local picture paths become
 /// asset URLs.
 pub fn for_ui<T: Serialize>(view: &T) -> Result<Value, String> {
@@ -74,7 +100,7 @@ fn asset_urls(value: &mut Value) {
         Value::Object(map) => {
             for (key, field) in map.iter_mut() {
                 let url = match (key.as_str(), &*field) {
-                    ("avatar" | "icon" | "banner" | "banner_poster", Value::String(path)) if Path::new(path).is_absolute() => {
+                    ("avatar" | "icon" | "icon_poster" | "banner" | "banner_poster", Value::String(path)) if Path::new(path).is_absolute() => {
                         Some(asset_url(path))
                     }
                     _ => None,

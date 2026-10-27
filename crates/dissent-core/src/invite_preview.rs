@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use dissent_discovery::InviteLink;
 use dissent_events::state::valid_community_name;
 use dissent_events::state::{valid_profile, CommunityProfile};
-use dissent_events::{Banner, ChannelId, Payload, Picture, SealKey, SignedEvent, Trait};
+use dissent_events::{AnimatedIcon, Banner, ChannelId, Payload, Picture, SealKey, SignedEvent, Trait};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, Genesis, Signature};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
@@ -194,7 +194,10 @@ pub struct InvitePreviewView {
     pub community: String,
     pub name: String,
     /// Path of the decrypted icon on this device. `None` when there is none yet, so show initials.
+    /// For an animated icon, its GIF, when it came with the more part.
     pub icon: Option<String>,
+    /// Path of an animated icon's still frame, shown under reduced motion. `None` for a still icon.
+    pub icon_poster: Option<String>,
     /// Path of the decrypted banner on this device. `None` when there is none or it is not fetched.
     pub banner: Option<String>,
     /// Path of an animated banner's still frame, shown under reduced motion.
@@ -214,13 +217,72 @@ pub struct InvitePreviewView {
     pub invite: InviteStatus,
     /// True when this device is already in the community. Then "Go to Server" replaces "Join".
     pub already_member: bool,
+    /// The server's boost level and its verified relay hosts, as the answering member counts them.
+    /// Zero from a member that predates boosts.
+    pub boost_level: u8,
+    pub boost_hosts: u32,
 }
 
 /// A preview's key in the cache: the community and the invite id the requester named.
 type PreviewKey = (CommunityId, Option<[u8; 16]>);
 
-/// A verified answer: the preview, and its extra when the member sent one.
-type Answered = (SignedPreview, PreviewExtra);
+/// A verified answer: the preview, its extra when the member sent one, and the part only newer
+/// members send.
+type Answered = (SignedPreview, PreviewExtra, Option<PreviewMore>);
+
+/// What a preview adds past `PreviewExtra`, whose encoding the released clients decode: the banner
+/// in a form they may not know (an animated GIF), and the server's boost. The answer to
+/// `Request::InvitePreviewMore`. Only the answering member vouches for it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PreviewMore {
+    pub banner: Option<Banner>,
+    /// The boost level and verified relay hosts, as the answering member counts them.
+    pub boost_level: u8,
+    pub boost_hosts: u32,
+    /// The animated icon, when the community has one. The preview's own icon is its still poster.
+    pub icon: Option<AnimatedIcon>,
+}
+
+/// A full preview with its more, signed by the same device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignedPreviewMore {
+    pub full: SignedPreviewFull,
+    pub more: PreviewMore,
+    pub sig: Signature,
+}
+
+const MORE_SIG_DOMAIN: &[u8] = b"dissent/invite-preview-more/v1";
+
+fn more_signing_bytes(community: &CommunityId, full: &Signature, more: &PreviewMore) -> Result<Vec<u8>> {
+    let mut out = MORE_SIG_DOMAIN.to_vec();
+    out.extend_from_slice(community.as_bytes());
+    out.extend(postcard::to_allocvec(&(full, more)).map_err(|e| CoreError::Encoding(e.to_string()))?);
+    Ok(out)
+}
+
+impl SignedPreviewMore {
+    pub(crate) fn verify(&self, community: &CommunityId) -> Result<()> {
+        self.full.verify(community)?;
+        if self.more.banner.is_some_and(|b| !b.is_valid()) || self.more.icon.is_some_and(|i| !i.is_valid()) || self.more.boost_level > 3 {
+            return Err(CoreError::Invalid("invite preview: the more part is out of range".into()));
+        }
+        self.full
+            .base
+            .cert
+            .device
+            .verify(&more_signing_bytes(community, &self.full.sig, &self.more)?, &self.sig)
+            .map_err(|_| CoreError::Invalid("invite preview: the more part's signature does not verify".into()))
+    }
+}
+
+/// A banner as the released `PreviewExtra` can carry it: an animated one as its still poster, which
+/// released clients decode, while `PreviewMore` carries the GIF.
+fn released_banner(banner: Option<Banner>) -> Option<Banner> {
+    match banner {
+        Some(Banner::Animated { poster, .. }) => Some(Banner::Image(poster)),
+        other => other,
+    }
+}
 
 /// A cached preview, when it was fetched, and the peer that answered it.
 type Cached = (Instant, Answered, PeerAddr);
@@ -240,6 +302,16 @@ impl PreviewState {
         let mut asks = self.asks.lock().unwrap_or_else(PoisonError::into_inner);
         if asks.len() >= MAX_TRACKED_ASKERS {
             asks.retain(|_, times| times.back().is_some_and(|t| now.duration_since(*t) < ASK_WINDOW));
+        }
+        // The cap is hard: a new requester evicts the one that asked longest ago.
+        while asks.len() >= MAX_TRACKED_ASKERS && !asks.contains_key(&from) {
+            let oldest = asks.iter().min_by_key(|(_, times)| times.back().copied()).map(|(id, _)| *id);
+            match oldest {
+                Some(id) => {
+                    asks.remove(&id);
+                }
+                None => break,
+            }
         }
         let times = asks.entry(from).or_default();
         while times.front().is_some_and(|t| now.duration_since(*t) >= ASK_WINDOW) {
@@ -345,7 +417,7 @@ impl Engine {
             };
             PreviewExtra {
                 rename: c.latest_rename(),
-                banner: c.state().banner.and_then(|(_, banner)| banner),
+                banner: released_banner(c.state().banner.and_then(|(_, banner)| banner)),
                 profile: c.state().profile.as_ref().map(|(_, p)| p.clone()),
             }
         };
@@ -357,6 +429,42 @@ impl Engine {
         Response::InvitePreviewFull(Box::new(SignedPreviewFull { base, extra, sig }))
     }
 
+    /// Answers `InvitePreviewMore`: the full preview, and the more part signed beside it.
+    pub(crate) fn answer_invite_preview_more(
+        &self,
+        from: DeviceId,
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    ) -> Response {
+        let full = match self.answer_invite_preview_full(from, community, token, invite_id) {
+            Response::InvitePreviewFull(full) => *full,
+            other => return other,
+        };
+        let more = {
+            let w = self.read();
+            let Some(c) = w.communities.get(&community) else {
+                return Response::Error(not_found(&community).to_string());
+            };
+            let hosts = w.boost_hosts(c, now_ms()).len();
+            PreviewMore {
+                banner: c.state().banner.and_then(|(_, banner)| banner),
+                boost_level: crate::boosts::level_for(hosts),
+                boost_hosts: u32::try_from(hosts).unwrap_or(u32::MAX),
+                icon: match c.state().shown_icon() {
+                    Some((image, Some(poster))) => Some(AnimatedIcon { image, poster }),
+                    _ => None,
+                },
+            }
+        };
+        let bytes = match more_signing_bytes(&community, &full.sig, &more) {
+            Ok(bytes) => bytes,
+            Err(e) => return Response::Error(e.to_string()),
+        };
+        let sig = self.inner.identity.device.sign(&bytes);
+        Response::InvitePreviewMore(Box::new(SignedPreviewMore { full, more, sig }))
+    }
+
     /// This device's signed preview of `community`.
     fn signed_preview(&self, community: CommunityId, invite_id: Option<[u8; 16]>, now: u64) -> Result<SignedPreview> {
         let (genesis, preview) = {
@@ -365,7 +473,7 @@ impl Engine {
             let (member_count, online_count) = member_counts(&w, c, now);
             let preview = InvitePreview {
                 name: c.genesis.name.clone(),
-                icon: c.state().icon.and_then(|(_, picture)| picture),
+                icon: c.state().shown_icon().map(|(image, poster)| poster.unwrap_or(image)),
                 member_count,
                 online_count,
                 created_ms: c.genesis.created_ms,
@@ -393,8 +501,21 @@ impl Engine {
         if let Some(view) = self.own_preview(&link) {
             return Ok(view);
         }
-        let ((signed, extra), peer) = self.fetched_preview(&link).await?;
-        let icon = self.icon_path(signed.preview.icon, &peer).await;
+        let ((signed, mut extra, more), peer) = self.fetched_preview(&link).await?;
+        // A newer member sends the banner as it is, an animated GIF included.
+        if let Some(m) = &more {
+            extra.banner = m.banner;
+        }
+        // The preview's icon is the still frame, or the still icon. An animated icon's GIF comes in the more part.
+        let still = self.icon_path(signed.preview.icon, &peer).await;
+        let gif = match more.as_ref().and_then(|m| m.icon) {
+            Some(animated) => self.icon_path(Some(animated.image), &peer).await,
+            None => None,
+        };
+        let (icon, icon_poster) = match gif {
+            Some(gif) => (Some(gif), still),
+            None => (still, None),
+        };
         let banner = self.icon_path(extra.banner.and_then(|b| b.picture()), &peer).await;
         let banner_poster = self.icon_path(extra.banner.and_then(|b| b.poster()), &peer).await;
         let profile = extra.profile.clone().unwrap_or_default();
@@ -410,6 +531,7 @@ impl Engine {
             community: id.to_string(),
             name,
             icon,
+            icon_poster,
             banner,
             banner_poster,
             banner_preset: preset_of(extra.banner),
@@ -420,6 +542,8 @@ impl Engine {
             created_ms: preview.created_ms,
             invite: preview.invite,
             already_member: false,
+            boost_level: more.as_ref().map_or(0, |m| m.boost_level),
+            boost_hosts: more.as_ref().map_or(0, |m| m.boost_hosts),
         })
     }
 
@@ -435,6 +559,7 @@ impl Engine {
             community: id.to_string(),
             name: c.name().to_string(),
             icon: w.icon_of(c),
+            icon_poster: w.icon_poster_of(c),
             banner: w.banner_of(c),
             banner_poster: w.banner_poster_of(c),
             banner_preset: preset_of(c.state().banner.and_then(|(_, b)| b)),
@@ -445,6 +570,8 @@ impl Engine {
             created_ms: c.genesis.created_ms,
             invite: invite_status(c, link.invite_id(), now),
             already_member: true,
+            boost_level: w.boost_level(c, now),
+            boost_hosts: u32::try_from(w.boost_hosts(c, now).len()).unwrap_or(u32::MAX),
         })
     }
 
@@ -508,6 +635,16 @@ impl Engine {
         invite_id: Option<[u8; 16]>,
         peer: &PeerAddr,
     ) -> Result<Answered> {
+        let more = Request::InvitePreviewMore {
+            community: id,
+            token,
+            invite_id,
+        };
+        if let Response::InvitePreviewMore(signed) = self.ask_once(peer, &more).await? {
+            signed.verify(&id)?;
+            let SignedPreviewMore { full, more, .. } = *signed;
+            return Ok((full.base, full.extra, Some(more)));
+        }
         let full = Request::InvitePreviewFull {
             community: id,
             token,
@@ -515,7 +652,7 @@ impl Engine {
         };
         if let Response::InvitePreviewFull(signed) = self.ask_once(peer, &full).await? {
             signed.verify(&id)?;
-            return Ok((signed.base, signed.extra));
+            return Ok((signed.base, signed.extra, None));
         }
         let req = Request::InvitePreview {
             community: id,
@@ -525,7 +662,7 @@ impl Engine {
         match self.ask_once(peer, &req).await? {
             Response::InvitePreview(signed) => {
                 signed.verify(&id)?;
-                Ok((*signed, PreviewExtra::default()))
+                Ok((*signed, PreviewExtra::default(), None))
             }
             Response::Refused(why) | Response::Error(why) => Err(CoreError::Rejected(why)),
             _ => Err(CoreError::Invalid("unexpected reply to an invite preview".into())),
@@ -552,3 +689,21 @@ impl Engine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn the_requester_table_never_exceeds_its_cap() {
+        let state = PreviewState::default();
+        let start = Instant::now();
+        for n in 0..(MAX_TRACKED_ASKERS as u32 + 200) {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&n.to_le_bytes());
+            state.admit(DeviceId(id), start);
+        }
+        let len = state.asks.lock().unwrap().len();
+        assert!(len <= MAX_TRACKED_ASKERS, "{len} requesters tracked");
+    }
+}

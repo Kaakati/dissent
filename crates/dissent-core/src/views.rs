@@ -32,6 +32,9 @@ pub struct CommunitySummary {
     pub my_role: String,
     /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
     pub icon: Option<String>,
+    /// Path of an animated icon's still frame, shown under reduced motion and while the window is in
+    /// the background. `None` for a still icon.
+    pub icon_poster: Option<String>,
     /// Unread mentions of me in the community's text channels, since each was last marked read.
     pub mentions: u32,
     /// Whether this device's user may mention everyone here: the owner and admins.
@@ -46,12 +49,17 @@ pub struct CommunityView {
     pub my_role: String,
     /// Path of the decrypted icon on this device, once fetched. `None` when there is none yet.
     pub icon: Option<String>,
+    /// Path of an animated icon's still frame, shown under reduced motion and while the window is in
+    /// the background. `None` for a still icon.
+    pub icon_poster: Option<String>,
     /// Path of the decrypted banner on this device, once fetched. `None` when there is none yet.
     pub banner: Option<String>,
     /// Path of an animated banner's still frame, shown under reduced motion.
     pub banner_poster: Option<String>,
     /// The preset gradient the banner is, when it is one. The UI draws presets itself.
     pub banner_preset: Option<u8>,
+    /// The server's boost, as this app verifies its relay hosts. See `boosts`.
+    pub boost: crate::boosts::BoostView,
     /// The description from Server Settings, empty when there is none.
     pub description: String,
     /// The traits from Server Settings, at most five.
@@ -169,6 +177,8 @@ pub struct MemberInfo {
     pub banned: bool,
     /// What others see of this member: their status, or offline.
     pub status: crate::presence::Presence,
+    /// Whether this app verifies the member as a relay host of this server. See `boosts`.
+    pub relay_host: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -250,6 +260,8 @@ pub struct UserView {
     pub is_contact: bool,
     pub handles: Vec<HandleView>,
     pub mutual_communities: Vec<CommunityRef>,
+    /// The shared servers this app verifies the person as a relay host of. See `boosts`.
+    pub hosts_for: Vec<CommunityRef>,
     /// Our contacts that they also have, when they share their list with us. Filled by
     /// `Engine::user_profile_full`; empty otherwise.
     pub mutual_friends: Vec<crate::friends::FriendView>,
@@ -368,8 +380,18 @@ pub enum EngineEvent {
         community_id: Option<String>,
     },
     CommunityUpdated { community_id: String },
+    /// A new message in a channel. Alerts and sounds are decided from this event alone.
     Message { community_id: String, channel_id: String },
+    /// Messages in a channel changed, and no new one came: an edit, a delete, a reaction, or history keys that
+    /// made older messages readable. The view re-reads the channel. Nothing alerts.
+    MessagesChanged { community_id: String, channel_id: String },
+    /// A new direct message came from this peer.
     Dm { peer: String },
+    /// Direct messages with this peer changed, and none came from the peer: our own message was delivered, or the
+    /// conversation's details changed. The view re-reads it. Nothing alerts.
+    DmChanged { peer: String },
+    /// A new text message in a group. Alerts are decided from this event alone.
+    Group { group_id: String },
     /// A conversation changed: a message, a rename, a member added or removed, or a new group.
     ConversationChanged { id: String },
     /// Someone asked to join a group with an invite link. Approve or decline it.
@@ -428,6 +450,9 @@ pub enum EngineEvent {
     },
     /// A reminder's time has come. It is removed from the list as it fires. Appended, see `saved`.
     ReminderDue { reminder: crate::saved::Reminder },
+    /// The latest latency measurements for the status bar, in milliseconds: the median DHT lookup time and the home relay's
+    /// round trip. `None` when there is no reading. Sent every DHT probe, so the bar updates without polling.
+    NetLatency { dht_ms: Option<u64>, relay_ms: Option<u64> },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.
@@ -451,6 +476,8 @@ pub struct NetStatusView {
     pub peers: usize,
     /// Host of our home relay, when we have one.
     pub relay: Option<String>,
+    /// The home relay's round-trip time in milliseconds, from the latest net report. `None` when unknown.
+    pub relay_ms: Option<u64>,
     /// How dials were resolved since start. See `DialsView`.
     pub dials: DialsView,
 }

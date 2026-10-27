@@ -1,6 +1,7 @@
 //! Authoring. Each local change becomes a signed event. Replay checks it before it is stored or sent.
 
 use crate::attachments::Mentions;
+use crate::community::Community;
 use crate::engine::{clean_message, clean_name, clean_text, not_found, Engine};
 use crate::error::Result;
 use crate::store::append_records_deferred;
@@ -325,7 +326,11 @@ impl Engine {
 
     /// Emits a stored event locally and broadcasts it on the community topic.
     pub(crate) async fn publish(&self, community: CommunityId, se: &SignedEvent) {
-        self.emit(event_for(&community, &se.event));
+        let notice = match self.read().communities.get(&community) {
+            Some(c) => private_notice(&community, c, &se.event),
+            None => None,
+        };
+        self.emit(notice.unwrap_or_else(|| event_for(&community, &se.event)));
         let sender = self
             .read()
             .communities
@@ -344,20 +349,56 @@ impl Engine {
     }
 }
 
+/// The notice for a private-channel message, which is stored as a carrier, so its kind is read from the opened
+/// event. It is a new message only when this device can read it now. A member without the channel key for its
+/// generation gets no alert and no view change. None for any other event.
+pub(crate) fn private_notice(community: &CommunityId, c: &Community, ev: &Event) -> Option<EngineEvent> {
+    let opened = c.open(ev).ok()?;
+    let Payload::PrivateSealed {
+        kind,
+        generation,
+        ciphertext,
+    } = &opened.body.payload
+    else {
+        return None;
+    };
+    let channel = opened.body.channel;
+    let aad = dissent_events::private_aad(community, &channel, *generation, &opened.body.author);
+    let readable = c
+        .private_keys
+        .get(&(channel, *generation))
+        .copied()
+        .is_some_and(|key| dissent_events::open_private_text(&key, &aad, ciphertext).is_some());
+    let community_id = community.to_string();
+    let channel_id = channel.to_string();
+    Some(if !readable {
+        EngineEvent::CommunityUpdated { community_id }
+    } else if matches!(kind, SealedKind::Message | SealedKind::Reply { .. }) {
+        EngineEvent::Message { community_id, channel_id }
+    } else {
+        EngineEvent::MessagesChanged { community_id, channel_id }
+    })
+}
+
 /// The notification for a stored event. Channel content is a `Message`, anything else is a `CommunityUpdated`.
 pub(crate) fn event_for(community: &CommunityId, ev: &Event) -> EngineEvent {
     let community_id = community.to_string();
+    let channel_id = ev.body.channel.to_string();
     match ev.body.payload {
+        // A new message, or a reply to one. Only these alert.
         Payload::Message { .. }
-        | Payload::Edit { .. }
-        | Payload::Delete { .. }
         | Payload::Reply { .. }
-        | Payload::Sealed { .. } => {
-            EngineEvent::Message {
-                community_id,
-                channel_id: ev.body.channel.to_string(),
-            }
-        }
+        | Payload::Sealed {
+            kind: SealedKind::Message | SealedKind::HistoryMessage | SealedKind::Reply { .. },
+            ..
+        } => EngineEvent::Message { community_id, channel_id },
+        // A change to a message that exists. Views re-read it, but a repeat must not alert again.
+        Payload::Edit { .. }
+        | Payload::Delete { .. }
+        | Payload::Sealed {
+            kind: SealedKind::Edit { .. } | SealedKind::React { .. } | SealedKind::Unreact { .. },
+            ..
+        } => EngineEvent::MessagesChanged { community_id, channel_id },
         _ => EngineEvent::CommunityUpdated { community_id },
     }
 }

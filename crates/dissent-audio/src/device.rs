@@ -255,7 +255,7 @@ fn build_input(
     overflows: Arc<AtomicU64>,
 ) -> Result<cpal::Stream> {
     let stream_config = config.config();
-    let on_error = |_e: cpal::Error| {};
+    let on_error = |e: cpal::Error| tracing::warn!(error = %e, "microphone stream error");
     let stream = match config.sample_format() {
         SampleFormat::F32 => {
             let mut producer = producer;
@@ -370,7 +370,7 @@ fn build_output(
     underruns: Arc<AtomicU64>,
 ) -> Result<cpal::Stream> {
     let stream_config = config.config();
-    let on_error = |_e: cpal::Error| {};
+    let on_error = |e: cpal::Error| tracing::warn!(error = %e, "speaker stream error");
     let stream = match config.sample_format() {
         SampleFormat::F32 => {
             let mut consumer = consumer;

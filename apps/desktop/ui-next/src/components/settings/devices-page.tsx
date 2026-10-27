@@ -4,6 +4,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { copyText } from '@/lib/clipboard';
+import { useShell } from '@/lib/store';
+import { stampLabel } from '@/lib/time';
 import { toast } from '@/lib/toasts';
 import type { DeviceView } from '@/lib/types';
 import { Block, Hint } from '@/components/settings/settings-ui';
@@ -56,7 +58,7 @@ export function DevicesPage() {
             <span className="flex min-w-0 flex-1 flex-col">
               <span className="text-body text-text-strong">{d.name}</span>
               <span className="text-meta text-muted-foreground">
-                {d.this_device ? 'This device' : `Last seen ${new Date(Number(d.last_seen_ms)).toLocaleString('en-US')}`}
+                {d.this_device ? 'This device' : `Last seen ${stampLabel(Number(d.last_seen_ms))}`}
               </span>
             </span>
             {d.this_device ? null : (
@@ -78,7 +80,17 @@ export function DevicesPage() {
 }
 
 function Linking() {
-  const [codeIn, setCodeIn] = useState('');
+  // A dissent://link/ link fills the code box, whether this page was open or not. The person still presses Approve.
+  const pendingLink = useShell((s) => s.pendingDeviceLink);
+  const [codeIn, setCodeIn] = useState(() => useShell.getState().pendingDeviceLink ?? '');
+  const [shownLink, setShownLink] = useState(pendingLink);
+  if (pendingLink !== shownLink) {
+    setShownLink(pendingLink);
+    if (pendingLink) setCodeIn(pendingLink);
+  }
+  useEffect(() => {
+    if (pendingLink) useShell.setState({ pendingDeviceLink: null });
+  }, [pendingLink]);
   const [grantOut, setGrantOut] = useState('');
   const [grantIn, setGrantIn] = useState('');
 

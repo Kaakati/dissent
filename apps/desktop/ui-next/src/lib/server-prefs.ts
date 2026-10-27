@@ -4,6 +4,7 @@
 import { create } from 'zustand';
 import { api } from './api';
 import { toast } from './toasts';
+import { clockLabel } from './time';
 import type { Id, ServerPrefs } from './types';
 
 // The mute that lasts until it is turned back on. Matches the engine's MUTED_FOREVER (2^63), which a JSON number carries.
@@ -21,11 +22,11 @@ export function isServerMuted(prefs: ServerPrefs, now = Date.now()): boolean {
   return prefs.muted_until !== null && prefs.muted_until > now;
 }
 
-// The time a mute ends, as the subtitle shows it: "Muted until 14:30", or until it is turned back on.
+// The time a mute ends, as the subtitle shows it: "Muted until 2:30 PM", or until it is turned back on.
 export function muteSubtitle(prefs: ServerPrefs): string {
   if (!isServerMuted(prefs)) return '';
   if (prefs.muted_until === MUTED_FOREVER) return 'Muted until I turn it back on';
-  const time = new Date(prefs.muted_until ?? 0).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const time = clockLabel(prefs.muted_until ?? 0);
   return `Muted until ${time}`;
 }
 

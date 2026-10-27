@@ -7,11 +7,11 @@ use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use dissent_events::{
     open_event_keyed, CommunityState, Dag, EventId, Hlc, InsertOutcome, Payload, Rejection, Replayer,
-    Role, SealKey, SignedEvent,
+    Role, SealKey, SealedKind, SignedEvent,
 };
 use dissent_identity::{CommunityId, Genesis, RootId};
 use dissent_net::TopicSender;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 /// Outcome of ingesting a batch of verified events.
@@ -46,6 +46,9 @@ pub(crate) struct Community {
     waiting: BTreeMap<EventId, SignedEvent>,
     /// Accepted events whose side effects have already been handed out, so each runs once.
     handled: BTreeSet<EventId>,
+    /// Fresh private messages this device is listed to read but could not open when they arrived. Each is
+    /// announced once, when its channel key arrives. See `note_private_pending`.
+    pending_alerts: PendingAlerts,
     /// Set when the keys change. Any accepted event may then have unlocked, so the next
     /// [`Community::take_unhandled`] considers every stored event.
     ring_dirty: bool,
@@ -74,6 +77,7 @@ impl Community {
             signed: BTreeMap::new(),
             waiting: BTreeMap::new(),
             handled: BTreeSet::new(),
+            pending_alerts: PendingAlerts::default(),
             ring_dirty: false,
             join_hlc: BTreeMap::new(),
             content: BTreeMap::new(),
@@ -160,6 +164,31 @@ impl Community {
         self.replayer.set_epoch_ring(&self.dag, epochs);
         self.join_times_refresh();
         self.ring_dirty = true;
+    }
+
+    /// Notes a fresh private message that `me` is listed to read, but whose channel key is not held yet, so it
+    /// is unreadable now. Its key may arrive later, and then the message is new to this device. Messages the
+    /// device could already open, and messages `me` is not listed to read, are not noted.
+    pub fn note_private_pending(&mut self, se: &SignedEvent, me: RootId) {
+        let Ok(opened) = self.open(&se.event) else {
+            return;
+        };
+        let Payload::PrivateSealed { kind, generation, .. } = &opened.body.payload else {
+            return;
+        };
+        if !matches!(kind, SealedKind::Message | SealedKind::Reply { .. }) {
+            return;
+        }
+        let channel = opened.body.channel;
+        if !self.state().can_read(channel, me) || self.private_keys.contains_key(&(channel, *generation)) {
+            return;
+        }
+        self.pending_alerts.note(se.event.id);
+    }
+
+    /// True once, for a message noted by `note_private_pending` whose key has now arrived.
+    pub fn take_pending_alert(&mut self, id: &EventId) -> bool {
+        self.pending_alerts.take(id)
     }
 
     /// Accepted events whose side effects have not run yet, in causal order, and marks them as
@@ -414,6 +443,42 @@ fn join_times(
         }
     }
     out
+}
+
+/// Most private messages kept as pending alerts. A flood of unreadable messages drops the oldest.
+const PENDING_ALERTS_MAX: usize = 500;
+
+/// Ids of fresh private messages awaiting their key, oldest first, at most `PENDING_ALERTS_MAX`.
+#[derive(Default)]
+pub(crate) struct PendingAlerts(VecDeque<EventId>);
+
+impl PendingAlerts {
+    /// Keeps `id`. The oldest id is dropped once the set is full.
+    pub(crate) fn note(&mut self, id: EventId) {
+        if self.0.contains(&id) {
+            return;
+        }
+        if self.0.len() == PENDING_ALERTS_MAX {
+            self.0.pop_front();
+        }
+        self.0.push_back(id);
+    }
+
+    /// True once for a kept id: it is removed.
+    pub(crate) fn take(&mut self, id: &EventId) -> bool {
+        match self.0.iter().position(|kept| kept == id) {
+            Some(at) => {
+                self.0.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 #[cfg(test)]

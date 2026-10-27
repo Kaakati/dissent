@@ -3,23 +3,24 @@
 // the same card an invite shows. The name, banner, description and traits wait in an unsaved bar until Save Changes,
 // which publishes only what changed; the icon applies at once, through the server icon flow. Leaving with unsaved
 // changes shakes the bar instead of closing, as Discord does.
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Smile, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Radio, Smile, X } from 'lucide-react';
 import { create } from 'zustand';
 import { BannerPicker } from '@/components/banner-picker';
 import { InviteList } from '@/components/channel-settings/channel-settings';
 import { openEmojiPicker } from '@/components/chat/emoji-picker';
 import { ServerCard } from '@/components/server-card';
 import { chooseImage } from '@/components/settings/avatar-editor';
-import { BLOCK_TITLE, Block, Hint } from '@/components/settings/settings-ui';
+import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { clearCommunityIcon, saveServerProfile, setCommunityIcon, type ServerProfileChanges } from '@/lib/actions';
-import { bannerOf, draftUrlOf, sameBanner, type BannerDraft } from '@/lib/banners';
+import { clearCommunityIcon, saveServerProfile, setCommunityIcon, setCommunityIconAnimated, type ServerProfileChanges } from '@/lib/actions';
+import { bannerOf, bannersStill, draftUrlOf, sameBanner, subscribeBannerMotion, type BannerDraft } from '@/lib/banners';
+import { boostLabel, videoLabel } from '@/lib/boosts';
 import { useDialogs } from '@/lib/dialog';
-import { imageOf } from '@/lib/images';
+import { iconSrc } from '@/lib/images';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { CommunityView, Id, Trait } from '@/lib/types';
@@ -30,9 +31,10 @@ const MAX_DESCRIPTION = 300;
 const MAX_LABEL = 24;
 const SLOTS = 5;
 
-export type Section = 'profile' | 'members' | 'invites' | 'bans';
+export type Section = 'profile' | 'boosts' | 'members' | 'invites' | 'bans';
 const NAV: { key: Section; label: string; group: 'server' | 'people' }[] = [
   { key: 'profile', label: 'Server Profile', group: 'server' },
+  { key: 'boosts', label: 'Boosts', group: 'server' },
   { key: 'members', label: 'Members', group: 'people' },
   { key: 'invites', label: 'Invites', group: 'people' },
   { key: 'bans', label: 'Bans', group: 'people' },
@@ -85,6 +87,7 @@ export function ServerSettingsHost() {
 }
 
 function ServerSettingsPage({ community, section: initial }: { community: CommunityView; section: Section }) {
+  useSyncExternalStore(subscribeBannerMotion, bannersStill);
   const [section, setSection] = useState<Section>(initial);
   // The saved values follow the store when the engine reports a change, and the draft follows them, so a save leaves
   // nothing to save. Edits are kept while the saved values stay the same.
@@ -200,13 +203,14 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
                 <ServerCard
                   id={community.id}
                   name={draft.name.trim()}
-                  icon={imageOf(community.id)}
+                  icon={iconSrc(community.id)}
                   banner={draft.banner}
                   memberCount={members.length}
                   onlineCount={online}
                   createdMs={community.created_ms}
                   description={draft.description.trim()}
                   traits={traitsOf(draft.slots)}
+                  boost={{ level: community.boost?.level ?? 0, hosts: community.boost?.hosts.length ?? 0 }}
                 />
               </aside>
             </div>
@@ -214,6 +218,7 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
           {section === 'members' ? <PeopleList people={members} empty="No members yet." /> : null}
           {section === 'invites' ? <InviteList communityId={community.id} /> : null}
           {section === 'bans' ? <PeopleList people={community.members.filter((m) => m.banned)} empty="Nobody is banned." /> : null}
+          {section === 'boosts' ? <BoostsSection community={community} /> : null}
           {dirty ? (
             <div
               key={shake}
@@ -250,7 +255,8 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
 
 function ProfileForm({ community, draft, edit }: { community: CommunityView; draft: Draft; edit: (patch: Partial<Draft>) => void }) {
   useShell((s) => s.communities); // the icon redraws once it has been saved and the list reloaded
-  const icon = imageOf(community.id);
+  useSyncExternalStore(subscribeBannerMotion, bannersStill);
+  const icon = iconSrc(community.id);
   const emojiRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const setSlot = (i: number, patch: Partial<Slot>) => edit({ slots: draft.slots.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
 
@@ -263,7 +269,18 @@ function ProfileForm({ community, draft, edit }: { community: CommunityView; dra
       <Block title="Server Icon">
         <Hint>We recommend an image of at least 512×512.</Hint>
         <div className="flex items-center gap-s-3">
-          <Button onClick={() => chooseImage({ shape: 'rounded', onApply: (bytes) => setCommunityIcon(community.id, bytes) })}>Change Server Icon</Button>
+          <Button
+            onClick={() =>
+              chooseImage({
+                shape: 'rounded',
+                animated: true,
+                onApply: (bytes, animated) =>
+                  animated ? setCommunityIconAnimated(community.id, bytes, animated.poster) : setCommunityIcon(community.id, bytes),
+              })
+            }
+          >
+            Change Server Icon
+          </Button>
           {icon ? (
             <button type="button" className="text-ui font-medium text-danger-text hover:underline" onClick={() => void clearCommunityIcon(community.id)}>
               Remove Icon
@@ -378,6 +395,94 @@ function HistoryBlock({ community }: { community: CommunityView }) {
         <Hint>New members can read past messages. Messages are protected per encryption period rather than per message.</Hint>
       ) : null}
     </Block>
+  );
+}
+
+// Boosts: the level this device verifies, the members who host relays for the server, what the next level needs,
+// and the ceilings it gives calls. Anyone may add their own relay here. Nothing basic depends on a level.
+function BoostsSection({ community }: { community: CommunityView }) {
+  const boost = community.boost;
+  const me = useShell((s) => s.me);
+  const [relay, setRelay] = useState('');
+  if (!boost) return <Hint>Boosts are not available on this server yet.</Hint>;
+  const mine = boost.hosts.find((h) => h.root_id === me?.root_id);
+  const toggleMembers = async (on: boolean) => {
+    try {
+      await api.setMembersHostRelays(community.id, on);
+      await useShell.getState().loadCommunity(community.id);
+    } catch (err) {
+      toast(err);
+    }
+  };
+  const publish = async (relays: string[]) => {
+    try {
+      await api.setHostedRelays(community.id, relays);
+      await useShell.getState().loadCommunity(community.id);
+      toast(relays.length ? 'Relay published. Members count it once their apps verify it.' : 'Relay withdrawn', 'info');
+      setRelay('');
+    } catch (err) {
+      toast(err);
+    }
+  };
+  return (
+    <div className="flex max-w-[640px] flex-col gap-7">
+      <Block title="Level">
+        <p data-boost-summary className="m-0 text-body font-semibold text-text-strong">{boostLabel(boost.level, boost.hosts.length)}</p>
+        <Hint>
+          {boost.next_level_hosts !== null
+            ? `${boost.next_level_hosts - boost.hosts.length} more verified relay host${boost.next_level_hosts - boost.hosts.length === 1 ? '' : 's'} reach level ${boost.level + 1}.`
+            : 'This is the top level.'}{' '}
+          {`Calls here can use up to ${boost.voice_kbps} kbps voice and ${videoLabel(boost.video_height, boost.video_fps)} video, as a mesh of up to ${boost.mesh_limit}.`}
+        </Hint>
+        <Hint>Boosts are never paid for and never lock anything: chat, files, calls and screen sharing work the same at level 0.</Hint>
+      </Block>
+      <Block title="Relay hosts">
+        {boost.hosts.length ? (
+          <>
+            <p className="m-0 text-sm text-text">Thank you to the members who keep this server fast by hosting relays.</p>
+            <ul data-boost-hosts className="m-0 flex list-none flex-col gap-s-1 p-0">
+              {boost.hosts.map((h) => (
+                <li key={h.root_id} className="flex min-h-11 items-center gap-s-3 rounded-lg border border-border bg-panel px-s-3 py-s-2">
+                  <Radio className="size-4 shrink-0 text-link" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate text-ui font-medium text-text-strong">{h.display_name}</span>
+                  <span className="min-w-0 truncate text-sm text-muted-foreground">{h.relays.join(', ')}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <Hint>No member hosts a verified relay for this server yet.</Hint>
+        )}
+      </Block>
+      {community.my_role === 'owner' || community.my_role === 'admin' ? (
+        <Block title="Who can host">
+          <CheckRow>
+            <input
+              type="checkbox"
+              className={CHECK_CLASS}
+              aria-label="Members can host relays"
+              checked={Boolean(boost.members_can_host)}
+              onChange={(e) => void toggleMembers(e.target.checked)}
+            />
+            Members can host relays
+          </CheckRow>
+          <Hint>Off: only the owner and admins can add a relay here. On: any member can, and the apps still check each one.</Hint>
+        </Block>
+      ) : null}
+      <Block title="Host a relay">
+        <Hint>Run the Dissent relay (see the relay guide), then add its address here. Each member’s app checks it before it counts.</Hint>
+        <div className="flex gap-s-2">
+          <Input value={relay} aria-label="Relay address" placeholder="https://relay.example.org" disabled={boost.can_publish === false} onChange={(e) => setRelay(e.target.value)} />
+          <Button disabled={!relay.trim() || boost.can_publish === false} onClick={() => void publish([relay.trim()])}>Publish</Button>
+        </div>
+        {boost.can_publish === false ? <Hint>Only the owner and admins can add relays on this server.</Hint> : null}
+        {mine ? (
+          <button type="button" className="self-start text-ui font-medium text-danger-text hover:underline" onClick={() => void publish([])}>
+            Withdraw my relay
+          </button>
+        ) : null}
+      </Block>
+    </div>
   );
 }
 

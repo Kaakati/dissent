@@ -7,13 +7,16 @@ use std::{
 use dissent_identity::{DeviceId, DeviceKey};
 use iroh::{
     Endpoint, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
-    address_lookup::{AddressLookup, MemoryLookup},
+    address_lookup::{
+        AddressLookup, AddressLookupBuilder, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver,
+    },
     endpoint::{default_relay_mode, presets},
     protocol::Router,
     tls::CaTlsConfig,
 };
 use futures_lite::{Stream, StreamExt};
 use iroh::Watcher;
+use std::time::Duration;
 use iroh::protocol::DynProtocolHandler;
 use iroh_gossip::{ALPN as GOSSIP_ALPN, Gossip};
 use iroh_mainline_address_lookup::DhtAddressLookup;
@@ -47,6 +50,13 @@ pub enum RelayChoice {
     Disabled,
 }
 
+/// What the net report says about the relays: the preferred one, and each relay's best measured latency.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelayReport {
+    pub home: Option<Url>,
+    pub latencies: Vec<(Url, Option<std::time::Duration>)>,
+}
+
 /// Default gossip frame limit: 128 KiB, enough for large MLS commits and long messages.
 pub const DEFAULT_GOSSIP_MAX_MESSAGE: usize = 128 * 1024;
 
@@ -64,6 +74,9 @@ pub struct NodeConfig {
     /// Bind only to 127.0.0.1, so nothing listens on external interfaces. Used by tests and
     /// local multi-instance checks; avoids OS firewall prompts. Peers must be on this machine.
     pub loopback_only: bool,
+    /// Add the relays that communities name to this node. Off, the node uses only the relays in `relay`, so
+    /// no community can have this device measured or dialled through its relay.
+    pub community_relays: bool,
     /// Handler for inbound media links on the media ALPN. `None` refuses media.
     pub media: Option<Arc<dyn MediaHandler>>,
     /// Largest gossip frame in bytes, framing included (about 256 bytes of it). Every peer on a
@@ -83,6 +96,11 @@ pub struct NodeConfig {
     pub lan_discovery: bool,
     /// This device answers address lookups as a seeder, so peers label those answers `seeder`.
     pub serves_lookups: bool,
+    /// Publish this device's ID and addresses to number0's DNS directory, and resolve peers through it. It
+    /// is faster to connect, but number0 sees the device ID and addresses. Used only with number0's relays
+    /// (`RelayChoice::Default`), where iroh's N0 preset used to add it; custom relays never use it. On by
+    /// default.
+    pub n0_address_lookup: bool,
 }
 
 impl Default for NodeConfig {
@@ -93,12 +111,14 @@ impl Default for NodeConfig {
             rpc: None,
             dht_lookup: true,
             loopback_only: false,
+            community_relays: true,
             media: None,
             gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
             extra_protocols: Vec::new(),
             relay_ca: None,
             lan_discovery: false,
             serves_lookups: false,
+            n0_address_lookup: true,
         }
     }
 }
@@ -110,6 +130,7 @@ impl fmt::Debug for NodeConfig {
             .field("bind_port", &self.bind_port)
             .field("rpc", &self.rpc.as_ref().map(|_| "RpcHandler"))
             .field("dht_lookup", &self.dht_lookup)
+            .field("n0_address_lookup", &self.n0_address_lookup)
             .field("media", &self.media.as_ref().map(|_| "MediaHandler"))
             .field("gossip_max_message", &self.gossip_max_message)
             .field(
@@ -144,6 +165,10 @@ struct Inner {
     lan_keys: Arc<Mutex<Vec<[u8; 32]>>>,
     serves_lookups: bool,
     lan_task: Mutex<Option<JoinHandle<()>>>,
+    /// The CA the relays were checked against, kept for `ping_via_relay`. `None` is the public roots.
+    relay_ca: Option<CaTlsConfig>,
+    /// Relay probes bound and not yet closed or dropped.
+    open_probes: std::sync::atomic::AtomicUsize,
 }
 
 impl Node {
@@ -172,10 +197,11 @@ impl Node {
         let lan_lookup = MemoryLookup::with_provenance(source::LAN);
         let dials = Arc::new(DialLog::default());
         let use_dht = cfg.dht_lookup && !matches!(cfg.relay, RelayChoice::Disabled);
-        let preset = match cfg.relay {
-            RelayChoice::Default => Endpoint::builder(presets::N0),
-            RelayChoice::Custom(_) | RelayChoice::Disabled => Endpoint::builder(presets::Minimal),
-        };
+        // number0's directory is used only with number0's own relays, as iroh's N0 preset did, and only when
+        // the setting is on. Custom relays and relay-less configs never reach it.
+        let use_n0 = cfg.n0_address_lookup && matches!(cfg.relay, RelayChoice::Default);
+        // Always the minimal preset: the directory is added below, separately, so it can be switched off.
+        let preset = Endpoint::builder(presets::Minimal);
         let provider = pq_preferred_provider();
         tracing::debug!(
             suites = ?provider.cipher_suites.iter().map(|s| s.suite()).collect::<Vec<_>>(),
@@ -203,6 +229,7 @@ impl Node {
                 builder.relay_mode(RelayMode::custom(urls.into_iter().map(RelayUrl::from)))
             }
         };
+        let relay_ca = cfg.relay_ca.clone();
         if let Some(ca) = cfg.relay_ca {
             builder = builder.ca_tls_config(ca);
         }
@@ -229,6 +256,22 @@ impl Node {
                 .build()
                 .map_err(|e| NetError::Config(e.to_string()))?;
             services.add(Recorded::new(source::DHT, dht, dials.clone()));
+        }
+        if use_n0 {
+            // The same three services the N0 preset added: publish our address, resolve peers by it, and
+            // resolve them by DNS. Each one is wrapped with its own label, so the dial log still names it.
+            let publisher = PkarrPublisher::n0_dns()
+                .into_address_lookup(&endpoint)
+                .map_err(|e| NetError::Config(e.to_string()))?;
+            services.add(Recorded::new(source::N0_DNS, publisher, dials.clone()));
+            let resolver = PkarrResolver::n0_dns()
+                .into_address_lookup(&endpoint)
+                .map_err(|e| NetError::Config(e.to_string()))?;
+            services.add(Recorded::new(source::N0_DNS, resolver, dials.clone()));
+            let dns = DnsAddressLookup::n0_dns()
+                .into_address_lookup(&endpoint)
+                .map_err(|e| NetError::Config(e.to_string()))?;
+            services.add(Recorded::new(source::N0_DNS, dns, dials.clone()));
         }
         let lan_keys = Arc::new(Mutex::new(Vec::new()));
         let lan_task = if cfg.lan_discovery && !cfg.loopback_only {
@@ -275,6 +318,8 @@ impl Node {
                 lan_keys,
                 serves_lookups: cfg.serves_lookups,
                 lan_task: Mutex::new(lan_task),
+                relay_ca,
+                open_probes: std::sync::atomic::AtomicUsize::new(0),
             }),
         })
     }
@@ -308,6 +353,15 @@ impl Node {
         }
     }
 
+    /// Removes relay servers added with `add_relays`. This node stops dialling them, and stops
+    /// advertising them in its address.
+    pub async fn remove_relays(&self, urls: &[Url]) {
+        for url in urls {
+            self.inner.endpoint.remove_relay(&RelayUrl::from(url.clone())).await;
+            self.inner.relays.lock().expect("relay list lock").retain(|known| known != url);
+        }
+    }
+
     /// Resolves once this node is connected to a relay. Returns at once if no relay is known,
     /// since waiting then would never finish.
     pub async fn online(&self) {
@@ -319,6 +373,27 @@ impl Node {
 
     pub fn id(&self) -> DeviceId {
         self.inner.id
+    }
+
+    /// The latest net report: the relay this node prefers, and the latency to each relay it measured. Each entry is
+    /// the relay's URL and the best latency measured to it, `None` when no probe reached it yet.
+    pub fn relay_report(&self) -> RelayReport {
+        let mut latencies: Vec<(Url, Option<Duration>)> = self
+            .relays()
+            .into_iter()
+            .map(|url| (url, None))
+            .collect();
+        let report = self.inner.endpoint.net_report().get();
+        let home = report.as_ref().and_then(|r| r.preferred_relay.clone()).map(Url::from);
+        if let Some(r) = report.as_ref() {
+            for (_, url, latency) in r.relay_latency.iter() {
+                let url = Url::from(url.clone());
+                if let Some(slot) = latencies.iter_mut().find(|(u, _)| *u == url) {
+                    slot.1 = Some(slot.1.map_or(latency, |best| best.min(latency)));
+                }
+            }
+        }
+        RelayReport { home, latencies }
     }
 
     /// Our dialable address as known now. Relay and direct addresses may still be filling in.
@@ -346,6 +421,45 @@ impl Node {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.inner.dials.finish(peer.id.0, elapsed_ms, report.is_ok());
         report
+    }
+
+    /// Relay probes bound and not yet closed. See `ping_via_relay`.
+    pub fn open_relay_probes(&self) -> usize {
+        self.inner.open_probes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Pings `peer` through `relay` and nothing else: a short-lived endpoint with this node's key, the
+    /// one relay in its relay map, no IP transport and no address lookup. The ping completes only if
+    /// the relay admits this node's key and carries its packets to `peer`, which must be connected to
+    /// that relay. Returns the round trip in ms. The relay keeps this node's main connection as an
+    /// inactive duplicate while the probe runs, and makes it active again when the probe closes.
+    pub async fn ping_via_relay(&self, relay: &Url, peer: DeviceId, timeout: Duration) -> Result<u64> {
+        let relay_url = RelayUrl::from(relay.clone());
+        // Everything that can fail before the probe exists is done first, so nothing returns between
+        // binding the probe and closing it.
+        let target = iroh::EndpointAddr::new(
+            EndpointId::from_bytes(&peer.0).map_err(|e| NetError::BadPeer(e.to_string()))?,
+        )
+        .with_relay_url(relay_url.clone());
+        let mut builder = Endpoint::builder(presets::Minimal)
+            .secret_key(self.inner.endpoint.secret_key().clone())
+            .crypto_provider(pq_preferred_provider())
+            .relay_mode(RelayMode::custom([relay_url.clone()]))
+            .clear_ip_transports();
+        if let Some(ca) = self.inner.relay_ca.clone() {
+            builder = builder.ca_tls_config(ca);
+        }
+        let probe = builder.bind().await?;
+        // Counts the probe until it is closed, or dropped if the caller gives up on this future.
+        // A dropped endpoint shuts down on its own.
+        let _open = OpenProbe::new(&self.inner.open_probes);
+        let result = tokio::time::timeout(timeout, run_ping(&probe, target)).await;
+        probe.close().await;
+        match result {
+            Ok(Ok(report)) => Ok(report.rtt_ms),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(NetError::Protocol("no answer through the relay in time".into())),
+        }
     }
 
     /// Sends `req` to `peer` and returns its reply. Dials by id, so addresses must be
@@ -421,5 +535,21 @@ impl Node {
         // The router shuts each protocol handler down, gossip included, and then closes the endpoint.
         // Gossip must not be shut down twice, since the second call warns that its actor is gone.
         self.inner.router.shutdown().await.map_err(|e| NetError::Shutdown(e.to_string()))
+    }
+}
+
+/// Counts one open relay probe while it lives.
+struct OpenProbe<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> OpenProbe<'a> {
+    fn new(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for OpenProbe<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }

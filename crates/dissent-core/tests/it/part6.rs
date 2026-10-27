@@ -3,7 +3,7 @@
 
 
 use crate::common::*;
-use dissent_core::{CallScope, NoteKind};
+use dissent_core::{CallScope, NoteKind, TestCapture};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
@@ -153,7 +153,13 @@ async fn call_controls_and_messages_reach_the_call() {
         .expect("call starts");
     accept_incoming(&bob.engine, &mut bob_events).await;
     alice.engine.set_deafened(true).unwrap();
-    assert!(alice.engine.set_camera(true).is_err());
+    // No camera in this test: turning it on is an error, and the call carries on without video.
+    alice.engine.set_test_capture(TestCapture::Unavailable);
+    assert!(alice.engine.set_camera(true).is_err(), "an unavailable camera is an error");
+    // A fake camera turns on, so the video path runs without a device.
+    alice.engine.set_test_capture(TestCapture::Pattern);
+    alice.engine.set_camera(true).expect("a fake camera turns on");
+    assert!(alice.engine.call_state().expect("in call").camera, "the fake camera is on");
     alice.engine.set_camera(false).unwrap();
     let view = alice.engine.call_state().expect("in call");
     assert_eq!(view.scope, CallScope::Dm);

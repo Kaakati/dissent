@@ -121,6 +121,8 @@ if (!window.__TAURI__) {
       hue: 25,
       name: 'Riverside Makers',
       owner: GRACE,
+      // Three members host relays for it, so it is at level 2.
+      relayHosts: { [GRACE]: ['https://relay.maya.example/'], [LINUS]: ['https://r1.jonas.example/', 'https://r2.jonas.example/'], [KEN]: ['https://relay.omar.example/'] },
       voice: [{ id: 'vc1', name: 'workshop', participants: [] }],
       channels: [
         { id: 'vc1', name: 'workshop', voice: true },
@@ -209,7 +211,7 @@ if (!window.__TAURI__) {
   generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
   // The desktop shell settings, as the desktop app would keep them. Start at login is offered in the mock.
-  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false };
+  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false, emoticons_as_text: false };
   const shellView = () => ({ ...mockShell, start_at_login_available: true, start_at_login_note: null });
   // The folder the user picked in the mock. Null is the default, which follows the OS Downloads folder.
   let pickedDownloadDir = null;
@@ -247,7 +249,14 @@ if (!window.__TAURI__) {
     ],
   };
 
-  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false };
+  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true };
+  // Relays the mock node measures. Public relays are always there; a community's relay is listed once it is named.
+  const mockRelayLatency = new Map([
+    ['https://use1-1.relay.n0.iroh.link./', 38],
+    ['https://usw1-1.relay.n0.iroh.link./', 96],
+    ['https://euc1-1.relay.n0.iroh.link./', 151],
+    ['https://aps1-1.relay.n0.iroh.link./', 230],
+  ]);
   // Voice settings as the desktop saves them (voice_settings / set_voice_settings), and the mic test's fake meter.
   let mockVoice = { profile: 'voice_isolation', input_volume: 100, output_volume: 100, noise_suppression: 'standard', echo_cancellation: true, agc: true, auto_sensitivity: true, threshold_db: -50, push_to_talk: false, ptt_key: null };
   let mockMicTimer = null;
@@ -278,7 +287,7 @@ if (!window.__TAURI__) {
   const mentionReads = {};
   const mentionsIn = (c, channelId) => (c.msgs[channelId] ?? []).filter((m) => m.mentions_me && (m.ms ?? 0) > (mentionReads[`${c.id}:${channelId}`] ?? 0)).length;
   const mentionTotal = (c) => c.channels.reduce((n, ch) => n + mentionsIn(c, ch.id), 0);
-  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null, mentions: mentionTotal(c) });
+  const summary = (c) => ({ id: c.id, name: c.name, owner: c.owner, my_role: myRole(c), icon: c.icon ?? null, icon_poster: c.icon_poster ?? null, mentions: mentionTotal(c) });
   const RAIL_ORDER_KEY = 'dissent-mock-rail-order';
   // Link previews are this device's setting; the mock keeps them for the page's life.
   const linkPreviews = { on: false, prompted: false };
@@ -302,7 +311,8 @@ if (!window.__TAURI__) {
     return {
       community: id,
       name: { c1: servers.c1.name, 'inv-closed': 'Old Workshop' }[id] ?? 'Rustaceans',
-      icon: null,
+      icon: id === 'c1' ? (servers.c1.icon ?? null) : null,
+      icon_poster: id === 'c1' ? (servers.c1.icon_poster ?? null) : null,
       banner: id === 'c1' ? (servers.c1.banner ?? null) : null,
       banner_preset: id === 'c1' ? (servers.c1.banner_preset ?? null) : 6,
       description: id === 'c1' ? (servers.c1.description ?? '') : 'Systems programmers sharing crates, questions and the occasional crab.',
@@ -312,6 +322,8 @@ if (!window.__TAURI__) {
       created_ms: 1767225600000,
       invite: closed ?? 'live',
       already_member: Boolean(servers[id]?.roles[ME]),
+      boost_level: id === 'c1' ? boostOf(servers.c1).level : 1,
+      boost_hosts: id === 'c1' ? boostOf(servers.c1).hosts.length : 1,
     };
   };
   const sharedServers = (user) => Object.values(servers).filter((c) => c.roles[user] && c.roles[ME]);
@@ -334,6 +346,7 @@ if (!window.__TAURI__) {
     name: c.name,
     owner: c.owner,
     icon: c.icon ?? null,
+    icon_poster: c.icon_poster ?? null,
     banner: c.banner ?? null,
     banner_preset: c.banner_preset ?? null,
     banner_poster: c.banner_poster ?? null,
@@ -356,7 +369,9 @@ if (!window.__TAURI__) {
       role: c.roles[r],
       banned: c.banned.has(r),
       status: MEMBER_STATUS[r],
+      relay_host: Boolean(c.relayHosts?.[r]?.length),
     })),
+    boost: boostOf(c),
   });
   // The reply reference: a snippet of the original, or text null when it is deleted or sealed for this device.
   const replyRef = (c, channelId, originalId) => {
@@ -461,6 +476,24 @@ if (!window.__TAURI__) {
     const a = m?.attachments?.find((x) => x.id === attachmentId);
     return { m, a };
   };
+  // Test hooks for the driver: post a message that mentions the viewer, and send an engine event as given.
+  window.__mockPostMention = (communityId, channelId) => {
+    servers[communityId].msgs[channelId].push({ ...msg(0, 0, LINUS, `@${people[ME]} the laser is free after all.`), mentions: [{ id: ME, display_name: people[ME] }], mentions_me: true, mentions_everyone: false });
+  };
+  window.__mockEngineEvent = (ev) => emit(ev);
+  const rootOf = (name) => Object.keys(people).find((k) => people[k] === name);
+  window.__mockRootOf = rootOf;
+  window.__mockPostDm = (name, text) => {
+    const peer = rootOf(name);
+    dms[peer].push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false });
+  };
+  window.__mockReactLastDm = (name, emoji) => {
+    const list = dms[rootOf(name)];
+    dmReactIn(list, list.at(-1).id, emoji, true);
+  };
+  window.__mockPostGroupMessage = (groupId, text) => {
+    groups[groupId].items.push({ id: id(`g${++seq}`), from: LINUS, text, ms: Date.now(), pending: false, embeds: [] });
+  };
   const refreshFor = (communityId, m) => {
     if (communityId) {
       const channelId = Object.keys(servers[communityId].msgs).find((ch) => servers[communityId].msgs[ch].includes(m));
@@ -480,6 +513,22 @@ if (!window.__TAURI__) {
   const MAX_PICTURE = 256 * 1024;
   // Profile banners by root: { banner: url or null, preset: id or null }. Maya has a preset, so a card shows one.
   const profileBanners = { [GRACE]: { banner: null, preset: 7 } };
+  // Boosts. The mock verifies every published relay at once; the engine checks each one itself (boosts.rs).
+  const LEVEL_HOSTS = [0, 1, 3, 5];
+  const CEILINGS = [
+    { voice_kbps: 96, video_width: 1280, video_height: 720, video_fps: 30, mesh_limit: 6 },
+    { voice_kbps: 96, video_width: 1920, video_height: 1080, video_fps: 30, mesh_limit: 6 },
+    { voice_kbps: 128, video_width: 1920, video_height: 1080, video_fps: 30, mesh_limit: 8 },
+    { voice_kbps: 256, video_width: 1920, video_height: 1080, video_fps: 60, mesh_limit: 10 },
+  ];
+  function boostOf(c) {
+    const hosts = Object.entries(c.relayHosts ?? {})
+      .filter(([root, relays]) => relays.length && c.roles[root] && !c.banned.has(root))
+      .map(([root, relays]) => ({ root_id: root, display_name: people[root] ?? `anon·${suffix(root)}`, relays }));
+    const level = LEVEL_HOSTS.reduce((l, min, i) => (hosts.length >= min ? i : l), 0);
+    const canPublish = Boolean(c.membersHostRelays) || ['owner', 'admin'].includes(myRole(c));
+    return { level, hosts, next_level_hosts: LEVEL_HOSTS[level + 1] ?? null, ...CEILINGS[level], members_can_host: Boolean(c.membersHostRelays), can_publish: canPublish };
+  }
   const pictureFrom = (bytes) => {
     need(atob(bytes).length <= MAX_PICTURE, 'That picture is over 256 KB');
     return `data:image/webp;base64,${bytes}`;
@@ -504,6 +553,12 @@ if (!window.__TAURI__) {
     const p = { ...DEFAULT_SERVER_PREFS, ...serverPrefs[communityId] };
     if (p.muted_until !== null && p.muted_until <= Date.now()) p.muted_until = null;
     return p;
+  };
+  // The `limit` items before the one with id `before` (the newest when it is null), oldest first, as the engine pages them.
+  const pageBefore = (list, before, limit) => {
+    const end = before == null ? list.length : list.findIndex((m) => m.id === before);
+    if (before != null && end < 0) return [];
+    return list.slice(Math.max(0, end - limit), end);
   };
   const handlers = {
     complete_first_run: () => { firstRunPending = false; return null; },
@@ -565,6 +620,7 @@ if (!window.__TAURI__) {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server icon');
       c.icon = pictureFrom(bytes);
+      c.icon_poster = null;
       emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
@@ -572,6 +628,7 @@ if (!window.__TAURI__) {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server icon');
       c.icon = null;
+      c.icon_poster = null;
       emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
@@ -583,6 +640,16 @@ if (!window.__TAURI__) {
       need(clean, 'server name must not be empty');
       need([...clean].length <= 64, 'server name is longer than 64 characters');
       c.name = clean;
+      return null;
+    },
+    // Animated icons: the engine crops the GIF to a square; the mock keeps the bytes and draws the poster from frame one.
+    prepare_animated_icon: (args) => handlers.prepare_animated_banner(args),
+    set_community_icon_animated: ({ communityId, gif, poster }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only owners and admins can change the server icon');
+      c.icon = `data:image/gif;base64,${gif}`;
+      c.icon_poster = `data:image/png;base64,${poster}`;
+      emitTo('dissent://avatar-changed', { community_id: communityId });
       return null;
     },
     set_community_banner: ({ communityId, bytes }) => {
@@ -628,6 +695,26 @@ if (!window.__TAURI__) {
       profileBanners[ME] = { banner: `data:image/gif;base64,${gif}`, poster: `data:image/jpeg;base64,${poster}`, preset: null };
       emitTo('dissent://avatar-changed', { root_id: ME });
       return null;
+    },
+    set_members_host_relays: ({ communityId, on }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'NoPermission');
+      c.membersHostRelays = on;
+      return null;
+    },
+    set_hosted_relays: ({ communityId, relays }) => {
+      const c = servers[communityId];
+      need(Boolean(c.membersHostRelays) || ['owner', 'admin'].includes(myRole(c)), 'NoPermission');
+      need(relays.length <= 4 && relays.every((u) => /^https:\/\/[^\s/]+/.test(u)), 'relays must be at most four https URLs');
+      c.relayHosts = { ...(c.relayHosts ?? {}), [ME]: relays };
+      return null;
+    },
+    check_relay: ({ communityId, url }) => {
+      need(Boolean(servers[communityId]), 'unknown community');
+      need(/^https:\/\/[^\s/]+/.test(url), 'not an https relay address');
+      // Only the riverside relay answers in the mock; any other address is not reachable.
+      need(url === 'https://relay-eu.riverside.example', 'not reachable over TLS from this device');
+      return 42;
     },
     set_community_banner_preset: ({ communityId, preset }) => {
       const c = servers[communityId];
@@ -772,6 +859,15 @@ if (!window.__TAURI__) {
       c.voice = [...(c.voice ?? []), { id: ch.id, name, participants: [] }];
       return ch;
     },
+    // Paged reads, as the engine answers them. Every channel read is logged, so the driver can see what a live update asked for.
+    channel_messages_before: async ({ communityId, channelId, beforeId, limit }) => {
+      await pause();
+      (window.__mockPageLog ??= []).push({ before: beforeId, limit });
+      const c = servers[communityId];
+      return pageBefore(c.msgs[channelId] ?? [], beforeId, limit).map((m) => messageItem(c, channelId, m));
+    },
+    dm_messages_before: ({ peer, beforeId, limit }) => pageBefore(dms[peer] ?? [], beforeId, limit).map((m) => dmItem(m, dms[peer])),
+    group_messages_before: ({ groupId, beforeId, limit }) => pageBefore(groups[groupId].items, beforeId, limit).map((m) => dmItem(m, groups[groupId].items)),
     channel_messages: async ({ communityId, channelId, limit }) => {
       await pause();
       const c = servers[communityId];
@@ -941,21 +1037,28 @@ if (!window.__TAURI__) {
         banner: profileBanners[user]?.banner ?? null,
         banner_poster: profileBanners[user]?.poster ?? null,
         banner_preset: profileBanners[user]?.preset ?? null,
-        is_contact: Boolean(dms[user]),
+        is_contact: contactSet.has(user),
         key_changed_ms: user === GRACE && !PLAIN_DM ? Date.now() - DAY : null,
         verified_ms: user === GRACE ? (PLAIN_DM ? new Date(2026, 9, 12).getTime() : Date.now() - 2 * DAY) : null,
         mutual_contacts: user === GRACE ? 1 : 0,
         first_seen_ms: at(120, 0),
         handles: shared.map((c) => ({ community_id: c.id, community_name: c.name, handle: handles[user] ?? null })),
         mutual_communities: shared.map((c) => ({ id: c.id, name: c.name })),
+        hosts_for: shared.filter((c) => c.relayHosts?.[user]?.length).map((c) => ({ id: c.id, name: c.name })),
         mutual_friends: user === GRACE && friendsSharedOn
-          ? [LINUS, RADIA].map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r), avatar: null }))
+          ? [LINUS, RADIA].filter((r) => contactSet.has(r)).map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r), avatar: null }))
           : [],
       };
     },
 
     list_conversations: () => conversations(),
-    dm_messages: ({ peer, limit }) => (dms[peer] ?? []).slice(-limit).map((m) => dmItem(m, dms[peer])),
+    dm_messages: ({ peer, limit }) => {
+      const read = () => (dms[peer] ?? []).slice(-limit).map((m) => dmItem(m, dms[peer]));
+      if (!window.__mockStaleReads) return read();
+      // `__mockStaleReads` reads now and replies after the delay, as a slow reply does, so a later read can finish first.
+      const early = read();
+      return pause().then(() => early);
+    },
     dm_reply: ({ peer, messageId, text }) => dmReplyIn((dms[peer] ??= []), 'd', messageId, text),
     dm_react: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, true),
     dm_unreact: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, false),
@@ -982,6 +1085,7 @@ if (!window.__TAURI__) {
         keep_running: settings.keep_running,
         start_at_login: settings.start_at_login,
         notifications_muted: settings.notifications_muted,
+        emoticons_as_text: settings.emoticons_as_text ?? mockShell.emoticons_as_text,
       };
       return shellView();
     },
@@ -993,13 +1097,49 @@ if (!window.__TAURI__) {
         return url.toString();
       });
       need(settings.use_public_relays || relays.length > 0, 'Add at least one relay, or turn public relays back on.');
-      mockNetwork = { use_public_relays: Boolean(settings.use_public_relays), relays: [...new Set(relays)], lan_discovery: Boolean(settings.lan_discovery) };
-      return { ...mockNetwork, relays: [...mockNetwork.relays] };
+      const pinned = [...new Set((settings.pinned ?? []).map((r) => new URL(r).toString()))];
+      const disabled = [...new Set((settings.disabled ?? []).map((r) => new URL(r).toString()))];
+      mockNetwork = {
+        use_public_relays: Boolean(settings.use_public_relays),
+        relays: [...new Set(relays)],
+        lan_discovery: Boolean(settings.lan_discovery),
+        pinned,
+        disabled,
+        use_community_relays: settings.use_community_relays !== false,
+        use_n0_lookup: settings.use_n0_lookup !== false,
+      };
+      return { ...mockNetwork, relays: [...mockNetwork.relays], pinned: [...pinned], disabled: [...disabled] };
+    },
+    relay_status: () => {
+      // Same order as the desktop: relays in use fastest first, then the rest. Public relays are the mock's only source here.
+      const rows = [...mockRelayLatency].map(([url, ms]) => ({
+        url,
+        source: 'public',
+        latency_ms: mockNetwork.use_public_relays && !mockNetwork.disabled.includes(url) ? ms : null,
+        home: false,
+        pinned: mockNetwork.pinned.includes(url),
+        disabled: mockNetwork.disabled.includes(url),
+        in_use: mockNetwork.use_public_relays && !mockNetwork.disabled.includes(url),
+        host: null,
+        verified: false,
+      }));
+      // Relays members host for the mock's server. Only shown while the "Use relays offered by my servers" switch is on.
+      if (mockNetwork.use_community_relays) {
+        rows.push(
+          { url: 'https://hosted-yusuf.example.org/', source: 'hosted', latency_ms: 60, home: false, pinned: false, disabled: false, in_use: true, host: 'Yusuf', verified: true },
+          { url: 'https://hosted-nadia.example.org/', source: 'hosted', latency_ms: null, home: false, pinned: false, disabled: false, in_use: false, host: 'Nadia', verified: false },
+        );
+      }
+      rows.sort((a, b) => Number(b.in_use) - Number(a.in_use) || (a.latency_ms ?? Infinity) - (b.latency_ms ?? Infinity));
+      const home = rows.find((r) => r.in_use);
+      if (home) home.home = true;
+      return { home: home ? home.url : null, relays: rows };
     },
     net_status: () => ({
-      dht: { size_estimate: 9200000, confidence: 0.82, firewalled: false },
+      dht: { size_estimate: 9200000, confidence: 0.82, firewalled: false, latency_ms: mockNetLatency.dht_ms },
       peers: 3,
       relay: 'use1-1.relay.n0.iroh.network',
+      relay_ms: mockNetLatency.relay_ms,
     }),
   };
 
@@ -1008,6 +1148,11 @@ if (!window.__TAURI__) {
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
   const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels'];
   const ignoredSet = new Set();
+  // The DHT and relay latencies the title bar shows. The engine sends them with each probe, so the mock does too.
+  const mockNetLatency = { dht_ms: 2529, relay_ms: 42 };
+  // Close DM hides a conversation until a message newer than the close arrives, as the engine does.
+  const closedDms = {};
+  const hiddenByClose = (c) => closedDms[`dm:${c.peer}`] !== undefined && c.last_ms <= closedDms[`dm:${c.peer}`];
   // Private channel access, kept per channel id for the preview's round trip.
   const channelAccess = new Map();
   const KARIM = id('karim-n2w5d8fx');
@@ -1137,7 +1282,7 @@ if (!window.__TAURI__) {
       return null;
     },
     // Desktop notifications: the native plugin shows them in the app. The browser preview only logs them.
-    'plugin:notification|notify': ({ options }) => { console.info('[mock] desktop notification', options); return null; },
+    'plugin:notification|notify': ({ options }) => { (window.__mockNotified ??= []).push(options); console.info('[mock] desktop notification', options); return null; },
     // Your status. set_status emits dissent://status-changed the way the engine will; a timed status reverts to online.
     get_status: () => mockStatus,
     // Auto-idle input report: the mock has no idle timer, so it does nothing.
@@ -1156,7 +1301,7 @@ if (!window.__TAURI__) {
     },
     list_conversations: () => {
       const rows = [
-        ...conversations().map((c) => ({ kind: 'dm', ...c, last_text: c.peer === NADIA ? 'Running a seeder for Book club' : '', online: c.peer !== LINUS, status: MEMBER_STATUS[c.peer] })),
+        ...conversations().filter((c) => !hiddenByClose(c)).map((c) => ({ kind: 'dm', ...c, last_text: c.peer === NADIA ? 'Running a seeder for Book club' : '', online: c.peer !== LINUS, status: MEMBER_STATUS[c.peer] })),
         ...Object.values(groups).map(groupRow),
       ];
       const rank = (r) => { const i = BOARD_ORDER.indexOf(r.kind === 'group' ? `group:${r.id}` : r.peer); return i < 0 ? 99 : i; };
@@ -1167,7 +1312,7 @@ if (!window.__TAURI__) {
       groups[gid] = { id: gid, name, creator: ME, members: [ME, ...peers], items: [] };
       return groupRow(groups[gid]);
     },
-    group_messages: ({ groupId }) => groups[groupId].items.map((m) => dmItem(m, groups[groupId].items)),
+    group_messages: ({ groupId, limit }) => groups[groupId].items.slice(-limit).map((m) => dmItem(m, groups[groupId].items)),
     send_group_message: ({ groupId, text }) => {
       const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false, reactions: [] };
       groups[groupId].items.push(item);
@@ -1204,7 +1349,10 @@ if (!window.__TAURI__) {
     remove_contact: ({ rootId }) => { contactSet.delete(rootId); return null; },
     block_user: ({ rootId }) => { contactSet.delete(rootId); return null; },
     unblock_user: () => null,
-    close_conversation: () => null,
+    close_conversation: ({ key }) => { closedDms[key] = Date.now(); return null; },
+    reopen_conversation: ({ key }) => { delete closedDms[key]; return null; },
+    // Links that arrived before the UI listened. The mock sends each one as an event, so none wait here.
+    take_deep_links: () => [],
     ignore_user: ({ user }) => { ignoredSet.add(user); return null; },
     unignore_user: ({ user }) => { ignoredSet.delete(user); return null; },
     ignored_users: () => [...ignoredSet],
@@ -1293,6 +1441,14 @@ if (!window.__TAURI__) {
     set_deafened: ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; return null; },
     set_camera: ({ on }) => { if (calls.current) calls.current.camera = on; return null; },
     set_camera_preview: () => null,
+    // The tile's drawn width is kept on window, so the driver can check that a tile reported it. Width 0 removes it.
+    set_video_tile: ({ rootId, screen, width }) => {
+      const tiles = { ...(window.__tileWidths ?? {}) };
+      const key = screen ? `${rootId}:screen` : rootId;
+      if (width) tiles[key] = width; else delete tiles[key];
+      window.__tileWidths = tiles;
+      return null;
+    },
     set_screen_share: ({ on }) => { if (calls.current) calls.current.screen = on; return null; },
     list_share_sources: () => [
       { target: { kind: 'display', id: 1 }, name: 'Built-in display', primary: true },
@@ -1400,12 +1556,37 @@ if (!window.__TAURI__) {
       : { call_id: 'call-maya', scope: 'dm', peer: GRACE, name: 'Maya', caller: { root_id: GRACE, display_name: 'Maya' }, verified: true, in_call: 1, total: 2, members_in: [] };
     emitTo('dissent://call-ringing', payload);
   };
+  // `window.__mockPinOldest(communityId, channelId)` pins the channel's oldest stored message, and returns its text.
+  window.__mockPinOldest = (communityId, channelId) => {
+    const m = servers[communityId].msgs[channelId][0];
+    mockPinnedIds.add(m.id);
+    return m.text;
+  };
+  // `window.__mockAnimatedIcon(communityId)` sets an animated icon, as the engine would save one: a GIF and a still poster.
+  window.__mockAnimatedIcon = (communityId) => {
+    const gif = 'R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=';
+    const poster = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    // Set directly: the fixture acts as the owner, whatever the signed-in user's role is.
+    const c = servers[communityId];
+    c.icon = `data:image/gif;base64,${gif}`;
+    c.icon_poster = `data:image/png;base64,${poster}`;
+    emitTo('dissent://avatar-changed', { community_id: communityId });
+  };
   // `mentionsMe` makes the message mention this device by name, as the mentions fixtures do.
   window.__mockPost = (communityId, channelId, author, text, mentionsMe = false) => {
     const m = { ...msg(0, 0, author, text), ms: Date.now(), mentions_me: mentionsMe, mentions: mentionsMe ? [{ id: ME, display_name: people[ME] }] : [] };
     servers[communityId].msgs[channelId].push(m);
     emit({ kind: 'message', community_id: communityId, channel_id: channelId });
   };
+  // A dissent:// link opened from outside the app, as the backend sends it.
+  window.__mockDeepLink = (link) => emitTo('dissent://deep-link', [link]);
+  // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.
+  window.__mockNetLatency = (dht_ms, relay_ms) => {
+    Object.assign(mockNetLatency, { dht_ms, relay_ms });
+    emit({ kind: 'net_latency', dht_ms, relay_ms });
+  };
+  // The address a contact link carries for a person, so a driver check can open a link for them.
+  window.__mockAddressOf = (id) => addressOf('user', id);
   window.__mockDm = (peer, text) => {
     (dms[peer] ??= []).push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false });
     emit({ kind: 'dm', peer });

@@ -41,6 +41,7 @@ tauri-plugin-opener.workspace = true
 tauri-plugin-notification.workspace = true
 tauri-plugin-global-shortcut.workspace = true
 tauri-plugin-single-instance.workspace = true
+tauri-plugin-deep-link.workspace = true
 tauri-plugin-autostart.workspace = true
 mime_guess.workspace = true
 rand.workspace = true

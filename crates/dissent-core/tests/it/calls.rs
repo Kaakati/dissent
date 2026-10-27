@@ -1221,3 +1221,181 @@ async fn an_outsider_sees_no_live_call() {
     finish(vec![alice, bob, carol, dave, outsider]).await;
     }).await;
 }
+
+/// Puts `count` peers in one voice channel at boost `level`, each announcing `kbps` of upload.
+async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Peer>, CommunityId, ChannelId) {
+    let owner = peer("owner").await;
+    let mut others = Vec::new();
+    for n in 1..count {
+        others.push(peer(&format!("member {n}")).await);
+    }
+    let refs: Vec<&Peer> = others.iter().collect();
+    let (community, channel) = voice_community(&owner, &refs).await;
+    let mut everyone = vec![owner];
+    everyone.extend(others);
+    for p in &everyone {
+        dissent_core::test_support::set_boost_level(&p.engine, Some(level));
+        p.engine.set_capacity_override(Some(kbps));
+    }
+    (everyone, community, channel)
+}
+
+/// Waits until every peer in `peers` sees a call of `peers.len()` at `topology`, with audio.
+async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
+    for p in peers {
+        eventually_within(Duration::from_secs(150), what, || {
+            p.engine.call_state().filter(|v| {
+                v.participants.len() == peers.len() - 1 && v.topology == topology && v.frames_received > 0
+            })
+        })
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn boosted_mesh_grows_to_the_level_limit_then_forwards() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    // Level 2 keeps a mesh up to 8. Every device has the upload for seven copies of audio.
+    let (everyone, community, channel) = boosted_call(9, 2, 5_000).await;
+    for p in &everyone[..8] {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone[..8], Topology::Mesh, "a boosted mesh of eight").await;
+    // Well past the tier sustain, eight is still a mesh. Level 0 would have forwarded it at 7.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    for p in &everyone[..8] {
+        let view = p.engine.call_state().expect("in call");
+        assert_eq!(view.topology, Topology::Mesh, "eight stays a mesh at level 2");
+        assert_eq!(view.participants.len(), 7);
+    }
+
+    // The ninth device takes the call over the limit, so it is forwarded.
+    everyone[8].engine.join_call(community, channel).await.expect("join");
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of nine").await;
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_released_device_holds_a_boosted_call_to_level_zero_and_still_takes_part() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    let (everyone, community, channel) = boosted_call(7, 2, 5_000).await;
+    // One device runs a released build. It sends no `Features`, and answers each one with the
+    // decode error a released build gives.
+    let released = &everyone[6];
+    dissent_core::test_support::act_as_released_calls(&released.engine);
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    // Seven is forwarded, as at level 0, and the released device hears the call.
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of seven with a released device").await;
+
+    // Signalling after the refused `Features` still reaches it and comes back from it.
+    released.engine.set_mute(true).await.expect("mute");
+    for p in &everyone[..6] {
+        eventually("the released device's mute is seen", || {
+            p.engine.call_state().filter(|v| {
+                v.participants
+                    .iter()
+                    .any(|m| m.muted && m.root_id == released.identity.root_id().to_string())
+            })
+        })
+        .await;
+    }
+    everyone[0].engine.set_mute(true).await.expect("mute");
+    eventually("the released device sees a new device's mute", || {
+        released.engine.call_state().filter(|v| {
+            v.participants
+                .iter()
+                .any(|m| m.muted && m.root_id == everyone[0].identity.root_id().to_string())
+        })
+    })
+    .await;
+    let before = released.engine.call_state().expect("in call").frames_received;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after = released.engine.call_state().expect("in call").frames_received;
+    assert!(after > before, "the released device keeps receiving audio");
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_boosted_call_with_a_device_short_of_upload_forwards_at_seven() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    let (everyone, community, channel) = boosted_call(7, 2, 5_000).await;
+    // Six copies of audio need 192 kbps. This device has 150.
+    everyone[3].engine.set_capacity_override(Some(150));
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn measured_upload_elects_a_forwarder() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    // No capacity overrides: every device announces what it measures.
+    let (everyone, community, channel) = boosted_call(7, 0, 0).await;
+    for p in &everyone {
+        p.engine.set_capacity_override(None);
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
+    // Each device's announced upload covers a forwarder's load for seven, so the election over the
+    // measured numbers alone picks one.
+    for p in &everyone {
+        eventually_within(Duration::from_secs(60), "an election over measured capacities", || {
+            let (measured, elected) = dissent_core::test_support::measured_election(&p.engine);
+            (measured == 7).then_some(elected).flatten()
+        })
+        .await;
+    }
+    // The forwarder sends a copy of the top speakers to six listeners, so it measures the most.
+    let most = everyone
+        .iter()
+        .filter_map(|p| dissent_core::test_support::own_call_capacity(&p.engine))
+        .max()
+        .expect("measured");
+    assert!(most >= 7 * 96, "the forwarder's measured upload covers seven listeners: {most} kbps");
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_boosted_mesh_holds_on_measured_upload() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    let (everyone, community, channel) = boosted_call(7, 2, 0).await;
+    for p in &everyone {
+        p.engine.set_capacity_override(None);
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Mesh, "a boosted mesh of seven").await;
+    // Wait until every device has heard every other's measured upload, then past the tier sustain.
+    for p in &everyone {
+        eventually_within(Duration::from_secs(60), "every device's upload is measured", || {
+            (dissent_core::test_support::measured_election(&p.engine).0 == 7).then_some(())
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    for p in &everyone {
+        let upload = dissent_core::test_support::own_call_capacity(&p.engine).expect("measured");
+        assert!(upload >= 6 * 32, "six copies of audio are measured: {upload} kbps");
+        let view = p.engine.call_state().expect("in call");
+        assert_eq!(view.topology, Topology::Mesh, "measured upload carries a mesh of seven at level 2");
+    }
+    finish(everyone).await;
+    }).await;
+}

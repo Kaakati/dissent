@@ -77,3 +77,26 @@ pub async fn set_profile_banner_animated(state: State<'_, AppState>, gif: String
     let (gif, poster) = (STANDARD.decode(&gif).map_err(err)?, STANDARD.decode(&poster).map_err(err)?);
     engine(&state).await?.set_profile_banner_animated(gif, poster).await.map_err(err)
 }
+
+/// The relays this person hosts for a server, for its boost. An empty list withdraws.
+#[tauri::command]
+pub async fn set_hosted_relays(state: State<'_, AppState>, community_id: String, relays: Vec<String>) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_hosted_relays(community, relays).await.map_err(err)
+}
+
+/// Lets members, and not only admins and the owner, publish relays they host. Owners and admins only.
+#[tauri::command]
+pub async fn set_members_host_relays(state: State<'_, AppState>, community_id: String, on: bool) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_members_host_relays(community, on).await.map_err(err)
+}
+
+/// Asks a member of the server to run the relay check on `url` from their own network. It is feedback
+/// for the host only: the answer is the relay's latency in milliseconds when it passed, or the reason
+/// it did not. A relay counts toward a level only after the app's own check passes, never from this.
+#[tauri::command]
+pub async fn check_relay(state: State<'_, AppState>, community_id: String, url: String) -> Result<u64, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.relay_check(community, &url).await
+}

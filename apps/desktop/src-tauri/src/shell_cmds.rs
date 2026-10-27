@@ -62,6 +62,7 @@ pub struct ShellView {
     /// Why start at login is not offered, when it is not. `null` when it is.
     pub start_at_login_note: Option<&'static str>,
     pub notifications_muted: bool,
+    pub emoticons_as_text: bool,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +70,9 @@ pub struct ShellSettingsInput {
     pub keep_running: bool,
     pub start_at_login: bool,
     pub notifications_muted: bool,
+    /// Absent from a window older than this setting, which leaves it as it was.
+    #[serde(default)]
+    pub emoticons_as_text: Option<bool>,
 }
 
 fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
@@ -78,6 +82,7 @@ fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
         start_at_login_available: state.login_note.is_none(),
         start_at_login_note: state.login_note,
         notifications_muted: settings.notifications_muted,
+        emoticons_as_text: settings.emoticons_as_text,
     }
 }
 
@@ -101,6 +106,9 @@ fn apply(app: &AppHandle, state: &ShellState, input: ShellSettingsInput) -> Resu
         s.keep_running = input.keep_running;
         s.start_at_login = input.start_at_login;
         s.notifications_muted = input.notifications_muted;
+        if let Some(as_text) = input.emoticons_as_text {
+            s.emoticons_as_text = as_text;
+        }
     })?;
     tray::sync_mute(app, saved.notifications_muted);
     let shown = view(state, saved);
@@ -121,6 +129,7 @@ pub fn set_muted(app: &AppHandle, muted: bool) -> Result<(), String> {
             keep_running: current.keep_running,
             start_at_login: current.start_at_login,
             notifications_muted: muted,
+            emoticons_as_text: None,
         },
     )
     .map(|_| ())

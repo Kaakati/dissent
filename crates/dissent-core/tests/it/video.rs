@@ -4,7 +4,7 @@
 //! camera. Networked, so run with `scripts/fwtest.sh dissent-core it --ignored video::`.
 
 use crate::common::*;
-use dissent_core::EngineEvent;
+use dissent_core::{EngineEvent, TestCapture};
 use std::time::{Duration, Instant};
 
 /// The two tests in this file start engines with the same names, so they run one at a time.
@@ -66,7 +66,7 @@ async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
 
         // Alice's test picture goes out, and Bob reads previews of it. The picture is flat colour
         // bars with noise, so each preview is a JPEG of a few kilobytes.
-        alice.engine.use_test_camera_pattern(true);
+        alice.engine.set_test_capture(TestCapture::Pattern);
         alice.engine.set_camera(true).expect("camera on");
         let alice_root = alice.identity.root_id().to_string();
         let (count, bytes) =
@@ -116,6 +116,7 @@ async fn a_shared_screen_in_a_dm_call_reaches_the_other_engine() {
         })
         .await;
 
+        alice.engine.set_test_capture(TestCapture::Pattern);
         alice.engine.set_screen_share(true, None).expect("screen share on");
         let alice_root = alice.identity.root_id().to_string();
         let (count, _) =
@@ -155,7 +156,7 @@ async fn a_camera_in_a_dm_call_is_encoded_with_av1_when_both_sides_agree() {
         })
         .await;
 
-        alice.engine.use_test_camera_pattern(true);
+        alice.engine.set_test_capture(TestCapture::Pattern);
         alice.engine.set_camera(true).expect("camera on");
         let alice_root = alice.identity.root_id().to_string();
         let mut av1 = 0u32;

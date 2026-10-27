@@ -411,7 +411,24 @@ impl Engine {
             .author_publish(community, ChannelId::CONTROL, Payload::Leave)
             .await
         {
-            Ok(_) | Err(CoreError::Rejected(_)) => {}
+            Ok(leave) => {
+                // Gossip is not acknowledged, and the topic closes at once below. Push the Leave to each device we
+                // are connected to, so the others learn of it and remove our device from the group.
+                let peers: Vec<DeviceId> = self
+                    .inner
+                    .neighbours
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&community)
+                    .map(|set| set.iter().copied().collect())
+                    .unwrap_or_default();
+                for peer in peers {
+                    if let Err(e) = self.push(community, peer, vec![leave.clone()]).await {
+                        debug!(community = %community, peer = %peer, error = %e, "leave not pushed to a peer");
+                    }
+                }
+            }
+            Err(CoreError::Rejected(_)) => {}
             Err(e) => return Err(e),
         }
         let removed = self.write().communities.remove(&community);

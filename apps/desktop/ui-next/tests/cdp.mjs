@@ -24,7 +24,7 @@ export function freePort() {
   });
 }
 
-export async function launch({ url, width = 1600, height = 1000, profile }) {
+export async function launch({ url, width = 1600, height = 1000, profile, reducedMotion = false }) {
   const port = await freePort();
   rmSync(profile, { recursive: true, force: true });
   mkdirSync(profile, { recursive: true });
@@ -34,8 +34,10 @@ export async function launch({ url, width = 1600, height = 1000, profile }) {
   // controls (Tailwind wraps hover styles in @media (hover: hover)). primaryPointerType=4 is a fine pointer and
   // primaryHoverType=2 is hover; Windows Chrome already reports both, so this only changes the Linux runs.
   const pointer = ['--blink-settings=primaryPointerType=4,primaryHoverType=2,availablePointerTypes=4,availableHoverTypes=2'];
+  // prefers-reduced-motion cannot be emulated headless, so a run that checks it starts with the preference forced on.
+  const motion = reducedMotion ? ['--force-prefers-reduced-motion'] : [];
   const browser = spawn(BROWSER, [
-    ...sandbox, ...pointer, '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+    ...sandbox, ...pointer, ...motion, '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
     '--no-first-run', '--disable-gpu', '--hide-scrollbars', `--window-size=${width},${height}`, '--force-device-scale-factor=1', url,
   ], { stdio: 'ignore' });
 

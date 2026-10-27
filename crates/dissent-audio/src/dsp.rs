@@ -229,6 +229,17 @@ const REFERENCE_KEEP: usize = 2 * SAMPLE_RATE as usize;
 ///
 /// Push the reference before processing the mic samples it echoes, on every tick. The desktop loop
 /// pushes each tick's playout before that tick's capture.
+/// What the canceller has done, for the call log. Counts only grow.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EchoStats {
+    /// Times the filter was rolled back because its error grew louder than the mic it came from.
+    pub divergence_events: u64,
+    /// Samples passed through unprocessed while a rolled-back filter recovered.
+    pub bypass_samples: u64,
+    /// Times the residual suppressor's gain crossed half, either way. Chatter here is audible as static.
+    pub suppressor_flips: u64,
+}
+
 pub struct EchoCanceller {
     taps: usize,
     mu: f32,
@@ -268,7 +279,34 @@ pub struct EchoCanceller {
     res_smooth: [f64; 3],
     /// Set by `DISSENT_AEC_TRACE=1`: the canceller logs its state once a second at debug level.
     trace: Option<Trace>,
+    /// Smoothed powers of the error and the mic, for the divergence watch.
+    err_power: f64,
+    mic_power: f64,
+    /// Samples the error has been louder than the mic in a row, and samples it has been well below it.
+    over_run: usize,
+    good_run: usize,
+    /// The weights at the last converged moment, which a rollback restores.
+    good: Vec<f32>,
+    good_valid: bool,
+    /// Set after a rollback: the mic passes unprocessed until the error falls below it again.
+    bypass: bool,
+    /// Whether the residual suppressor is above half gain.
+    res_open: bool,
+    stats: EchoStats,
 }
+
+/// Smoothing of the divergence watch's powers, about 10 ms.
+const DIVERGE_SECONDS: f64 = 0.01;
+/// The error must be louder than the mic for this many samples (20 ms) before the filter is rolled back.
+const DIVERGE_HOLD: usize = 960;
+/// Below this mic power the watch does not count, so silence and near-silence never trigger a rollback.
+const DIVERGE_MIN_POWER: f64 = 1e-8;
+/// Bypass ends when the error falls below this share of the mic.
+const DIVERGE_RECOVER: f64 = 0.5;
+/// The weights are saved as converged after the error has been below this share of the mic for `GOOD_HOLD`
+/// samples while the far end talks.
+const DIVERGE_GOOD: f64 = 0.1;
+const GOOD_HOLD: usize = 480;
 
 /// Power smoothing of the residual suppressor, about 10 ms.
 const RES_SMOOTHING_SECONDS: f64 = 0.01;
@@ -334,6 +372,15 @@ impl EchoCanceller {
             res_gain: 1.0,
             res_smooth: [RES_SMOOTHING_SECONDS, RES_OPEN_SECONDS, RES_CLOSE_SECONDS].map(smoothing),
             trace: std::env::var("DISSENT_AEC_TRACE").is_ok_and(|v| v == "1").then(Trace::default),
+            err_power: 0.0,
+            mic_power: 0.0,
+            over_run: 0,
+            good_run: 0,
+            good: vec![0.0; taps],
+            good_valid: false,
+            bypass: false,
+            res_open: true,
+            stats: EchoStats::default(),
         }
     }
 
@@ -415,11 +462,18 @@ impl EchoCanceller {
             self.push_history(far);
             let echo = self.dot_window();
             let error = *sample - echo;
+            self.watch_divergence(error, mic_in);
             if self.power > EC_MIN_REFERENCE_POWER {
                 let g = self.mu * error / (self.power as f32 + EC_EPS);
                 self.adapt(g);
             }
-            let out = self.suppress_residual(error, echo, mic_in);
+            // A rolled-back filter is still learning, but its output is not used until the error falls back.
+            let out = if self.bypass {
+                self.stats.bypass_samples += 1;
+                mic_in
+            } else {
+                self.suppress_residual(error, echo, mic_in)
+            };
             *sample = out;
             if let Some(t) = self.trace.as_mut() {
                 let (m, e, y) = (mic_in as f64, out as f64, echo as f64);
@@ -512,7 +566,59 @@ impl EchoCanceller {
         };
         let rate = if target > self.res_gain { open } else { close };
         self.res_gain += (target - self.res_gain) * (1.0 - rate);
+        if (self.res_gain > 0.5) != self.res_open {
+            self.res_open = self.res_gain > 0.5;
+            self.stats.suppressor_flips += 1;
+        }
         (e * self.res_gain) as f32
+    }
+
+    /// Watches the error against the mic. An error louder than its mic means the echo estimate adds energy, which NLMS
+    /// does once it has adapted to near-end speech. When that lasts [`DIVERGE_HOLD`] samples the weights go back to the
+    /// last converged moment, and the mic passes until the error falls below [`DIVERGE_RECOVER`] of it. The weights are
+    /// saved as converged while the error is well below the mic and the far end talks.
+    fn watch_divergence(&mut self, error: f32, mic: f32) {
+        let smooth = smoothing(DIVERGE_SECONDS);
+        self.err_power = smooth * self.err_power + (1.0 - smooth) * (error as f64).powi(2);
+        self.mic_power = smooth * self.mic_power + (1.0 - smooth) * (mic as f64).powi(2);
+        let far_active = self.power > EC_MIN_REFERENCE_POWER;
+        if self.bypass {
+            if self.err_power < DIVERGE_RECOVER * self.mic_power || !far_active {
+                self.bypass = false;
+            }
+            return;
+        }
+        if self.err_power > self.mic_power && self.mic_power > DIVERGE_MIN_POWER {
+            self.good_run = 0;
+            self.over_run += 1;
+            if self.over_run >= DIVERGE_HOLD {
+                self.over_run = 0;
+                self.stats.divergence_events += 1;
+                if self.good_valid {
+                    self.weights.copy_from_slice(&self.good);
+                } else {
+                    self.weights.fill(0.0);
+                }
+                self.bypass = true;
+            }
+        } else {
+            self.over_run = 0;
+            if far_active && self.err_power < DIVERGE_GOOD * self.mic_power {
+                self.good_run += 1;
+                if self.good_run >= GOOD_HOLD {
+                    self.good_run = 0;
+                    self.good.copy_from_slice(&self.weights);
+                    self.good_valid = true;
+                }
+            } else {
+                self.good_run = 0;
+            }
+        }
+    }
+
+    /// What the canceller has done so far.
+    pub fn stats(&self) -> EchoStats {
+        self.stats
     }
 
     /// Logs the trace sums once a second of mic audio, then clears them. The echo return loss
@@ -721,5 +827,53 @@ mod tests {
         }
         assert!(agc.gain() > 1.5, "gain {} should rise for quiet input", agc.gain());
         assert!(agc.gain() <= db_to_amp(12.0) + 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod divergence_tests {
+    use super::*;
+
+    /// Deterministic noise in [-amp, amp), so the tests need no random seed.
+    fn noise(n: usize, amp: f32) -> Vec<f32> {
+        let mut x: u32 = 0x1234_5678;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                amp * (x as f32 / u32::MAX as f32 * 2.0 - 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_filter_whose_error_outgrows_the_mic_is_rolled_back() {
+        let mut ec = EchoCanceller::new(256, 0.3);
+        // An echo estimate far larger than any echo the mic could hold.
+        ec.weights.fill(1.0);
+        for block in noise(8 * 480, 0.3).chunks(480) {
+            ec.push_far(block);
+            let mut mic = vec![1e-3f32; block.len()];
+            ec.process(&mut mic);
+        }
+        let stats = ec.stats();
+        assert!(stats.divergence_events >= 1, "the error outgrew the mic, so the filter was rolled back");
+        assert!(stats.bypass_samples > 0, "the mic passed unprocessed while the filter recovered");
+    }
+
+    #[test]
+    fn a_converging_filter_is_not_rolled_back() {
+        let mut ec = EchoCanceller::new(256, 0.3);
+        let far = noise(48_000, 0.3);
+        // The echo is the far end, delayed by 10 samples at half amplitude.
+        for start in (0..far.len()).step_by(480) {
+            ec.push_far(&far[start..start + 480]);
+            let mut mic: Vec<f32> = (start..start + 480)
+                .map(|t| if t >= 10 { 0.5 * far[t - 10] } else { 0.0 })
+                .collect();
+            ec.process(&mut mic);
+        }
+        assert_eq!(ec.stats().divergence_events, 0, "a filter that converges is never rolled back");
     }
 }
