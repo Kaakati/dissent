@@ -89,6 +89,12 @@ async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
 #[ignore = "networked, and needs a display: run with scripts/fwtest.sh"]
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 async fn a_shared_screen_in_a_dm_call_reaches_the_other_engine() {
+    // CI's Linux runner has no display to capture.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("skipped: no display");
+        return;
+    }
     let _serial = SERIAL.lock().await;
     bounded(async {
         let alice = peer("alice").await;
