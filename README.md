@@ -167,7 +167,7 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 - **Older versions miss newer features.** Someone on an older Dissent sees plain `@names` instead of highlighted mentions, no banners, and server changes such as a rename show for them only once they update.
 - **A sudden power cut can lose your last quarter-second of sent messages.** Other members usually already have them, so they come back when you sync.
 - **Mutual friends shares your whole friends list with your friends**, not just the people you have in common. You can turn this off in Settings › Privacy.
-- **Screen sharing doesn't work on Linux yet**, and the Linux camera isn't supported either.
+- **Linux builds need Ubuntu 24.04 or newer**, or another distribution of the same age (glibc 2.39 and PipeWire 1.0). That covers the desktop app, the seeder and the relay. Older systems such as Ubuntu 22.04 and Debian 12 can't run them.
 - **No mobile app yet.**
 - **Most testing has happened on one machine and over the internet between a few copies of the app.** Real-world measurements across many networks and mobile carriers are still to come.
 

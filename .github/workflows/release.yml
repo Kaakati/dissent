@@ -97,7 +97,7 @@ jobs:
       - name: Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev \n            libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -151,7 +151,7 @@ jobs:
           - name: macOS Apple Silicon
             os: macos-latest
           - name: Linux x64
-            os: ubuntu-22.04
+            os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -250,7 +250,7 @@ jobs:
             args: "--target x86_64-apple-darwin"
             rust_targets: x86_64-apple-darwin
           - name: Linux x64
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             args: ""
     runs-on: ${{ matrix.os }}
     steps:
@@ -277,7 +277,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev \n            libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_targets }}
@@ -375,7 +375,7 @@ jobs:
             os: macos-latest
             ext: ""
           - name: linux-x64
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             ext: ""
     runs-on: ${{ matrix.os }}
     env:
@@ -388,7 +388,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev
+          sudo apt-get install -y libasound2-dev libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

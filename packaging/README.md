@@ -33,6 +33,9 @@ UDP to it only if you want direct connections to the seeder. Without that, traff
 
 ## Linux (systemd)
 
+The release binaries need Ubuntu 24.04 or newer, or another distribution of the same age (glibc 2.39). On older
+systems, such as Ubuntu 22.04 or Debian 12, build from source there instead.
+
 The units run under a dedicated account that systemd creates on start (`DynamicUser=yes`). Its state lives in
 `/var/lib/dissent-seeder` or `/var/lib/dissent-relay`, which systemd keeps across updates. Each unit is hardened:
 a read-only system, no home directories, a private `/tmp`, no privilege escalation, and a short list of allowed
