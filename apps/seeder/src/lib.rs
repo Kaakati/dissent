@@ -713,6 +713,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // uses the OS credential store, which CI's Linux runner lacks
     fn a_missing_identity_beside_sealed_data_is_refused_and_no_key_is_made() {
         const APP: &str = "dissent-seeder-test";
         let dir = std::env::temp_dir().join(format!("dissent-seeder-sealed-{}", std::process::id()));

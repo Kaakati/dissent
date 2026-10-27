@@ -334,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)] // `\` is a separator only on Windows; elsewhere it is a filename character
     fn one_folder_has_one_name_however_it_is_typed() {
         let back = normal_dir(Path::new(r"C:\Users\Me\Dissent\dev"));
         assert_eq!(back, normal_dir(Path::new("C:/Users/Me/Dissent/dev/")));

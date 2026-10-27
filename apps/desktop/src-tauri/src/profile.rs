@@ -654,6 +654,7 @@ mod key_name_tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn one_folder_has_one_key_name_however_it_is_typed() {
         assert_eq!(
             keyed_name(&dissent_identity::vault::normal_dir(Path::new(r"C:\Dissent\dev"))),
@@ -753,6 +754,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // uses the OS credential store, which CI's Linux runner lacks
     fn a_missing_identity_beside_sealed_data_is_refused_and_no_key_is_made() {
         const APP: &str = "dissent-profile-test";
         let dir = scratch("sealed");
