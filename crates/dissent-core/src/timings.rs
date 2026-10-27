@@ -27,7 +27,7 @@ pub struct Timings {
     /// The shortest gap between two typing signals for one target.
     pub typing_every: Duration,
     /// How long a joiner waits before its first request for epoch keys, and the base of the backoff
-    /// after a request that no member answers.
+    /// after a request that no member answers. Invite-card key requests start the same way.
     pub history_first_retry: Duration,
 }
 
@@ -44,7 +44,7 @@ impl Default for Timings {
             call_presence_ttl: Duration::from_secs(90),
             typing_expiry: Duration::from_secs(6),
             typing_every: Duration::from_secs(3),
-            history_first_retry: Duration::from_secs(3),
+            history_first_retry: Duration::from_secs(1),
         }
     }
 }

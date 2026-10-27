@@ -26,8 +26,14 @@ const AAD_DOMAIN: &[u8] = b"dissent/epoch-keys-aad/v1";
 /// Members asked for their epoch keys when joining. The first answers are merged.
 const HISTORY_FROM: usize = 3;
 /// The wait doubles after each attempt that no member answers, up to `HISTORY_RETRY_CAP`. A member
-/// coming online restarts it at once. The first wait is `Timings::history_first_retry`.
+/// coming online restarts it at once. The first wait is `Timings::history_first_retry`, 1 s in production,
+/// as in `history` for invite-card keys.
 const HISTORY_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The wait after a failed attempt that follows `wait`: double it, up to the cap.
+fn history_retry_after(wait: std::time::Duration) -> std::time::Duration {
+    (wait * 2).min(HISTORY_RETRY_CAP)
+}
 
 /// The epoch keys one device holds for one community.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -374,7 +380,7 @@ impl Engine {
             let seen = self.inner.member_seen.notified();
             tokio::pin!(seen);
             tokio::select! {
-                _ = tokio::time::sleep(wait) => wait = (wait * 2).min(HISTORY_RETRY_CAP),
+                _ = tokio::time::sleep(wait) => wait = history_retry_after(wait),
                 _ = &mut seen => wait = first,
             }
         }
@@ -546,5 +552,23 @@ impl Engine {
         {
             warn!(community = %community, error = %e, "could not put the name back after joining");
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_schedule_tests {
+    use super::{history_retry_after, HISTORY_RETRY_CAP};
+    use std::time::Duration;
+
+    #[test]
+    fn the_wait_doubles_from_one_second_to_the_cap_and_stays_there() {
+        let mut wait = Duration::from_secs(1);
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(wait.as_secs());
+            wait = history_retry_after(wait);
+        }
+        assert_eq!(seen, vec![1, 2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(HISTORY_RETRY_CAP, Duration::from_secs(60));
     }
 }

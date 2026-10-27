@@ -696,9 +696,6 @@ impl Engine {
         seed: bool,
         mentions: Mentions,
     ) -> Result<crate::views::MessageItem> {
-        if self.is_private_channel(community, channel) {
-            return Err(crate::error::CoreError::Invalid(crate::private_keys::PRIVATE_FILES_REFUSED.into()));
-        }
         let (attached, thumbs) = self.add_files(&paths, seed).await?;
         let plain = pack_all(text.trim(), &attached, &[], &thumbs, Some(&mentions))?;
         self.send_channel_plain(community, channel, plain).await
@@ -1460,11 +1457,31 @@ impl Engine {
         }
     }
 
+    /// Whether a message is not in a public channel. It is private, or its place is unknown, and either way
+    /// its media hashes are not given to seeders.
+    fn is_private_message(&self, community: dissent_identity::CommunityId, message: &str) -> bool {
+        let Ok(id) = message.parse::<dissent_events::EventId>() else {
+            return true;
+        };
+        let w = self.read();
+        let Some(c) = w.communities.get(&community) else {
+            return true;
+        };
+        let state = c.state();
+        !state.channels.keys().any(|chan| {
+            !state.is_private(*chan) && state.messages.get(chan).is_some_and(|ms| ms.iter().any(|m| m.id == id))
+        })
+    }
+
     /// Tells the seeders about the thumbnails and preview pictures of a message this device has fetched.
     fn hint_media_of(&self, community: Option<dissent_identity::CommunityId>, message: &str) {
         let Some(c) = community else {
             return;
         };
+        // A private channel's media hashes are for its readers only, so seeders are not told them.
+        if self.is_private_message(c, message) {
+            return;
+        }
         if let Ok((text, _)) = self.message_text(Some(c), message) {
             self.hint_seeders(c, media_blobs(&text));
         }

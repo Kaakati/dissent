@@ -101,6 +101,61 @@ target, so VOIP stays.
     sample in each direction. Release-mode CPU use is not measured.
 - **Headphones need none.** The app should skip echo cancellation when the output is headphones.
 
+## Double-talk: what we tried
+
+Double talk means both ends speak at once. The canceller must keep the near-end voice and still remove
+the echo. Today the time-domain filter fails this: during double talk the near-end voice comes out
+about 5.6 dB quieter than it went in (`echo_path::double_talk_keeps_the_near_end_voice`, ignored). The
+measurements below come from `crates/dissent-audio/tests/echo_path.rs`: a room impulse response with a
+250 ms tail, speaker buffering of 40 to 120 ms, 200 ppm clock drift, and a speech-like far end.
+
+- **Learned-gain detector (time domain), reverted.** Mic power is compared with the echo-path gain
+  learned from mic over reference power while the far end talks alone, and the filter freezes when the
+  mic is 1.4 times that. It does not read the filter output, so it avoids the circularity below. It
+  failed in three ways:
+  - Freezing on the first trigger let the learned gain sink, and the filter stopped for good: far-only
+    ERLE fell to about 0 dB.
+  - Slow learning during double talk kept far-only ERLE at 36 to 40 dB, but near-end speech stayed
+    about 1 dB below its residual. The detector fires for about 70% of the double-talk window and drops
+    out between syllables. In those gaps the filter keeps adapting on the near-end voice.
+  - A 0.25 s hangover fixed the gaps but froze the filter during far-only false alarms, so far-only
+    ERLE fell to 2 to 14 dB. Margins of 1.4, 2.0 and 3.0 all failed.
+- **Circular detection.** A detector that reads the filter's echo estimate cannot see near-end speech
+  the filter has already learned, because the estimate contains it. NLMS over 4608 taps absorbs part of
+  the near-end voice, so the estimate goes up with the mic and the test never fires. Any next detector
+  must read the mic and the reference only, or the errors in the filter's own output.
+- **Partitioned frequency-domain filter (block path), reverted.** A 26-partition overlap-save filter
+  with a 480-sample block and a 256 ms tail. The echo path reproduced exactly with known weights, so the
+  failures below are in adaptation, and each one was reproduced in NumPy first.
+  - **Normaliser instability.** Dividing each bin's step by that block's own power diverges. The
+    constrained gradient spreads energy across bins, so a bin with little reference power takes a huge
+    step. Smoothing the power over blocks fixes the blow-up. The power still needs a floor at 10% of the
+    mean over bins, or a weak bin's step grows without bound.
+  - **Weight constraint.** Without the constraint the taps spread past the block, and the echo wraps.
+    The weights have to be transformed back, cut to the first block of taps, and transformed forward
+    after each update.
+  - **DC offset.** A reference with a DC offset puts most of its power in the lowest bin. That bin's
+    step then dominates the update and the filter diverges. The unit tests use zero-mean noise. A real
+    reference should be high-passed before it reaches the filter.
+  - **Partition count.** Normalising by the total power over all partitions converges far too slowly:
+    the echo's first partition learns about 26 times slower than it would alone. Per-partition
+    normalisation converges, but it is unstable on coloured input (AR(1) with coefficient 0.98: 19 dB at
+    step 0.03, unstable at 0.1). Each partition sees the same error, so the partitions are correlated,
+    and the step has to be scaled to the partition count.
+  - **Numbers at the best setting** (per-partition normalisation, step 0.1, room harness): far-only
+    ERLE 34.4 dB at 0 ppm, 19.2 dB at 200 ppm. Double talk gave an output of -1.4 dBFS against a
+    near-end voice at -19.3 dBFS, so the block path adds energy when both talk. CPU was not measured.
+- **Zero-lag coherence gate, not working.** The per-bin step was scaled by the coherence of mic and
+  reference. The coherence is computed over one block, so it sees only zero-lag coherence. Echo that
+  arrives more than one block late looks incoherent, and the gate stops learning on the echo itself.
+  Any per-bin statistic has to be computed after the delay alignment, or over a window that covers the
+  echo's full spread.
+
+Next attempt: start from the block path's constraint and normaliser fixes above, or from a detector
+that reads only the mic and the reference. Test with `echo_path`, including the ignored double-talk
+test. Keep the time-domain path until a new one meets far-only ERLE of at least 38 dB and double-talk
+within 1.5 dB.
+
 ## Jitter buffer
 
 - **Inputs.** Each packet carries a sequence number, an RTP timestamp, the payload and the arrival

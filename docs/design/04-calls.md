@@ -281,12 +281,12 @@ Reference numbers for SVT-AV1 and the old encoder, measured on the same host:
 
 ### Capture
 
-- **Camera:** nokhwa 0.10. Media Foundation on Windows, AVFoundation on macOS. V4L2 on Linux is compiled out for now (see Linux below). It asks for the closest mode to the requested size and fps. The source scales what the device delivers to the requested size.
-- **Screen and window:** xcap 0.9, which wraps the platform capture APIs on Windows, macOS and Linux. It lists displays and visible titled windows, and paces capture to the frame rate. A target is looked up on every frame, because xcap's monitor handle is not `Send` on Windows.
+- **Camera:** nokhwa 0.10. Media Foundation on Windows, AVFoundation on macOS. V4L2 on Linux. It asks for the closest mode to the requested size and fps. The source scales what the device delivers to the requested size.
+- **Screen and window:** xcap 0.9, which wraps the platform capture APIs on Windows, macOS and Linux. It lists displays and visible titled windows, and paces capture to the frame rate. A target is looked up on every frame, because xcap's monitor handle is not `Send` on Windows. On Linux a display is a stream, and a window is grabbed per frame.
 - **Cursor:** xcap draws no cursor. `Cursor::Excluded` is the only supported mode, and `Cursor::Included` returns `VideoError::Unsupported`. The option is kept so it can light up when a backend can draw the cursor.
 - **Test source:** `PatternSource`, which is deterministic and needs no hardware. It drives the tests and CI.
 
-On Linux, screen capture is compiled out and every call returns `VideoError::Unsupported`. xcap's Linux backend needs the pipewire, wayland, EGL and xcb development packages at build time, and the release workflow does not install them. Camera capture is compiled out on Linux as well. nokhwa's V4L2 backend runs bindgen, which needs libclang, and a plain Linux build must not need it. Linux camera capture is the next step, after libclang is added to the build or the V4L2 binding is replaced.
+On Linux, camera capture uses nokhwa's V4L2 backend, and screen capture uses xcap: the X11 root window, or the desktop portal's ScreenCast on Wayland, which shows the system's own picker. Both need libclang, PipeWire, xcb, Wayland, EGL and gbm development packages at build time. The Linux test and desktop jobs in the release workflow install them.
 
 ### Rate control
 
@@ -332,8 +332,6 @@ Video frames use the same SFrame media key and per-sender key IDs as audio (the 
 - **Hardware encoders:** NVENC, Media Foundation, VideoToolbox and VAAPI. They are the next step. Each needs a binding and a runtime probe, and `VideoEncoder` is the seam.
 - **VP8.** H.264 is the fallback instead.
 - **Cursor capture.** xcap draws no cursor, so `Cursor::Included` returns `Unsupported`.
-- **Linux camera capture.** `camera.rs` is compiled out on Linux. nokhwa's V4L2 backend runs bindgen and needs libclang, which a plain build must not need. On Linux `CameraSource::open` is absent, so the media layer cannot open a camera there until this lands.
-- **Linux screen capture.** xcap's Linux backend needs pipewire, wayland, EGL and xcb development packages, which the release workflow does not install. Camera capture on Linux waits on libclang for nokhwa's V4L2 backend.
 - **Wiring into `dissent-media`, the app and the UI.**
 - **SVT log noise.** SVT-AV1 writes `Svt[info]` and `SvtMalloc[info]` lines to stderr. Set the `SVT_LOG` environment variable to a level above info (see `Lib/Codec/svt_log.c` in SVT-AV1) before the app ships.
 
@@ -376,7 +374,7 @@ The options that were rejected:
 - **Negotiation:** every offer carries a video line. `m=video 0` in the answer leaves the call audio-only (`has_video()` is false), with no error. `enable_h264` and `enable_bwe` are in `new_rtc`.
 - **Forwarder:** an SFU relays video for active senders only. A downlink starts at a keyframe for each sender, and a downlink's keyframe request restarts its stream.
 - **Core and desktop:** `set_camera(true)` starts a capture thread (640x360, 15 fps, 600 kbps, H.264), and the call loop sends its frames through the mesh or the forwarder. Received frames are decoded per sender and sent to the window as 320 px RGB previews, base64 encoded, in a `video_frame` event with the person's root id.
-- **Linux:** camera capture is compiled out, so `set_camera(true)` returns an error there.
+- **Linux:** camera and screen capture build with the same packages as the rest of the app, see the release workflow.
 - **Bitrate follows the link:** each tick the call loop takes the smallest estimate across peers (str0m's BWE, which needs `enable_bwe`) and the largest audio target, and sizes each capture with `VideoAdapter`, so the audio reservation holds. A budget too small for video pauses it.
 - **Previews:** each remote frame becomes a 320 px JPEG at quality 70, base64 in the `video_frame` event. About 116 KB/s per remote camera, measured on the test picture. Raw RGB base64 would be about 3.5 MB/s.
 - **Datagram margin:** str0m's MTU is the RTP payload limit, so the transport's datagram limit is reduced by 128 bytes for the RTP header, extensions and SRTP tag. Without it, a full-size video packet exceeds the transport limit and the call drops the peer.
@@ -451,7 +449,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 
 - **Camera.** `toggleCamera` and `set_camera` already exist. Phase 2 replaces the stub at `calls.rs:2269` with a call into the media session, which opens `CameraSource`, runs the encoder and drives the send queue. The lobby preview (`ui/views/lobby.js`) and the incoming answer (`ui/views/incoming.js`) change from "off" to the real state.
 - **Remote video.** Decoded frames reach the UI through a Tauri `Channel`, one frame per message, as RGBA, drawn on a canvas tile per speaker. Remote video needs a new engine event beside `CallUpdated`.
-- **Share screen.** Part of the first cut, built for the primary display on Windows and macOS. Linux has no screen capture yet, and the control says so. A window picker is still to do.
+- **Share screen.** Part of the first cut, built for the primary display on Windows and macOS. Linux shares through the same picker path, with the portal on Wayland. A window picker is still to do.
 - **macOS.** Add `NSCameraUsageDescription` under `bundle.macOS` in `tauri.conf.json` before the first camera build.
 
 ### Files to touch

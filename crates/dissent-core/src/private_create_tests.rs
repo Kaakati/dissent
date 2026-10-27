@@ -7,114 +7,33 @@ use std::time::Duration;
 use dissent_events::ChannelId;
 
 use crate::membership::tests::{eventually, Node};
-use crate::private_keys::{private_retry_after, PRIVATE_FILES_REFUSED};
-use crate::{CommunityId, CoreError};
+use crate::private_keys::private_retry_after;
+use crate::CommunityId;
 
 fn listed(view: &crate::CommunityView, name: &str) -> bool {
     view.channels.iter().any(|c| c.name == name)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_access_step_leaves_no_channel_behind() {
+async fn a_private_channel_is_made_in_one_event_and_is_private_from_the_start() {
     crate::testutil::bounded(async {
         let alice = Node::named("alice").await;
         let id: CommunityId = alice
             .engine
-            .create_community("Rollback".into())
+            .create_community("OneEvent".into())
             .await
             .expect("create")
             .id
             .parse()
             .unwrap();
-
-        alice.engine.inner.access_fault.store(true, std::sync::atomic::Ordering::SeqCst);
-        let refused = alice
-            .engine
-            .create_private_channel(id, "vault".into(), vec![], vec![])
-            .await;
-        assert!(refused.is_err(), "the access step was refused");
-        let view = alice.engine.community_view(id).expect("view");
-        assert!(!listed(&view, "vault"), "the channel was deleted again, so none is left public");
-        assert!(
-            alice.engine.inner.private_pending.lock().expect("lock").is_empty(),
-            "nothing is left pending"
-        );
-
-        // A retry makes the channel, now private, with its key.
         let made = alice
             .engine
             .create_private_channel(id, "vault".into(), vec![], vec![])
             .await
-            .expect("the retry succeeds");
-        assert!(made.private);
+            .expect("the channel is made");
+        assert!(made.private, "the channel is private as soon as it exists");
         let view = alice.engine.community_view(id).expect("view");
         assert!(listed(&view, "vault"));
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn posts_are_refused_while_a_private_channel_is_being_set_up() {
-    crate::testutil::bounded(async {
-        let alice = Node::named("alice").await;
-        let id: CommunityId = alice
-            .engine
-            .create_community("Pending".into())
-            .await
-            .expect("create")
-            .id
-            .parse()
-            .unwrap();
-        let made = alice
-            .engine
-            .create_private_channel(id, "vault".into(), vec![], vec![])
-            .await
-            .expect("create");
-        let channel: ChannelId = made.id.parse().expect("id");
-
-        // Mark it as still being set up, as the window between the two events would.
-        alice.engine.set_pending_private(id, channel, true);
-        let posted = alice.engine.send_message(id, channel, "too early".into()).await;
-        assert!(
-            matches!(posted, Err(CoreError::Invalid(ref m)) if m.contains("still being set up")),
-            "a post waits until the access is in local state"
-        );
-        alice.engine.set_pending_private(id, channel, false);
-        alice
-            .engine
-            .send_message(id, channel, "now".into())
-            .await
-            .expect("a post after the access is in local state");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn files_are_refused_in_a_private_channel() {
-    crate::testutil::bounded(async {
-        let alice = Node::named("alice").await;
-        let id: CommunityId = alice
-            .engine
-            .create_community("Files".into())
-            .await
-            .expect("create")
-            .id
-            .parse()
-            .unwrap();
-        let made = alice
-            .engine
-            .create_private_channel(id, "vault".into(), vec![], vec![])
-            .await
-            .expect("create");
-        let channel: ChannelId = made.id.parse().expect("id");
-        let refused = alice
-            .engine
-            .send_files(id, channel, vec![std::path::PathBuf::from("does-not-matter.txt")], String::new(), false)
-            .await;
-        assert!(
-            matches!(refused, Err(CoreError::Invalid(ref m)) if m == PRIVATE_FILES_REFUSED),
-            "the engine refuses files before reading them"
-        );
     })
     .await;
 }

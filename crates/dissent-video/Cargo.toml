@@ -16,9 +16,9 @@ thiserror.workspace = true
 tracing.workspace = true
 image.workspace = true
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-# Linux gets no camera or screen capture yet: nokhwa's V4L2 backend (v4l2-sys-mit) runs bindgen,
-# which needs libclang, and xcap's Linux backend needs PipeWire and Wayland headers.
+# nokhwa's V4L2 backend (v4l2-sys-mit) and xcap's Linux backend (pipewire, xcb) run bindgen and
+# pkg-config, so a Linux build needs libclang, PipeWire, xcb and Wayland development packages.
+# See the Linux dependencies in .github/workflows/release.yml.
 nokhwa.workspace = true
 xcap.workspace = true
 

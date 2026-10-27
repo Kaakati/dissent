@@ -88,7 +88,8 @@ impl Engine {
         channel: ChannelId,
         plain: String,
     ) -> Result<MessageItem> {
-        let payload = if self.is_private_channel(community, channel) {
+        let private = self.is_private_channel(community, channel);
+        let payload = if private {
             self.private_payload(community, channel, SealedKind::Message, &plain).await?
         } else {
             let (kind, epoch, ciphertext) = match self.history_seal(community, &plain) {
@@ -108,7 +109,10 @@ impl Engine {
         let se = self.author_publish(community, channel, payload).await?;
         self.store_content(community, se.event.id, se.event.body.hlc, plain.clone());
         // The sender tells the seeders about the thumbnails and previews, so they keep them for members who join later.
-        self.hint_seeders(community, crate::attachments::media_blobs(&plain));
+        // A private channel's media hashes are for its readers only, so seeders are not told them.
+        if !private {
+            self.hint_seeders(community, crate::attachments::media_blobs(&plain));
+        }
         let me = self.inner.me;
         let (attachments, mentions_me, mentions, mentions_everyone) = {
             let w = self.read();
@@ -278,11 +282,18 @@ impl Engine {
         // Control payloads are sealed under the epoch key while member-only control is on, and under
         // the current secret otherwise. Without a key, nothing is sent.
         if dissent_events::is_sealable(&body.payload) {
+            // A private channel's name and readers are carried, under the same seal as the other control.
+            let private = matches!(body.payload, Payload::ChannelCreatePrivate { .. } | Payload::ChannelAccess { .. });
             body.payload = match &member {
                 Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,
                 None => {
                     let keys = access.get(&community).ok_or_else(|| not_found(&community))?;
-                    dissent_events::seal(&keys.secret, keys.generation, &body)?
+                    let sealed = dissent_events::seal(&keys.secret, keys.generation, &body)?;
+                    if private {
+                        dissent_events::carry_sealed(&sealed)?
+                    } else {
+                        sealed
+                    }
                 }
             };
         }
@@ -303,9 +314,6 @@ impl Engine {
         channel: ChannelId,
         payload: Payload,
     ) -> Result<SignedEvent> {
-        if channel != ChannelId::CONTROL && self.is_pending_private(community, channel) {
-            return Err(crate::error::CoreError::Invalid("this private channel is still being set up".into()));
-        }
         let access_changed = matches!(payload, Payload::ChannelAccess { .. });
         let se = self.author(community, channel, payload)?;
         if access_changed {

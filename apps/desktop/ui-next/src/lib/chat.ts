@@ -312,20 +312,10 @@ export function attachmentProgress(p: { message_id: Id; attachment_id: Id; progr
   if (nextMessages !== messages || nextDm !== dmMessages) useChat.setState({ messages: nextMessages, dmMessages: nextDm });
 }
 
-// Whether the open channel is private. Private channels take no files yet.
-export function openChannelIsPrivate(): boolean {
-  const t = useChat.getState().target;
-  if (t?.kind !== 'channel') return false;
-  const s = useShell.getState();
-  return s.community?.id === t.communityId && Boolean(s.community.channels.find((c) => c.id === t.channelId)?.private);
-}
-
-export const PRIVATE_FILES_REFUSED = "Files aren't supported in private channels yet";
-
 // Whether files dropped or picked now would be sent: a conversation that takes attachments is open.
 export function canAttachNow(): boolean {
   const s = useChat.getState();
-  if (!s.target || openChannelIsPrivate()) return false;
+  if (!s.target) return false;
   return s.target.kind === 'channel' ? s.messages.some((m) => m.attachments != null) : s.dmMessages.some((m) => m.attachments != null);
 }
 
@@ -340,10 +330,6 @@ export function startChat(): void {
   listenTo('dissent://drag-leave', () => useChat.getState().setDropping(false)).catch(() => {});
   listenTo<{ path?: string; name?: string; size?: number | null; mime?: string }[]>('dissent://files-dropped', (files) => {
     useChat.getState().setDropping(false);
-    if (openChannelIsPrivate()) {
-      toast(PRIVATE_FILES_REFUSED, 'info');
-      return;
-    }
     if (!canAttachNow() || !Array.isArray(files)) return;
     useChat.getState().stageFiles(files.filter((f) => f && typeof f.path === 'string').map((f) => {
       const name = f.name ?? baseName(f.path ?? '');

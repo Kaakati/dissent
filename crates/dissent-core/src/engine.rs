@@ -82,11 +82,6 @@ pub(crate) struct Inner {
     pub member_seen: tokio::sync::Notify,
     /// Woken when a channel's access changes here. A reader waiting for a private channel's keys retries at once.
     pub access_changed: tokio::sync::Notify,
-    /// Private channels being set up. Posts to one are refused until its access event is in local state.
-    pub private_pending: Mutex<std::collections::BTreeSet<(CommunityId, dissent_events::ChannelId)>>,
-    /// Test only: makes the next access step of `create_private_channel` fail, to test the rollback.
-    #[cfg(test)]
-    pub access_fault: std::sync::atomic::AtomicBool,
     /// Direct gossip neighbours per community, refreshed by each receive loop.
     pub neighbours: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
     /// Devices with a live peer lookup running. See `peer_lookup`.
@@ -217,9 +212,6 @@ impl Engine {
             sync_backoff: Mutex::new(BTreeMap::new()),
             member_seen: tokio::sync::Notify::new(),
             access_changed: tokio::sync::Notify::new(),
-            private_pending: Mutex::new(std::collections::BTreeSet::new()),
-            #[cfg(test)]
-            access_fault: std::sync::atomic::AtomicBool::new(false),
             neighbours: Mutex::new(BTreeMap::new()),
             asking: Mutex::new(BTreeSet::new()),
             calls: crate::calls::CallHub::new(&timings),

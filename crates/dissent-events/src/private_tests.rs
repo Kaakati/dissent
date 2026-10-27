@@ -390,3 +390,83 @@ fn the_history_form_is_refused_in_a_private_channel() {
     );
     assert_eq!(f.rejection_of(history), Some(Rejection::Malformed));
 }
+
+#[test]
+fn the_carried_access_is_applied_only_with_the_secret_of_its_generation() {
+    let mut f = Fixture::new();
+    let (bob, mod_) = (f.bob.id(), f.mod_.id());
+    let (old, current) = ([3u8; 32], [7u8; 32]);
+
+    // The plain form, as events written before the carrier are. Replay reads it as it always did.
+    f.access(W::Owner, true, vec![], vec![bob]);
+    let plain = f.state();
+    assert!(plain.can_read(f.channel, bob));
+    assert!(!plain.can_read(f.channel, mod_));
+
+    // The carried form: the same change, sealed under generation 2 and carried. Its body is the seal,
+    // as the community writes it. Only the current secret opens it.
+    let hlc = f.next();
+    let base = event(
+        f.user(W::Owner),
+        f.last.into_iter().collect(),
+        hlc,
+        Payload::ChannelAccess {
+            channel: f.channel,
+            private: true,
+            roles: vec![],
+            members: vec![mod_],
+        },
+    );
+    let sealed = crate::seal(&current, 2, &base.body).expect("sealed");
+    let carried = crate::carry_sealed(&sealed).expect("carried");
+    let carried_event = event(f.user(W::Owner), base.body.parents.clone(), base.body.hlc, carried);
+    f.dag.insert(carried_event).expect("insert");
+
+    // A holder of the current secret applies it, and the later change replaces the plain one.
+    let with_current = replay_with(f.owner.id(), &f.dag, &[(2, current)]);
+    assert!(with_current.is_private(f.channel));
+    assert!(with_current.can_read(f.channel, mod_));
+    assert!(!with_current.can_read(f.channel, bob), "the carried change replaces the plain one");
+
+    // Someone with no secret, or only an older one such as a banned member's, applies nothing: the
+    // channel's access stays as the plain change left it.
+    for ring in [vec![], vec![(1, old)]] {
+        let without = replay_with(f.owner.id(), &f.dag, &ring);
+        assert!(without.can_read(f.channel, bob), "the plain change still stands");
+        assert!(!without.can_read(f.channel, mod_), "the carried change is not visible without the secret");
+    }
+}
+
+#[test]
+fn a_channel_created_in_one_event_is_private_from_its_first_state() {
+    let mut f = Fixture::new();
+    let bob = f.bob.id();
+    let created = f.push(
+        W::Owner,
+        Payload::ChannelCreatePrivate {
+            name: "vault".into(),
+            roles: vec![],
+            members: vec![bob],
+        },
+    );
+    assert_eq!(f.rejection_of(created), None);
+    let channel = ChannelId(created.0);
+    let state = f.state();
+    assert!(state.is_private(channel), "private as soon as it exists");
+    assert!(state.can_read(channel, bob));
+    assert_eq!(state.key_generation.get(&channel), None, "creation starts no new key");
+}
+
+#[test]
+fn only_an_owner_or_admin_creates_a_private_channel_in_one_event() {
+    let mut f = Fixture::new();
+    let refused = f.push(
+        W::Bob,
+        Payload::ChannelCreatePrivate {
+            name: "vault".into(),
+            roles: vec![],
+            members: vec![],
+        },
+    );
+    assert_eq!(f.rejection_of(refused), Some(Rejection::NoPermission));
+}

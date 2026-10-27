@@ -5,7 +5,7 @@
 //! H.264, and hands each encoded frame to the call loop, which sends it through the mesh or the
 //! forwarder. The bitrate follows the link's bandwidth estimate, minus the audio reservation, so
 //! video never takes the audio's share. Received frames are decoded per sender and sent to the
-//! window as small JPEG previews. Capture is not built on Linux yet, see `docs/design/04-calls.md`.
+//! window as small JPEG previews.
 
 use std::collections::{hash_map::Entry, HashMap};
 
@@ -32,8 +32,7 @@ pub struct ShareSource {
     pub primary: bool,
 }
 
-/// Lists the displays and the titled windows that can be shared. Windows and macOS only.
-#[cfg(not(target_os = "linux"))]
+/// Lists the displays and the titled windows that can be shared.
 pub fn list_share_sources() -> Result<Vec<ShareSource>> {
     let mut out = Vec::new();
     for display in dissent_video::screen::list_displays().map_err(camera_error)? {
@@ -57,13 +56,6 @@ pub fn list_share_sources() -> Result<Vec<ShareSource>> {
     Ok(out)
 }
 
-/// Lists what can be shared. Linux has no screen capture yet.
-#[cfg(target_os = "linux")]
-pub fn list_share_sources() -> Result<Vec<ShareSource>> {
-    Err(CoreError::Invalid("screen sharing is not supported on Linux yet".into()))
-}
-
-#[cfg(not(target_os = "linux"))]
 fn camera_error(e: impl std::fmt::Display) -> CoreError {
     CoreError::Invalid(format!("capture: {e}"))
 }
@@ -85,7 +77,6 @@ pub(crate) struct Encoded {
     pub data: Vec<u8>,
 }
 
-#[cfg(not(target_os = "linux"))]
 pub(crate) use capture::{Capture, CaptureKind};
 
 /// Set by tests to send a deterministic test picture instead of the camera. Process-wide, so a
@@ -141,7 +132,6 @@ impl Sending {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 mod capture {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc::{self, Receiver, TrySendError};
@@ -441,62 +431,6 @@ mod capture {
     }
 
 }
-
-#[cfg(target_os = "linux")]
-mod capture {
-    use super::Encoded;
-    use crate::error::{CoreError, Result};
-
-    /// Which picture a capture sends. Linux has no capture yet.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(crate) enum CaptureKind {
-        Camera,
-        Screen,
-    }
-
-    pub(crate) struct Capture;
-
-    impl Capture {
-        pub(crate) fn camera(_index: u32) -> Result<Self> {
-            Err(CoreError::Invalid(
-                "camera capture is not built on Linux yet".into(),
-            ))
-        }
-
-        pub(crate) fn test_pattern() -> Result<Self> {
-            Err(CoreError::Invalid(
-                "camera capture is not built on Linux yet".into(),
-            ))
-        }
-
-        pub(crate) fn screen(_target: Option<super::ShareTarget>) -> Result<Self> {
-            Err(CoreError::Invalid(
-                "screen sharing is not supported on Linux yet".into(),
-            ))
-        }
-
-        pub(crate) fn kind(&self) -> CaptureKind {
-            CaptureKind::Camera
-        }
-
-        pub(crate) fn try_next(&self) -> Option<Encoded> {
-            None
-        }
-
-        pub(crate) fn try_preview(&self) -> Option<super::Preview> {
-            None
-        }
-
-        pub(crate) fn request_keyframe(&self) {}
-
-        pub(crate) fn set_bitrate(&self, _kbps: u32) {}
-
-        pub(crate) fn set_av1(&self, _on: bool) {}
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) use capture::{Capture, CaptureKind};
 
 /// The video budget of one capture: the bitrate it may use, given the link's estimate. It wraps
 /// the adapter, so the audio reservation applies as it does everywhere else.

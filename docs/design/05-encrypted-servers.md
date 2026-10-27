@@ -100,7 +100,10 @@ not know fails the batch, stalls that peer's sync, and makes the community skip 
 - **New control payloads go through the carrier.** The payload is `SealedControl { generation: CARRIER_GENERATION
   (u64::MAX), ciphertext }`, where the ciphertext is a postcard `Carried { kind, body }`. An older client decodes the
   outer event, finds no key for that generation, and shows the event as locked. The carrier's kind is what a newer
-  client reads. The member-sealed kind (`kind = 1`) is the first one.
+  client reads. The member-sealed kind (`kind = 1`) is the first one. A private channel's access events use kind `4`
+  (`CARRIED_SEALED`): the body is an ordinary community-secret seal under the current generation, so the carrier hides
+  it from an older client and the seal hides it from anyone without that generation's secret, a banned member included
+  after a rotation.
 - **The carrier is part of the event.** Its bytes are inside the event body, so the event id and signature cover
   them. A relay or peer cannot change the kind without breaking the signature.
 - **Old forms keep decoding.** `Payload::MemberSealedControl` is what v0.1.6 wrote. Replay still opens it, and the

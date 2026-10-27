@@ -20,8 +20,6 @@ use crate::rpc::{Request, Response};
 use crate::store::{write_bytes_atomic, Paths};
 use crate::views::ChannelInfo;
 
-/// Refusal for an attachment sent to a private channel. Files are not built for them yet.
-pub(crate) const PRIVATE_FILES_REFUSED: &str = "Files aren't supported in private channels yet";
 /// The first wait after a key request fails, then doubled up to the cap.
 const PRIVATE_KEY_RETRY_FIRST: Duration = Duration::from_secs(1);
 const PRIVATE_KEY_RETRY_CAP: Duration = Duration::from_secs(60);
@@ -200,9 +198,8 @@ impl Engine {
         Ok(crate::views::ChannelAccessView { private, roles, members })
     }
 
-    /// Creates a private channel in two events: the channel, then its access. Posts to it are refused until
-    /// its access is in local state. If the access event is refused, the channel is deleted again, so it is not
-    /// left open to everyone. Owner and admin only, as replay checks.
+    /// Creates a private channel in one event, which makes the channel and its access together. No peer sees
+    /// the channel without its access. Owner and admin only, as replay checks.
     pub async fn create_private_channel(
         &self,
         community: CommunityId,
@@ -211,58 +208,18 @@ impl Engine {
         members: Vec<RootId>,
     ) -> Result<ChannelInfo> {
         let name = crate::engine::clean_text(&name, "channel name")?;
-        let created = self
-            .author_publish(community, ChannelId::CONTROL, Payload::ChannelCreate { name: name.clone() })
-            .await?;
+        let payload = Payload::ChannelCreatePrivate {
+            name: name.clone(),
+            roles,
+            members,
+        };
+        let created = self.author_publish(community, ChannelId::CONTROL, payload).await?;
         let channel = ChannelId(created.event.id.0);
-        self.set_pending_private(community, channel, true);
-        if let Err(access_err) = self.publish_channel_access(community, channel, roles, members).await {
-            let undone = self
-                .author_publish(community, ChannelId::CONTROL, Payload::ChannelDelete { channel })
-                .await;
-            match undone {
-                // Once the delete is in, the channel is gone, and the pending mark has no more to guard.
-                Ok(_) => self.set_pending_private(community, channel, false),
-                // The channel stays pending, so nothing is posted to it, but it is listed until the delete goes through.
-                Err(undo_err) => {
-                    warn!(community = %community, error = %undo_err, "could not delete a private channel whose access failed")
-                }
-            }
-            self.emit(crate::views::EngineEvent::CommunitiesChanged);
-            return Err(access_err);
-        }
-        self.set_pending_private(community, channel, false);
         self.ensure_private_key(community, channel);
         self.emit(crate::views::EngineEvent::CommunitiesChanged);
         let mut info = ChannelInfo::new(channel, name, false, &dissent_events::state::ChannelSettings::default());
         info.private = true;
         Ok(info)
-    }
-
-    /// The second step of `create_private_channel`.
-    async fn publish_channel_access(
-        &self,
-        community: CommunityId,
-        channel: ChannelId,
-        roles: Vec<Role>,
-        members: Vec<RootId>,
-    ) -> Result<()> {
-        #[cfg(test)]
-        if self.inner.access_fault.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            return Err(CoreError::Invalid("injected access failure".into()));
-        }
-        self.author_publish(
-            community,
-            ChannelId::CONTROL,
-            Payload::ChannelAccess {
-                channel,
-                private: true,
-                roles,
-                members,
-            },
-        )
-        .await?;
-        Ok(())
     }
 
     /// Makes the key of the channel's current generation, if this device has none for it yet.
@@ -331,28 +288,6 @@ impl Engine {
             .communities
             .get(&community)
             .is_some_and(|c| c.state().can_read(channel, self.inner.me))
-    }
-
-    /// Whether `channel` is being set up and must take no posts yet.
-    pub(crate) fn is_pending_private(&self, community: CommunityId, channel: ChannelId) -> bool {
-        self.inner
-            .private_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&(community, channel))
-    }
-
-    pub(crate) fn set_pending_private(&self, community: CommunityId, channel: ChannelId, pending: bool) {
-        let mut set = self
-            .inner
-            .private_pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending {
-            set.insert((community, channel));
-        } else {
-            set.remove(&(community, channel));
-        }
     }
 
     /// Asks the readers for a channel's keys in the background. A request already in flight for the same

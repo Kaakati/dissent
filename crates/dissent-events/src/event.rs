@@ -268,6 +268,13 @@ pub enum Payload {
     /// stays as it is. Sealed, so a client that predates it rejects it as forged. Appended, see
     /// `control` and `picture`.
     ProfileBannerSet { banner: Option<crate::picture::Banner> },
+    /// Creates a private channel and sets its access in one event, so no peer sees the channel without
+    /// its access. Owner and admin only. Carried: see `control::carry_sealed`. Appended.
+    ChannelCreatePrivate {
+        name: String,
+        roles: Vec<Role>,
+        members: Vec<RootId>,
+    },
 }
 
 /// One of a community's traits: an optional emoji (empty when there is none) and a short label. See

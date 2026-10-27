@@ -34,6 +34,56 @@ const CARRIED_MEMBER: u8 = 1;
 /// for it, since the kind and generation are clear.
 const CARRIED_PRIVATE: u8 = 3;
 
+/// Carrier kind of a private channel's access event. The body is a postcard `Payload`, which is the
+/// community-secret seal of `ChannelCreatePrivate` or `ChannelAccess`: the same generation and seal as other
+/// control. Only a holder of that generation's secret can open it, so a banned member, after a rotation,
+/// cannot read a private channel's name or readers. See `carry_sealed`.
+const CARRIED_SEALED: u8 = 4;
+
+/// Wraps a community-secret seal of a private channel's access event in the carrier, so an older client shows
+/// it as locked rather than failing the batch it is in. `sealed` must be a payload from `seal`.
+pub fn carry_sealed(sealed: &Payload) -> Result<Payload> {
+    let Payload::SealedControl { generation, .. } = sealed else {
+        return Err(Error::Encoding("only a sealed control payload is carried".into()));
+    };
+    if *generation == CARRIER_GENERATION {
+        return Err(Error::Encoding("a carrier cannot carry a carrier".into()));
+    }
+    let body = postcard::to_allocvec(sealed).map_err(|e| Error::Encoding(e.to_string()))?;
+    let carried = postcard::to_allocvec(&Carried {
+        kind: CARRIED_SEALED,
+        body,
+    })
+    .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(Payload::SealedControl {
+        generation: CARRIER_GENERATION,
+        ciphertext: carried,
+    })
+}
+
+/// Opens a carried private-channel access event with the ring, as the body it was sealed for. Only
+/// `ChannelCreatePrivate` and `ChannelAccess` are accepted, so the carrier cannot carry another kind.
+fn open_sealed_carried(body: &EventBody, ciphertext: &[u8], ring: &[SealKey]) -> std::result::Result<Payload, OpenError> {
+    let carried = carried(ciphertext).ok_or(OpenError::Forged)?;
+    if carried.kind != CARRIED_SEALED {
+        return Err(OpenError::Forged);
+    }
+    let inner: Payload = postcard::from_bytes(&carried.body).map_err(|_| OpenError::Forged)?;
+    let Payload::SealedControl { generation, .. } = &inner else {
+        return Err(OpenError::Forged);
+    };
+    if *generation == CARRIER_GENERATION {
+        return Err(OpenError::Forged);
+    }
+    let mut sealed = body.clone();
+    sealed.payload = inner;
+    let payload = open(ring, &sealed)?;
+    match payload {
+        Payload::ChannelCreatePrivate { .. } | Payload::ChannelAccess { .. } => Ok(payload),
+        _ => Err(OpenError::Forged),
+    }
+}
+
 /// A private-channel message's clear fields and its sealed text.
 #[derive(Serialize, Deserialize)]
 struct PrivateBody {
@@ -265,6 +315,7 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::CommunityProfileSet { .. }
             | Payload::ProfileBannerSet { .. }
             | Payload::ChannelAccess { .. }
+            | Payload::ChannelCreatePrivate { .. }
     )
 }
 
@@ -503,6 +554,7 @@ pub fn open_event_keyed<'a>(
         } => match carried(ciphertext) {
             Some(Carried { kind, .. }) if kind == CARRIED_MEMBER => open_member(epochs, &ev.body)?,
             Some(Carried { kind, .. }) if kind == CARRIED_PRIVATE => open_private(ciphertext)?,
+            Some(Carried { kind, .. }) if kind == CARRIED_SEALED => open_sealed_carried(&ev.body, ciphertext, ring)?,
             // A kind this build does not know is refused as forged, not locked, so it does not look
             // like a key that is missing.
             _ => return Err(OpenError::Forged),

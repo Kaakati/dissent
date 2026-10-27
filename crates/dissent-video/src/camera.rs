@@ -1,11 +1,6 @@
 //! Webcam capture through nokhwa. Media Foundation on Windows, AVFoundation on macOS and
 //! V4L2 on Linux. The device picks the mode closest to the one asked for, and the source
 //! scales whatever arrives to the requested size.
-//!
-//! Not built on Linux: nokhwa's V4L2 backend needs libclang, which a plain build must not need.
-//! Linux camera capture is the next step, see `docs/design/04-calls.md`.
-
-#![cfg(not(target_os = "linux"))]
 
 use std::time::Instant;
 

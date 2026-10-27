@@ -1,27 +1,31 @@
-//! Screen and window capture through xcap, on Windows and macOS.
+//! Screen and window capture through xcap, on Windows, macOS and Linux.
 //!
-//! xcap's Linux backend needs the pipewire, wayland, EGL and xcb development packages at
-//! build time. The CI image does not install them, so Linux builds get the same API with
-//! every call returning `VideoError::Unsupported`. Adding Linux capture means adding those
-//! packages to the workflow first.
+//! A display on Linux is a stream. xcap's recorder reads the X11 root window, or opens a
+//! ScreenCast session through the desktop portal on Wayland, which shows the system's own
+//! picker. Other targets are grabbed when a frame is due. Each Wayland grab would be a separate
+//! portal screenshot, so window capture is for X11, Windows and macOS.
 //!
-//! Capture is pulled, not pushed. `next_frame` sleeps to the frame rate and then grabs the
-//! target, so a slow grab shows up as a lower real rate rather than as a backlog.
+//! Capture is pulled, not pushed. `next_frame` sleeps to the frame rate and then takes the
+//! newest picture, so a slow grab shows up as a lower real rate rather than as a backlog.
 
+use std::borrow::Cow;
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use image::imageops::FilterType;
 use image::RgbaImage;
 
-#[cfg(not(target_os = "linux"))]
 use crate::camera::capture_error;
 use crate::error::{Result, VideoError};
 use crate::frame::{from_packed_rgb, Frame};
 use crate::source::{CaptureFormat, VideoSource};
 
+/// How long the first picture of a display stream may take. On Wayland that includes the portal's
+/// picker, which waits for the user.
 #[cfg(target_os = "linux")]
-const LINUX_UNSUPPORTED: &str = "screen capture on Linux needs the xcap Linux backend";
+const FIRST_PICTURE: Duration = Duration::from_secs(30);
 
 /// A display the system reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,7 +61,6 @@ pub enum Cursor {
     Included,
 }
 
-#[cfg(not(target_os = "linux"))]
 pub fn list_displays() -> Result<Vec<DisplayInfo>> {
     let monitors = xcap::Monitor::all().map_err(capture_error)?;
     monitors
@@ -74,13 +77,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
-pub fn list_displays() -> Result<Vec<DisplayInfo>> {
-    Err(VideoError::Unsupported(LINUX_UNSUPPORTED))
-}
-
 /// Lists windows that are on screen with a title. Minimised windows are left out.
-#[cfg(not(target_os = "linux"))]
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
     let windows = xcap::Window::all().map_err(capture_error)?;
     let mut out = Vec::new();
@@ -98,36 +95,97 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
     Ok(out)
 }
 
-#[cfg(target_os = "linux")]
-pub fn list_windows() -> Result<Vec<WindowInfo>> {
-    Err(VideoError::Unsupported(LINUX_UNSUPPORTED))
-}
-
 pub struct ScreenSource {
-    target: ScreenTarget,
+    feed: Feed,
     format: CaptureFormat,
     period: Duration,
     next_due: Instant,
     started: Instant,
 }
 
+/// Where the pictures come from.
+enum Feed {
+    /// Each frame grabs the target again. Each frame looks the target up, because xcap's handles
+    /// are not `Send` on every platform.
+    Grab(ScreenTarget),
+    #[cfg(target_os = "linux")]
+    Stream(Stream),
+}
+
+/// A display stream on Linux. The desktop sends a picture when the screen changes, so the last one
+/// is kept and repeated until a new one arrives.
+#[cfg(target_os = "linux")]
+struct Stream {
+    recorder: xcap::VideoRecorder,
+    pictures: Receiver<xcap::Frame>,
+    latest: Option<RgbaImage>,
+}
+
+#[cfg(target_os = "linux")]
+impl Stream {
+    /// The newest picture, waiting for the first one if none has arrived yet.
+    fn newest(&mut self) -> Result<&RgbaImage> {
+        let mut arrived = None;
+        while let Ok(frame) = self.pictures.try_recv() {
+            arrived = Some(frame);
+        }
+        if arrived.is_none() && self.latest.is_none() {
+            arrived = self.pictures.recv_timeout(FIRST_PICTURE).ok();
+        }
+        if let Some(frame) = arrived {
+            self.latest = Some(
+                RgbaImage::from_raw(frame.width, frame.height, frame.raw)
+                    .ok_or_else(|| VideoError::Capture("screen picture has the wrong size".into()))?,
+            );
+        }
+        self.latest
+            .as_ref()
+            .ok_or_else(|| VideoError::Capture("the screen stream sent no picture".into()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let _ = self.recorder.stop();
+    }
+}
+
 impl ScreenSource {
     /// Checks that the target exists now, so a missing display or window fails here rather
-    /// than on the first frame. Each frame looks the target up again, because xcap's
-    /// handles are not `Send` on every platform.
+    /// than on the first frame.
     pub fn open(target: ScreenTarget, format: CaptureFormat, cursor: Cursor) -> Result<Self> {
         if cursor == Cursor::Included {
             return Err(VideoError::Unsupported("capturing the cursor"));
         }
-        grab(target)?;
+        let feed = Feed::open(target)?;
         let now = Instant::now();
         Ok(Self {
-            target,
+            feed,
             format,
             period: Duration::from_micros(1_000_000 / format.fps.max(1) as u64),
             next_due: now,
             started: now,
         })
+    }
+}
+
+impl Feed {
+    fn open(target: ScreenTarget) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            if let ScreenTarget::Display(id) = target {
+                let (recorder, pictures) = find_monitor(id)?.video_recorder().map_err(capture_error)?;
+                recorder.start().map_err(capture_error)?;
+                return Ok(Self::Stream(Stream {
+                    recorder,
+                    pictures,
+                    latest: None,
+                }));
+            }
+        }
+        grab(target)?;
+        Ok(Self::Grab(target))
     }
 }
 
@@ -143,30 +201,38 @@ impl VideoSource for ScreenSource {
         }
         self.next_due = Instant::now().max(self.next_due) + self.period;
 
-        let grabbed = grab(self.target)?;
+        let owned;
+        let picture: &RgbaImage = match &mut self.feed {
+            Feed::Grab(target) => {
+                owned = grab(*target)?;
+                &owned
+            }
+            #[cfg(target_os = "linux")]
+            Feed::Stream(stream) => stream.newest()?,
+        };
         let (w, h) = (self.format.width, self.format.height);
-        let scaled = if grabbed.dimensions() == (w, h) {
-            grabbed
+        let scaled = if picture.dimensions() == (w, h) {
+            Cow::Borrowed(picture)
         } else {
-            image::imageops::resize(&grabbed, w, h, FilterType::Triangle)
+            Cow::Owned(image::imageops::resize(picture, w, h, FilterType::Triangle))
         };
         let pts_us = self.started.elapsed().as_micros() as u64;
         from_packed_rgb(w, h, 4, pts_us, scaled.as_raw())
     }
 }
 
+fn find_monitor(id: u32) -> Result<xcap::Monitor> {
+    xcap::Monitor::all()
+        .map_err(capture_error)?
+        .into_iter()
+        .find(|m| m.id().ok() == Some(id))
+        .ok_or_else(|| VideoError::Capture(format!("no display with id {id}")))
+}
+
 /// Looks up `target` and captures it at native size.
-#[cfg(not(target_os = "linux"))]
 fn grab(target: ScreenTarget) -> Result<RgbaImage> {
     match target {
-        ScreenTarget::Display(id) => {
-            let monitor = xcap::Monitor::all()
-                .map_err(capture_error)?
-                .into_iter()
-                .find(|m| m.id().ok() == Some(id))
-                .ok_or_else(|| VideoError::Capture(format!("no display with id {id}")))?;
-            monitor.capture_image().map_err(capture_error)
-        }
+        ScreenTarget::Display(id) => find_monitor(id)?.capture_image().map_err(capture_error),
         ScreenTarget::Window(id) => {
             let window = xcap::Window::all()
                 .map_err(capture_error)?
@@ -176,9 +242,4 @@ fn grab(target: ScreenTarget) -> Result<RgbaImage> {
             window.capture_image().map_err(capture_error)
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn grab(_target: ScreenTarget) -> Result<RgbaImage> {
-    Err(VideoError::Unsupported(LINUX_UNSUPPORTED))
 }

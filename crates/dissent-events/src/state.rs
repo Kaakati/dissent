@@ -50,6 +50,11 @@ pub struct CommunityState {
     pub aliases: BTreeMap<RootId, RootId>,
     /// Revoked device to the HLC of the first accepted revocation.
     pub revoked_devices: BTreeMap<DeviceId, Hlc>,
+    /// Revoked device to the wall time of its revocation, as learned before this replay applies any event.
+    /// The replayer sets it, so a device's events from the revocation's millisecond on are refused whatever
+    /// order they sort in. See `Replayer::apply_all`.
+    #[serde(default)]
+    pub pre_revoked: BTreeMap<DeviceId, u64>,
     /// Device to the root that signed its events. Learned from every event applied.
     pub device_roots: BTreeMap<DeviceId, RootId>,
     pub rejected: Vec<(EventId, Rejection)>,
@@ -314,11 +319,35 @@ pub fn replay_keyed(
     ring: &[SealKey],
     epochs: &[EpochKey],
 ) -> CommunityState {
-    let mut st = CommunityState::new(owner);
-    for ev in dag.causal_order() {
-        apply_event(&mut st, ev, ring, epochs);
+    // The same settling passes as `Replayer::apply_all`: each pass replays with the revocations the
+    // one before learned in force, until they stop changing. See that function.
+    let mut known = BTreeMap::new();
+    for pass in 1..=MAX_REVOCATION_PASSES {
+        let mut st = CommunityState::new(owner);
+        st.pre_revoked = known.clone();
+        for ev in dag.causal_order() {
+            apply_event(&mut st, ev, ring, epochs);
+        }
+        let learned = learned_revocations(&st);
+        if learned == known || pass == MAX_REVOCATION_PASSES {
+            return st;
+        }
+        known = learned;
     }
-    st
+    unreachable!("the loop returns on its last pass")
+}
+
+/// Replay passes at most this many times to settle the revocations. Two are enough: one learns them, the next
+/// confirms. The cap only bounds a pathological set.
+pub(crate) const MAX_REVOCATION_PASSES: usize = 4;
+
+/// The wall time of each device's first accepted revocation, in `state`.
+pub(crate) fn learned_revocations(state: &CommunityState) -> BTreeMap<DeviceId, u64> {
+    state
+        .revoked_devices
+        .iter()
+        .map(|(device, at)| (*device, at.wall_ms))
+        .collect()
 }
 
 /// Apply one event at its causal position, recording a rejection if it has one.
@@ -355,6 +384,7 @@ impl CommunityState {
             members: BTreeMap::new(),
             aliases: BTreeMap::new(),
             revoked_devices: BTreeMap::new(),
+            pre_revoked: BTreeMap::new(),
             device_roots: BTreeMap::new(),
             rejected: Vec::new(),
             relays: Vec::new(),
@@ -466,7 +496,11 @@ impl CommunityState {
         if self
             .revoked_devices
             .get(&ev.body.device)
-            .is_some_and(|revoked_at| ev.body.hlc > *revoked_at)
+            .is_some_and(|revoked_at| ev.body.hlc.wall_ms >= revoked_at.wall_ms)
+            || self
+                .pre_revoked
+                .get(&ev.body.device)
+                .is_some_and(|wall| ev.body.hlc.wall_ms >= *wall)
         {
             return Err(Rejection::DeviceRevoked);
         }
@@ -491,7 +525,9 @@ impl CommunityState {
             Payload::SealedControl { .. } | Payload::MemberSealedControl { .. } => {
                 return Err(Rejection::Forged)
             }
-            Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
+            Payload::ChannelCreate { name }
+            | Payload::VoiceChannelCreate { name }
+            | Payload::ChannelCreatePrivate { name, .. } => {
                 require_control(chan)?;
                 if rank < Rank::Admin {
                     return Err(Rejection::NoPermission);
@@ -842,6 +878,18 @@ impl CommunityState {
         }
         match &ev.body.payload {
             Payload::SealedControl { .. } | Payload::MemberSealedControl { .. } => {}
+            Payload::ChannelCreatePrivate { name, roles, members } => {
+                // Made private from its first state: the channel and its access are one event.
+                let id = ChannelId(ev.id.0);
+                self.channels.insert(id, name.clone());
+                self.messages.entry(id).or_default();
+                let spec = ChannelAccessSpec {
+                    private: true,
+                    roles: roles.iter().copied().collect(),
+                    members: members.iter().copied().collect(),
+                };
+                self.channel_access.insert(id, (ev.body.hlc, spec));
+            }
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());
@@ -1916,6 +1964,67 @@ mod revocation_tests {
             dag.insert(ev.clone()).unwrap();
         }
         replay(owner.id(), &dag)
+    }
+
+    #[test]
+    fn a_post_in_the_revocations_millisecond_is_refused() {
+        let (owner, user) = (User::new(), User::new());
+        let d1 = user.device.id();
+        let d2 = DeviceKey::generate();
+        let ctl = ChannelId::CONTROL;
+        let g = on_channel(
+            &owner,
+            ctl,
+            vec![],
+            Hlc {
+                wall_ms: 1,
+                counter: 0,
+            },
+            Payload::ChannelCreate { name: "g".into() },
+        );
+        let chan = ChannelId(g.id.0);
+        // The revocation is stamped at millisecond 5. The laptop has not seen it, so its post is concurrent with
+        // it, and in the same millisecond. Take a post whose id sorts first, the order that used to accept it.
+        let rev = on_device(
+            &user,
+            &d2,
+            ctl,
+            vec![g.id],
+            5,
+            Payload::DeviceRevoke(user.root.revoke(d1, 5)),
+        );
+        let same_ms = (0..64)
+            .map(|i| {
+                on_device(
+                    &user,
+                    &user.device,
+                    chan,
+                    vec![g.id],
+                    5,
+                    Payload::Message {
+                        text: format!("same millisecond {i}"),
+                    },
+                )
+            })
+            .find(|m| m.id < rev.id)
+            .expect("a post that sorts before the revocation");
+        let earlier = on_device(
+            &user,
+            &user.device,
+            chan,
+            vec![g.id],
+            4,
+            Payload::Message {
+                text: "earlier".into(),
+            },
+        );
+        let (same_id, earlier_id) = (same_ms.id, earlier.id);
+        let st = replay_all(&owner, &[g, rev, same_ms, earlier]);
+        assert!(
+            st.rejected.contains(&(same_id, Rejection::DeviceRevoked)),
+            "a post in the revocation's millisecond is refused, whatever order it sorts in"
+        );
+        assert!(!st.rejected.iter().any(|(id, _)| *id == earlier_id), "a post before the revocation is kept");
     }
 
     #[test]

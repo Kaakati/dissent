@@ -44,7 +44,7 @@ Each identity can have several devices. Each device has its own key. Only a devi
 
 A device without the root key can chat but cannot add or revoke devices. Only root-holding devices can do that. The root key is never sent to a linked device. Sending it would make the linked device as powerful as the root. A future option may seal the root key to the new device, but that is not built yet.
 
-**Revoking a device.** A root device signs a `DeviceRevocation` naming the lost device and a time. Peers must treat that device as untrusted from that time onward. Revocation does not reach into history. Events the device signed before the revocation time stay valid.
+**Revoking a device.** A root device signs a `DeviceRevocation` naming the lost device and a time. Peers must treat that device as untrusted from that time onward. Revocation does not reach into history. Events the device signed before the revocation time stay valid. The time is the millisecond of the revocation's HLC, and an event stamped in that millisecond or later is refused, whatever order it sorts in. A device that has not heard of the revocation can stamp a post in the same millisecond, and that post is refused too. Peers settle the set of revocations before they apply any event, so every peer refuses the same events. Limit: the device stamps its own events with its own clock. A device whose clock runs behind the revocation can still sign events stamped before it, for as far as its clock lags. Peers cannot tell those events from honest ones, so a lagging clock widens the window in which a revoked device's events are accepted.
 
 **How peers must treat a revocation.** When a peer receives a valid `DeviceRevocation`:
 

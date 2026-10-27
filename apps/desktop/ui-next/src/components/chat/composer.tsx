@@ -10,7 +10,7 @@ import { contactLink } from '@/lib/actions';
 import { wrapSelection } from '@/lib/markdown';
 import { api } from '@/lib/api';
 import { MAX_FILE_LABEL, guessMime, isOverLimit } from '@/lib/attachments';
-import { PRIVATE_FILES_REFUSED, useChat, type StagedFile } from '@/lib/chat';
+import { useChat, type StagedFile } from '@/lib/chat';
 import { useShell } from '@/lib/store';
 import { MAX_ROWS, activeMention, candidatesFor, mentionArg, mentionText, picksInText, type Candidate, type MentionPick } from '@/lib/mentions';
 import { pickFiles, sendFiles, sendMessage, sendReply } from '@/lib/chat-actions';
@@ -232,7 +232,7 @@ export function Composer({ view }: { view: ChatView }) {
   const openPlusMenu = (anchor: HTMLElement) => {
     const r = anchor.getBoundingClientRect();
     const items: MenuEntry[] = [
-      view.files && !view.privateChannel ? { label: 'Upload a file', icon: Paperclip, onPick: () => void uploadFile() } : null,
+      view.files ? { label: 'Upload a file', icon: Paperclip, onPick: () => void uploadFile() } : null,
       view.dm
         ? { label: 'Copy contact link', icon: Link, onPick: () => void copyContactLink() }
         : view.target.kind === 'channel'
@@ -285,22 +285,7 @@ export function Composer({ view }: { view: ChatView }) {
         <div className="composer">
           {rows.length ? <MentionList rows={rows} total={matches.length} query={mention?.query ?? ''} active={mentionIndex} onPick={pickMention} /> : null}
           <IconBtn lg label="More actions" title={`Attach a file (up to ${MAX_FILE_LABEL})`} icon={Plus} aria-haspopup="menu" onClick={(e) => openPlusMenu(e.currentTarget)} />
-          <textarea
-            ref={input}
-            rows={1}
-            placeholder={view.placeholder}
-            aria-label="Message"
-            value={text}
-            onChange={onChange}
-            onKeyDown={onKeyDown}
-            onPaste={(e) => {
-              // A pasted file is refused in a private channel. Its text still pastes.
-              if (view.privateChannel && e.clipboardData.files.length > 0) {
-                e.preventDefault();
-                toast(PRIVATE_FILES_REFUSED, 'info');
-              }
-            }}
-          />
+          <textarea ref={input} rows={1} placeholder={view.placeholder} aria-label="Message" value={text} onChange={onChange} onKeyDown={onKeyDown} />
           <IconBtn lg label="Insert emoji" title="Emoji" icon={Smile} onClick={(e) => openEmojiPicker(e.currentTarget, insertEmoji, 'Insert emoji')} />
           <IconBtn lg className="send" label="Send message" title="Send" icon={SendHorizontal} disabled={overLimit} onClick={() => void send()} />
         </div>

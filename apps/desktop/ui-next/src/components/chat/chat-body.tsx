@@ -4,8 +4,7 @@ import type { DragEvent } from 'react';
 import './chat.css';
 import { Paperclip } from 'lucide-react';
 import { MAX_FILE_LABEL } from '@/lib/attachments';
-import { PRIVATE_FILES_REFUSED, useChat } from '@/lib/chat';
-import { toast } from '@/lib/toasts';
+import { useChat } from '@/lib/chat';
 import { MessageList } from './message-list';
 import { needsAgeGate } from './chat-notices';
 import { Composer } from './composer';
@@ -19,7 +18,7 @@ export function ChatBody() {
   const view = useChatView();
   const ageSession = useChat((s) => s.ageSession);
   const gated = view ? needsAgeGate(view, ageSession) : false;
-  const canAttach = Boolean(view?.files) && !view?.privateChannel;
+  const canAttach = Boolean(view?.files);
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col"
@@ -29,9 +28,7 @@ export function ChatBody() {
         e.dataTransfer.dropEffect = canAttach ? 'copy' : 'none';
       }}
       onDrop={(e) => {
-        if (!hasFiles(e)) return;
-        e.preventDefault();
-        if (view?.privateChannel) toast(PRIVATE_FILES_REFUSED, 'info');
+        if (hasFiles(e)) e.preventDefault();
       }}
     >
       <MessageList view={view} gated={gated} />

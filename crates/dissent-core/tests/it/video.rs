@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "linux"))]
 
 //! Video in a call, end to end: one engine turns its camera or its screen on, and the other engine
 //! receives decoded previews of it. The camera is a deterministic test picture, since CI has no
@@ -43,7 +42,6 @@ async fn previews_for(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-#[cfg(not(target_os = "linux"))]
 async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
     let _serial = SERIAL.lock().await;
     bounded(async {
@@ -89,7 +87,7 @@ async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked, and needs a display: run with scripts/fwtest.sh"]
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 async fn a_shared_screen_in_a_dm_call_reaches_the_other_engine() {
     let _serial = SERIAL.lock().await;
     bounded(async {

@@ -61,8 +61,6 @@ export interface ChatView {
   // Replies and reactions exist only when the backend sends a `reactions` array; files, an `attachments` array.
   social: boolean;
   files: boolean;
-  // A private channel takes no files yet, and its messages are not listed to everyone.
-  privateChannel: boolean;
 }
 
 interface ShellSlice {
@@ -122,7 +120,6 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
       visibility: channel.visibility ?? 'default',
       social: items.some((m) => m.reactions !== null),
       files: items.some((m) => m.attachments !== null),
-      privateChannel: Boolean(channel.private),
     };
   }
 
@@ -169,7 +166,6 @@ function buildView(shell: ShellSlice, target: ChatTarget | null, messages: Chann
     visibility: 'default',
     social: items.some((m) => m.reactions !== null),
     files: items.some((m) => m.attachments !== null),
-    privateChannel: false,
   };
 }
 

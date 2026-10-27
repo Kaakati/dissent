@@ -5,11 +5,14 @@
 //! Callers must pass every id that `Dag::insert` reports as entered to
 //! [`Replayer::on_insert`]. The replayer then matches [`crate::replay`] exactly.
 
+use std::collections::BTreeMap;
+
 use crate::control::{open_event_keyed, EpochKey, SealKey};
 use crate::dag::OrderKey;
-use crate::state::{apply_event, CommunityState, Rejection};
-use crate::{Dag, Event, EventId};
-use dissent_identity::RootId;
+use crate::state::{apply_event, learned_revocations, CommunityState, Rejection, MAX_REVOCATION_PASSES};
+use crate::{Dag, Event, EventId, Payload};
+use dissent_identity::{DeviceId, RootId};
+
 
 /// Take a snapshot after this many applied events.
 const SNAPSHOT_EVERY: usize = 1024;
@@ -98,16 +101,41 @@ impl Replayer {
     }
 
     /// Discard the state and rebuild it from every event in `dag`.
+    ///
+    /// A device's events from a revocation's millisecond on are refused, whatever order they sort in. A post
+    /// that ties the revocation's HLC may sort before it, so the revocations are learned first: each pass
+    /// replays everything with the revocations of the pass before in force, until they settle. The set is a
+    /// function of `dag`, so every peer ends with the same state.
     pub fn apply_all(&mut self, dag: &Dag) {
-        self.state = CommunityState::new(self.owner);
-        self.applied_up_to = None;
-        self.snapshots.clear();
-        self.since_snapshot = 0;
-        self.apply_after(dag, None);
+        let mut known: BTreeMap<DeviceId, u64> = BTreeMap::new();
+        for _ in 0..MAX_REVOCATION_PASSES {
+            self.state = CommunityState::new(self.owner);
+            self.state.pre_revoked = known.clone();
+            self.applied_up_to = None;
+            self.snapshots.clear();
+            self.since_snapshot = 0;
+            self.apply_after(dag, None);
+            let learned = learned_revocations(&self.state);
+            if learned == known {
+                return;
+            }
+            known = learned;
+        }
+    }
+
+    /// Whether an event is a device revocation, once opened with the current keys.
+    fn is_revocation(&self, ev: &Event) -> bool {
+        open_event_keyed(ev, &self.ring, &self.epochs)
+            .is_ok_and(|plain| matches!(plain.body.payload, Payload::DeviceRevoke(_)))
     }
 
     /// Account for events that `dag` just stored. `inserted` holds their ids.
     pub fn on_insert(&mut self, dag: &Dag, inserted: &[EventId]) {
+        // A new revocation changes what earlier events are refused, so the state is rebuilt.
+        if inserted.iter().any(|id| dag.get(id).is_some_and(|ev| self.is_revocation(ev))) {
+            self.apply_all(dag);
+            return;
+        }
         let mut keys: Vec<OrderKey> = inserted
             .iter()
             .filter_map(|id| dag.get(id).map(|e| (e.body.hlc, *id)))
@@ -126,6 +154,11 @@ impl Replayer {
                     }
                 }
             }
+        }
+        // A revocation these events made valid, which the state has not learned yet, changes what earlier
+        // events are refused. Rebuild, so this state matches a replay of the whole DAG.
+        if learned_revocations(&self.state) != self.state.pre_revoked {
+            self.apply_all(dag);
         }
     }
 

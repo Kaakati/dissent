@@ -343,3 +343,250 @@ async fn replies_reactions_edits_and_deletes_work_in_a_private_channel() {
     })
     .await;
 }
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn files_in_a_private_channel_reach_its_readers_only() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let carol = peer("carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+        // A storage member keeps the community's events. It cannot read a private channel.
+        let seeder = peer("seeder").await;
+        seeder
+            .engine
+            .join_as_storage(&invite)
+            .await
+            .expect("seeder joins as storage");
+
+        alice
+            .engine
+            .create_channel(id, "vault".into())
+            .await
+            .expect("vault");
+        let vault = channel_named(&alice.engine, id, "vault");
+        alice
+            .engine
+            .set_channel_access(id, vault, true, vec![], vec![bob.identity.root_id()])
+            .await
+            .expect("bob reads vault");
+        eventually("bob lists the private channel", || {
+            lists_channel(&bob.engine, id, "vault").then_some(())
+        })
+        .await;
+
+        let dir = scratch("private-files");
+        let path = dir.join("vault-plan.txt");
+        std::fs::write(&path, b"eyes only file").expect("write source file");
+        let sent = alice
+            .engine
+            .send_files(id, vault, vec![path], "see the file".into(), true)
+            .await
+            .expect("alice posts a file in vault");
+        assert_eq!(sent.attachments.len(), 1);
+        let attachment = sent.attachments[0].id.clone();
+
+        // Bob reads the message and downloads the file from its key in the channel.
+        eventually("bob reads the file message", || {
+            message_with(&bob.engine, id, vault, "see the file")
+                .filter(|m| m.attachments.len() == 1)
+                .map(|_| ())
+        })
+        .await;
+        bob.engine
+            .download_attachment(Some(id), sent.id.clone(), attachment.clone())
+            .await
+            .expect("bob downloads the file");
+        eventually("bob has the file", || {
+            message_with(&bob.engine, id, vault, "see the file")
+                .and_then(|m| m.attachments.first().map(|a| a.state == "downloaded"))
+                .filter(|done| *done)
+                .map(|_| ())
+        })
+        .await;
+        let local = message_with(&bob.engine, id, vault, "see the file")
+            .and_then(|m| m.attachments.first().and_then(|a| a.local_path.clone()))
+            .expect("bob has a local path for the file");
+        assert_eq!(std::fs::read(&local).expect("read the downloaded file"), b"eyes only file");
+
+        // Carol is in the community but not on the list: no channel, no text, no file.
+        alice
+            .engine
+            .create_channel(id, "lounge".into())
+            .await
+            .expect("lounge");
+        let lounge = channel_named(&alice.engine, id, "lounge");
+        alice
+            .engine
+            .send_message(id, lounge, "marker".into())
+            .await
+            .expect("marker");
+        wait_seen(&carol, id, lounge, "marker").await;
+        assert!(!lists_channel(&carol.engine, id, "vault"));
+        assert!(message_with(&carol.engine, id, vault, "see the file").is_none());
+
+        // The seeder stores the message's event, and the file's hash is not in its log.
+        let log = seeder.dir.join("communities").join(id.to_string()).join("events.log");
+        let message_id: dissent_core::EventId = sent.id.parse().expect("event id");
+        eventually("the seeder stores the file message", || {
+            let bytes = std::fs::read(&log).ok()?;
+            contains(&bytes, &message_id.0).then_some(())
+        })
+        .await;
+        let hash = data_encoding::BASE32_NOPAD
+            .decode(attachment.to_uppercase().as_bytes())
+            .expect("attachment id is base32");
+        let bytes = std::fs::read(&log).expect("seeder log");
+        assert!(!contains(&bytes, &hash), "the seeder's log holds no hash of the private file");
+
+        finish(vec![alice, bob, carol, seeder]).await;
+    })
+    .await;
+}
+
+async fn one_event_channel_reaches_its_reader(member_only: bool) {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let carol = peer("carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+        if member_only {
+            alice
+                .engine
+                .set_member_only(id, true)
+                .await
+                .expect("member-only control on");
+            eventually("bob sees member-only control", || {
+                bob.engine
+                    .community_view(id)
+                    .ok()
+                    .filter(|v| v.member_only)
+                    .map(|_| ())
+            })
+            .await;
+        }
+
+        // One event makes the channel and its access, so bob lists it as soon as it lands.
+        let made = alice
+            .engine
+            .create_private_channel(id, "vault".into(), vec![], vec![bob.identity.root_id()])
+            .await
+            .expect("alice makes vault in one event");
+        assert!(made.private);
+        let vault: ChannelId = made.id.parse().expect("id");
+        eventually("bob lists the private channel", || {
+            lists_channel(&bob.engine, id, "vault").then_some(())
+        })
+        .await;
+        alice
+            .engine
+            .send_message(id, vault, "one step".into())
+            .await
+            .expect("send");
+        wait_seen(&bob, id, vault, "one step").await;
+
+        // Carol is not on the list, and never lists the channel.
+        alice
+            .engine
+            .create_channel(id, "lounge".into())
+            .await
+            .expect("lounge");
+        let lounge = channel_named(&alice.engine, id, "lounge");
+        alice
+            .engine
+            .send_message(id, lounge, "marker".into())
+            .await
+            .expect("marker");
+        wait_seen(&carol, id, lounge, "marker").await;
+        assert!(!lists_channel(&carol.engine, id, "vault"));
+
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_channel_made_in_one_event_reaches_its_reader() {
+    one_event_channel_reaches_its_reader(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_channel_made_in_one_event_under_member_only_reaches_its_reader() {
+    one_event_channel_reaches_its_reader(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_banned_member_cannot_read_a_private_channels_name_after_the_rotation() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let carol = peer("carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+
+        // The ban rotates the community secret. A channel made after it is sealed under the new secret.
+        alice
+            .engine
+            .moderate(id, dissent_core::ModAction::Ban, bob.identity.root_id())
+            .await
+            .expect("alice bans bob");
+        alice
+            .engine
+            .create_channel(id, "after-ban".into())
+            .await
+            .expect("marker");
+        eventually("carol sees the marker", || {
+            lists_channel(&carol.engine, id, "after-ban").then_some(())
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let made = alice
+            .engine
+            .create_private_channel(
+                id,
+                "vault-after-ban".into(),
+                vec![],
+                vec![carol.identity.root_id()],
+            )
+            .await
+            .expect("alice makes a private channel after the ban");
+        let vault: ChannelId = made.id.parse().expect("id");
+        alice
+            .engine
+            .set_channel_access(id, vault, true, vec![], vec![carol.identity.root_id()])
+            .await
+            .expect("alice changes its access after the ban");
+        eventually("carol lists the private channel", || {
+            lists_channel(&carol.engine, id, "vault-after-ban").then_some(())
+        })
+        .await;
+
+        // A banned member receives no further events, so bob's log holds none of them. The wire bytes are
+        // the same as alice's log, so the name is checked there: it is sealed, and bob has no key for it.
+        let log = alice.dir.join("communities").join(id.to_string()).join("events.log");
+        let bytes = std::fs::read(&log).expect("alice's log");
+        assert!(contains(&bytes, &vault.0), "the channel's event is in the log");
+        assert!(
+            !contains(&bytes, b"vault-after-ban"),
+            "the name of a private channel made after the ban is sealed"
+        );
+        assert!(!lists_channel(&bob.engine, id, "vault-after-ban"));
+
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
