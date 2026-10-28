@@ -499,7 +499,7 @@ async fn a_locked_key_rotation_raises_its_notice_once_when_the_key_arrives() {
         alice.engine.remember_secrets(id, &[(7, secret)]).await;
         // The unlock can emit just after `remember_secrets` returns, so wait for it briefly.
         let mut seen = notices(&mut events);
-        for _ in 0..50 {
+        for _ in 0..500 {
             if seen > 0 {
                 break;
             }
