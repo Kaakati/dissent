@@ -30,10 +30,10 @@ use dissent_identity::keystore;
 use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
 
-/// Debug builds only: `DISSENT_FAKE_CAPTURE=1` makes this engine's camera and screen a test picture, so a live check can run
-/// two instances without a camera or a display. Release builds ignore it.
+/// Debug builds, or any build with the `fake-capture` feature: `DISSENT_FAKE_CAPTURE=1` makes this engine's camera and screen a
+/// test picture, so a live check can run two instances without a camera or a display. Other release builds ignore it.
 pub(crate) fn fake_capture(engine: &dissent_core::Engine) {
-    if cfg!(debug_assertions) && std::env::var_os("DISSENT_FAKE_CAPTURE").is_some_and(|v| v == "1") {
+    if (cfg!(debug_assertions) || cfg!(feature = "fake-capture")) && std::env::var_os("DISSENT_FAKE_CAPTURE").is_some_and(|v| v == "1") {
         tracing::warn!("fake capture is on (DISSENT_FAKE_CAPTURE=1): the camera and the screen are a test picture");
         engine.set_test_capture(dissent_core::TestCapture::Pattern);
     }

@@ -4,7 +4,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -56,11 +57,11 @@ pub struct AudioPrefs {
 pub enum Plan {
     /// No call: no devices are open.
     Idle,
-    /// In a call: the speaker plays, and the microphone is open only when `capture` is true.
+    /// In a call: the speaker plays and the microphone stays open. `capture` says whether mic frames are sent.
     Run { capture: bool },
 }
 
-/// The call state decides the plan. Capture needs a joined, unmuted call.
+/// The call state decides the plan. Frames are sent only in a joined, unmuted call.
 pub fn plan(in_call: bool, muted: bool) -> Plan {
     if in_call {
         Plan::Run { capture: !muted }
@@ -202,6 +203,94 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, pressed: bool) {
     }
 }
 
+/// How often the microphone thread drains its ring: short enough that a frame never waits long, long enough not to spin.
+const MIC_PUMP: Duration = Duration::from_millis(5);
+
+/// What the microphone thread tells the voice loop.
+enum MicEvent {
+    /// The device is open, and its frames follow.
+    Opened,
+    /// Converted 48 kHz mono samples, in capture order.
+    Frames(Vec<f32>),
+    /// The device would not open, or stopped.
+    Failed(String),
+}
+
+/// A microphone that opens and is read on its own thread. The device stream is created, read and dropped on that
+/// thread, so opening it (tens of milliseconds) never stalls playout, and a mute or a device change cannot either.
+struct MicFeed {
+    events: Receiver<MicEvent>,
+    stop: Arc<AtomicBool>,
+    overflows: Arc<AtomicU64>,
+    /// True once the device is open, so its frames are the ones the echo canceller should hear.
+    open: bool,
+}
+
+impl MicFeed {
+    fn start(input: Option<String>) -> Self {
+        let (tx, events) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let overflows = Arc::new(AtomicU64::new(0));
+        let (s, o) = (stop.clone(), overflows.clone());
+        let spawned = thread::Builder::new()
+            .name("dissent-mic".into())
+            .spawn(move || mic_thread(input.as_deref(), tx, s, o));
+        if let Err(e) = spawned {
+            // The closure, and with it the sender, is dropped here, so the first read reports the failure.
+            warn!(error = %e, "could not start the microphone thread");
+        }
+        MicFeed { events, stop, overflows, open: false }
+    }
+
+    /// Moves the frames the thread has read into `pending` and notes the open. Returns the reason when the
+    /// device failed.
+    fn drain(&mut self, pending: &mut Vec<f32>) -> Option<String> {
+        loop {
+            match self.events.try_recv() {
+                Ok(MicEvent::Opened) => {
+                    self.open = true;
+                    info!("microphone open");
+                }
+                Ok(MicEvent::Frames(frames)) => pending.extend_from_slice(&frames),
+                Ok(MicEvent::Failed(e)) => return Some(e),
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => return Some("the microphone thread stopped".into()),
+            }
+        }
+    }
+}
+
+impl Drop for MicFeed {
+    /// Dropping the feed stops the thread, which then drops its stream.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Opens the microphone, then reads it until told to stop or until the voice loop goes away. The stream never
+/// leaves this thread.
+fn mic_thread(input: Option<&str>, tx: Sender<MicEvent>, stop: Arc<AtomicBool>, overflows: Arc<AtomicU64>) {
+    let mut mic = match CaptureStream::open(input) {
+        Ok(mic) => mic,
+        Err(e) => {
+            let _ = tx.send(MicEvent::Failed(e.to_string()));
+            return;
+        }
+    };
+    if tx.send(MicEvent::Opened).is_err() {
+        return;
+    }
+    let mut out = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        mic.read_48k(&mut out);
+        overflows.store(mic.overflows(), Ordering::Relaxed);
+        if !out.is_empty() && tx.send(MicEvent::Frames(std::mem::take(&mut out))).is_err() {
+            break;
+        }
+        thread::sleep(MIC_PUMP);
+    }
+}
+
 fn due(retry_at: Option<Instant>) -> bool {
     match retry_at {
         None => true,
@@ -261,22 +350,9 @@ fn run(
         let p = lock(&prefs);
         (p.input.clone(), p.output.clone())
     };
-    // The microphone opens before the speaker when capture is on at the start. Opening it blocks for tens of
-    // milliseconds (measured 32 to 54 ms), and with the speaker already playing that gap starves the playout.
-    let mut mic: Option<CaptureStream> = if capture_on.load(Ordering::Relaxed) {
-        match CaptureStream::open(input.as_deref()) {
-            Ok(c) => {
-                info!("microphone open");
-                Some(c)
-            }
-            Err(e) => {
-                warn!(error = %e, "microphone unavailable; retrying");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // The microphone opens on its own thread and stays open for the whole call. Opening it blocks for tens of
+    // milliseconds (measured 32 to 54 ms), and muting used to open and close it, which starved the playout.
+    let mut mic = Some(MicFeed::start(input.clone()));
     let mut playout = match PlayoutStream::open(output.as_deref()) {
         Ok(p) => p,
         Err(e) => {
@@ -287,8 +363,7 @@ fn run(
     info!("speaker open");
     let mut chain = CaptureChain::new(ChainSettings::default());
     let mut level = LevelReporter::new(app);
-    let mut retry_at: Option<Instant> = (mic.is_none() && capture_on.load(Ordering::Relaxed)).then(|| Instant::now() + RETRY);
-    let mut read = Vec::new();
+    let mut retry_at: Option<Instant> = None;
     let mut pending: Vec<f32> = Vec::new();
     let mut play = vec![0f32; FRAME];
     let (mut sent, mut played) = (0u64, 0u64);
@@ -306,23 +381,17 @@ fn run(
         };
         chain.set_settings(settings);
 
-        if capture_on.load(Ordering::Relaxed) {
-            if mic.is_none() && due(retry_at) {
-                match CaptureStream::open(input.as_deref()) {
-                    Ok(c) => {
-                        info!("microphone open");
-                        mic = Some(c);
-                        retry_at = None;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "microphone unavailable; retrying");
-                        retry_at = Some(Instant::now() + RETRY);
-                    }
-                }
+        if mic.is_none() && due(retry_at) {
+            mic = Some(MicFeed::start(input.clone()));
+            retry_at = None;
+        }
+        if let Some(feed) = mic.as_mut() {
+            if let Some(e) = feed.drain(&mut pending) {
+                warn!(error = %e, "microphone unavailable; retrying");
+                mic = None;
+                pending.clear();
+                retry_at = Some(Instant::now() + RETRY);
             }
-        } else if mic.take().is_some() {
-            pending.clear();
-            info!("microphone released");
         }
         engine.pull_playout(&mut play);
         apply_gain(&mut play, out_gain);
@@ -333,21 +402,19 @@ fn run(
         }
         // The echo canceller needs the audio as it leaves the speaker, pushed before the mic frames
         // that hear it. It is fed only while the mic runs, so its reference stays in step with them.
-        if mic.is_some() {
+        if mic.as_ref().is_some_and(|m| m.open) {
             chain.push_far(&play);
         }
-        if let Some(cap) = mic.as_mut() {
-            read.clear();
-            cap.read_48k(&mut read);
-            pending.extend_from_slice(&read);
-            for mut frame in take_frames(&mut pending) {
-                // With push-to-talk on, audio goes out only while the key is held.
-                let allowed = !ptt_on || held.load(Ordering::Relaxed);
-                let report = chain.process(&mut frame, allowed);
-                level.report(report);
-                if engine.push_capture(&frame).is_ok() {
-                    sent += 1;
-                }
+        // Frames reach `pending` only from an open device, and it is cleared when the device goes. Muted frames
+        // still go through the chain, so its echo state stays in step, but nothing is sent.
+        let sending = capture_on.load(Ordering::Relaxed);
+        for mut frame in take_frames(&mut pending) {
+            // With push-to-talk on, audio goes out only while the key is held.
+            let allowed = sending && (!ptt_on || held.load(Ordering::Relaxed));
+            let report = chain.process(&mut frame, allowed);
+            level.report(report);
+            if sending && engine.push_capture(&frame).is_ok() {
+                sent += 1;
             }
         }
         playout.write_48k(&play);
@@ -355,7 +422,7 @@ fn run(
         if played % REPORT_EVERY == 0 {
             info!(sent, played, "voice frames");
             let underruns = playout.underruns();
-            let overflows = mic.as_ref().map_or(0, CaptureStream::overflows);
+            let overflows = mic.as_ref().map_or(0, |m| m.overflows.load(Ordering::Relaxed));
             let clipped = chain.clipped_samples();
             let echo = chain.echo_stats().unwrap_or_default();
             let (lost, concealed, silenced) = engine.playout_loss();

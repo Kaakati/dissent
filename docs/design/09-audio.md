@@ -423,3 +423,22 @@ Not reproduced here: the live loopback counts from the desktop debug builds (abo
 with the other counters at zero). This bench reaches about 51 per second under the same conditions, so the live
 pipeline has a source this bench does not model. The fix removes the bench's underruns, and the live counter line
 will show whether the live ones are gone.
+
+### Live check: two debug instances, DM call, 60 s each side
+
+Two debug desktop instances on loopback (`DISSENT_LOOPBACK=1`, `DISSENT_FAKE_CAPTURE=1`, separate data folders
+and WebView2 profiles), a DM call with the microphone and speaker of one machine. Counters read from the 10 s
+`audio counters` lines.
+
+- Cushion 60 ms: zero speaker underruns in every window after the first. The first window (speaker open) showed
+  576 frames on the caller.
+- Cushion 40 ms, before the microphone change: zero in every window after the first. The first window showed 576
+  frames on the caller and 96 on the callee.
+- The first-window shortfall came from the voice thread's start-up order. Opening the microphone blocks for 32 to 54
+  ms (the log timestamps), and it ran after the speaker had started, so the first playout write came late. The fix
+  opens the microphone before the speaker when capture is on at the start (`apps/desktop/src-tauri/src/voice.rs`).
+- Cushion 40 ms, after the microphone change: zero underruns in every window on both sides, including the first.
+
+Chosen: 40 ms, so mouth-to-ear delay is 20 ms less than the 60 ms cushion. The microphone still blocks for its open
+time if it is opened mid-call (unmute, or a device change restarts the worker). That open can still starve a
+speaker that is playing; this was not measured mid-call.

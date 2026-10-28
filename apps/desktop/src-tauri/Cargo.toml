@@ -13,6 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 custom-protocol = ["tauri/custom-protocol"]
 # AV1 encoding through SVT-AV1 (builds from the third_party submodule). The release build turns it on.
 svt-av1 = ["dissent-core/svt-av1"]
+# Test picture for the camera and screen, from DISSENT_FAKE_CAPTURE=1, in release builds too. Never enabled in CI or the installers.
+fake-capture = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

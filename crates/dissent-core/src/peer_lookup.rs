@@ -35,11 +35,40 @@ impl PeerLookup {
     }
 }
 
+/// The engine for the length of one `resolve` call. iroh calls `resolve` while it holds the read
+/// lock on its list of lookup services. If every other engine reference goes away meanwhile, this
+/// one is the last, and dropping it drops the endpoint, whose `Drop` takes the write lock on that
+/// list to clear it: the thread would wait on itself forever. So the last reference is dropped on
+/// another thread, which waits until `resolve` has returned and the lock is free.
+struct LookupEngine(Option<Engine>);
+
+impl std::ops::Deref for LookupEngine {
+    type Target = Engine;
+
+    fn deref(&self) -> &Engine {
+        self.0.as_ref().expect("taken only on drop")
+    }
+}
+
+impl Drop for LookupEngine {
+    fn drop(&mut self) {
+        let Some(inner) = self.0.take().and_then(|engine| Arc::into_inner(engine.inner)) else {
+            return;
+        };
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        std::thread::spawn(move || {
+            let _context = runtime.as_ref().map(|r| r.enter());
+            drop(inner);
+        });
+    }
+}
+
 impl AddressLookup for PeerLookup {
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
-        let engine = Engine {
+        // Declared first so it drops last: any clone dropped inside this call is not the last.
+        let engine = LookupEngine(Some(Engine {
             inner: self.inner.upgrade()?,
-        };
+        }));
         let device = DeviceId(*endpoint_id.as_bytes());
         let peers = engine.lookup_targets(device);
         if peers.is_empty() || !engine.begin_lookup(device) {

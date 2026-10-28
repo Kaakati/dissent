@@ -133,8 +133,6 @@ fn the_new_format_switches_on_within_two_seconds_of_the_last_unsupported_member_
 }
 
 #[test]
-// Hangs intermittently on CI's Linux runner (the watchdog fires); under investigation.
-#[cfg_attr(target_os = "linux", ignore = "intermittent hang on Linux, under investigation")]
 fn a_restart_starts_from_the_last_readiness_answer() {
     on_own_thread(|| async {
         let alice = Node::named("alice-restart-ready").await;
