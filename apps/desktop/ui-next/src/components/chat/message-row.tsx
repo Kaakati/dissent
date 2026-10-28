@@ -6,6 +6,8 @@ import { AlertCircle, Clock, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from '
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { useChat } from '@/lib/chat';
+import { convertEmoticons, convertWhileTyping, isInsertion } from '@/lib/emoticons';
+import { useShellPrefs } from '@/lib/shell-prefs';
 import { splitMentions } from '@/lib/mentions';
 import { editMessage, retryMessage } from '@/lib/chat-actions';
 import { has } from '@/lib/features';
@@ -136,7 +138,8 @@ function EditForm({ item, target }: { item: ViewItem; target: ChatTarget }) {
   }, []);
   const cancel = () => useChat.getState().beginEdit(null);
   const save = async () => {
-    const next = text.trim();
+    // Emoticons convert on save as they do on send, with the same setting.
+    const next = (useShellPrefs.getState().convertEmoticons ? convertEmoticons(text) : text).trim();
     if (!next) return;
     if (await editMessage(target, item.id, next)) useChat.getState().beginEdit(null);
   };
@@ -148,7 +151,12 @@ function EditForm({ item, target }: { item: ViewItem; target: ChatTarget }) {
         rows={2}
         aria-label="Edit message"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          const el = e.target;
+          const live = useShellPrefs.getState().convertEmoticons ? convertWhileTyping(el.value, el.selectionStart, isInsertion(e.nativeEvent)) : null;
+          setText(live ? live.text : el.value);
+          if (live) requestAnimationFrame(() => el.setSelectionRange(live.caret, live.caret));
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();

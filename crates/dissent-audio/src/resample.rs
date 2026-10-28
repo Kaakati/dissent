@@ -72,6 +72,8 @@ impl LowPass {
 pub struct LinearResampler {
     /// Input samples per output sample.
     step: f64,
+    /// The step at unit speed, from the two rates.
+    base_step: f64,
     /// Last input sample of the previous chunk. Index 0 of the working buffer.
     prev: f32,
     /// Read position in the working buffer, where index 0 is `prev`.
@@ -88,6 +90,7 @@ impl LinearResampler {
         let from = f64::from(from_hz);
         LinearResampler {
             step: from / to,
+            base_step: from / to,
             prev: 0.0,
             pos: 1.0,
             identity: from_hz == to_hz,
@@ -100,9 +103,16 @@ impl LinearResampler {
         self.identity
     }
 
+    /// Scales the output rate by `speed` from the next chunk on: above 1.0 gives more output per input, below 1.0 less.
+    /// Used to track a device clock that runs a little fast or slow. Unit speed is the unchanged rate.
+    pub fn set_speed(&mut self, speed: f64) {
+        self.step = self.base_step / speed.max(1e-6);
+    }
+
     /// Resamples `input` and appends the result to `out`.
     pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        if self.identity {
+        // At unit speed and matching rates the chunk passes through. A speed trim resamples it.
+        if self.identity && self.step == 1.0 {
             out.extend_from_slice(input);
             return;
         }
@@ -221,5 +231,18 @@ mod tests {
         }
         assert_eq!(all.len(), parts.len());
         assert!(all.iter().zip(&parts).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+    #[test]
+    fn speed_above_one_gives_more_output_per_input() {
+        for speed in [1.0, 1.02, 0.98] {
+            let mut r = LinearResampler::new(48_000, 48_000);
+            r.set_speed(speed);
+            let mut out = Vec::new();
+            for _ in 0..50 {
+                r.process(&vec![0.5f32; 960], &mut out);
+            }
+            let per_chunk = out.len() as f64 / 50.0;
+            assert!((per_chunk - 960.0 * speed).abs() < 1.5, "speed {speed}: {per_chunk} per 960 input");
+        }
     }
 }

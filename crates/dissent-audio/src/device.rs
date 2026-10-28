@@ -22,6 +22,18 @@ use crate::resample::LinearResampler;
 /// Ring buffer length, in seconds of audio at the device rate.
 const RING_SECONDS: usize = 1;
 
+/// Queued playout the pipeline keeps ahead of the speaker, in milliseconds. The voice thread writes 20 ms at a time,
+/// and the output callback drains the ring between writes. Without a cushion the ring is empty just before each write,
+/// so a late wake-up plays silence.
+const PLAYOUT_CUSHION_MS: usize = 40;
+
+/// The speaker's clock can run a little faster or slower than the pipeline's 20 ms cadence, so a fixed cushion drains
+/// (or fills) slowly. The write rate follows the queued level: `PLAYOUT_TRIM_GAIN` times the level's error from the
+/// cushion, limited to `PLAYOUT_TRIM_MAX` either way. Measured on a 48 kHz output: the speaker took about 0.7% more than
+/// nominal, and a fixed 200 ms cushion lost 576 frames in 30 s.
+const PLAYOUT_TRIM_GAIN: f64 = 0.5;
+const PLAYOUT_TRIM_MAX: f64 = 0.02;
+
 /// What a device looks like to a person, for picking its icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -305,6 +317,8 @@ pub struct PlayoutStream {
     producer: HeapProd<f32>,
     resampler: LinearResampler,
     device_rate: u32,
+    /// The queued level the write rate tracks, in frames at the device rate.
+    cushion: usize,
     underruns: Arc<AtomicU64>,
     scratch: Vec<f32>,
 }
@@ -320,7 +334,11 @@ impl PlayoutStream {
         let channels = usize::from(config.channels().max(1));
 
         let ring = HeapRb::<f32>::new(device_rate as usize * RING_SECONDS);
-        let (producer, consumer) = ring.split();
+        let (mut producer, consumer) = ring.split();
+        let cushion = device_rate as usize * PLAYOUT_CUSHION_MS / 1000;
+        for _ in 0..cushion {
+            let _ = producer.try_push(0.0);
+        }
         let underruns = Arc::new(AtomicU64::new(0));
         let stream = build_output(&device, &config, consumer, channels, underruns.clone())?;
         stream.play().map_err(device_err)?;
@@ -329,6 +347,7 @@ impl PlayoutStream {
             producer,
             resampler: LinearResampler::new(SAMPLE_RATE, device_rate),
             device_rate,
+            cushion,
             underruns,
             scratch: Vec::new(),
         })
@@ -342,12 +361,21 @@ impl PlayoutStream {
     /// Converts 48 kHz mono audio to the device rate and queues it for playout. Samples that do
     /// not fit in the ring are dropped and counted as overflows.
     pub fn write_48k(&mut self, samples: &[f32]) {
+        let target = self.cushion as f64;
+        let error = (target - self.producer.occupied_len() as f64) / target.max(1.0);
+        let trim = (PLAYOUT_TRIM_GAIN * error).clamp(-PLAYOUT_TRIM_MAX, PLAYOUT_TRIM_MAX);
+        self.resampler.set_speed(1.0 + trim);
         self.scratch.clear();
         self.resampler.process(samples, &mut self.scratch);
         for &s in &self.scratch {
             // A full ring drops the newest sample. The pipeline is then ahead of the device.
             let _ = self.producer.try_push(s);
         }
+    }
+
+    /// Audio queued for playout, in frames at the device rate. Near the cushion when the speaker keeps up.
+    pub fn buffered_frames(&self) -> usize {
+        self.producer.occupied_len()
     }
 
     /// Callbacks that found the ring empty and played silence. A growing count means the pipeline

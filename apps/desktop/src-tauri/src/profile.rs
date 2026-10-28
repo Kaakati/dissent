@@ -603,6 +603,7 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     .await
     .map_err(|e| e.to_string())?;
     attachments::prepare_engine(app, &engine);
+    crate::fake_capture(&engine);
     voice::prepare(&engine, &voice);
     app.manage(voice);
     voice_settings::restore_ptt(app);

@@ -12,7 +12,7 @@ import { api } from '@/lib/api';
 import { MAX_FILE_LABEL, guessMime, isOverLimit } from '@/lib/attachments';
 import { useChat, type StagedFile } from '@/lib/chat';
 import { useShell } from '@/lib/store';
-import { convertEmoticons } from '@/lib/emoticons';
+import { convertEmoticons, convertWhileTyping, isInsertion } from '@/lib/emoticons';
 import { useShellPrefs } from '@/lib/shell-prefs';
 import { MAX_ROWS, activeMention, candidatesFor, mentionArg, mentionText, picksInText, type Candidate, type MentionPick } from '@/lib/mentions';
 import { pickFiles, sendFiles, sendMessage, sendReply } from '@/lib/chat-actions';
@@ -161,18 +161,13 @@ export function Composer({ view }: { view: ChatView }) {
 
   const onChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const el = e.target;
-    // Typing a space or a new line after an emoticon turns it into emoji at once, as Discord does. Only the text before
-    // the caret changes, so the caret stays after what was typed. An escaped one keeps its backslash until the send.
-    const caret = el.selectionStart;
-    if (useShellPrefs.getState().convertEmoticons && caret > 0 && /\s/.test(el.value[caret - 1]) && el.value.length > text.length) {
-      const before = convertEmoticons(el.value.slice(0, caret), { keepEscapes: true });
-      if (before !== el.value.slice(0, caret)) {
-        const next = before + el.value.slice(caret);
-        setText(next);
-        typed(view.target, next);
-        requestAnimationFrame(() => el.setSelectionRange(before.length, before.length));
-        return;
-      }
+    // Typing a space or a new line after an emoticon turns it into emoji at once. The caret stays after what was typed.
+    const live = useShellPrefs.getState().convertEmoticons ? convertWhileTyping(el.value, el.selectionStart, isInsertion(e.nativeEvent)) : null;
+    if (live) {
+      setText(live.text);
+      typed(view.target, live.text);
+      requestAnimationFrame(() => el.setSelectionRange(live.caret, live.caret));
+      return;
     }
     setText(e.target.value);
     setMention(view.target.kind === 'channel' && has('mentions') ? activeMention(e.target.value, e.target.selectionStart) : null);

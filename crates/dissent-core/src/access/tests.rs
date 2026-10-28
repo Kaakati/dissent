@@ -110,21 +110,17 @@ async fn a_banned_member_is_refused_once_the_secret_rotates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_who_leaves_is_refused_once_the_secret_rotates() {
     crate::testutil::bounded(async {
-        use crate::membership::tests::{eventually, eventually_within, general, readable, three_members};
-        use std::time::Duration;
+        use crate::membership::tests::{eventually, general, readable, three_members};
         let (alice, bob, carol, id, _invite) = three_members().await;
 
         carol.engine.leave_community(id).await.expect("carol leaves");
 
         // Alice, an admin, rotates for the departure once the removal commit has applied. Bob learns it from the DAG.
-        // TODO: the Leave reaches the other members only through the next maintenance pass (about 30 s), not when it is
-        // published, so this wait is long. The delivery gap is open: the pushed Leave is not ingested by the observer.
-        // Find out why, then return this wait to the default 60 s.
-        eventually_within("alice holds the rotated secret", Duration::from_secs(120), || {
+        eventually("alice holds the rotated secret", || {
             alice.engine.access_keys(id).map(|k| k.generation) == Some(1)
         })
         .await;
-        eventually_within("bob holds the rotated secret", Duration::from_secs(120), || {
+        eventually("bob holds the rotated secret", || {
             bob.engine.access_keys(id).map(|k| k.generation) == Some(1)
         })
         .await;

@@ -159,7 +159,7 @@ export function RecoveryPage() {
               onClick={() => setThreshold(n)}
               className={cn(
                 'h-11 min-w-28 rounded-lg border border-border-strong bg-transparent px-s-4 text-body font-semibold text-text-strong tabular-nums',
-                n === threshold && 'border-accent-text bg-[rgb(210_69_47_/_0.18)]',
+                n === threshold && 'border-accent-text bg-[rgb(255_79_0_/_0.18)]',
               )}
             >
               {n} of {count}

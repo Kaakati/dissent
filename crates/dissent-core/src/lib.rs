@@ -83,6 +83,7 @@ pub use calls::{
 };
 pub use attachments::{AttachmentView, Mentions, StoreStats, TransferSettings, TransferView};
 pub use engine::Engine;
+pub use calls::{EncodedSink, EncodedVideo};
 pub use store::{sealed_data_present, SEALED_WITHOUT_IDENTITY};
 pub use dissent_audio::SenderConfig;
 pub use local::{NoteKind, CAPABILITIES};

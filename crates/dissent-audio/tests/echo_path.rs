@@ -8,7 +8,7 @@
 mod common;
 
 use common::{power, Rng};
-use dissent_audio::{CaptureChain, ChainSettings, Threshold, FRAME_SAMPLES, SAMPLE_RATE};
+use dissent_audio::{CaptureChain, ChainSettings, EchoEngine, Threshold, FRAME_SAMPLES, SAMPLE_RATE};
 
 const RATE: f64 = SAMPLE_RATE as f64;
 
@@ -449,4 +449,764 @@ fn measure_near_only_loss_controls() {
         }
         println!("{name}: near-only blocks {blocks}, mean loss per block {:.1} dB, best-fit near gain {:.1} dB", loss / blocks.max(1) as f64, db(num * num / den.max(1e-30) / den.max(1e-30)).max(-200.0));
     }
+}
+
+/// The sonora spike: WebRTC APM (AEC3, NS, AGC2) against our NLMS chain, on the same signals and metrics. Run with
+/// `cargo test -p dissent-audio --features sonora --test echo_path sonora -- --ignored --nocapture`, in release for CPU.
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_spike {
+    use super::*;
+    use sonora::config::{EchoCanceller as ApmEchoCanceller, NoiseSuppression, NoiseSuppressionLevel};
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    /// Sonora with `config`, mono at 48 kHz. No stream delay is set: AEC3 estimates the delay itself, as our NLMS does.
+    fn apm(config: Config) -> AudioProcessing {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build()
+    }
+
+    /// The echo canceller alone, the comparison our NLMS is measured on.
+    fn aec_only() -> Config {
+        Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() }
+    }
+
+    /// Runs sonora over `far` and `mic` in 10 ms blocks: the render block, then the capture block that hears it.
+    fn run_sonora(far: &[f32], mic: &[f32], config: Config) -> Vec<f32> {
+        let mut apm = apm(config);
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    /// Our chain with the same AEC-only settings the sonora run uses.
+    fn ours_aec_only(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let settings = ChainSettings { noise_suppression: None, agc: false, echo_cancellation: true, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() };
+        run_with(far, mic, settings)
+    }
+
+    /// The double-talk leak of `measure_echo_leak_in_double_talk`, for one run: the output minus the near end, measured
+    /// against the echo, over the blocks where the near end is at least a tenth of the mic and the echo too.
+    fn double_talk_leak(near: &[f32], echo: &[f32], mic: &[f32], out: &[f32]) -> (usize, f64) {
+        let start = 2 * SAMPLE_RATE as usize;
+        let (mut e, mut l, mut n) = (0.0f64, 0.0f64, 0usize);
+        for b in (start..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                n += 1;
+                e += power(&echo[r.clone()]);
+                l += power(&out[r.clone()].iter().zip(&near[r.clone()]).map(|(o, x)| o - x).collect::<Vec<f32>>());
+            }
+        }
+        (n, db(e / l.max(1e-30)))
+    }
+
+    /// The near-only loss of `measure_near_only_loss_controls`: the mean per-block loss over the near blocks, and the
+    /// best-fit gain of the output to the near end.
+    fn near_loss(near: &[f32], mic: &[f32], out: &[f32]) -> (f64, f64) {
+        let (mut loss, mut blocks, mut num, mut den) = (0.0f64, 0usize, 0.0f64, 0.0f64);
+        for b in (2 * SAMPLE_RATE as usize..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                blocks += 1;
+                loss += db(power(&near[r.clone()])) - db(power(&out[r.clone()]));
+                for t in r {
+                    num += out[t] as f64 * near[t] as f64;
+                    den += near[t] as f64 * near[t] as f64;
+                }
+            }
+        }
+        (loss / blocks.max(1) as f64, db(num * num / den.max(1e-30) / den.max(1e-30)))
+    }
+
+    #[test]
+    #[ignore = "spike: run with --features sonora --ignored --nocapture"]
+    fn sonora_vs_ours_on_the_harness() {
+        // Far-only ERLE, on the 10 s scenario the existing ERLE tests use.
+        let s = Scenario { buffer_ms: 40.0, ppm: 0.0 };
+        let (far, mic) = scenario_signals(10.0, &s);
+        let ours = ours_aec_only(&far, &mic);
+        let theirs = run_sonora(&far, &mic, aec_only());
+        let tail = mic.len() - 2 * SAMPLE_RATE as usize..mic.len();
+        println!("far-only ERLE, last 2 s: ours {:.1} dB, sonora {:.1} dB", erle_tail(&mic, &ours, tail.clone()), erle_tail(&mic, &theirs, tail));
+
+        // Double talk and near-only loss, on the signals of measure_echo_leak_in_double_talk.
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let near: Vec<f32> = speech_like(n, &mut Rng::new(33)).iter().map(|s| 0.2 * s).collect();
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let ir = room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5);
+        let echo = mic_signal(&vec![0.0; n], &spk, &ir);
+        let mic = mic_signal(&near, &spk, &ir);
+        let ours_out = ours_aec_only(&far, &mic);
+        let theirs_out = run_sonora(&far, &mic, aec_only());
+        let (blocks, ours_leak) = double_talk_leak(&near, &echo, &mic, &ours_out);
+        let (_, theirs_leak) = double_talk_leak(&near, &echo, &mic, &theirs_out);
+        println!("double-talk blocks {blocks}: echo leak ours {ours_leak:.1} dB, sonora {theirs_leak:.1} dB below the echo");
+        let (ours_loss, ours_gain) = near_loss(&near, &mic, &ours_out);
+        let (theirs_loss, theirs_gain) = near_loss(&near, &mic, &theirs_out);
+        println!("near-only loss: ours {ours_loss:.1} dB per block (best-fit gain {ours_gain:.1} dB), sonora {theirs_loss:.1} dB (best-fit gain {theirs_gain:.1} dB)");
+    }
+
+    #[test]
+    #[ignore = "spike: CPU per 10 ms frame, run in release"]
+    fn sonora_cpu_per_10ms_frame() {
+        let seconds = 20.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let near: Vec<f32> = speech_like(n, &mut Rng::new(33)).iter().map(|s| 0.2 * s).collect();
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let mic = mic_signal(&near, &spk, &room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5));
+        let frames = (n / BLOCK) as f64;
+        let t = std::time::Instant::now();
+        let _ = ours_aec_only(&far, &mic);
+        let ours = t.elapsed().as_secs_f64() * 1e6 / frames;
+        let t = std::time::Instant::now();
+        let _ = run_sonora(&far, &mic, aec_only());
+        let theirs = t.elapsed().as_secs_f64() * 1e6 / frames;
+        println!("CPU per 10 ms frame, AEC only: ours {ours:.1} us, sonora {theirs:.1} us");
+    }
+
+    /// Noise suppression, sonora's in place of ours: the noise removed from quiet blocks and the speech kept in loud ones.
+    #[test]
+    #[ignore = "spike: run with --features sonora --ignored --nocapture"]
+    fn sonora_noise_suppression_against_ours() {
+        let seconds = 8.0;
+        let n = (seconds * RATE) as usize;
+        let mut rng = Rng::new(41);
+        let speech: Vec<f32> = speech_like(n, &mut Rng::new(42)).iter().map(|s| 0.2 * s).collect();
+        let noisy: Vec<f32> = speech.iter().map(|s| s + 0.02 * rng.bipolar()).collect();
+        let ours_settings = ChainSettings { noise_suppression: Some(dissent_audio::STANDARD_STRENGTH), agc: false, echo_cancellation: false, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() };
+        let ours = run_with(&vec![0.0; n], &noisy, ours_settings);
+        let ns = Config { noise_suppression: Some(NoiseSuppression { level: NoiseSuppressionLevel::Moderate, analyze_linear_aec_output_when_available: false }), ..Default::default() };
+        let theirs = run_sonora(&vec![0.0; n], &noisy, ns);
+        for (name, out) in [("ours", &ours), ("sonora", &theirs)] {
+            let (mut noise_in, mut noise_out, mut speech_in, mut speech_err) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for b in (SAMPLE_RATE as usize..n - BLOCK).step_by(BLOCK) {
+                let r = b..b + BLOCK;
+                if power(&speech[r.clone()]) < 1e-6 {
+                    noise_in += power(&noisy[r.clone()]);
+                    noise_out += power(&out[r.clone()]);
+                } else {
+                    speech_in += power(&speech[r.clone()]);
+                    speech_err += power(&out[r.clone()].iter().zip(&speech[r.clone()]).map(|(o, x)| o - x).collect::<Vec<f32>>());
+                }
+            }
+            println!("{name}: noise removed {:.1} dB in quiet blocks, speech SNR {:.1} dB in loud blocks", db(noise_in / noise_out.max(1e-30)), db(speech_in / speech_err.max(1e-30)));
+        }
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_controls {
+    use super::*;
+    use sonora::config::EchoCanceller as ApmEchoCanceller;
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    fn run(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let config = Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() };
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    /// Near-only loss on the controls, sonora alone: no echo and a silent far end, then the far end talking with no
+    /// echo path. The first must pass the near voice unchanged, or the wrapper is at fault.
+    #[test]
+    #[ignore = "spike control: run with --features sonora --ignored --nocapture"]
+    fn sonora_near_only_controls() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let near: Vec<f32> = speech_like(n, &mut Rng::new(33)).iter().map(|s| 0.2 * s).collect();
+        let silent = vec![0.0f32; n];
+        for (name, far_in) in [("no echo, far silent", &silent), ("far talks, no echo path", &far)] {
+            let out = run(far_in, &near);
+            let (mut loss, mut blocks, mut in_p, mut out_p) = (0.0f64, 0usize, 0.0f64, 0.0f64);
+            for b in (2 * SAMPLE_RATE as usize..n - BLOCK).step_by(BLOCK) {
+                let r = b..b + BLOCK;
+                if power(&near[r.clone()]) > 1e-6 {
+                    blocks += 1;
+                    loss += db(power(&near[r.clone()])) - db(power(&out[r.clone()]));
+                    in_p += power(&near[r.clone()]);
+                    out_p += power(&out[r.clone()]);
+                }
+            }
+            println!("sonora {name}: {blocks} near blocks, mean loss {:.1} dB per block, total {:.1} dB", loss / blocks.max(1) as f64, db(in_p / out_p.max(1e-30)));
+        }
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_delay {
+    use super::*;
+    use sonora::config::EchoCanceller as ApmEchoCanceller;
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    /// Sonora's echo canceller with an optional stream delay hint, in milliseconds, set before every block.
+    fn run(far: &[f32], mic: &[f32], delay_ms: Option<i32>) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let config = Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() };
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            if let Some(d) = delay_ms {
+                apm.set_stream_delay_ms(d).unwrap();
+            }
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    /// Double talk and near-only loss on the signals of the sonora harness, for several delay hints.
+    #[test]
+    #[ignore = "spike: stream delay hint, run with --features sonora --ignored --nocapture"]
+    fn sonora_stream_delay_hint() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let near: Vec<f32> = speech_like(n, &mut Rng::new(33)).iter().map(|s| 0.2 * s).collect();
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let ir = room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5);
+        let echo = mic_signal(&vec![0.0; n], &spk, &ir);
+        let mic = mic_signal(&near, &spk, &ir);
+        for delay in [None, Some(40), Some(60), Some(80)] {
+            let out = run(&far, &mic, delay);
+            let start = 2 * SAMPLE_RATE as usize;
+            let (mut e, mut l, mut blocks, mut num, mut den) = (0.0f64, 0.0f64, 0usize, 0.0f64, 0.0f64);
+            for b in (start..n - BLOCK).step_by(BLOCK) {
+                let r = b..b + BLOCK;
+                if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                    blocks += 1;
+                    e += power(&echo[r.clone()]);
+                    l += power(&out[r.clone()].iter().zip(&near[r.clone()]).map(|(o, x)| o - x).collect::<Vec<f32>>());
+                }
+                if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                    for t in r {
+                        num += out[t] as f64 * near[t] as f64;
+                        den += near[t] as f64 * near[t] as f64;
+                    }
+                }
+            }
+            println!("delay {delay:?}: double-talk leak {:.1} dB below the echo over {blocks} blocks, near best-fit gain {:.1} dB", db(e / l.max(1e-30)), db(num * num / den.max(1e-30) / den.max(1e-30)));
+        }
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_sweep {
+    use super::*;
+    use sonora::config::EchoCanceller as ApmEchoCanceller;
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    fn run_apm(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let config = Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() };
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    fn run_ours(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let settings = ChainSettings { noise_suppression: None, agc: false, echo_cancellation: true, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() };
+        run_with(far, mic, settings)
+    }
+
+    /// Double-talk leak with the near end fitted out: the output is fitted to the near end over the double-talk blocks,
+    /// and the leak is what the fit leaves, against the echo. Returns (near best-fit gain dB, leak dB below the echo).
+    fn fitted_leak(near: &[f32], echo: &[f32], mic: &[f32], out: &[f32]) -> (f64, f64) {
+        let start = 2 * SAMPLE_RATE as usize;
+        let mut blocks = Vec::new();
+        for b in (start..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                blocks.push(r);
+            }
+        }
+        let (mut on, mut nn) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                on += out[t] as f64 * near[t] as f64;
+                nn += near[t] as f64 * near[t] as f64;
+            }
+        }
+        let g = on / nn.max(1e-30);
+        let (mut e, mut l) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                e += echo[t] as f64 * echo[t] as f64;
+                let d = out[t] as f64 - g * near[t] as f64;
+                l += d * d;
+            }
+        }
+        (db(g * g), db(e / l.max(1e-30)))
+    }
+
+    #[test]
+    #[ignore = "spike: near-level sweep, run with --features sonora --ignored --nocapture"]
+    fn sonora_near_level_sweep() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let ir = room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5);
+        let echo = mic_signal(&vec![0.0; n], &spk, &ir);
+        let speech = speech_like(n, &mut Rng::new(33));
+        for level in [0.2f32, 0.6, 1.0] {
+            let near: Vec<f32> = speech.iter().map(|s| level * s).collect();
+            let mic = mic_signal(&near, &spk, &ir);
+            let (ours_g, ours_leak) = fitted_leak(&near, &echo, &mic, &run_ours(&far, &mic));
+            let (theirs_g, theirs_leak) = fitted_leak(&near, &echo, &mic, &run_apm(&far, &mic));
+            let apm_out = run_apm(&far, &mic);
+            let ours_out = run_ours(&far, &mic);
+            let (mut pm, mut po, mut pa, mut pn) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for b in (2 * SAMPLE_RATE as usize..n - BLOCK).step_by(BLOCK) {
+                let r = b..b + BLOCK;
+                if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                    pm += power(&mic[r.clone()]);
+                    pn += power(&near[r.clone()]);
+                    po += power(&ours_out[r.clone()]);
+                    pa += power(&apm_out[r.clone()]);
+                }
+            }
+            println!("  double-talk power dBFS: mic {:.1}, near {:.1}, ours out {:.1}, sonora out {:.1}", db(pm), db(pn), db(po), db(pa));
+            println!("near level {level}: ours near gain {ours_g:.1} dB, leak {ours_leak:.1} dB below echo | sonora near gain {theirs_g:.1} dB, leak {theirs_leak:.1} dB below echo");
+        }
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_lag {
+    use super::*;
+    use sonora::config::EchoCanceller as ApmEchoCanceller;
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    fn run_apm(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let config = Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() };
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    fn run_ours(far: &[f32], mic: &[f32]) -> Vec<f32> {
+        let settings = ChainSettings { noise_suppression: None, agc: false, echo_cancellation: true, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() };
+        run_with(far, mic, settings)
+    }
+
+    /// The lag, in samples, at which `out` best matches `near` over the whole run: out[t + lag] against near[t].
+    fn best_lag(near: &[f32], out: &[f32]) -> usize {
+        let start = SAMPLE_RATE as usize;
+        let (mut best, mut best_c) = (0usize, f64::MIN);
+        for lag in 0..1200usize {
+            let (mut c, mut e) = (0.0f64, 0.0f64);
+            for t in start..near.len() - 1200 {
+                c += near[t] as f64 * out[t + lag] as f64;
+                e += (out[t + lag] as f64).powi(2);
+            }
+            let score = c / e.max(1e-30).sqrt();
+            if score > best_c {
+                (best, best_c) = (lag, score);
+            }
+        }
+        best
+    }
+
+    /// Shifts `out` back by `lag` samples so that it lines up with `near`.
+    fn align(out: &[f32], lag: usize) -> Vec<f32> {
+        let mut shifted: Vec<f32> = out[lag..].to_vec();
+        shifted.resize(out.len(), 0.0);
+        shifted
+    }
+
+    /// The fitted near gain and leak, as in the sweep, over the double-talk blocks of the aligned output.
+    fn fitted_leak(near: &[f32], echo: &[f32], mic: &[f32], out: &[f32]) -> (f64, f64) {
+        let start = 2 * SAMPLE_RATE as usize;
+        let mut blocks = Vec::new();
+        for b in (start..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                blocks.push(r);
+            }
+        }
+        let (mut on, mut nn) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                on += out[t] as f64 * near[t] as f64;
+                nn += near[t] as f64 * near[t] as f64;
+            }
+        }
+        let g = on / nn.max(1e-30);
+        let (mut e, mut l) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                e += echo[t] as f64 * echo[t] as f64;
+                let d = out[t] as f64 - g * near[t] as f64;
+                l += d * d;
+            }
+        }
+        (db(g * g), db(e / l.max(1e-30)))
+    }
+
+    #[test]
+    #[ignore = "spike: aligned near-level sweep, run with --features sonora --ignored --nocapture"]
+    fn sonora_aligned_near_level_sweep() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let ir = room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5);
+        let echo = mic_signal(&vec![0.0; n], &spk, &ir);
+        let speech = speech_like(n, &mut Rng::new(33));
+        for level in [0.2f32, 0.6, 1.0] {
+            let near: Vec<f32> = speech.iter().map(|s| level * s).collect();
+            let mic = mic_signal(&near, &spk, &ir);
+            let ours_raw = run_ours(&far, &mic);
+            let apm_raw = run_apm(&far, &mic);
+            let (ours_lag, apm_lag) = (best_lag(&near, &ours_raw), best_lag(&near, &apm_raw));
+            let ours = align(&ours_raw, ours_lag);
+            let apm = align(&apm_raw, apm_lag);
+            let (ours_g, ours_leak) = fitted_leak(&near, &echo, &mic, &ours);
+            let (apm_g, apm_leak) = fitted_leak(&near, &echo, &mic, &apm);
+            println!("near level {level}: lag ours {ours_lag} / sonora {apm_lag} samples; ours near gain {ours_g:.1} dB, leak {ours_leak:.1} dB | sonora near gain {apm_g:.1} dB, leak {apm_leak:.1} dB");
+        }
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_final {
+    use super::*;
+    use sonora::config::{EchoCanceller as ApmEchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel};
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    /// Runs sonora with `config` over `far` and `mic` in 10 ms blocks, the render block first.
+    fn run(far: &[f32], mic: &[f32], config: Config) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    fn aec() -> Config {
+        Config { echo_canceller: Some(ApmEchoCanceller::default()), ..Default::default() }
+    }
+
+    /// The lag, in samples, at which `out` best matches `reference` over the run.
+    fn lag_of(reference: &[f32], out: &[f32]) -> usize {
+        let start = SAMPLE_RATE as usize;
+        let (mut best, mut best_c) = (0usize, f64::MIN);
+        for lag in 0..1200usize {
+            let (mut c, mut e) = (0.0f64, 0.0f64);
+            for t in start..reference.len() - 1200 {
+                c += reference[t] as f64 * out[t + lag] as f64;
+                e += (out[t + lag] as f64).powi(2);
+            }
+            let score = c / e.max(1e-30).sqrt();
+            if score > best_c {
+                (best, best_c) = (lag, score);
+            }
+        }
+        best
+    }
+
+    fn align(out: &[f32], lag: usize) -> Vec<f32> {
+        let mut shifted = out[lag..].to_vec();
+        shifted.resize(out.len(), 0.0);
+        shifted
+    }
+
+    /// Mean near-only loss per 10 ms block, over the blocks where `near` is at least a tenth of the mic.
+    fn near_loss(near: &[f32], mic: &[f32], out: &[f32]) -> f64 {
+        let (mut loss, mut blocks) = (0.0f64, 0usize);
+        for b in (2 * SAMPLE_RATE as usize..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                blocks += 1;
+                loss += db(power(&near[r.clone()])) - db(power(&out[r.clone()]));
+            }
+        }
+        loss / blocks.max(1) as f64
+    }
+
+    #[test]
+    #[ignore = "spike final: aligned controls, run with --features sonora --ignored --nocapture"]
+    fn sonora_aligned_controls() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let near: Vec<f32> = speech_like(n, &mut Rng::new(33)).iter().map(|s| 0.2 * s).collect();
+        let silent = vec![0.0f32; n];
+        for (name, far_in) in [("no echo, far silent", &silent), ("far talks, no echo path", &far)] {
+            let raw = run(far_in, &near, aec());
+            let lag = lag_of(&near, &raw);
+            let out = align(&raw, lag);
+            println!("sonora {name}: lag {lag} samples, near-only loss {:.2} dB per block", near_loss(&near, &near, &out));
+        }
+    }
+
+    /// Noise suppression, aligned: the noise removed from quiet blocks and the speech kept in loud ones, for sonora
+    /// and for ours. Ours carries one block of latency too.
+    #[test]
+    #[ignore = "spike final: noise suppression, run with --features sonora --ignored --nocapture"]
+    fn sonora_aligned_noise_suppression() {
+        let seconds = 8.0;
+        let n = (seconds * RATE) as usize;
+        let mut rng = Rng::new(41);
+        let speech: Vec<f32> = speech_like(n, &mut Rng::new(42)).iter().map(|s| 0.2 * s).collect();
+        let noisy: Vec<f32> = speech.iter().map(|s| s + 0.02 * rng.bipolar()).collect();
+        let ours_raw = run_with(&vec![0.0; n], &noisy, ChainSettings { noise_suppression: Some(dissent_audio::STANDARD_STRENGTH), agc: false, echo_cancellation: false, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() });
+        let ns = Config { noise_suppression: Some(NoiseSuppression { level: NoiseSuppressionLevel::Moderate, analyze_linear_aec_output_when_available: false }), ..Default::default() };
+        let apm_raw = run(&vec![0.0; n], &noisy, ns);
+        for (name, raw) in [("ours", &ours_raw), ("sonora", &apm_raw)] {
+            let lag = lag_of(&speech, raw);
+            let out = align(raw, lag);
+            let (mut noise_in, mut noise_out, mut speech_in, mut speech_err) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for b in (SAMPLE_RATE as usize..n - BLOCK).step_by(BLOCK) {
+                let r = b..b + BLOCK;
+                if power(&speech[r.clone()]) < 1e-6 {
+                    noise_in += power(&noisy[r.clone()]);
+                    noise_out += power(&out[r.clone()]);
+                } else {
+                    speech_in += power(&speech[r.clone()]);
+                    speech_err += power(&out[r.clone()].iter().zip(&speech[r.clone()]).map(|(o, x)| o - x).collect::<Vec<f32>>());
+                }
+            }
+            println!("{name}: lag {lag}, noise removed {:.1} dB in quiet blocks, speech SNR {:.1} dB in loud blocks", db(noise_in / noise_out.max(1e-30)), db(speech_in / speech_err.max(1e-30)));
+        }
+    }
+
+    /// AGC2 against our AGC: the output level reached from a quiet and a loud speech input, after ten seconds.
+    #[test]
+    #[ignore = "spike final: AGC level, run with --features sonora --ignored --nocapture"]
+    fn sonora_agc_against_ours() {
+        let seconds = 10.0;
+        let n = (seconds * RATE) as usize;
+        let speech = speech_like(n, &mut Rng::new(51));
+        let rms = (speech.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / n as f64).sqrt();
+        for (name, level_db) in [("quiet (-40 dBFS)", -40.0f32), ("loud (-10 dBFS)", -10.0)] {
+            let scale = db_amp(level_db) / rms as f32;
+            let input: Vec<f32> = speech.iter().map(|s| scale * s).collect();
+            let tail = (seconds - 2.0) * RATE;
+            let ours_settings = ChainSettings { noise_suppression: None, agc: true, echo_cancellation: false, threshold: Threshold::Manual(-120.0), ..ChainSettings::default() };
+            let ours = run_with(&vec![0.0; n], &input, ours_settings);
+            let agc2 = Config { gain_controller2: Some(GainController2 { adaptive_digital: Some(sonora::config::AdaptiveDigital::default()), ..Default::default() }), ..Default::default() };
+            let theirs = run(&vec![0.0; n], &input, agc2);
+            let lo = (tail * 1.0) as usize;
+            println!("{name} input: ours output {:.1} dBFS, sonora AGC2 output {:.1} dBFS (last 2 s RMS)", rms_db(&ours[lo..]), rms_db(&theirs[lo..]));
+        }
+    }
+
+    fn db_amp(d: f32) -> f32 {
+        10f32.powf(d / 20.0)
+    }
+
+    fn rms_db(x: &[f32]) -> f64 {
+        db(x.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / x.len() as f64)
+    }
+}
+
+#[cfg(feature = "sonora")]
+#[allow(clippy::chunks_exact_to_as_chunks, reason = "spike: replaced or removed if sonora is adopted")]
+mod sonora_tune {
+    use super::*;
+    use sonora::config::{EchoCanceller as ApmEchoCanceller, TransparentModeType};
+    use sonora::{AudioProcessing, Config, StreamConfig};
+
+    const BLOCK: usize = 480;
+
+    fn run(far: &[f32], mic: &[f32], echo: ApmEchoCanceller) -> Vec<f32> {
+        let stream = StreamConfig::new(SAMPLE_RATE, 1);
+        let config = Config { echo_canceller: Some(echo), ..Default::default() };
+        let mut apm = AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build();
+        let mut render_out = vec![0f32; BLOCK];
+        let mut capture_out = vec![0f32; BLOCK];
+        let mut out = Vec::with_capacity(mic.len());
+        for (f, m) in far.chunks_exact(BLOCK).zip(mic.chunks_exact(BLOCK)) {
+            apm.process_render_f32(&[f], &mut [&mut render_out]).unwrap();
+            apm.process_capture_f32(&[m], &mut [&mut capture_out]).unwrap();
+            out.extend_from_slice(&capture_out);
+        }
+        out
+    }
+
+    fn lag_of(reference: &[f32], out: &[f32]) -> usize {
+        let start = SAMPLE_RATE as usize;
+        let (mut best, mut best_c) = (0usize, f64::MIN);
+        for lag in 0..1200usize {
+            let (mut c, mut e) = (0.0f64, 0.0f64);
+            for t in start..reference.len() - 1200 {
+                c += reference[t] as f64 * out[t + lag] as f64;
+                e += (out[t + lag] as f64).powi(2);
+            }
+            let score = c / e.max(1e-30).sqrt();
+            if score > best_c {
+                (best, best_c) = (lag, score);
+            }
+        }
+        best
+    }
+
+    /// Fitted near gain and leak over the double-talk blocks, as in the aligned sweep.
+    fn fitted(near: &[f32], echo: &[f32], mic: &[f32], out: &[f32]) -> (f64, f64) {
+        let start = 2 * SAMPLE_RATE as usize;
+        let mut blocks = Vec::new();
+        for b in (start..mic.len() - BLOCK).step_by(BLOCK) {
+            let r = b..b + BLOCK;
+            if power(&near[r.clone()]) > 0.1 * power(&mic[r.clone()]) && power(&echo[r.clone()]) > 0.1 * power(&mic[r.clone()]) {
+                blocks.push(r);
+            }
+        }
+        let (mut on, mut nn) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                on += out[t] as f64 * near[t] as f64;
+                nn += near[t] as f64 * near[t] as f64;
+            }
+        }
+        let g = on / nn.max(1e-30);
+        let (mut e, mut l) = (0.0f64, 0.0f64);
+        for r in &blocks {
+            for t in r.clone() {
+                e += echo[t] as f64 * echo[t] as f64;
+                let d = out[t] as f64 - g * near[t] as f64;
+                l += d * d;
+            }
+        }
+        (db(g * g), db(e / l.max(1e-30)))
+    }
+
+    #[test]
+    #[ignore = "spike tuning: run with --features sonora --ignored --nocapture"]
+    fn sonora_transparent_mode_and_highpass() {
+        let seconds = 12.0;
+        let n = (seconds * RATE) as usize;
+        let far = far_end(seconds, 31);
+        let spk = speaker_output(&far, 60.0, 100.0);
+        let ir = room_ir(&mut Rng::new(5), 250.0, 250.0, 0.5);
+        let echo = mic_signal(&vec![0.0; n], &spk, &ir);
+        let speech = speech_like(n, &mut Rng::new(33));
+        let variants = [
+            ("default (legacy, high-pass)", TransparentModeType::Legacy, true),
+            ("HMM transparent mode", TransparentModeType::Hmm, true),
+            ("legacy, no high-pass", TransparentModeType::Legacy, false),
+            ("HMM, no high-pass", TransparentModeType::Hmm, false),
+        ];
+        for (name, mode, highpass) in variants {
+            for level in [0.2f32, 1.0] {
+                let near: Vec<f32> = speech.iter().map(|s| level * s).collect();
+                let mic = mic_signal(&near, &spk, &ir);
+                let raw = run(&far, &mic, ApmEchoCanceller { transparent_mode: mode, enforce_high_pass_filtering: highpass });
+                let lag = lag_of(&near, &raw);
+                let mut out = raw[lag..].to_vec();
+                out.resize(n, 0.0);
+                let (g, leak) = fitted(&near, &echo, &mic, &out);
+                println!("{name}, near {level}: lag {lag}, near gain {g:.1} dB, leak {leak:.1} dB below echo");
+            }
+        }
+    }
+}
+
+/// The chain with the echo engine chosen per frame by `engine_at`, as the desktop loop applies a change between frames.
+fn run_engines(far: &[f32], mic: &[f32], engine_at: impl Fn(usize) -> EchoEngine) -> Vec<f32> {
+    let base = ChainSettings {
+        echo_cancellation: true,
+        threshold: Threshold::Manual(-120.0),
+        ..ChainSettings::default()
+    };
+    let mut chain = CaptureChain::new(base);
+    let mut out = Vec::with_capacity(mic.len());
+    for (i, (f, m)) in far.as_chunks::<FRAME_SAMPLES>().0.iter().zip(mic.as_chunks::<FRAME_SAMPLES>().0).enumerate() {
+        chain.set_settings(ChainSettings { engine: engine_at(i), ..base });
+        chain.push_far(f);
+        let mut frame = m.to_vec();
+        chain.process(&mut frame, true);
+        out.extend_from_slice(&frame);
+    }
+    out
+}
+
+/// Without the `sonora` feature, asking for the WebRTC engine runs the standard engine, sample for sample.
+#[cfg(not(feature = "sonora"))]
+#[test]
+fn the_webrtc_engine_falls_back_to_standard_without_the_feature() {
+    let s = Scenario { buffer_ms: 40.0, ppm: 0.0 };
+    let (far, mic) = scenario_signals(4.0, &s);
+    let standard = run_engines(&far, &mic, |_| EchoEngine::Standard);
+    let asked = run_engines(&far, &mic, |_| EchoEngine::WebRtc);
+    assert_eq!(standard, asked, "the chain runs the standard engine when the feature is off");
+}
+
+/// The engine is switched in the middle of a call: Standard, then WebRtc from 8 s to 16 s, then Standard again. Each
+/// switch starts the engine fresh, so ERLE must come back to 35 dB within four seconds of it.
+#[cfg(feature = "sonora")]
+#[test]
+fn echo_recovers_after_the_engine_is_switched_mid_call() {
+    let s = Scenario { buffer_ms: 40.0, ppm: 0.0 };
+    let (far, mic) = scenario_signals(26.0, &s);
+    let frame = |sec: f64| (sec * RATE / FRAME_SAMPLES as f64) as usize;
+    let webrtc = frame(8.0)..frame(16.0);
+    let out = run_engines(&far, &mic, |i| if webrtc.contains(&i) { EchoEngine::WebRtc } else { EchoEngine::Standard });
+    let at = |sec: f64| (sec * RATE) as usize;
+    let during = erle_over(&mic, &out, at(10.0)..at(12.0));
+    let after = erle_over(&mic, &out, at(18.0)..at(20.0));
+    println!("ERLE 2 to 4 s into the WebRtc period: {during:.1} dB; 2 to 4 s after switching back to standard: {after:.1} dB");
+    assert!(during >= 35.0, "WebRtc ERLE {during:.1} dB, expected at least 35 dB two to four seconds after the switch");
+    assert!(after >= 35.0, "standard ERLE {after:.1} dB, expected at least 35 dB within four seconds of the switch back");
 }

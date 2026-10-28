@@ -538,3 +538,47 @@ Migration is per device, so two devices can reach the same tier a little apart. 
 **CPU saved (estimate, to measure before relying on it).** For one 720p30 remote tile, today's path costs roughly: decode 3 ms, box scale 4 ms and JPEG 9 ms in Rust, about 16 ms a frame, or 48% of a core at 30 fps, plus 5 to 7 ms a frame of base64 and image decode in the webview. With WebCodecs the Rust side only copies the payload into the Channel, under 0.5 ms a frame, and the decode runs on the GPU or a hardware decoder, so the webview's main thread spends close to nothing on it. The saving is roughly 45 percentage points of a core per large tile and most of the webview's per-frame cost. Measure it on the target machines before the design is built: the figures above are from this Windows machine with a software H.264 decoder.
 
 **Order of work.** First build the transport on Linux-free platforms behind the existing fallback, and measure the webview's main-thread time per frame on WebView2. Then the Rust side can stop decoding for tiles whose webview has WebCodecs, which the webview reports at start.
+
+### Prototype and first numbers (28 October 2026)
+
+**Built, behind a setting that is off by default.** Settings › Voice has a "Video" block with "Hardware video decoding (experimental)". The choice is kept per window in local storage.
+- **Engine.** `Engine::set_encoded_video_sink` sends received camera and screen frames, decrypted but not decoded, to a sink. While a sink is set, `show_video` skips the Rust decode and the JPEG. `Engine::request_video_keyframes` sets a flag that the call pump turns into a keyframe request to every link (`Mesh::request_keyframes`, `Participant::request_keyframes`).
+- **Desktop.** `subscribe_encoded_video(channel)` sends each frame as one binary `Channel` message: a version byte, flags (keyframe, screen, AV1), the frame id, the sender's root id, then the bitstream. `unsubscribe_encoded_video` restores the JPEG previews. `request_video_keyframes` asks the peers for a keyframe.
+- **Window.** `lib/webcodecs.ts` decodes each tile with a `VideoDecoder` and draws it to a canvas. It detects support with `isConfigSupported` and falls back to the JPEG path when that fails. A keyframe starts a fresh decoder. A delta without a decoder, or a decoder error, asks for a keyframe, at most once a second. The first subscription also asks for one.
+- **Layer change.** The sender already sends a keyframe at each change of size. The window starts a new decoder on every keyframe, so the new size decodes without a separate request.
+
+**Measured on this machine.** The streams are the fake capture source's 720p30 pattern at 2 Mbit/s, 300 frames, 10 seconds. The JPEG path uses the 1280 px preview of the same frames.
+
+| Path | Where | Cost |
+|---|---|---|
+| JPEG, H.264 | Rust, `show()` at a 1280 px tile | 48% of one core, 15.9 ms per frame |
+| JPEG, AV1 | Rust, `show()` at a 1280 px tile | 60% of one core, 19.9 ms per frame |
+| Encoded, either codec | Rust, copy of the payload | 0.0004 ms per frame, about 6 to 7 KB |
+| JPEG event | Window, base64 parse, decode, draw | 4.5 ms per frame on the page's main thread; 0 late frames |
+| WebCodecs, H.264 | Window, `decode()` call | 0.13 ms per frame; 0 errors, 0 late frames |
+| WebCodecs, H.264 | Window, drawing each frame to a 2D canvas | 4.1 ms per frame |
+| WebCodecs, AV1 | Window, `decode()` call | 0.11 ms per frame |
+| WebCodecs, AV1 | Window, drawing each frame to a 2D canvas | 3.8 ms per frame |
+
+The window numbers come from headless Edge with no GPU. The decoder runs off the page's main thread, so its decode time is not in the window's main-thread figures. Per-process browser CPU could not be sampled reliably, so it is not reported.
+
+**What this says.** The engine saves 16 to 20 ms of CPU per 720p30 frame on this machine. The window's main-thread cost does not fall: drawing a decoded frame to a software canvas takes about 4 ms, about what the JPEG path's decode and draw take. A GPU-accelerated window, such as WebView2 with a GPU, should draw much faster. That is not measured here, so the flag stays off until it is.
+
+**Still open.** The draw on a GPU window is measured below, and the path is the default now. A window that cannot decode H.264 keeps the JPEG path.
+
+### Default on, measured in the app's WebView2 (28 October 2026)
+
+The window's own bench ran inside the desktop app's WebView2 (Chromium with a GPU), 300 frames of 720p30 at 30 fps over 10 seconds, with CPU sampled for the app process and its WebView2 processes. Each figure is the CPU above an idle sample taken in the same pass, over three passes.
+
+| Path | CPU above idle, 10 s | Draw in the page |
+|---|---|---|
+| JPEG previews (base64 event, decode, bitmap, draw) | 1.2 to 1.8 s | not split |
+| WebCodecs H.264, `drawImage(videoFrame)` | 0.5 to 0.8 s | 0.32 ms a frame |
+| WebCodecs H.264, `createImageBitmap(videoFrame)`, then draw | 0.4 to 0.6 s | 0.05 ms a frame, plus the asynchronous bitmap decode |
+| WebCodecs AV1, `drawImage(videoFrame)` | 0.4 to 0.55 s | 0.3 ms a frame |
+
+The two H.264 variants are within the noise of each other, so the simpler `drawImage` stays. Each frame is closed as soon as it is drawn, so no decoder waits on a frame the page still holds.
+
+**Decision.** The window decodes by default, and the setting in Settings › Voice is an opt-out. On a GPU-backed window this path costs about a third of the JPEG path's CPU, and the engine saves 16 to 20 ms a frame in Rust on top. Without WebCodecs or H.264 the window keeps the JPEG previews.
+
+**Not measured.** Two instances in a live DM call with fake capture, and the app's whole-process CPU in that call. The desktop app has no fake capture switch, and the second instance needs contacts set up. The figures above come from the bench inside the app's own WebView2, plus the engine costs measured in Rust.

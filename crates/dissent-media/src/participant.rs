@@ -382,6 +382,13 @@ impl<T: PacketTransport> Participant<T> {
             .fold(false, |asked, call| call.take_keyframe_request() | asked)
     }
 
+    /// Asks the active forwarder links for a keyframe now. A viewer whose decoder lost its place uses this to start again.
+    pub fn request_keyframes(&mut self) {
+        for call in self.links.values_mut() {
+            let _ = call.request_keyframe();
+        }
+    }
+
     /// Waits for the next video frame from any forwarder link. Returns `Ok(None)` once no link is
     /// left. Cancel-safe.
     pub async fn next_video_frame(&mut self) -> Result<Option<VideoFrame>> {

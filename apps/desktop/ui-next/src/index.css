@@ -28,7 +28,7 @@
   --muted-foreground: #a0a6b0; /* --muted in style.css */
   --accent: #d93f00; /* the accent fill (menu highlight, badges, selected): white text on it passes 4.5:1 */
   --accent-foreground: #ffffff;
-  --destructive: #e0163a; /* --danger: a crimson, further in hue from the orange accent */
+  --destructive: #d0105a; /* --danger: a crimson-rose, apart from the orange accent under colour blindness */
   --destructive-foreground: #ffffff;
   --border: #252529;
   --input: #222327; /* the field background; --input-border is the field edge */
@@ -68,10 +68,10 @@
   --accent-tint: rgb(255 79 0 / 0.18);
   --accent-tint-soft: rgb(255 79 0 / 0.14);
   --brand: #ff4f00; /* the brand accent: the logo and the focus ring */
-  --danger: #e0163a;
-  --danger-hover: #c0102f;
-  --danger-text: #ff7a8a;
-  --danger-tint: rgb(224 22 58 / 0.15);
+  --danger: #d0105a;
+  --danger-hover: #b00d4c;
+  --danger-text: #ff7aa0;
+  --danger-tint: rgb(208 16 90 / 0.15);
   --warn: #f0b232;
   --warn-tint: rgb(240 178 50 / 0.15);
   --success: #23a55a;

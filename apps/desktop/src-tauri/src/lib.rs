@@ -30,6 +30,15 @@ use dissent_identity::keystore;
 use tauri::{Manager, RunEvent};
 use tracing_subscriber::EnvFilter;
 
+/// Debug builds only: `DISSENT_FAKE_CAPTURE=1` makes this engine's camera and screen a test picture, so a live check can run
+/// two instances without a camera or a display. Release builds ignore it.
+pub(crate) fn fake_capture(engine: &dissent_core::Engine) {
+    if cfg!(debug_assertions) && std::env::var_os("DISSENT_FAKE_CAPTURE").is_some_and(|v| v == "1") {
+        tracing::warn!("fake capture is on (DISSENT_FAKE_CAPTURE=1): the camera and the screen are a test picture");
+        engine.set_test_capture(dissent_core::TestCapture::Pattern);
+    }
+}
+
 /// The node config: the saved network settings, or loopback-only when `DISSENT_LOOPBACK=1`.
 /// Loopback mode avoids the firewall prompt on Windows and only works for instances on one machine.
 pub(crate) fn node_config(settings: &network::NetworkSettings) -> NodeConfig {
@@ -271,6 +280,10 @@ pub fn run() {
             part6::set_camera,
             part6::set_camera_preview,
             part6::set_video_tile,
+            part6::subscribe_encoded_video,
+            part6::unsubscribe_encoded_video,
+            part6::request_video_keyframes,
+            part6::set_jpeg_tiles,
             part6::set_screen_share,
             part6::list_share_sources,
             part6::send_call_message,

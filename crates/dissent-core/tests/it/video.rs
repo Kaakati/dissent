@@ -4,7 +4,8 @@
 //! camera. Networked, so run with `scripts/fwtest.sh dissent-core it --ignored video::`.
 
 use crate::common::*;
-use dissent_core::{EngineEvent, TestCapture};
+use dissent_core::{EncodedVideo, EngineEvent, TestCapture};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The two tests in this file start engines with the same names, so they run one at a time.
@@ -67,11 +68,15 @@ async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
         // Alice's test picture goes out, and Bob reads previews of it. The picture is flat colour
         // bars with noise, so each preview is a JPEG of a few kilobytes.
         alice.engine.set_test_capture(TestCapture::Pattern);
+        let before = bob.engine.call_state().map_or(0, |v| v.frames_received);
         alice.engine.set_camera(true).expect("camera on");
         let alice_root = alice.identity.root_id().to_string();
         let (count, bytes) =
             previews_for(&mut bob_events, &alice_root, false, Duration::from_secs(4)).await;
         assert!(count >= 20, "Bob reads Alice's camera at about 15 fps: {count} previews");
+        // Every video frame Bob takes in counts, not only the ones he draws as previews.
+        let received = bob.engine.call_state().map_or(0, |v| v.frames_received);
+        assert!(received >= before + count as u64, "frames_received counts the video: {received} after {before} + {count} previews");
         let per_second = bytes / 4;
         eprintln!(
             "camera previews: {count} in 4 s, {} KB of JPEG, {} KB/s per remote camera",
@@ -80,6 +85,56 @@ async fn a_camera_in_a_dm_call_reaches_the_other_engine_as_jpeg_previews() {
         );
 
         alice.engine.set_camera(false).expect("camera off");
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_encoded_sink_gets_the_camera_frames_undecoded_and_no_previews() {
+    let _serial = SERIAL.lock().await;
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        make_contacts_ready(&alice, &bob).await;
+
+        // Bob's window decodes the frames itself, so he takes them encoded.
+        let (tx, rx) = std::sync::mpsc::channel::<EncodedVideo>();
+        bob.engine.set_encoded_video_sink(Some(Arc::new(move |frame| {
+            let _ = tx.send(frame);
+            true
+        })));
+
+        let mut bob_events = bob.engine.subscribe();
+        alice
+            .engine
+            .call_dm(bob.identity.root_id())
+            .await
+            .expect("call starts");
+        accept_incoming(&bob.engine, &mut bob_events).await;
+        eventually("the call is up on both sides", || {
+            alice
+                .engine
+                .call_state()
+                .filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+        })
+        .await;
+
+        alice.engine.set_test_capture(TestCapture::Pattern);
+        alice.engine.set_camera(true).expect("camera on");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let alice_root = alice.identity.root_id().to_string();
+        let frames: Vec<EncodedVideo> = rx.try_iter().filter(|f| f.root_id == alice_root).collect();
+        assert!(frames.len() >= 15, "Bob's window gets about 15 frames of Alice's camera a second: {}", frames.len());
+        assert!(frames.iter().any(|f| f.keyframe), "a keyframe arrives first, so a decoder can start");
+        assert!(frames.iter().all(|f| !f.screen && !f.av1 && !f.payload.is_empty()), "H.264 camera frames, still encoded");
+        let (previews, _) = previews_for(&mut bob_events, &alice_root, false, Duration::from_secs(1)).await;
+        assert_eq!(previews, 0, "no JPEG previews while the window decodes the frames itself");
+
+        alice.engine.set_camera(false).expect("camera off");
+        bob.engine.set_encoded_video_sink(None);
         finish(vec![alice, bob]).await;
     })
     .await;

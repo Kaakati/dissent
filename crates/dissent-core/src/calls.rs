@@ -560,7 +560,30 @@ pub(crate) struct Room {
     screen: Mutex<Option<Sending>>,
     /// The decoders of the peers' cameras and screens.
     remote_video: Mutex<RemoteVideo>,
+    /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
+    keyframe_wanted: AtomicBool,
 }
+
+/// A received camera or screen frame, still encoded, for a window that decodes it itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedVideo {
+    /// The sender's root id, as the window keys its tiles.
+    pub root_id: String,
+    /// Whether the frame is a shared screen rather than a camera.
+    pub screen: bool,
+    /// Whether the frame is AV1, else H.264.
+    pub av1: bool,
+    /// Whether the frame is a keyframe, which a decoder can start from.
+    pub keyframe: bool,
+    /// The sender's frame counter for this stream.
+    pub frame_id: u32,
+    /// The codec bitstream of the frame, decrypted.
+    pub payload: Vec<u8>,
+}
+
+/// Where encoded frames go. It returns true when it took the frame, and false to have the frame previewed as a JPEG
+/// instead. See `Engine::set_encoded_video_sink`.
+pub type EncodedSink = Arc<dyn Fn(EncodedVideo) -> bool + Send + Sync>;
 
 /// An incoming direct call the user has not answered yet. No media exists until they accept.
 pub(crate) struct Ringing {
@@ -580,6 +603,8 @@ pub(crate) struct CallHub {
     /// The pixel width each remote tile is drawn at, by the peer's root id and whether it is a
     /// screen. A preview is made that wide, so a small tile costs little.
     tiles: Mutex<HashMap<(String, bool), u32>>,
+    /// Where received frames go when a window decodes them itself. `None` for the JPEG previews.
+    encoded_sink: Mutex<Option<EncodedSink>>,
     /// Where this engine's camera, lobby preview and screen take their pictures from. A device, unless a test set it.
     test_capture: Mutex<crate::call_video::TestCapture>,
     /// This device's camera while the lobby previews it, before a call. A call takes the camera
@@ -609,6 +634,7 @@ impl CallHub {
         Self {
             tiles: Mutex::new(HashMap::new()),
             test_capture: Mutex::new(crate::call_video::TestCapture::Device),
+            encoded_sink: Mutex::new(None),
             lobby_camera: Mutex::new(None),
             current: Mutex::new(None),
             staged: Mutex::new(None),
@@ -876,6 +902,7 @@ impl Room {
             camera: Mutex::new(None),
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
+            keyframe_wanted: AtomicBool::new(false),
         }
     }
 
@@ -1064,6 +1091,21 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
         .get(&frame.sender)
         .map(|peer| peer.root.to_string())
         .unwrap_or_default();
+    // A window that decodes the frame itself gets it as it was sent: no decode here, and no JPEG.
+    let sink = lock(&engine.inner.calls.encoded_sink).clone();
+    if let Some(sink) = sink {
+        let taken = sink(EncodedVideo {
+            root_id: root_id.clone(),
+            screen: frame.screen,
+            av1: frame.codec == dissent_media::VideoCodec::Av1,
+            keyframe: frame.keyframe,
+            frame_id: frame.frame_id,
+            payload: frame.payload.clone(),
+        });
+        if taken {
+            return;
+        }
+    }
     let tile = (root_id.clone(), frame.screen);
     let (width, largest) = {
         let tiles = lock(&engine.inner.calls.tiles);
@@ -1082,6 +1124,9 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
 
 /// Sends this device's camera and screen through the mesh, and shows the peers' frames.
 async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTransport>) {
+    if room.keyframe_wanted.swap(false, Ordering::Relaxed) {
+        mesh.request_keyframes();
+    }
     let audio = mesh
         .stats()
         .values()
@@ -1107,6 +1152,7 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
     while let Ok(Ok(Some(frame))) =
         tokio::time::timeout(Duration::from_millis(1), mesh.next_video_frame()).await
     {
+        lock(&room.quality).frames_received += 1;
         show_video(engine, room, &frame);
     }
     show_own_previews(engine, room);
@@ -1115,6 +1161,9 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
 /// Sends this device's camera and screen to its forwarder, and shows the frames the forwarder
 /// relays.
 async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Participant<CallLink>) {
+    if room.keyframe_wanted.swap(false, Ordering::Relaxed) {
+        participant.request_keyframes();
+    }
     let audio = participant
         .link_stats()
         .values()
@@ -1140,6 +1189,7 @@ async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Partici
     while let Ok(Ok(Some(frame))) =
         tokio::time::timeout(Duration::from_millis(1), participant.next_video_frame()).await
     {
+        lock(&room.quality).frames_received += 1;
         show_video(engine, room, &frame);
     }
     show_own_previews(engine, room);
@@ -2568,6 +2618,20 @@ impl Engine {
                 }
             }
         });
+        Ok(())
+    }
+
+    /// Sends received camera and screen frames to `sink` still encoded, instead of decoding them here. `None` goes back to
+    /// the JPEG previews. A window that decodes frames itself uses this, and skips the decode and the JPEG for each frame
+    /// the sink takes.
+    pub fn set_encoded_video_sink(&self, sink: Option<EncodedSink>) {
+        *lock(&self.inner.calls.encoded_sink) = sink;
+    }
+
+    /// Asks the peers of the current call for a keyframe, so a viewer that lost its decoder can start again.
+    pub fn request_video_keyframes(&self) -> Result<()> {
+        let room = self.current_or_err()?;
+        room.keyframe_wanted.store(true, Ordering::Relaxed);
         Ok(())
     }
 

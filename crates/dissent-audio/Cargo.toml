@@ -11,6 +11,11 @@ nnnoiseless.workspace = true
 ringbuf.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sonora = { workspace = true, optional = true }
+
+[features]
+# Off by default. Builds the WebRTC APM port beside the NLMS canceller, for comparison only.
+sonora = ["dep:sonora"]
 
 [build-dependencies]
 cc.workspace = true

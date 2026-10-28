@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 
 use crate::dsp::{soft_limit, Agc, EchoCanceller, EchoStats, NoiseSuppressor, DENOISE_BLOCK};
+use crate::webrtc::{self, Apm};
 use crate::gate::{Threshold, VoiceGate};
 use crate::meter::LevelMeter;
 
@@ -25,6 +26,16 @@ pub const STANDARD_STRENGTH: f32 = 0.6;
 /// clean speech (`voice_path` measurements), so the default is 0.8.
 pub const STRONG_STRENGTH: f32 = 0.8;
 
+/// Which engine cancels echo, suppresses noise and levels the voice. [`EchoEngine::Standard`] is ours: the NLMS
+/// canceller, RNNoise and our AGC. [`EchoEngine::WebRtc`] is sonora's port of WebRTC's processing, which runs only in a
+/// build with the `sonora` feature. Without that feature it runs as the standard engine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EchoEngine {
+    #[default]
+    Standard,
+    WebRtc,
+}
+
 /// What the chain does. Build it from the user's settings and hand it to [`CaptureChain::set_settings`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChainSettings {
@@ -39,6 +50,8 @@ pub struct ChainSettings {
     pub agc: bool,
     /// When a frame passes the gate. Frames below it are silenced.
     pub threshold: Threshold,
+    /// The engine for echo cancellation, noise suppression and AGC. Switching it rebuilds the chain's state.
+    pub engine: EchoEngine,
 }
 
 impl Default for ChainSettings {
@@ -50,6 +63,7 @@ impl Default for ChainSettings {
             echo_cancellation: false,
             agc: false,
             threshold: Threshold::Auto,
+            engine: EchoEngine::Standard,
         }
     }
 }
@@ -88,6 +102,8 @@ pub struct CaptureChain {
     clipped: u64,
     /// Changes of the voice gate, open to closed or back. Chatter here is audible as static.
     gate_flips: u64,
+    /// The WebRTC engine, built when it is selected and the `sonora` feature is on.
+    webrtc: Option<Apm>,
 }
 
 impl CaptureChain {
@@ -105,18 +121,29 @@ impl CaptureChain {
             dry: Vec::new(),
             clipped: 0,
             gate_flips: 0,
+            webrtc: None,
         }
     }
 
     /// Replaces the settings. Filter state is kept, so changes apply from the next frame.
     pub fn set_settings(&mut self, settings: ChainSettings) {
         // Turning echo cancellation off and on again starts from a new canceller, as a call does. A kept one would
-        // hold a reference that ran on while it was off, so it would read the far end from the wrong moment.
-        if settings.echo_cancellation != self.settings.echo_cancellation {
+        // hold a reference that ran on while it was off, so it would read the far end from the wrong moment. The
+        // same holds for the WebRTC engine, and a change of engine starts both engines fresh.
+        if settings.echo_cancellation != self.settings.echo_cancellation || settings.engine != self.settings.engine {
             self.echo = None;
+            self.webrtc = None;
         }
         self.settings = settings;
+        if let Some(apm) = self.webrtc.as_mut() {
+            apm.apply(&settings);
+        }
         self.gate.set_threshold(settings.threshold);
+    }
+
+    /// The engine that runs now: the one chosen, or the standard engine when this build cannot run the chosen one.
+    pub fn engine(&self) -> EchoEngine {
+        webrtc::engine_for(&self.settings)
     }
 
     /// The settings in effect.
@@ -144,6 +171,11 @@ impl CaptureChain {
     /// with a current reference. Call it before [`CaptureChain::process`] for the mic frame that
     /// hears that playout, so the reference leads the echo it cancels.
     pub fn push_far(&mut self, far: &[f32]) {
+        if self.engine() == EchoEngine::WebRtc {
+            let settings = self.settings;
+            self.webrtc.get_or_insert_with(|| Apm::new(&settings)).push_far(far);
+            return;
+        }
         if let Some(echo) = self.echo.as_mut() {
             echo.push_far(far);
         } else if self.settings.echo_cancellation {
@@ -161,8 +193,16 @@ impl CaptureChain {
         }
         self.clipped += frame.iter().filter(|s| s.abs() >= 1.0).count() as u64;
 
+        // The WebRTC engine does its own echo cancellation, noise suppression and AGC, so the steps below are ours
+        // and are skipped for it.
+        let webrtc = self.engine() == EchoEngine::WebRtc;
+        if webrtc {
+            let settings = self.settings;
+            self.webrtc.get_or_insert_with(|| Apm::new(&settings)).process(frame);
+        }
+
         // The canceller is linear, so it runs before the soft limit, which bends loud samples.
-        if self.settings.echo_cancellation {
+        if !webrtc && self.settings.echo_cancellation {
             if let Some(echo) = self.echo.as_mut() {
                 echo.process(frame);
             }
@@ -170,7 +210,7 @@ impl CaptureChain {
         soft_limit(frame);
 
         // A strength of 0.0 is off: the raw frame passes without the denoiser's delay.
-        if let Some(strength) = self.settings.noise_suppression.filter(|s| *s > 0.0) {
+        if let Some(strength) = self.settings.noise_suppression.filter(|s| *s > 0.0 && !webrtc) {
             self.suppress(frame, strength);
         }
 
@@ -181,7 +221,7 @@ impl CaptureChain {
         if open != self.gate_open {
             self.gate_flips += 1;
         }
-        if self.settings.agc {
+        if self.settings.agc && !webrtc {
             self.agc.process_while(frame, open);
             soft_limit(frame);
         }

@@ -287,6 +287,12 @@ export const api = {
   setCameraPreview: (on: boolean) => call<void>('set_camera_preview', { on }),
   // How many CSS pixels wide a remote tile is drawn, times the screen's density, so its preview is that wide.
   setVideoTile: (rootId: string, screen: boolean, width: number) => call<void>('set_video_tile', { rootId, screen, width }),
+  // Hardware video decoding (experimental): received frames go to this window encoded, over a channel, instead of as JPEGs.
+  subscribeEncodedVideo: (channel: unknown) => call<void>('subscribe_encoded_video', { channel }),
+  unsubscribeEncodedVideo: () => call<void>('unsubscribe_encoded_video'),
+  requestVideoKeyframes: () => call<void>('request_video_keyframes'),
+  // The tiles that have fallen back to JPEG previews, by root id. The engine previews their frames.
+  setJpegTiles: (roots: string[]) => call<void>('set_jpeg_tiles', { roots }),
   setScreenShare: (on: boolean, target?: ShareSource['target']) => call<void>('set_screen_share', { on, target: target ?? null }),
   listShareSources: () => call<ShareSource[]>('list_share_sources'),
   sendCallMessage: (text: string) => call<unknown>('send_call_message', { text }),

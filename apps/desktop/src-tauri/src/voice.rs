@@ -261,6 +261,22 @@ fn run(
         let p = lock(&prefs);
         (p.input.clone(), p.output.clone())
     };
+    // The microphone opens before the speaker when capture is on at the start. Opening it blocks for tens of
+    // milliseconds (measured 32 to 54 ms), and with the speaker already playing that gap starves the playout.
+    let mut mic: Option<CaptureStream> = if capture_on.load(Ordering::Relaxed) {
+        match CaptureStream::open(input.as_deref()) {
+            Ok(c) => {
+                info!("microphone open");
+                Some(c)
+            }
+            Err(e) => {
+                warn!(error = %e, "microphone unavailable; retrying");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut playout = match PlayoutStream::open(output.as_deref()) {
         Ok(p) => p,
         Err(e) => {
@@ -271,8 +287,7 @@ fn run(
     info!("speaker open");
     let mut chain = CaptureChain::new(ChainSettings::default());
     let mut level = LevelReporter::new(app);
-    let mut mic: Option<CaptureStream> = None;
-    let mut retry_at: Option<Instant> = None;
+    let mut retry_at: Option<Instant> = (mic.is_none() && capture_on.load(Ordering::Relaxed)).then(|| Instant::now() + RETRY);
     let mut read = Vec::new();
     let mut pending: Vec<f32> = Vec::new();
     let mut play = vec![0f32; FRAME];
@@ -348,6 +363,7 @@ fn run(
             info!(
                 late_ticks = late,
                 worst_late_ms = worst_late.as_secs_f64() * 1000.0,
+                engine = ?chain.engine(),
                 speaker_underruns = underruns.saturating_sub(seen.0),
                 mic_overflows = overflows.saturating_sub(seen.1),
                 clipped_samples = clipped.saturating_sub(seen.2),

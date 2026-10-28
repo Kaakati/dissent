@@ -272,6 +272,13 @@ impl<T: PacketTransport> Mesh<T> {
             .fold(false, |asked, call| call.take_keyframe_request() | asked)
     }
 
+    /// Asks every peer for a keyframe now. A viewer whose decoder lost its place uses this to start again.
+    pub fn request_keyframes(&mut self) {
+        for call in self.calls.values_mut() {
+            let _ = call.request_keyframe();
+        }
+    }
+
     /// Waits for the next video frame from any peer. Returns `Ok(None)` when no peers are left.
     /// Cancel-safe.
     pub async fn next_video_frame(&mut self) -> Result<Option<VideoFrame>> {

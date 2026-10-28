@@ -1,7 +1,7 @@
 // Unit tests for the emoticon converter. Run with `npm run test:unit` (node --test, no build step).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EMOTICONS, convertEmoticons } from '../src/lib/emoticons.ts';
+import { EMOTICONS, convertEmoticons, convertWhileTyping } from '../src/lib/emoticons.ts';
 
 test('every emoticon in the table converts on its own', () => {
   for (const [emoticon, emoji] of Object.entries(EMOTICONS)) {
@@ -71,4 +71,17 @@ test('a backslash keeps an emoticon as typed, and the send drops the backslash',
 test('converting twice changes nothing more', () => {
   const once = convertEmoticons(':D and :P and `:)`');
   assert.equal(convertEmoticons(once), once);
+});
+
+test('while typing, a typed space converts the text before the caret and moves the caret with it', () => {
+  // ":P " typed: the space is at index 2, the caret after it.
+  assert.deepEqual(convertWhileTyping(':P ', 3, true), { text: '😛 ', caret: 3 });
+  // The text after the caret is left alone, even an emoticon in it.
+  assert.deepEqual(convertWhileTyping(':D  :P', 3, true), { text: '😄  :P', caret: 3 });
+  // No whitespace just before the caret, a deletion, or nothing to convert: no change.
+  assert.equal(convertWhileTyping(':P', 2, true), null);
+  assert.equal(convertWhileTyping(':P ', 3, false), null);
+  assert.equal(convertWhileTyping('hello ', 6, true), null);
+  // An escape keeps its backslash while typing.
+  assert.equal(convertWhileTyping('\\:D ', 4, true), null);
 });

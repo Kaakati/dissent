@@ -204,8 +204,8 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .reactions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
 .reaction { height: 24px; min-width: 40px; padding: 0 var(--s-2) 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; border-radius: var(--r-2); background: rgb(255 255 255 / .06); color: var(--muted-foreground); font: 500 var(--fs-sm) / var(--lh-sm) var(--font); font-variant-numeric: tabular-nums; cursor: pointer; }
 .reaction:hover { background: rgb(255 255 255 / .1); border-color: var(--border-strong); color: var(--text); }
-.reaction.mine { border-color: var(--accent-text); background: rgb(255 130 102 / .12); color: var(--text-strong); }
-.reaction.mine:hover { background: rgb(255 130 102 / .2); border-color: var(--accent-text); }
+.reaction.mine { border-color: var(--accent-text); background: rgb(255 79 0 / .12); color: var(--text-strong); }
+.reaction.mine:hover { background: rgb(255 79 0 / .2); border-color: var(--accent-text); }
 .reaction-emoji { font: 15px / 1 var(--emoji); }
 .reaction.add { min-width: 32px; padding: 0 6px; opacity: 0; }
 .reaction.add > svg { width: var(--icon-sm); height: var(--icon-sm); }
@@ -257,7 +257,7 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .att-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .att-name-text[title="Transfer details"] { cursor: pointer; }
 .att-ext { flex: none; height: 16px; padding: 0 4px; border-radius: 2px; background: var(--border-strong); color: var(--muted-foreground); font: 600 9px / 16px var(--font); letter-spacing: .04em; }
-.att-ext.danger { background: rgb(211 54 57 / .2); color: var(--danger-text); }
+.att-ext.danger { background: rgb(208 16 90 / .2); color: var(--danger-text); }
 .att-meta { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font: 12px / 18px var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .att-state.danger { color: var(--danger-text); }
 .att-card .icon-btn { flex: none; width: 36px; height: 36px; border-radius: var(--r-2); background: var(--elevated); color: var(--text); }

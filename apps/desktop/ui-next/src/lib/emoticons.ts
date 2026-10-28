@@ -56,9 +56,29 @@ function isListNumber(text: string, i: number, emoticon: string): boolean {
 }
 
 /**
+ * The live conversion while typing, as Discord does it: once a whitespace character is typed, the emoticons in the text
+ * before the caret become emoji. Returns the new text and caret, or `null` when nothing changes. Only an insertion
+ * converts (`inserted`, from the input event's type, which also covers typing over a selection), so deleting back
+ * over an emoji never turns it into something else. Escapes are kept for the save or send.
+ */
+export function convertWhileTyping(value: string, caret: number, inserted: boolean): { text: string; caret: number } | null {
+  if (!inserted || caret === 0 || !/\s/.test(value[caret - 1])) return null;
+  const head = value.slice(0, caret);
+  const converted = convertEmoticons(head, { keepEscapes: true });
+  if (converted === head) return null;
+  return { text: converted + value.slice(caret), caret: converted.length };
+}
+
+/**
  * Converts the emoticons in `text`. With `keepEscapes` (while typing), an escaped emoticon keeps its backslash, so the
  * send can still see it. Without it (the send), the backslash goes and the emoticon is sent as typed.
  */
+// Whether a change event came from typing or pasting text, not from a deletion.
+export function isInsertion(event: Event): boolean {
+  const type = (event as InputEvent).inputType;
+  return typeof type === 'string' ? type.startsWith('insert') : true;
+}
+
 export function convertEmoticons(text: string, { keepEscapes = false }: { keepEscapes?: boolean } = {}): string {
   const ranges = protectedRanges(text);
   const isProtected = (i: number) => ranges.some(([a, b]) => i >= a && i < b);

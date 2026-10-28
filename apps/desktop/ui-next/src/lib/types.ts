@@ -264,6 +264,8 @@ export interface VoiceSettings {
   threshold_db: number;
   push_to_talk: boolean;
   ptt_key: string | null;
+  // The echo cancellation engine. 'web_rtc' is experimental, and runs only in a build with the sonora feature.
+  echo_engine: 'standard' | 'web_rtc';
 }
 
 export interface MicLevel {

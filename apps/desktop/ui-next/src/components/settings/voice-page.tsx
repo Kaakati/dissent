@@ -10,6 +10,7 @@ import { levelPosition, useMicMonitor } from '@/components/voice/mic-monitor';
 import type { AudioDevice, AudioDevices, VoiceSettings } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { Block, CHECK_CLASS, Choices, CheckRow, Hint } from './settings-ui';
+import { applyHardwareVideo, hardwareVideoWanted, saveHardwareVideoWanted } from '@/lib/webcodecs';
 
 const BARS = 40;
 
@@ -71,6 +72,25 @@ export function VoicePage() {
       </Choices>
 
       {settings.profile === 'custom' ? <CustomBlocks settings={settings} /> : null}
+      <VideoBlock />
+
+      <Block title="Echo Cancellation Engine">
+        <label className="flex min-h-8 items-center gap-s-3 text-body text-text-strong">
+          <span>Engine</span>
+          <select
+            value={settings.echo_engine ?? 'standard'}
+            aria-label="Echo cancellation engine"
+            onChange={(e) => updateVoice({ echo_engine: e.target.value as VoiceSettings['echo_engine'] }, { now: true })}
+            className={cn(SELECT, 'w-auto')}
+          >
+            <option value="standard">Standard (current)</option>
+            <option value="web_rtc">WebRTC AEC3 (experimental)</option>
+          </select>
+        </label>
+        <Hint>
+          WebRTC AEC3 replaces our echo canceller, noise suppression and gain control while it is selected. Switching during a call restarts the processing.
+        </Hint>
+      </Block>
 
       <Sensitivity settings={settings} live={monitor.db} liveThreshold={monitor.thresholdDb} />
 
@@ -199,6 +219,26 @@ function CustomBlocks({ settings }: { settings: VoiceSettings }) {
         <Toggle label="Automatic Gain Control" checked={settings.agc} onChange={(on) => updateVoice({ agc: on }, { now: true })} />
       </Block>
     </>
+  );
+}
+
+// Hardware video decoding: this window decodes received video with WebCodecs, which costs about a third of the CPU of the
+// JPEG previews. Off by default until measured in release builds; turning it on is opt-in.
+function VideoBlock() {
+  const [on, setOn] = useState(hardwareVideoWanted);
+  const [status, setStatus] = useState<string | null>(null);
+  const change = (next: boolean) => {
+    saveHardwareVideoWanted(next);
+    setOn(next);
+    void applyHardwareVideo(next).then((active) =>
+      setStatus(next && !active ? 'Not available here: this window cannot decode H.264 with WebCodecs, so previews stay on.' : null),
+    );
+  };
+  return (
+    <Block title="Video">
+      <Toggle label="Hardware video decoding (experimental)" checked={on} onChange={change} />
+      {status ? <Hint>{status}</Hint> : null}
+    </Block>
   );
 }
 

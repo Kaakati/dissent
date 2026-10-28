@@ -1,9 +1,9 @@
 // The call pane (the old UI's views/call.js): the header of the call, and in the main column the route banner, the participants in a
-// grid with their speaking rings, the controls, and the call chat below. The camera and screen share are disabled slots
+// grid with their speaking rings, the controls, and the call chat beside or below. The camera and screen share are disabled slots
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, PhoneOff, ShieldCheck, Video, VideoOff, Volume2 } from 'lucide-react';
+import { Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import { Composer } from '@/components/chat/composer';
 import { listKey, rowsFor } from '@/components/chat/message-list';
@@ -12,6 +12,7 @@ import '@/components/chat/chat.css';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { UserAvatar } from '@/components/user-avatar';
 import { useCallRoom } from '@/lib/calls';
+import { applyHardwareVideo, hardwareVideoWanted, registerCanvas, resetForCall, useEncodedVideoOn } from '@/lib/webcodecs';
 import { callConversationOf, chatTargetOf, conversationKey, loadCallChat, useCallChat } from '@/lib/call-chat';
 import { api } from '@/lib/api';
 import { hueOf } from '@/lib/identity';
@@ -56,20 +57,111 @@ export function CallHeader() {
 }
 
 const NEAR_BOTTOM_PX = 80; // within this distance of the end, a new message keeps the call chat at the end
+// A call pane at least this wide puts the chat beside the video, as Discord does. A narrower one puts it below.
+const SIDE_CHAT_MIN_PANE = 1000;
+// Where the call chat's open or closed state is kept, on this device.
+const CHAT_OPEN_KEY = 'dissent.callChatOpen';
+// The space between tiles, in px. Matches gap-s-3.
+const TILE_GAP = 12;
 
-// The call pane. Replaces the chat while the call is open here.
+function readChatOpen(): boolean {
+  try {
+    return localStorage.getItem(CHAT_OPEN_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function writeChatOpen(open: boolean): void {
+  try {
+    localStorage.setItem(CHAT_OPEN_KEY, String(open));
+  } catch {
+    // A window without storage keeps the choice for the session.
+  }
+}
+
+// The content size of an element, kept current as it resizes.
+function useSize(ref: React.RefObject<HTMLElement | null>): { width: number; height: number } {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setSize((s) => (s.width === width && s.height === height ? s : { width, height }));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return size;
+}
+
+// The call pane. Replaces the chat while the call is open here. The video takes the space, and the chat sits beside it
+// in a wide pane or below it, capped, in a narrow one. The chat can be hidden, and that choice is kept on this device.
 export function CallBody() {
+  // Starts the encoded path when the window's setting asks for it and this window can decode H.264.
+  useEffect(() => {
+    resetForCall();
+    void applyHardwareVideo(hardwareVideoWanted());
+  }, []);
   const call = useShell((s) => s.call);
+  const root = useRef<HTMLDivElement>(null);
+  const { width } = useSize(root);
+  const [chatOpen, setChatOpen] = useState(readChatOpen);
+  const toggleChat = useCallback(() => {
+    setChatOpen((open) => {
+      writeChatOpen(!open);
+      return !open;
+    });
+  }, []);
   if (!call) return null;
+  const side = width >= SIDE_CHAT_MIN_PANE;
   return (
-    <div className="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_400px] gap-s-2 p-s-2">
-      <CallStage call={call} />
-      <CallChat />
+    <div
+      ref={root}
+      data-call-layout={side ? 'side' : 'bottom'}
+      data-call-chat={chatOpen ? 'open' : 'closed'}
+      className={cn('flex min-h-0 min-w-0 gap-s-2 p-s-2', side ? 'flex-row' : 'flex-col')}
+    >
+      <CallStage call={call} chatOpen={chatOpen} onToggleChat={toggleChat} />
+      {chatOpen ? <CallChat side={side} onClose={toggleChat} /> : null}
     </div>
   );
 }
 
-function CallStage({ call }: { call: CallState }) {
+// The columns and tile size that fit `count` tiles of 16:9 into `width` by `height` with the largest tiles.
+export function fitTiles(count: number, width: number, height: number, gap = TILE_GAP): { cols: number; tileWidth: number; tileHeight: number } {
+  let best = { cols: 1, tileWidth: 0, tileHeight: 0 };
+  for (let cols = 1; cols <= Math.max(1, count); cols++) {
+    const rows = Math.ceil(count / cols);
+    const byWidth = (width - gap * (cols - 1)) / cols;
+    const byHeight = ((height - gap * (rows - 1)) / rows) * (16 / 9);
+    const tileWidth = Math.floor(Math.max(0, Math.min(byWidth, byHeight)));
+    if (tileWidth > best.tileWidth) best = { cols, tileWidth, tileHeight: Math.floor((tileWidth * 9) / 16) };
+  }
+  return best;
+}
+
+// The tiles, laid out at 16:9 in the columns that make them largest for their number, centred in the space they have.
+// A short last row is centred too.
+function TileGrid({ count, children }: { count: number; children: ReactNode }) {
+  const box = useRef<HTMLDivElement>(null);
+  const { width, height } = useSize(box);
+  const fit = fitTiles(count, width, height);
+  const rowWidth = fit.cols * fit.tileWidth + (fit.cols - 1) * TILE_GAP;
+  return (
+    <div ref={box} className="min-h-0 min-w-0 p-s-3" data-call-tiles>
+      <div
+        className="mx-auto flex h-full flex-wrap content-center justify-center gap-s-3 [&>*]:h-[var(--tile-h)] [&>*]:w-[var(--tile-w)]"
+        style={{ maxWidth: rowWidth, '--tile-w': `${fit.tileWidth}px`, '--tile-h': `${fit.tileHeight}px` } as CSSProperties}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function CallStage({ call, chatOpen, onToggleChat }: { call: CallState; chatOpen: boolean; onToggleChat: () => void }) {
   const toggleMuted = useShell((s) => s.toggleMuted);
   const toggleDeafened = useShell((s) => s.toggleDeafened);
   const toggleCamera = useShell((s) => s.toggleCamera);
@@ -77,17 +169,18 @@ function CallStage({ call }: { call: CallState }) {
   const me = useShell((s) => s.me);
   const ownPreviews = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
   const ownScreen = useShell((s) => (me ? s.videoFrames[`${me.root_id}:screen`] : undefined));
+  const selfTile = Boolean(me && (call.camera || call.screen));
   return (
-    <section className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_96px] overflow-hidden rounded-lg bg-ink" aria-label="Call">
+    <section className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_80px] overflow-hidden rounded-lg bg-ink" aria-label="Call">
       <RouteBanner call={call} />
-      <div className="grid min-h-0 grid-cols-3 auto-rows-[minmax(0,1fr)] gap-s-3 p-s-3">
-        {me && (call.camera || call.screen) ? (
+      <TileGrid count={call.participants.length + (selfTile ? 1 : 0)}>
+        {selfTile && me ? (
           <SelfTile name={me.display_name} rootId={me.root_id} preview={call.screen ? ownScreen ?? ownPreviews : ownPreviews} />
         ) : null}
         {call.participants.map((p) => (
           <Tile key={p.root_id} person={p} />
         ))}
-      </div>
+      </TileGrid>
       <div className="flex items-center justify-center gap-s-3">
         <ControlButton
           label={call.muted ? 'Unmute microphone' : 'Mute microphone'}
@@ -111,6 +204,9 @@ function CallStage({ call }: { call: CallState }) {
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
         </ControlButton>
         <ShareButton sharing={Boolean(call.screen)} />
+        <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
+          <MessageCircle className="size-7" />
+        </ControlButton>
         <button
           type="button"
           aria-label="Leave call"
@@ -194,7 +290,7 @@ function VideoImage({ preview, label }: { preview: { jpeg: string }; label: stri
 function SelfTile({ name, rootId, preview }: { name: string; rootId: Id; preview?: { jpeg: string } }) {
   return (
     <div className="relative grid place-items-center overflow-hidden rounded-lg" style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(rootId)})` }}>
-      {preview ? <VideoImage preview={preview} label="Your video" /> : <UserAvatar name={name} seed={rootId} size="xl" className="size-24 text-[31px]" />}
+      {preview ? <VideoImage preview={preview} label="Your video" /> : <UserAvatar name={name} seed={rootId} size="xl" className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
       <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
         {`${name} (you)`}
       </span>
@@ -222,6 +318,10 @@ function Tile({ person }: { person: VoiceParticipant }) {
   const camera = useShell((s) => s.videoFrames[person.root_id]);
   const screen = useShell((s) => s.videoFrames[`${person.root_id}:screen`]);
   const preview = screen ?? camera;
+  const encoded = useEncodedVideoOn(person.root_id);
+  // Stable callbacks, so a re-render does not detach the canvases: a canvas is released only when its tile goes.
+  const cameraRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(person.root_id, el), [person.root_id]);
+  const screenRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(`${person.root_id}:screen`, el), [person.root_id]);
   const ref = useRef<HTMLDivElement>(null);
   useTileWidth(ref, person.root_id, Boolean(screen));
   return (
@@ -230,8 +330,25 @@ function Tile({ person }: { person: VoiceParticipant }) {
       className={cn('relative grid place-items-center overflow-hidden rounded-lg', person.speaking && 'shadow-[inset_0_0_0_3px_var(--success)]')}
       style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(person.root_id)})` }}
     >
-      {preview ? <VideoImage preview={preview} label={`${person.display_name}'s video`} /> : null}
-      {preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" className="size-24 text-[31px]" />}
+      {encoded ? (
+        // Decoded here: the camera, then the screen on top of it, which stays hidden until its first frame.
+        <>
+          <canvas
+            ref={cameraRef}
+            aria-label={`${person.display_name}'s video`}
+            hidden
+            className="absolute inset-0 size-full object-contain"
+          />
+          <canvas
+            ref={screenRef}
+            aria-label={`${person.display_name}'s screen`}
+            hidden
+            className="absolute inset-0 size-full object-contain"
+          />
+        </>
+      ) : null}
+      {encoded || preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
+      {encoded || !preview ? null : <VideoImage preview={preview} label={`${person.display_name}'s video`} />}
       <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
         {person.muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}
         <span>{person.display_name}</span>
@@ -298,12 +415,14 @@ function ShareButton({ sharing }: { sharing: boolean }) {
 function ControlButton({
   label,
   pressed,
+  expanded,
   disabled,
   onClick,
   children,
 }: {
   label: string;
   pressed?: boolean;
+  expanded?: boolean; // for a button that shows or hides a panel
   disabled?: boolean;
   onClick?: () => void;
   children: ReactNode;
@@ -313,6 +432,7 @@ function ControlButton({
       type="button"
       aria-label={label}
       aria-pressed={pressed}
+      aria-expanded={expanded}
       title={disabled ? 'Coming soon' : label}
       aria-disabled={disabled || undefined}
       disabled={disabled}
@@ -330,7 +450,7 @@ function ControlButton({
 // The call chat: the messages of the conversation the call sends into, and its composer. Rows and composer are the chat's
 // own (message-list.tsx, message-row.tsx, composer.tsx), so a message reads and acts the same here as in the chat:
 // formatting, mentions, link previews, invite cards, files, replies, reactions and the message menu.
-function CallChat() {
+function CallChat({ side, onClose }: { side: boolean; onClose: () => void }) {
   const view = useCallChatView();
   const audience = view ? audienceOf(view) : null;
   // The conversation the call sends into: its messages are the call chat's. Read again when the call moves to another one.
@@ -340,11 +460,27 @@ function CallChat() {
     void loadCallChat();
   }, [conversation]);
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-sidebar" aria-label="Call chat">
+    <section
+      className={cn(
+        'flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-sidebar',
+        // Beside the video it is a column; below it, it takes at most a third of the pane, so the video keeps the rest.
+        side ? 'w-[360px]' : 'h-[min(33%,300px)] min-h-[200px]',
+      )}
+      aria-label="Call chat"
+    >
       <div className="flex h-12 shrink-0 items-center gap-s-2 pr-s-2 pl-s-4 shadow-[inset_0_-1px_0_var(--border)]">
-        <MessageCircle className="size-[18px] text-muted-foreground" aria-hidden="true" />
-        <h3 className="text-ui font-semibold text-text-strong">Call chat</h3>
-        {audience ? <span className="min-w-0 truncate text-meta text-muted-foreground" title={audience} data-call-chat-audience>{`· ${audience}`}</span> : null}
+        <MessageCircle className="size-[18px] shrink-0 text-muted-foreground" aria-hidden="true" />
+        <h3 className="shrink-0 text-ui font-semibold text-text-strong">Call chat</h3>
+        {audience ? <span className="min-w-0 flex-1 truncate text-meta text-muted-foreground" title={audience} data-call-chat-audience>{`· ${audience}`}</span> : <span className="flex-1" />}
+        <button
+          type="button"
+          aria-label="Hide call chat"
+          title="Hide call chat"
+          onClick={onClose}
+          className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-elevated-hover hover:text-text-strong focus-visible:outline-2 focus-visible:outline-ring"
+        >
+          <X className="size-4" aria-hidden="true" />
+        </button>
       </div>
       <CallMessages view={view} />
       {view ? <Composer key={view.target.key} view={view} /> : null}

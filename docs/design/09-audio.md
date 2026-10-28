@@ -330,3 +330,96 @@ Recommendation:
    first: vendor the meson build or pre-build the library, and do not start from the bundled path as shipped.
 4. Speex MDF is the middle option if we want C without WebRTC's build. Its benefit over NLMS is unmeasured.
    Do not take it before the AEC3 spike.
+
+## sonora spike (off by default, feature `sonora`)
+
+`sonora` 0.2.0 and `sonora-aec3` 0.2.0 (BSD-3-Clause, pure Rust, WebRTC APM M145) are in the workspace behind the
+`sonora` feature of `dissent-audio`, which is off by default. The measurements are in `tests/echo_path.rs`
+(`sonora_spike` and `sonora_final` modules, `--features sonora --ignored --nocapture`, CPU in `--release`).
+
+Alignment matters. Sonora's capture path delays its output by about 425 samples (9 ms), and our NS path by 480
+samples. The first runs compared unaligned output and gave misleading numbers (a near-only loss of 20 dB, which was
+mostly the offset). Every figure below lags its output by the lag that maximises the correlation with the near end.
+
+| Measure (AEC only unless stated) | Ours (NLMS) | sonora | Bar | Result |
+|---|---|---|---|---|
+| Far-only ERLE, last 2 s, 40 ms, 0 ppm | 40.9 dB | 51.5 dB | at least ours | Pass |
+| Double-talk echo leak, near 0.2 (fitted near gain) | 2.4 dB below echo | 10.0 dB | 20 dB better than ours | Fail: 7.6 dB better |
+| Double-talk, near 0.6 | -2.3 dB | 1.2 dB | 20 dB better | Fail: 3.5 dB better |
+| Double-talk, near 1.0 | -3.0 dB | -1.7 dB | 20 dB better | Fail: 1.3 dB better |
+| Near gain, double talk (best fit), near 0.2 | -13.5 dB | -18.3 dB | not worse than ours | Fail |
+| Near-only loss, no echo, far silent | 0.0 dB | 0.12 dB per block | under 1 dB | Pass |
+| Near-only loss, far talks, no echo path | 3.1 dB per block | 5.9 dB per block | under 1 dB | Fail |
+| CPU per 10 ms frame, AEC only, release | 1200 us | 50 us | none | sonora about 24 times cheaper |
+
+Noise suppression, aligned, quiet blocks and loud blocks: ours removes 7.3 dB of noise at 4.8 dB speech SNR;
+sonora (Moderate) removes 15.0 dB at 2.0 dB speech SNR. The two suppressors ran at different strengths, so
+this is a trade-off, not a verdict.
+
+AGC2 with adaptive digital gain on (it is off by default in sonora): from a quiet -40 dBFS input, ours reaches
+-27.3 dBFS and sonora -25.1 dBFS. From a loud -10 dBFS input, ours reaches -20.6 dBFS and sonora -9.6 dBFS.
+
+Verdict: sonora meets the far-only ERLE bar and is much cheaper than our NLMS. It misses both double-talk bars:
+the leak improves by about 8 dB at most, and the near voice is attenuated more than ours when the far end talks.
+Per the agreed plan, the OS built-in AECs (VoiceProcessingIO, the Windows communications APO, the PipeWire
+echo-cancel module) are the next options to compare, and aec3 stays the backup.
+
+## Echo engine choice: Standard or WebRTC AEC3 (experimental)
+
+Settings › Voice has an "Echo cancellation engine" choice, Standard (the default) or WebRTC AEC3 (experimental).
+Standard is ours: the NLMS canceller, RNNoise and our AGC. WebRTC AEC3 is sonora 0.2.0 (`dissent-audio` feature
+`sonora`, enabled in `dissent-desktop`): its echo canceller, noise suppression (Moderate, or High at the strong
+setting) and AGC2 with adaptive digital gain replace ours. Our gate, level meter and fade stay in front of the voice.
+
+Switching mid-call rebuilds the chain's engine state, as the profile switch does: a change of engine or of the echo
+setting starts a fresh canceller and a fresh WebRTC pipeline. `echo_recovers_after_the_engine_is_switched_mid_call`
+switches Standard, WebRTC and back to Standard. WebRTC reaches 42.6 dB ERLE two to four seconds after the switch, and
+Standard reaches 36.5 dB two to four seconds after switching back. Without the feature, asking for WebRTC gives
+exactly the Standard output (`the_webrtc_engine_falls_back_to_standard_without_the_feature`).
+
+The 10-second counter line carries `engine`, the engine that actually runs.
+
+Tuning: sonora exposes only AEC3's default configuration, its transparent-mode choice (legacy or HMM) and the
+high-pass switch. Across those, the near gain at a near level of 1.0 moves by at most 2 dB (best -5.2 dB, default
+-6.8 dB, ours -3.8 dB). The levers that matter for double talk (dominant near-end detection, the near-end suppressor
+tuning) need a block-level driver on `sonora-aec3`'s `BlockProcessor`. That is not built, so no preset was tested.
+
+Cost, measured:
+- Windows: `cargo clippy -p dissent-audio` and `-p dissent-desktop` with `-D warnings` pass, with and without the feature.
+- Linux (Docker, `rust:1` with the CI package list): `dissent-audio --features sonora` and `dissent-desktop` pass
+  `clippy -D warnings`. The Linux desktop build needs the PipeWire and clang packages from `release.yml`, which the
+  CLAUDE.md list does not include.
+- macOS: not verified here. `cargo check --target x86_64-apple-darwin` fails in `dissent-audio`'s build script, which
+  needs a macOS C compiler that this Windows host lacks. The macOS CI job is the check.
+- Binary size: release `dissent-desktop.exe` is 65,388,544 bytes with the feature and 64,758,272 bytes without.
+  The feature adds 630,272 bytes, about 1%.
+- CPU: AEC only, release, measured earlier: sonora about 50 us per 10 ms frame, our NLMS about 1,200 us.
+
+## Speaker underruns: real, and fixed
+
+What the counter counts: `PlayoutStream`'s underrun counter goes up once per output frame that the callback
+needs and the ring cannot supply, and that frame plays silence. It is per frame (per stereo pair), not per callback
+and not per channel sample. So it is a count of silent frames, which are audible as clicks or static if they
+come in runs.
+
+Cause, confirmed on the real 48 kHz output. The voice thread writes 20 ms (960 frames) every tick, and the output
+callback drains the ring continuously. There was no cushion, so the ring was empty just before each write. The
+speaker's clock also ran about 0.7% faster than the 20 ms cadence, so the ring drained even with a cushion.
+
+Measured with `speaker_underruns_at_the_voice_cadence` (ignored, needs an output device), counting only during the
+writes (the test's drain after the last write is not counted):
+- no cushion, no trim (the original behaviour): 672 underruns in 30 s of writes, with the capture chain not running
+- debug build with the capture chain (echo cancellation and noise suppression) running before each write, same
+  device: original 1,536 in 30 s (about 51 per second), fixed 0
+- fixed: 0 in both
+
+The fix in `device.rs`: a 60 ms cushion of silence is queued before the speaker starts (`PLAYOUT_CUSHION_MS`), and
+the write rate follows the queued level. `LinearResampler::set_speed` trims the rate by up to 2% (`PLAYOUT_TRIM_MAX`)
+in proportion to the error from the cushion (`PLAYOUT_TRIM_GAIN` = 0.5). This keeps the queue near 60 ms, so a late
+tick of up to about 60 ms plays without a gap. A fixed cushion alone is not enough, because the speaker's clock
+drifts (a 200 ms cushion still lost 576 frames over 30 s). `PlayoutStream::buffered_frames` reports the queue.
+
+Not reproduced here: the live loopback counts from the desktop debug builds (about 500 per second on each side,
+with the other counters at zero). This bench reaches about 51 per second under the same conditions, so the live
+pipeline has a source this bench does not model. The fix removes the bench's underruns, and the live counter line
+will show whether the live ones are gone.

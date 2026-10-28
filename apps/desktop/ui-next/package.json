@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "test:ui": "node tests/run.mjs",
     "test:unit": "node --test tests/markdown.test.ts tests/code-highlight.test.ts tests/emoticons.test.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:video-decoders": "node --test tests/video-decoders.test.mjs"
   },
   "dependencies": {
     "class-variance-authority": "0.7.1",

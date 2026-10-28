@@ -111,13 +111,8 @@ pub(crate) fn general(engine: &Engine, id: CommunityId) -> ChannelId {
         .expect("general channel")
 }
 
-pub(crate) async fn eventually(what: &str, check: impl FnMut() -> bool) {
-    eventually_within(what, Duration::from_secs(60), check).await;
-}
-
-/// As `eventually`, with a longer limit for a wait that depends on a maintenance pass.
-pub(crate) async fn eventually_within(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + limit;
+pub(crate) async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;

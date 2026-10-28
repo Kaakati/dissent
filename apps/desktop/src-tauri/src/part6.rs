@@ -5,15 +5,16 @@
 
 use std::fmt::Display;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use dissent_core::{
-    CallView, ChannelId, ChannelInfo, ChannelPatch, ChannelVisibility, CommunityId, ConvId,
+    CallView, ChannelId, ChannelInfo, ChannelPatch, ChannelVisibility, CommunityId, ConvId, EncodedSink, EncodedVideo,
     DeviceView, Engine, EventId, GuardianView, Identity, InviteView, MessageItem, NoteKind,
     PendingDevice, RootId,
 };
 use dissent_identity::{keystore, DeviceId};
 use serde_json::{json, Value};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{restart_engine, AppState};
@@ -286,6 +287,67 @@ pub async fn set_video_tile(
 ) -> Result<(), String> {
     engine(&state).await?.set_video_tile(&root_id, screen, width);
     Ok(())
+}
+
+/// The bytes in front of an encoded frame on the video channel: a version, flags (bit 0 keyframe, bit 1 screen, bit 2 AV1),
+/// the frame id as little-endian u32, then the sender's root id as a u16 length and its text. The codec bitstream follows.
+fn video_header(frame: &EncodedVideo) -> Vec<u8> {
+    let mut flags = 0u8;
+    flags |= u8::from(frame.keyframe);
+    flags |= u8::from(frame.screen) << 1;
+    flags |= u8::from(frame.av1) << 2;
+    let root = frame.root_id.as_bytes();
+    let mut out = Vec::with_capacity(8 + root.len() + frame.payload.len());
+    out.push(1);
+    out.push(flags);
+    out.extend_from_slice(&frame.frame_id.to_le_bytes());
+    out.extend_from_slice(&u16::try_from(root.len()).unwrap_or(u16::MAX).to_le_bytes());
+    out.extend_from_slice(root);
+    out.extend_from_slice(&frame.payload);
+    out
+}
+
+/// The tiles the window has switched back to JPEG previews, by root id. Their frames are not sent encoded.
+static JPEG_TILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Starts sending received camera and screen frames to the window through `channel`, still encoded. The window decodes
+/// them with WebCodecs. Tiles in `JPEG_TILES` keep their JPEG previews.
+#[tauri::command]
+pub async fn subscribe_encoded_video(state: State<'_, AppState>, channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    let sink: EncodedSink = Arc::new(move |frame: EncodedVideo| {
+        if lock_jpeg_tiles().contains(&frame.root_id) {
+            return false;
+        }
+        let mut bytes = video_header(&frame);
+        bytes.extend_from_slice(&frame.payload);
+        let _ = channel.send(InvokeResponseBody::Raw(bytes));
+        true
+    });
+    engine(&state).await?.set_encoded_video_sink(Some(sink));
+    Ok(())
+}
+
+/// Replaces the tiles that use JPEG previews instead of the encoded path. The window sends the whole list each time.
+#[tauri::command]
+pub fn set_jpeg_tiles(roots: Vec<String>) {
+    *lock_jpeg_tiles() = roots;
+}
+
+fn lock_jpeg_tiles() -> std::sync::MutexGuard<'static, Vec<String>> {
+    JPEG_TILES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Stops the encoded frames; the JPEG previews resume.
+#[tauri::command]
+pub async fn unsubscribe_encoded_video(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.set_encoded_video_sink(None);
+    Ok(())
+}
+
+/// Asks the peers of the current call for a keyframe, so a window whose decoder lost its place can start again.
+#[tauri::command]
+pub async fn request_video_keyframes(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.request_video_keyframes().map_err(err)
 }
 
 #[tauri::command]

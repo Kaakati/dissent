@@ -15,12 +15,13 @@ mod opus_ffi;
 pub mod meter;
 pub mod pipeline;
 pub mod resample;
+pub mod webrtc;
 
 pub use codec::{
     Decoder, Encoder, OpusDecoder, OpusEncoder, PcmDecoder, PcmEncoder, FRAME_SAMPLES, MAX_BITRATE,
     MAX_PACKET_BYTES, MIN_BITRATE, SAMPLE_RATE,
 };
-pub use chain::{CaptureChain, ChainSettings, FrameReport, STANDARD_STRENGTH, STRONG_STRENGTH};
+pub use chain::{CaptureChain, ChainSettings, EchoEngine, FrameReport, STANDARD_STRENGTH, STRONG_STRENGTH};
 pub use device::{
     default_input_name, default_output_name, kind_hint, list_inputs, list_outputs, CaptureStream,
     DeviceInfo, DeviceKind, PlayoutStream,

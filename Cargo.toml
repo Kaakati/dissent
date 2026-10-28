@@ -107,6 +107,8 @@ cc = "1"
 cpal = "0.18"
 http = "1.5"
 nnnoiseless = "0.5"
+# Off-by-default spike: WebRTC APM (AEC3, NS, AGC2) as a pure-Rust port. See dissent-audio feature `sonora`.
+sonora = "0.2.0"
 ringbuf = "0.5"
 bytes = "1"
 fs4 = "1"

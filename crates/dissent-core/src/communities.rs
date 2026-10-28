@@ -18,6 +18,8 @@ use std::time::Duration;
 use tracing::{debug, warn};
 
 /// How long a join waits for a gossip neighbour before it announces itself.
+/// Longest a departing device waits for its Leave to reach the other members.
+const LEAVE_PUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const JOIN_GOSSIP_WAIT: Duration = Duration::from_secs(5);
 /// How long leaving waits for the receive loop to stop before the loop is aborted.
 const LEAVE_WAIT: Duration = Duration::from_secs(2);
@@ -403,6 +405,30 @@ impl Engine {
         }
     }
 
+    /// Pushes the Leave to every other member device, and waits briefly for each to store it. Gossip is not
+    /// acknowledged, and this device closes its topic at once after leaving, so the broadcast alone may not reach
+    /// anyone. A peer that does not answer in time is left to the maintenance passes.
+    async fn announce_leave(&self, community: CommunityId, leave: SignedEvent) {
+        let devices: Vec<DeviceId> = {
+            let w = self.read();
+            w.communities.get(&community).map(|c| w.member_devices(c)).unwrap_or_default()
+        };
+        let mut pushes = tokio::task::JoinSet::new();
+        for peer in devices {
+            let engine = self.clone();
+            let leave = leave.clone();
+            pushes.spawn(async move {
+                if let Err(e) = engine.push(community, peer, vec![leave]).await {
+                    debug!(community = %community, peer = %peer, error = %e, "leave not pushed to a peer");
+                }
+            });
+        }
+        let _ = tokio::time::timeout(LEAVE_PUSH_WAIT, async {
+            while pushes.join_next().await.is_some() {}
+        })
+        .await;
+    }
+
     /// Announces leaving, leaves the gossip topic, then forgets the community and deletes its
     /// local data.
     pub async fn leave_community(&self, community: CommunityId) -> Result<()> {
@@ -411,23 +437,7 @@ impl Engine {
             .author_publish(community, ChannelId::CONTROL, Payload::Leave)
             .await
         {
-            Ok(leave) => {
-                // Gossip is not acknowledged, and the topic closes at once below. Push the Leave to each device we
-                // are connected to, so the others learn of it and remove our device from the group.
-                let peers: Vec<DeviceId> = self
-                    .inner
-                    .neighbours
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get(&community)
-                    .map(|set| set.iter().copied().collect())
-                    .unwrap_or_default();
-                for peer in peers {
-                    if let Err(e) = self.push(community, peer, vec![leave.clone()]).await {
-                        debug!(community = %community, peer = %peer, error = %e, "leave not pushed to a peer");
-                    }
-                }
-            }
+            Ok(leave) => self.announce_leave(community, leave).await,
             Err(CoreError::Rejected(_)) => {}
             Err(e) => return Err(e),
         }

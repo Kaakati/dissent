@@ -1,6 +1,7 @@
 // Dev-only stand-in for the Tauri backend so ui/index.html opens in a plain browser.
 // Does nothing inside the desktop app, where window.__TAURI__ is injected before this module runs.
 import { addressOf, base32Encode, parseAddressInput } from './address.js';
+import { toast } from '../lib/toasts';
 
 if (!window.__TAURI__) {
   window.__DISSENT_MOCK__ = true;
@@ -258,7 +259,7 @@ if (!window.__TAURI__) {
     ['https://aps1-1.relay.n0.iroh.link./', 230],
   ]);
   // Voice settings as the desktop saves them (voice_settings / set_voice_settings), and the mic test's fake meter.
-  let mockVoice = { profile: 'voice_isolation', input_volume: 100, output_volume: 100, noise_suppression: 'standard', echo_cancellation: true, agc: true, auto_sensitivity: true, threshold_db: -50, push_to_talk: false, ptt_key: null };
+  let mockVoice = { profile: 'voice_isolation', input_volume: 100, output_volume: 100, noise_suppression: 'standard', echo_cancellation: true, agc: true, auto_sensitivity: true, threshold_db: -50, push_to_talk: false, ptt_key: null, echo_engine: 'standard' };
   let mockMicTimer = null;
   let mockMicTick = 0;
   let mockStatus = { status: 'online', until_ms: null };
@@ -1561,6 +1562,37 @@ if (!window.__TAURI__) {
     const m = servers[communityId].msgs[channelId][0];
     mockPinnedIds.add(m.id);
     return m.text;
+  };
+  // `window.__mockToast(kind, text, withAction)` raises a toast the way an action does: 'error' or 'info', with a button when asked.
+  window.__mockToast = (kind, text, withAction = false) => toast(text, kind, withAction ? { label: 'Jump', run: () => {} } : undefined);
+  // `window.__mockSwatches(mode)` lays out an accent and a danger piece side by side, as the real components draw them. The mode
+  // is 'normal', or a colour-vision simulation (deuteranopia or protanopia) applied as an SVG matrix over the same pieces.
+  window.__mockSwatches = (mode = 'normal') => {
+    document.getElementById('mock-swatches')?.remove();
+    if (!document.getElementById('mock-sim-filters')) {
+      const sim = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      sim.id = 'mock-sim-filters';
+      sim.setAttribute('width', '0');
+      sim.setAttribute('height', '0');
+      sim.innerHTML = `<filter id="sim-deuteranopia"><feColorMatrix type="matrix" values="0.367322 0.860646 -0.227968 0 0  0.280085 0.672501 0.047413 0 0  -0.011820 0.042940 0.968881 0 0  0 0 0 1 0"/></filter>
+        <filter id="sim-protanopia"><feColorMatrix type="matrix" values="0.152286 1.052583 -0.204868 0 0  0.114503 0.786281 0.099216 0 0  -0.003882 -0.048116 1.051998 0 0  0 0 0 1 0"/></filter>`;
+      document.body.appendChild(sim);
+    }
+    const panel = document.createElement('div');
+    panel.id = 'mock-swatches';
+    panel.style.cssText = 'position:fixed;inset:0;z-index:300;background:var(--chat);padding:40px;';
+    const inner = document.createElement('div');
+    inner.style.cssText = 'display:grid;grid-template-columns:repeat(2,300px);gap:28px;align-items:center;font:600 15px var(--font);color:var(--text-strong);';
+    if (mode !== 'normal') inner.style.filter = `url(#sim-${mode})`;
+    inner.innerHTML = `
+      <button class="bg-primary text-primary-foreground rounded-md px-4 py-2 w-fit">Primary</button>
+      <button class="bg-destructive text-white rounded-md px-4 py-2 w-fit">Destructive</button>
+      <span class="bg-accent text-white rounded-full px-2 w-fit">3</span>
+      <span class="bg-danger text-white rounded-full px-2 w-fit">3</span>
+      <span class="text-accent-text">Accent text</span>
+      <span class="text-danger-text">Danger text</span>`;
+    panel.appendChild(inner);
+    document.body.appendChild(panel);
   };
   // `window.__mockAnimatedIcon(communityId)` sets an animated icon, as the engine would save one: a GIF and a still poster.
   window.__mockAnimatedIcon = (communityId) => {

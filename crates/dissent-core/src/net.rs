@@ -204,7 +204,12 @@ impl Engine {
         let fresh = c.take_unhandled(&batch.stored);
         // A departure can make a rotation due. Run the MLS removal and the rotation now, not on the next maintenance
         // pass, which is up to `RETRY_EVERY` away.
-        if batch.stored.iter().any(|se| matches!(se.event.body.payload, Payload::Leave)) {
+        // A Leave is sealed under the community secret, so the payload to check is the opened one.
+        let departure = batch
+            .stored
+            .iter()
+            .any(|se| matches!(c.open(&se.event), Ok(ev) if matches!(ev.body.payload, Payload::Leave)));
+        if departure {
             let engine = self.clone();
             self.spawn_task(async move {
                 engine.rotate_after_departure(community).await;

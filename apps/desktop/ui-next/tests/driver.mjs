@@ -1141,7 +1141,7 @@ check('Enter on All selects it and lists "All friends"', (await b.ev(`document.q
 
 const glyphs = await b.ev(`['Online', 'Idle', 'Do Not Disturb', 'Offline'].map(l => !!document.querySelector('main [role="img"][aria-label="' + l + '"]'))`);
 check('friend rows show the four presence glyphs (online, idle, dnd, offline)', JSON.stringify(glyphs) === '[true,true,true,true]', JSON.stringify(glyphs));
-check('the DND glyph is red (its colour token resolves)', (await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`)) === 'rgb(224, 22, 58)', await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`));
+check('the DND glyph is red (its colour token resolves)', (await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`)) === 'rgb(208, 16, 90)', await b.ev(`getComputedStyle(document.querySelector('main [role="img"][aria-label="Do Not Disturb"]')).backgroundColor`));
 check('the accent and danger tokens meet WCAG AA: white on the fills, the accent text on every dark surface', (await b.ev(`(() => {
   const css = getComputedStyle(document.documentElement);
   const token = (name) => css.getPropertyValue(name).trim();
@@ -1151,7 +1151,8 @@ check('the accent and danger tokens meet WCAG AA: white on the fills, the accent
   const white = '#ffffff';
   const fills = ['--accent', '--primary', '--danger'].every((t) => ratio(token(t), white) >= 4.5);
   const surfaces = ['--chat', '--sidebar', '--panel', '--elevated'].every((t) => ratio(token('--accent-text'), token(t)) >= 4.5);
-  return fills && surfaces;
+  const dangerText = ['--chat', '--sidebar', '--panel', '--elevated'].every((t) => ratio(token('--danger-text'), token(t)) >= 4.5);
+  return fills && surfaces && dangerText;
 })()`)) === true);
 check('a friend in a call shows the call line under the name', (await b.ev(`[...document.querySelectorAll('main span')].some(n => n.textContent.startsWith('In a call · '))`)) === true);
 check('the friend avatar is 32 px', (await b.ev(`document.querySelector('main [role="img"][aria-label="Online"]').parentElement.getBoundingClientRect().width`)) === 32);
@@ -1538,6 +1539,14 @@ await clickBy('input[name="input-profile"][value="custom"]');
 await sleep(300);
 check('C9 the Custom profile shows Processing and Advanced', (await b.ev(`['Processing', 'Advanced'].every((t) => [...document.querySelectorAll('h2')].some((n) => n.textContent === t))`)) === true);
 check('C9 Custom offers the noise suppression choice and echo cancellation', (await b.ev(`!!document.querySelector('select[aria-label="Noise suppression"]') && document.body.textContent.includes('Echo Cancellation')`)) === true);
+// The echo cancellation engine: Standard by default, and the choice saves when it changes (E33).
+const engineSelect = 'select[aria-label="Echo cancellation engine"]';
+check('E33 the echo cancellation engine defaults to Standard', (await b.ev(`document.querySelector('${engineSelect}')?.value`)) === 'standard');
+await b.ev(`(() => { const s = document.querySelector('${engineSelect}'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'web_rtc'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await sleep(300);
+check('E33 choosing WebRTC AEC3 saves the choice', (await b.ev(`document.querySelector('${engineSelect}')?.value`)) === 'web_rtc');
+await b.ev(`(() => { const s = document.querySelector('${engineSelect}'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'standard'); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await sleep(300);
 await clickBy('input[name="input-profile"][value="studio"]');
 await sleep(300);
 check('C9 Studio hides the custom processing', (await b.ev(`![...document.querySelectorAll('h2')].some((n) => n.textContent === 'Processing')`)) === true);
@@ -1610,6 +1619,25 @@ check('C11 an invite link in the call chat shows the invite card', (await b.ev(`
 check('C11 the call chat message has the hover actions and the message menu', (await b.ev(`(() => { const m = [...document.querySelectorAll('${CALL_CHAT} article.msg')].at(-1); return !!m?.querySelector('button[aria-label="More message actions"]'); })()`)) === true);
 check('C11 the call chat stays at its end once the invite card has loaded', (await until(() => b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return l.scrollHeight - l.scrollTop - l.clientHeight < 4; })()`))) === true, JSON.stringify(await b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return [l.scrollHeight, l.scrollTop, l.clientHeight]; })()`)));
 await b.screenshot(`${SCRATCH}/shots/C11-call-chat.png`);
+// The layout at a normal window size: the video gets most of the pane, the chat a capped part, and a 1:1 call's tile is
+// large. The mock answers the call after four seconds.
+await b.resize(1100, 729);
+for (let i = 0; i < 40 && !(await b.ev(`!!document.querySelector('[data-call-tiles] > div > *')`)); i++) await sleep(200);
+await sleep(400);
+const layoutAt = () => b.ev(`(() => { const pane = document.querySelector('[data-call-layout]').getBoundingClientRect(); const tiles = document.querySelector('[data-call-tiles]').getBoundingClientRect(); return { share: tiles.height / pane.height, chat: !!document.querySelector('section[aria-label="Call chat"]'), tiles: document.querySelectorAll('[data-call-tiles] > div > *').length }; })()`);
+const small = await layoutAt();
+check('C11 at 1100×729 with the chat open, the tiles take at least 40% of the pane', small.chat && small.share >= 0.4, JSON.stringify(small));
+check('C11 a 1:1 call reports a tile wider than 300 px', small.tiles === 1 && Math.max(0, ...Object.values((await b.ev(`window.__tileWidths ?? {}`)) ?? {})) > 300, JSON.stringify(await b.ev(`window.__tileWidths ?? null`)));
+await b.screenshot(`${SCRATCH}/shots/C11-call-1100x729.png`);
+await clickBy('section[aria-label="Call chat"] button', 'Hide call chat');
+await sleep(400);
+const hidden = await layoutAt();
+check('C11 Hide call chat gives the video the pane', !hidden.chat && hidden.share > small.share, JSON.stringify(hidden));
+await clickBy('section[aria-label="Call"] button', 'Show call chat');
+await sleep(400);
+check('C11 Show call chat brings the chat back', (await layoutAt()).chat === true);
+await b.resize(1600, 1000);
+await sleep(300);
 await clickBy('section[aria-label="Call"] button', 'Leave call');
 await sleep(500);
 // The same message in the DM chat, once the call is left: the same rows, so the same bold text and card.
@@ -3101,6 +3129,18 @@ check('EM5 ":P" sent in a DM shows as 😛', (await bodyOf('typed live')) === '�
 await typeIn('\\:D escaped');
 await enter();
 check('EM6 a backslash keeps the emoticon as typed', (await bodyOf('escaped')) === ':D escaped', String(await bodyOf('escaped')));
+// The inline edit converts too, live as you type and on save.
+await ev(`(() => { const a = [...document.querySelectorAll('.messages article.msg')].reverse().find((x) => x.textContent.includes('escaped')); a?.querySelector('button[aria-label="Edit message"]')?.click(); })()`);
+await sleep(400);
+const editBox = `document.querySelector('textarea[aria-label="Edit message"]')`;
+await ev(`(() => { const t = ${editBox}; t.focus(); t.select(); })()`);
+await send('Input.insertText', { text: 'edited :P ' });
+await sleep(250);
+check('EM6a typing a space after ":P" in the edit box shows 😛 at once', (await ev(`${editBox}?.value`)) === 'edited 😛 ', String(await ev(`${editBox}?.value`)));
+await send('Input.insertText', { text: 'and :D' });
+await sleep(200);
+await enter();
+check('EM6b the saved edit converts the rest on save', (await bodyOf('edited'))?.startsWith('edited 😛 and 😄') === true, String(await bodyOf('edited')));
 
 // The setting off: nothing converts.
 await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
@@ -3123,6 +3163,58 @@ check('EM10 with the setting off, ":P" is sent as typed', (await bodyOf('setting
 await b.close();
 }
 
+// ---- Toasts, each kind, and the accent and danger pieces side by side under colour-vision simulation ----
+async function section_toasts() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9790, profile: `${SCRATCH}/toasts-next-profile` });
+const { ev } = b;
+await sleep(800);
+// One toast of each kind, and one with an action button. Each icon takes its colour from the kind's token.
+await ev(`window.__mockToast('info', 'An info toast for the audit')`);
+await ev(`window.__mockToast('error', 'An error toast for the audit')`);
+await ev(`window.__mockToast('error', 'An error toast with an action', true)`);
+await sleep(400);
+const iconColour = (text) => ev(`(() => { const t = [...document.querySelectorAll('[role=status]')].find((n) => n.textContent.includes(${JSON.stringify(text)})); const svg = t?.querySelector('svg'); return svg ? getComputedStyle(svg).color : null; })()`);
+check('an info toast shows its icon in the link colour', (await iconColour('An info toast for the audit')) === 'rgb(124, 183, 255)', String(await iconColour('An info toast for the audit')));
+check('an error toast shows its icon in the danger text colour', (await iconColour('An error toast for the audit')) === 'rgb(255, 122, 160)', String(await iconColour('An error toast for the audit')));
+check('a toast with an action shows its button', (await ev(`[...document.querySelectorAll('[role=status] button')].some((n) => n.textContent.trim() === 'Jump')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/toasts.png`);
+await b.close();
+
+// The accent and danger pieces, as they draw, then under deuteranopia and protanopia simulations.
+const s = await launch({ url: `${BASE}/`, width: 1000, height: 700, port: 9791, profile: `${SCRATCH}/swatch-next-profile` });
+await sleep(800);
+const pieces = (mode) => s.ev(`window.__mockSwatches('${mode}')`);
+await pieces('normal');
+await sleep(300);
+await s.screenshot(`${SCRATCH}/shots/swatches-normal.png`);
+await pieces('deuteranopia');
+await sleep(300);
+await s.screenshot(`${SCRATCH}/shots/swatches-deuteranopia.png`);
+await pieces('protanopia');
+await sleep(300);
+await s.screenshot(`${SCRATCH}/shots/swatches-protanopia.png`);
+// The same comparison in numbers: the colour-blindness matrices applied to the live tokens, then a CIE76 distance. Under each
+// simulation the accent and the danger fill, and the accent and danger text, must differ by at least 20.
+const distances = await s.ev(`(() => {
+  const css = getComputedStyle(document.documentElement);
+  const rgb = (t) => { const h = css.getPropertyValue(t).trim(); return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); };
+  const lin = (v) => { const x = v / 255; return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; };
+  const M = { deut: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.011820, 0.042940, 0.968881]], prot: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]] };
+  const sim = (t, m) => { const l = rgb(t).map(lin); return m.map((row) => row[0] * l[0] + row[1] * l[1] + row[2] * l[2]); };
+  const lab = ([r, g, bl]) => { const X = 0.4124 * r + 0.3576 * g + 0.1805 * bl, Y = 0.2126 * r + 0.7152 * g + 0.0722 * bl, Z = 0.0193 * r + 0.1192 * g + 0.9505 * bl; const f = (t) => (t > 0.008856 ? t ** (1 / 3) : 7.787 * t + 16 / 116); const fx = f(X / 0.95047), fy = f(Y), fz = f(Z / 1.08883); return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]; };
+  const dE = (a, c) => Math.hypot(...lab(a).map((v, i) => v - lab(c)[i]));
+  const out = {};
+  for (const [name, m] of Object.entries(M)) {
+    out[name] = { fill: dE(sim('--accent', m), sim('--danger', m)), text: dE(sim('--accent-text', m), sim('--danger-text', m)) };
+  }
+  return out;
+})()`);
+check('accent and danger fills differ under deuteranopia (CIE76 >= 20)', distances.deut.fill >= 20, JSON.stringify(distances));
+check('accent and danger fills differ under protanopia (CIE76 >= 20)', distances.prot.fill >= 20, JSON.stringify(distances));
+check('accent and danger text differ under deuteranopia (CIE76 >= 20)', distances.deut.text >= 20, JSON.stringify(distances));
+await s.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -3140,6 +3232,7 @@ const SECTIONS = [
   ['netlatency', section_netlatency],
   ['animatedicon', section_animatedicon],
   ['oldpin', section_oldpin],
+  ['toasts', section_toasts],
   ['scrollback', section_scrollback],
   ['shell', section_shell],
   ['emoticons', section_emoticons],

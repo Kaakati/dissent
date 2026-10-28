@@ -3,7 +3,7 @@
 //! every tick, so a change applies at once, without a restart.
 
 use dissent_audio::gate::clamp_manual;
-use dissent_audio::{ChainSettings, Threshold, STANDARD_STRENGTH, STRONG_STRENGTH};
+use dissent_audio::{ChainSettings, EchoEngine, Threshold, STANDARD_STRENGTH, STRONG_STRENGTH};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
@@ -26,6 +26,16 @@ pub enum Profile {
     Studio,
     /// The processing choices as the user set them.
     Custom,
+}
+
+/// The echo cancellation engine. Standard is ours: the NLMS canceller, RNNoise and our AGC. WebRtc is sonora's port of
+/// WebRTC's processing (AEC3, noise suppression, AGC2), experimental, and it runs only in a build with that feature.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EchoEngineChoice {
+    #[default]
+    Standard,
+    WebRtc,
 }
 
 /// Noise suppression for the Custom profile.
@@ -62,6 +72,8 @@ pub struct VoiceSettings {
     pub push_to_talk: bool,
     /// The push-to-talk key as an accelerator, such as `Control+KeyV`.
     pub ptt_key: Option<String>,
+    /// The echo cancellation engine. Switching it mid-call rebuilds the chain.
+    pub echo_engine: EchoEngineChoice,
 }
 
 impl Default for VoiceSettings {
@@ -77,6 +89,7 @@ impl Default for VoiceSettings {
             threshold_db: -50.0,
             push_to_talk: false,
             ptt_key: None,
+            echo_engine: EchoEngineChoice::Standard,
         }
     }
 }
@@ -121,12 +134,17 @@ pub fn chain_settings(s: &VoiceSettings) -> ChainSettings {
     } else {
         Threshold::Manual(clamp_manual(s.threshold_db))
     };
+    let engine = match s.echo_engine {
+        EchoEngineChoice::Standard => EchoEngine::Standard,
+        EchoEngineChoice::WebRtc => EchoEngine::WebRtc,
+    };
     ChainSettings {
         input_gain: percent(s.input_volume),
         noise_suppression,
         echo_cancellation,
         agc,
         threshold,
+        engine,
     }
 }
 
@@ -292,5 +310,26 @@ mod tests {
         let prefs: AudioPrefs = serde_json::from_str(r#"{"input":"Mic"}"#).unwrap();
         assert_eq!(prefs.input.as_deref(), Some("Mic"));
         assert_eq!(prefs.voice, VoiceSettings::default());
+    }
+}
+
+#[cfg(test)]
+mod engine_choice_tests {
+    use super::*;
+
+    #[test]
+    fn the_engine_choice_maps_to_the_chain_and_defaults_to_standard() {
+        let mut s = VoiceSettings::default();
+        assert_eq!(chain_settings(&s).engine, EchoEngine::Standard, "the standard engine is the default");
+        s.echo_engine = EchoEngineChoice::WebRtc;
+        assert_eq!(chain_settings(&s).engine, EchoEngine::WebRtc);
+    }
+
+    #[test]
+    fn older_prefs_without_the_engine_load_as_standard() {
+        let old: VoiceSettings = serde_json::from_str(r#"{"profile": "custom"}"#).unwrap();
+        assert_eq!(old.echo_engine, EchoEngineChoice::Standard);
+        let new: VoiceSettings = serde_json::from_str(r#"{"echo_engine": "web_rtc"}"#).unwrap();
+        assert_eq!(new.echo_engine, EchoEngineChoice::WebRtc);
     }
 }
