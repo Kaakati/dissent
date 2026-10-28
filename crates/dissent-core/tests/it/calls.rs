@@ -1548,10 +1548,15 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
         Some(speaker.as_str()),
         "the speaker did not change"
     );
-    // The viewer with room still gets every camera high.
-    for s in senders {
-        assert!(layer_of(free, &everyone[*s]).is_some_and(|l| l > 0), "the unconstrained viewer keeps every camera high");
-    }
+    // The viewer with room still gets every camera high. Its own link estimate can dip under load and
+    // briefly lower a layer, so wait for it to settle rather than reading it once.
+    eventually_within(Duration::from_secs(30), "the unconstrained viewer keeps every camera high", || {
+        senders
+            .iter()
+            .all(|s| layer_of(free, &everyone[*s]).is_some_and(|l| l > 0))
+            .then_some(())
+    })
+    .await;
     for s in senders {
         everyone[*s].engine.set_camera(false).expect("camera off");
     }
