@@ -89,7 +89,9 @@ const OFFSET: u16 = 8_000;
 pub(crate) fn free_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
     static NEXT: AtomicU16 = AtomicU16::new(0);
-    let base = 30_000 + OFFSET + (std::process::id() % 20_000) as u16;
+    // Below Linux's ephemeral range (32768 and up) and Windows' (49152 and up), so the OS never
+    // hands one of these to another socket first.
+    let base = 20_000 + OFFSET + (std::process::id() % 4_000) as u16;
     base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
