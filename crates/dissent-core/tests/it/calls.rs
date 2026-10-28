@@ -1399,3 +1399,203 @@ async fn a_boosted_mesh_holds_on_measured_upload() {
     finish(everyone).await;
     }).await;
 }
+
+/// A forwarded call of seven with video layers, every device at level 0. The devices at `released`
+/// act as released builds: no `Features` and no layer messages, one video stream. They announce
+/// less upload, so a device that knows layers is elected to forward. Returns the peers and the
+/// forwarder's index.
+async fn simulcast_call(released: &[usize]) -> (Vec<Peer>, usize) {
+    let (everyone, community, channel) = boosted_call(7, 0, 5_000).await;
+    for i in released {
+        dissent_core::test_support::act_as_released_calls(&everyone[*i].engine);
+        everyone[*i].engine.set_capacity_override(Some(2_000));
+    }
+    for p in &everyone {
+        p.engine.set_test_capture(dissent_core::TestCapture::Pattern);
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
+    let forwarder = everyone.iter().find_map(|p| forwarder_root(&p.engine)).expect("a forwarder");
+    let index = everyone.iter().position(|p| root(p) == forwarder).expect("the forwarder is in the call");
+    assert!(!released.contains(&index), "a device that knows layers forwards");
+    (everyone, index)
+}
+
+fn root(p: &Peer) -> String {
+    p.identity.root_id().to_string()
+}
+
+/// Mutes every device but `senders`. The forwarder sends video only of the top three speakers, so
+/// the senders must be them.
+async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
+    for (i, p) in everyone.iter().enumerate() {
+        if !senders.contains(&i) {
+            p.engine.set_mute(true).await.expect("mute");
+        }
+    }
+}
+
+/// The layer of the last frame `viewer` received of `sender`'s camera.
+fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
+    dissent_core::test_support::received_layer(&viewer.engine, &root(sender), false)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
+    only_senders_speak(&everyone, &[others[0]]).await;
+    sender.engine.set_camera(true).expect("camera on");
+    narrow.engine.set_video_tile(&root(sender), false, 200);
+    wide.engine.set_video_tile(&root(sender), false, 1920);
+
+    eventually_within(Duration::from_secs(60), "the narrow tile gets layer 0 and the wide one a higher layer", || {
+        let (n, w) = (layer_of(narrow, sender), layer_of(wide, sender));
+        (n == Some(0) && w.is_some_and(|l| l > 0)).then_some(())
+    })
+    .await;
+    let mask = dissent_core::test_support::wanted_layers(&sender.engine, false).expect("the sender was asked for layers");
+    assert!(mask & 1 != 0 && mask > 1, "the base layer and a higher one are asked for: {mask:#b}");
+    // It holds: each keeps its layer.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(layer_of(narrow, sender), Some(0), "the narrow tile stays on layer 0");
+        assert!(layer_of(wide, sender).is_some_and(|l| l > 0), "the wide tile stays on a higher layer");
+    }
+    sender.engine.set_camera(false).expect("camera off");
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_the_others() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let senders = &others[..3];
+    let (constrained, free) = (&everyone[others[3]], &everyone[others[4]]);
+    only_senders_speak(&everyone, senders).await;
+    for s in senders {
+        everyone[*s].engine.set_camera(true).expect("camera on");
+        for viewer in [constrained, free] {
+            viewer.engine.set_video_tile(&root(&everyone[*s]), false, 1920);
+        }
+    }
+    // Every viewer draws every camera large. With room for all, both get them high.
+    eventually_within(Duration::from_secs(60), "both viewers get every camera high", || {
+        senders
+            .iter()
+            .all(|s| [constrained, free].iter().all(|v| layer_of(v, &everyone[*s]).is_some_and(|l| l > 0)))
+            .then_some(())
+    })
+    .await;
+
+    // Only the first sender keeps talking. Equally loud senders let the forwarder's choice of speaker
+    // move between them under load, which would move the sharp layer with it.
+    only_senders_speak(&everyone, &senders[..1]).await;
+    let fwd = &everyone[forwarder].engine;
+    let wanted = root(&everyone[senders[0]]);
+    let mut speaker = None;
+    for _ in 0..200 {
+        speaker = dissent_core::test_support::active_speaker(fwd).await.filter(|r| *r == wanted);
+        if speaker.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let speaker = speaker.expect("the forwarder hears the one sender still talking");
+    // A budget that carries one camera on its top layer and two on the base, with less than one
+    // step up to spare. The top rung follows the sender's link, so the budget is sized from what
+    // the senders announced.
+    let mut tables = Vec::new();
+    for s in senders {
+        tables.push(dissent_core::test_support::sender_layers(fwd, &root(&everyone[*s])).await);
+    }
+    assert!(tables.iter().all(|t| t.len() >= 2), "every sender announced layers: {tables:?}");
+    let top = tables.iter().map(|t| t[t.len() - 1].1).max().expect("three senders");
+    let base = tables.iter().map(|t| t[0].1).max().expect("three senders");
+    let step = tables.iter().map(|t| t[1].1 - t[0].1).min().expect("three senders");
+    let budget = top + 2 * base + step / 2;
+    assert!(
+        dissent_core::test_support::set_viewer_budget(fwd, &root(constrained), budget).await,
+        "the forwarder takes the budget"
+    );
+    let speaker_peer = senders.iter().map(|s| &everyone[*s]).find(|p| root(p) == speaker).expect("the speaker sends");
+    let quiet: Vec<&Peer> = senders.iter().map(|s| &everyone[*s]).filter(|p| root(p) != speaker).collect();
+    let layers_now = || -> (Option<u8>, Vec<Option<u8>>) {
+        (layer_of(constrained, speaker_peer), quiet.iter().map(|q| layer_of(constrained, q)).collect())
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (sharp, low) = layers_now();
+        if sharp.is_some_and(|l| l > 0) && low.iter().all(|l| *l == Some(0)) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the constrained viewer keeps the speaker high and gets the others low: speaker {sharp:?}, others {low:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        dissent_core::test_support::active_speaker(fwd).await.as_deref(),
+        Some(speaker.as_str()),
+        "the speaker did not change"
+    );
+    // The viewer with room still gets every camera high.
+    for s in senders {
+        assert!(layer_of(free, &everyone[*s]).is_some_and(|l| l > 0), "the unconstrained viewer keeps every camera high");
+    }
+    for s in senders {
+        everyone[*s].engine.set_camera(false).expect("camera off");
+    }
+    finish(everyone).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_viewer_the_base() {
+    let _serial = crate::common::heavy_test_lock().await;
+    bounded(async {
+    // Devices 5 and 6 run a released build: 5 sends one stream, 6 knows no layers.
+    let (everyone, forwarder) = simulcast_call(&[5, 6]).await;
+    let (old_sender, old_viewer) = (&everyone[5], &everyone[6]);
+    let others: Vec<usize> = (0..5).filter(|i| *i != forwarder).collect();
+    let (new_sender, wide) = (&everyone[others[0]], &everyone[others[1]]);
+    only_senders_speak(&everyone, &[5, others[0]]).await;
+    for s in [old_sender, new_sender] {
+        s.engine.set_camera(true).expect("camera on");
+        for viewer in [wide, old_viewer] {
+            viewer.engine.set_video_tile(&root(s), false, 1920);
+        }
+    }
+    eventually_within(Duration::from_secs(60), "every viewer gets both cameras, each at its layer", || {
+        let wide_ok = layer_of(wide, new_sender).is_some_and(|l| l > 0) && layer_of(wide, old_sender) == Some(0);
+        let old_ok = layer_of(old_viewer, new_sender) == Some(0) && layer_of(old_viewer, old_sender) == Some(0);
+        (wide_ok && old_ok).then_some(())
+    })
+    .await;
+    assert_eq!(
+        dissent_core::test_support::wanted_layers(&old_sender.engine, false),
+        None,
+        "a released sender is never asked for layers"
+    );
+    // A released viewer only ever gets the base layer, however wide it draws the camera.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(layer_of(old_viewer, new_sender), Some(0), "the released viewer stays on the base layer");
+        assert_eq!(layer_of(wide, old_sender), Some(0), "the released sender's one stream reaches the wide tile");
+    }
+    for s in [old_sender, new_sender] {
+        s.engine.set_camera(false).expect("camera off");
+    }
+    finish(everyone).await;
+    }).await;
+}

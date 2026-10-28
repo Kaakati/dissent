@@ -39,6 +39,10 @@ pub(crate) struct Inner {
     /// Whether loopback relays are accepted, for a node that runs on loopback alone. From
     /// `NodeConfig::loopback_only`. Private and local relay addresses are refused otherwise.
     pub loopback_relays: bool,
+    /// Whether this device announces simulcast layers and acts on a forwarder's mask. On by
+    /// default. Off, the device sends one stream as a released client does, which tests use to
+    /// stand in for one. See `call_layers`.
+    pub simulcast: AtomicBool,
     /// Held while the node's relays are reconciled, so two reconciles do not interleave.
     pub relay_reconcile: tokio::sync::Mutex<()>,
     pub me: RootId,
@@ -207,6 +211,7 @@ impl Engine {
             community_relays: net.community_relays,
             loopback_relays: net.loopback_only,
             relay_reconcile: tokio::sync::Mutex::new(()),
+            simulcast: AtomicBool::new(true),
             me,
             world: RwLock::new(world),
             clock: Mutex::new(HlcClock::new()),

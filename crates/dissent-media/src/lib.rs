@@ -45,11 +45,11 @@ pub use key::MediaKey;
 pub use link::{LinkTransport, Side};
 pub use mesh::Mesh;
 pub use participant::{Failover, FailoverReason, Participant, SILENCE_TIMEOUT};
-pub use sfu::{Observer, Sfu, SfuStats};
+pub use sfu::{LayerInfo, Observer, Sfu, SfuStats};
 pub use signal::Signal;
 pub use transport::{PacketTransport, UdpTransport};
 pub use video::VideoCodec;
-pub use video::VideoMeta;
+pub use video::{VideoMeta, MAX_LAYERS};
 pub use video::VideoFrame;
 
 /// Host candidate of the caller on a transport with no IP path of its own, such as iroh.

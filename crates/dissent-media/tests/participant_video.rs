@@ -33,6 +33,7 @@ fn meta(frame_id: u32) -> VideoMeta {
         keyframe: is_key(frame_id),
         codec: VideoCodec::H264,
         screen: false,
+        layer: 0,
     }
 }
 

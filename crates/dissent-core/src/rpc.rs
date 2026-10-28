@@ -404,6 +404,10 @@ mod wire_order_tests {
         "Presence",
     ];
 
+    /// The CallMsg variants appended after v0.1.11, in tag order: `Features` (boost tiers), then the
+    /// simulcast messages (`call_layers`). Pinned too, so a later variant goes after them.
+    const APPENDED_CALLMSG: &[&str] = &["Features", "VideoLayers", "TileWidths", "WantedLayers"];
+
     /// The variant names of `enum_name` in declaration order, read from `source`. See the note above.
     fn variant_names(source: &str, enum_name: &str) -> Vec<String> {
         let header = format!("enum {enum_name} {{");
@@ -456,5 +460,17 @@ mod wire_order_tests {
         let names = variant_names(include_str!("calls.rs"), "CallMsg");
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         assert_eq!(names[..V0111_CALLMSG.len()], *V0111_CALLMSG, "CallMsg order changed: see the note above");
+    }
+
+    #[test]
+    fn call_msg_appended_variants_follow_v0111_in_order() {
+        let names = variant_names(include_str!("calls.rs"), "CallMsg");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let start = V0111_CALLMSG.len();
+        assert_eq!(
+            names[start..start + APPENDED_CALLMSG.len()],
+            *APPENDED_CALLMSG,
+            "CallMsg order changed: see the note above"
+        );
     }
 }

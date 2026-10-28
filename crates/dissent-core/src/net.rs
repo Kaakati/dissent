@@ -343,9 +343,16 @@ impl Engine {
         if let Err(e) = self.check_request(&env, conn_from) {
             return Response::Error(e.to_string());
         }
-        // A test models a released device, which fails to decode `Features` as above.
+        // A test models a released device, which fails to decode `Features` and the layer messages
+        // as above.
         if self.inner.legacy_calls.load(std::sync::atomic::Ordering::Relaxed)
-            && matches!(&env.req, Request::Call(msg) if matches!(**msg, crate::calls::CallMsg::Features { .. }))
+            && matches!(&env.req, Request::Call(msg) if matches!(
+                **msg,
+                crate::calls::CallMsg::Features { .. }
+                    | crate::calls::CallMsg::VideoLayers { .. }
+                    | crate::calls::CallMsg::TileWidths { .. }
+                    | crate::calls::CallMsg::WantedLayers { .. }
+            ))
         {
             return Response::Error("bad request: unknown call message".into());
         }

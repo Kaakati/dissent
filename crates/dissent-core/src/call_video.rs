@@ -82,6 +82,8 @@ pub(crate) struct Encoded {
     pub keyframe: bool,
     /// The codec the bytes are encoded with, named in the frame's header on the wire.
     pub codec: VideoCodec,
+    /// The simulcast layer the frame belongs to: 0 is the smallest. A capture that sends one layer sends 0.
+    pub layer: u8,
     pub data: Vec<u8>,
 }
 
@@ -124,6 +126,39 @@ pub(crate) struct Sending {
     pub capture: Capture,
     pub budget: Budget,
     pub paused: bool,
+    /// The simulcast layers the forwarder wants, as a bit mask (bit 0 is the 180p base). `None` is the mesh mode: one
+    /// adaptive stream, tagged layer 0. A forwarded call only changes this when the forwarder asks for layers.
+    wanted: Option<u8>,
+}
+
+/// One simulcast layer a sender can send: its picture size and the rate it costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerInfo {
+    pub width: u32,
+    pub height: u32,
+    pub kbps: u32,
+}
+
+/// The layers below the top rung, as (height, kbps): 180p and 360p. Each is sent only while it is shorter than the top
+/// rung, at the top rung's aspect.
+const LOWER_LAYERS: [(u32, u32); 2] = [(180, 150), (360, 400)];
+
+/// The simulcast layers of a capture whose top rung is `top`, smallest first. The top rung is the last, so a capture on
+/// the 360p rung sends two layers and one on the bottom rung sends one. Lower layers are always H.264: a second AV1
+/// encoder per layer costs too much CPU (`docs/design/13-forwarded-calls.md`).
+pub(crate) fn simulcast_layers(top: Plan) -> Vec<LayerInfo> {
+    let mut out: Vec<LayerInfo> = LOWER_LAYERS
+        .iter()
+        .filter(|(height, _)| *height < top.height)
+        .map(|(height, kbps)| LayerInfo {
+            // Even, as the encoders need.
+            width: (top.width * height / top.height.max(1)) & !1,
+            height: *height,
+            kbps: (*kbps).min(top.kbps),
+        })
+        .collect();
+    out.push(LayerInfo { width: top.width, height: top.height, kbps: top.kbps });
+    out
 }
 
 impl Sending {
@@ -133,7 +168,40 @@ impl Sending {
             capture,
             budget,
             paused: false,
+            wanted: None,
         }
+    }
+
+    /// Sets the simulcast layers to send: `None` for the mesh mode, `Some(mask)` for the layers in the mask, indexed as
+    /// [`Sending::layers`] lists them. The base layer is always sent with layers, whatever the mask: a released viewer, a
+    /// cascade child and a forwarder taken over on failover all get layer 0, so it must exist.
+    pub(crate) fn set_wanted_layers(&mut self, mask: Option<u8>) {
+        self.wanted = mask;
+        self.capture.set_layers(mask.map(|m| m | 1));
+    }
+
+    /// The layers the forwarder wants, or `None` in the mesh mode.
+    pub(crate) fn wanted_layers(&self) -> Option<u8> {
+        self.wanted
+    }
+
+    /// The layers this sender can send, smallest first: 180p and 360p below the top rung the capture sends now.
+    pub(crate) fn layers(&self) -> Vec<LayerInfo> {
+        simulcast_layers(self.capture.applied_plan())
+    }
+
+    /// What the lower layers being sent cost, in kbps. The top rung is planned in what is left.
+    fn lower_layers_kbps(&self) -> u32 {
+        let Some(mask) = self.wanted.map(|m| m | 1) else {
+            return 0;
+        };
+        let layers = self.layers();
+        layers[..layers.len() - 1]
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, layer)| layer.kbps)
+            .sum()
     }
 
     /// Takes the link's estimate and the audio target and plans the capture to fit: the budget's
@@ -146,6 +214,8 @@ impl Sending {
         let Some(available) = available_kbps else {
             return;
         };
+        // The lower layers come out of the same uplink as the top rung.
+        let available = available.saturating_sub(self.lower_layers_kbps());
         match self.budget.update(available, audio_kbps) {
             Some(plan) => {
                 self.paused = false;
@@ -168,19 +238,19 @@ mod capture {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
-    use dissent_video::encode::{self, EncoderConfig};
+    use dissent_video::encode::{self, EncoderConfig, VideoEncoder};
     use dissent_video::screen::{Cursor, ScreenSource, ScreenTarget};
-    use dissent_video::{CaptureFormat, Codec, VideoSource};
+    use dissent_video::{CaptureFormat, Codec, Frame, VideoSource};
 
-    use dissent_media::VideoCodec;
+    use dissent_media::{VideoCodec, MAX_LAYERS};
 
-    use super::{encode_jpeg, Encoded, Plan, Preview, PREVIEW_WIDTH};
+    use super::{encode_jpeg, simulcast_layers, Encoded, LayerInfo, Plan, Preview, PREVIEW_WIDTH};
     use crate::error::{CoreError, Result};
 
     /// Keyframes every this many seconds, so a late joiner or a lost frame recovers quickly.
     const KEYFRAME_SECONDS: u32 = 2;
-    /// Frames the capture thread may queue for the call loop before it drops one and asks for a
-    /// keyframe.
+    /// Frames the capture thread may queue for the call loop, per layer, before it drops one and
+    /// asks for a keyframe.
     const QUEUE: usize = 4;
     /// Every this many captured frames, the thread also makes a preview of its own picture for the
     /// window's self tile.
@@ -225,6 +295,11 @@ mod capture {
         key_request: Arc<AtomicBool>,
         /// What the capture should send next. The thread reads it before each frame.
         plan: Arc<Mutex<Plan>>,
+        /// What the capture sends now: `plan` once a reshape has applied it.
+        applied: Arc<Mutex<Plan>>,
+        /// The simulcast layers to send, as a mask over [`simulcast_layers`] of the applied plan.
+        /// `None` is one stream at the plan, tagged layer 0.
+        layers: Arc<Mutex<Option<u8>>>,
         /// The encoder's latest share of the frame interval, for the call loop to judge.
         cpu: Arc<Mutex<Option<f64>>>,
         rx: Receiver<Encoded>,
@@ -244,14 +319,18 @@ mod capture {
             let stop = Arc::new(AtomicBool::new(false));
             let key_request = Arc::new(AtomicBool::new(false));
             let plan = Arc::new(Mutex::new(initial));
+            let applied_plan = Arc::new(Mutex::new(initial));
+            let layers = Arc::new(Mutex::new(None));
             let cpu = Arc::new(Mutex::new(None));
-            let (tx, rx) = mpsc::sync_channel::<Encoded>(QUEUE);
+            let (tx, rx) = mpsc::sync_channel::<Encoded>(QUEUE * usize::from(MAX_LAYERS));
             let (preview_tx, previews) = mpsc::sync_channel::<Preview>(1);
             let screen = kind == CaptureKind::Screen;
             let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<()>>(1);
             let thread_stop = stop.clone();
             let thread_key = key_request.clone();
             let thread_plan = plan.clone();
+            let thread_applied = applied_plan.clone();
+            let thread_layers = layers.clone();
             let thread_cpu = cpu.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("dissent-{kind:?}").to_lowercase())
@@ -272,7 +351,13 @@ mod capture {
                         }
                     };
                     let _ = ready_tx.send(Ok(()));
-                    let mut frame_id = 0u32;
+                    // Each layer numbers its frames on its own. One stream is layer 0.
+                    let mut frame_ids = [0u32; MAX_LAYERS as usize];
+                    // The encoders of the layers below the top rung, by layer. `None` while not sent.
+                    let mut lower: Vec<Option<Lower>> = Vec::new();
+                    // The layer the main encoder sent last, or `None` if it was skipped. A change
+                    // starts the new layer at a keyframe.
+                    let mut main_layer: Option<u8> = Some(0);
                     let mut captured = 0u32;
                     let mut period = frame_period(applied.fps);
                     let mut due = Instant::now();
@@ -285,6 +370,7 @@ mod capture {
                         // A bitrate change goes to the open encoder at once.
                         if wanted.kbps != applied.kbps && encoder.set_bitrate(wanted.kbps).is_ok() {
                             applied.kbps = wanted.kbps;
+                            *lock(&thread_applied) = applied;
                         }
                         // A size or rate change reopens the camera, so it waits for the interval. A codec change
                         // only reopens the encoder, which is quick, so it applies at once.
@@ -315,6 +401,7 @@ mod capture {
                                     encoder = fresh;
                                     encoder.request_keyframe();
                                     applied = wanted;
+                                    *lock(&thread_applied) = applied;
                                     period = frame_period(applied.fps);
                                     due = Instant::now();
                                     ewma_ms = None;
@@ -351,10 +438,41 @@ mod capture {
                                 });
                             }
                         }
+                        // With layers, the main encoder sends the top one and the lower ones encode
+                        // scaled copies. Without, the main encoder is the one stream, layer 0.
+                        let mask = *lock(&thread_layers);
+                        let table = mask.map(|_| simulcast_layers(applied)).unwrap_or_default();
+                        let top = u8::try_from(table.len().saturating_sub(1)).unwrap_or(0);
+                        let send_top = mask.is_none_or(|m| m & (1 << top) != 0);
                         let started = Instant::now();
-                        let Ok(chunks) = encoder.encode(&frame) else {
-                            break;
-                        };
+                        let mut out: Vec<(u8, Vec<encode::EncodedChunk>)> = Vec::new();
+                        if send_top {
+                            if main_layer != Some(top) {
+                                encoder.request_keyframe();
+                                main_layer = Some(top);
+                            }
+                            let Ok(chunks) = encoder.encode(&frame) else {
+                                break;
+                            };
+                            out.push((top, chunks));
+                        } else {
+                            main_layer = None;
+                        }
+                        lower.resize_with(usize::from(top), || None);
+                        for (index, slot) in lower.iter_mut().enumerate() {
+                            let wanted = mask.is_some_and(|m| m & (1 << index) != 0);
+                            if !wanted {
+                                *slot = None;
+                                continue;
+                            }
+                            let chunks = Lower::refresh(slot, table[index], applied.fps)
+                                .and_then(|lower| lower.encode(&frame));
+                            match chunks {
+                                Some(chunks) => out.push((index as u8, chunks)),
+                                // A layer that fails is dropped, and tried again on the next frame.
+                                None => *slot = None,
+                            }
+                        }
                         // Encode time in an exponential moving average, reported as a share of the frame
                         // interval. The call loop steps down or climbs on that share.
                         let ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -369,25 +487,34 @@ mod capture {
                             ewma_ms = None;
                             timed = 0;
                         }
-                        let codec = wire_codec(applied.codec);
-                        for chunk in chunks {
-                            let encoded = Encoded {
-                                frame_id,
-                                keyframe: chunk.keyframe,
-                                codec,
-                                data: chunk.data,
-                            };
-                            frame_id = frame_id.wrapping_add(1);
-                            match tx.try_send(encoded) {
-                                Ok(()) => {}
-                                // The call loop is behind. Drop the frame and send a keyframe next,
-                                // so the receivers resynchronise.
-                                Err(TrySendError::Full(_)) => encoder.request_keyframe(),
-                                Err(TrySendError::Disconnected(_)) => return,
+                        let mut resync = false;
+                        for (layer, chunks) in out {
+                            // The lower layers are H.264 whatever the top rung is.
+                            let codec = if layer == top { wire_codec(applied.codec) } else { VideoCodec::H264 };
+                            for chunk in chunks {
+                                let frame_id = &mut frame_ids[usize::from(layer)];
+                                let encoded = Encoded {
+                                    frame_id: *frame_id,
+                                    keyframe: chunk.keyframe,
+                                    codec,
+                                    layer,
+                                    data: chunk.data,
+                                };
+                                *frame_id = frame_id.wrapping_add(1);
+                                match tx.try_send(encoded) {
+                                    Ok(()) => {}
+                                    // The call loop is behind. Drop the frame and send keyframes
+                                    // next, so the receivers resynchronise.
+                                    Err(TrySendError::Full(_)) => resync = true,
+                                    Err(TrySendError::Disconnected(_)) => return,
+                                }
                             }
                         }
-                        if thread_key.swap(false, Ordering::Relaxed) {
+                        if thread_key.swap(false, Ordering::Relaxed) || resync {
                             encoder.request_keyframe();
+                            for lower in lower.iter_mut().flatten() {
+                                lower.encoder.request_keyframe();
+                            }
                         }
                     }
                 })
@@ -400,6 +527,8 @@ mod capture {
                 stop,
                 key_request,
                 plan,
+                applied: applied_plan,
+                layers,
                 cpu,
                 rx,
                 previews,
@@ -469,6 +598,16 @@ mod capture {
             self.rx.try_recv().ok()
         }
 
+        /// The plan the capture is sending now. A new plan shows here once the thread applies it.
+        pub(crate) fn applied_plan(&self) -> Plan {
+            *lock(&self.applied)
+        }
+
+        /// Sets the simulcast layers to send, from the next frame. See `Capture::layers`.
+        pub(crate) fn set_layers(&self, mask: Option<u8>) {
+            *lock(&self.layers) = mask;
+        }
+
         /// The latest preview of this capture's own picture, if one is ready. Never blocks.
         pub(crate) fn try_preview(&self) -> Option<Preview> {
             self.previews.try_recv().ok()
@@ -505,6 +644,43 @@ mod capture {
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
         m.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The encoder of one layer below the top rung, fed a scaled copy of each captured frame.
+    struct Lower {
+        encoder: Box<dyn VideoEncoder>,
+        config: EncoderConfig,
+    }
+
+    impl Lower {
+        /// The layer's encoder, opened or reopened when its size or rate changed, with its bitrate
+        /// kept at the layer's. A new encoder starts at a keyframe. `None` if it cannot open.
+        fn refresh(slot: &mut Option<Lower>, layer: LayerInfo, fps: u32) -> Option<&mut Lower> {
+            let config = EncoderConfig {
+                width: layer.width,
+                height: layer.height,
+                fps,
+                bitrate_kbps: layer.kbps.max(1),
+                keyframe_interval: fps * KEYFRAME_SECONDS,
+            };
+            let reopen = slot.as_ref().is_none_or(|l| {
+                (l.config.width, l.config.height, l.config.fps) != (config.width, config.height, config.fps)
+            });
+            if reopen {
+                let encoder = encode::open(Codec::H264, config).ok()?;
+                *slot = Some(Lower { encoder, config });
+            }
+            let lower = slot.as_mut()?;
+            if lower.config.bitrate_kbps != config.bitrate_kbps && lower.encoder.set_bitrate(config.bitrate_kbps).is_ok() {
+                lower.config.bitrate_kbps = config.bitrate_kbps;
+            }
+            Some(lower)
+        }
+
+        fn encode(&mut self, frame: &Frame) -> Option<Vec<encode::EncodedChunk>> {
+            let scaled = frame.scaled_i420(self.config.width, self.config.height).ok()?;
+            self.encoder.encode(&scaled).ok()
+        }
     }
 
     fn format_of(plan: Plan) -> CaptureFormat {
@@ -807,6 +983,51 @@ mod tests {
     }
 
     #[test]
+    fn layers_sit_below_the_top_rung_at_its_aspect() {
+        let plan = |width, height, kbps| Plan { kbps, codec: Codec::H264, width, height, fps: 30 };
+        let sizes = |top| simulcast_layers(top).iter().map(|l| (l.width, l.height, l.kbps)).collect::<Vec<_>>();
+        assert_eq!(sizes(plan(1280, 720, 1500)), [(320, 180, 150), (640, 360, 400), (1280, 720, 1500)]);
+        assert_eq!(sizes(plan(640, 360, 300)), [(320, 180, 150), (640, 360, 300)], "a 360p top has one layer below it");
+        assert_eq!(sizes(plan(320, 180, 100)), [(320, 180, 100)], "the bottom rung is one layer");
+        // A 16:10 screen keeps its shape, with even widths.
+        assert_eq!(sizes(plan(1920, 1200, 2500))[..2], [(288, 180, 150), (576, 360, 400)]);
+    }
+
+    #[test]
+    fn a_capture_asked_for_layers_sends_each_from_a_keyframe_with_its_own_frame_ids() {
+        let top = Plan { kbps: 1_500, codec: Codec::H264, width: 1280, height: 720, fps: 30 };
+        let (capture, _) = recording_capture(top);
+        // One stream first, tagged layer 0.
+        assert!(wait_for(Duration::from_secs(10), || capture.try_next().is_some_and(|f| f.layer == 0)));
+        capture.set_layers(Some(0b101));
+        let mut seen: std::collections::BTreeMap<u8, Vec<Encoded>> = Default::default();
+        let got_both = wait_for(Duration::from_secs(20), || {
+            while let Some(frame) = capture.try_next() {
+                seen.entry(frame.layer).or_default().push(frame);
+            }
+            [0u8, 2].iter().all(|l| seen.get(l).is_some_and(|f| f.len() >= 10))
+        });
+        assert!(got_both, "layers 0 and 2 both arrive: {:?}", seen.keys().collect::<Vec<_>>());
+        assert!(!seen.contains_key(&1), "layer 1 is not asked for, so not sent");
+        // Layer 2 is the main encoder, which starts the switch at a keyframe.
+        let top_frames = &seen[&2];
+        assert!(top_frames[0].keyframe, "the top layer starts at a keyframe");
+        assert!(top_frames.windows(2).all(|p| p[1].frame_id == p[0].frame_id.wrapping_add(1)), "layer 2 counts its own frames");
+        // Layer 0 moved from the main encoder to a 180p one, which starts with a keyframe too, and
+        // its frame ids count on from the single stream's.
+        let base = &seen[&0];
+        assert!(base.windows(2).all(|p| p[1].frame_id == p[0].frame_id.wrapping_add(1)), "layer 0 counts on");
+        let small_start = base.iter().rposition(|f| f.keyframe).expect("the 180p encoder starts at a keyframe");
+        let mut decoder = dissent_video::decode::open(Codec::H264).expect("a decoder");
+        let pictures: Vec<_> = base[small_start..]
+            .iter()
+            .flat_map(|f| decoder.decode(&f.data, u64::from(f.frame_id)).unwrap_or_default())
+            .collect();
+        let picture = pictures.last().expect("the base layer decodes");
+        assert_eq!((picture.width(), picture.height()), (320, 180), "the base layer is 180p");
+    }
+
+    #[test]
     fn a_slow_encoder_steps_the_plan_down_and_a_headroom_run_climbs_it_back() {
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
@@ -912,6 +1133,7 @@ mod tests {
                     keyframe: chunk.keyframe,
                     codec: VideoCodec::H264,
                     screen: false,
+                    layer: 0,
                     payload: chunk.data.clone(),
                 };
                 let t = Instant::now();
@@ -955,6 +1177,7 @@ mod tests {
             keyframe: chunks[i].keyframe,
             codec: VideoCodec::H264,
             screen: false,
+            layer: 0,
             payload: chunks[i].data.clone(),
         };
 

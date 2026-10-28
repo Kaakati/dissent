@@ -11,6 +11,7 @@ mod addr_record;
 mod announce;
 mod avatars;
 mod attachments;
+mod call_layers;
 mod call_video;
 mod calls;
 mod channels;

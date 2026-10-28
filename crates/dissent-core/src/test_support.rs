@@ -110,6 +110,41 @@ pub fn measured_election(engine: &crate::Engine) -> (usize, Option<u64>) {
     engine.measured_election()
 }
 
+/// Turns simulcast layers on or off for `engine`. Off, it sends one stream and never announces
+/// layers, as a released client does.
+pub fn set_simulcast(engine: &crate::Engine, on: bool) {
+    engine.inner.simulcast.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The simulcast layers `engine`'s camera (or screen) was asked for by its forwarder, as a mask.
+/// `None` while it sends one stream, as in a mesh.
+pub fn wanted_layers(engine: &crate::Engine, screen: bool) -> Option<u8> {
+    engine.wanted_layers_now(screen)
+}
+
+/// The simulcast layer of the last frame `engine` received of `sender_root`'s camera (or screen)
+/// in its current call.
+pub fn received_layer(engine: &crate::Engine, sender_root: &str, screen: bool) -> Option<u8> {
+    engine.received_layer_now(sender_root, screen)
+}
+
+/// On the forwarder `engine`: the root id of the active speaker, whom a tight budget keeps sharp.
+pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
+    engine.active_speaker_now().await
+}
+
+/// On the forwarder `engine`: the layers `sender_root`'s camera announced, as (width, kbps),
+/// smallest first.
+pub async fn sender_layers(engine: &crate::Engine, sender_root: &str) -> Vec<(u32, u32)> {
+    engine.sender_layers_now(sender_root).await
+}
+
+/// On the forwarder `engine`: holds `viewer_root`'s downlink to `kbps` of video, as a measured
+/// estimate would. Returns false when `engine` does not forward its call.
+pub async fn set_viewer_budget(engine: &crate::Engine, viewer_root: &str, kbps: u32) -> bool {
+    engine.set_viewer_budget_now(viewer_root, kbps).await
+}
+
 /// How many hosted relays `engine` holds a passed check for.
 pub fn relay_checks(engine: &crate::Engine) -> usize {
     engine.read().relay_checks.len()

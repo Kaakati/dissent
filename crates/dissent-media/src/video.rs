@@ -4,7 +4,9 @@
 //! FU-A packets and reassembles it on the other side. The NAL body is:
 //!
 //! - `frame_id` (u32, big endian): the sender's video frame counter.
-//! - `flags` (u8): bit 0 is the keyframe flag.
+//! - `flags` (u8): bit 0 is the keyframe flag, bit 1 the screen flag, and bits 2 and 3 the
+//!   simulcast layer, 0 for the smallest. A released receiver reads only bits 0 and 1, so to it
+//!   every frame is layer 0; a forwarder sends such a receiver one layer only.
 //! - `codec` (u8): the real codec, AV1 or H.264. The SDP label is only the carrier.
 //! - the SFrame ciphertext of the codec frame.
 //!
@@ -25,6 +27,13 @@ const NAL_HEADER: u8 = 0x01;
 const FLAG_KEYFRAME: u8 = 0x01;
 /// The screen bit of `flags`: set for a shared screen, clear for a camera.
 const FLAG_SCREEN: u8 = 0x02;
+/// Where the layer sits in `flags`.
+const LAYER_SHIFT: u8 = 2;
+/// The bits of `flags` that hold the layer.
+const LAYER_MASK: u8 = 0x0c;
+
+/// The most simulcast layers one stream has: a small, a medium and a full-size layer.
+pub const MAX_LAYERS: u8 = 3;
 
 /// How many recent counters per sender the replay check remembers.
 const REPLAY_WINDOW: usize = 128;
@@ -67,6 +76,9 @@ pub struct VideoMeta {
     pub codec: VideoCodec,
     /// Whether the frame is part of a shared screen rather than a camera.
     pub screen: bool,
+    /// The simulcast layer, 0 for the smallest. A stream with one layer uses 0. Each layer numbers
+    /// its frames on its own.
+    pub layer: u8,
 }
 
 /// A video frame as the receiver delivers it, after decryption.
@@ -82,6 +94,9 @@ pub struct VideoFrame {
     pub codec: VideoCodec,
     /// Whether the frame is a shared screen rather than a camera.
     pub screen: bool,
+    /// The simulcast layer the frame belongs to. A forwarder sends one layer of a stream at a
+    /// time, and changes it only at a keyframe.
+    pub layer: u8,
     /// The decrypted codec frame.
     pub payload: Vec<u8>,
 }
@@ -92,6 +107,12 @@ pub(crate) fn stream_key(sender: u64, screen: bool) -> u64 {
     (sender << 1) | u64::from(screen)
 }
 
+/// The key of one layer of a stream. Each layer has its own frame ids, so a forwarder gates its
+/// incoming frames by layer.
+pub(crate) fn layer_key(stream: u64, layer: u8) -> u64 {
+    (stream << 2) | u64::from(layer & 0x03)
+}
+
 /// The clear header of a carried frame, read without any key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Header {
@@ -99,6 +120,7 @@ pub(crate) struct Header {
     pub keyframe: bool,
     pub codec: VideoCodec,
     pub screen: bool,
+    pub layer: u8,
 }
 
 /// Escapes a body so `00 00 0x` (x <= 3) never appears: an `03` is inserted after two zeros.
@@ -142,6 +164,7 @@ pub(crate) fn carry(meta: VideoMeta, ciphertext: &[u8]) -> Vec<u8> {
     if meta.screen {
         flags |= FLAG_SCREEN;
     }
+    flags |= (meta.layer.min(MAX_LAYERS - 1) << LAYER_SHIFT) & LAYER_MASK;
     body.push(flags);
     body.push(meta.codec.tag());
     body.extend_from_slice(ciphertext);
@@ -176,6 +199,7 @@ pub(crate) fn uncarry(nal: &[u8]) -> Result<(Header, Vec<u8>)> {
         frame_id: u32::from_be_bytes(body[0..4].try_into().expect("four bytes")),
         keyframe: body[4] & FLAG_KEYFRAME != 0,
         screen: body[4] & FLAG_SCREEN != 0,
+        layer: ((body[4] & LAYER_MASK) >> LAYER_SHIFT).min(MAX_LAYERS - 1),
         codec: VideoCodec::from_tag(body[5])
             .ok_or(MediaError::BadState("video frame names an unknown codec"))?,
     };
@@ -224,6 +248,7 @@ pub(crate) struct RawVideo {
     pub sender: u64,
     pub screen: bool,
     pub keyframe: bool,
+    pub layer: u8,
 }
 
 /// What the gate decides for one arriving frame.
@@ -329,6 +354,7 @@ mod tests {
             keyframe: true,
             codec: VideoCodec::Av1,
             screen: true,
+            layer: 0,
         };
         let nal = carry(meta, &ciphertext);
         let mut delivered = vec![0, 0, 0, 1];
@@ -341,6 +367,7 @@ mod tests {
                 keyframe: true,
                 codec: VideoCodec::Av1,
                 screen: true,
+                layer: 0,
             }
         );
         assert_eq!(got, ciphertext);
@@ -353,6 +380,7 @@ mod tests {
             keyframe: false,
             codec: VideoCodec::H264,
             screen: false,
+            layer: 0,
         };
         let nal = carry(meta, &[1, 2, 3]);
         let mut delivered = vec![0, 0, 1];
@@ -360,6 +388,22 @@ mod tests {
         let (header, _) = uncarry(nal_of(&delivered).unwrap()).unwrap();
         assert!(!header.keyframe);
         assert_eq!(header.codec, VideoCodec::H264);
+    }
+
+    #[test]
+    fn the_layer_rides_in_the_flags_beside_the_keyframe_and_screen_bits() {
+        for layer in 0..MAX_LAYERS {
+            let meta = VideoMeta { frame_id: 9, keyframe: true, codec: VideoCodec::Av1, screen: true, layer };
+            let nal = carry(meta, &[4, 5, 6]);
+            let (header, ciphertext) = uncarry(&nal).unwrap();
+            assert_eq!((header.layer, header.keyframe, header.screen), (layer, true, true));
+            assert_eq!(ciphertext, vec![4, 5, 6]);
+            // A released reader looks at bits 0 and 1 only, and they are unchanged by the layer.
+            let flags = unescape(&nal[1..])[4];
+            assert_eq!(flags & (FLAG_KEYFRAME | FLAG_SCREEN), FLAG_KEYFRAME | FLAG_SCREEN);
+        }
+        let meta = VideoMeta { frame_id: 1, keyframe: false, codec: VideoCodec::H264, screen: false, layer: 7 };
+        assert_eq!(uncarry(&carry(meta, &[1])).unwrap().0.layer, MAX_LAYERS - 1, "a layer past the top is the top");
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::{PacketTransport, UdpTransport};
 use crate::video::{
-    carry, nal_of, stream_key, uncarry, RawFrame, RawVideo, VideoFrame, VideoGate,
+    carry, layer_key, nal_of, stream_key, uncarry, RawFrame, RawVideo, VideoFrame, VideoGate,
     VideoMeta, VideoReplay,
 };
 use dissent_identity::DeviceCert;
@@ -41,7 +41,7 @@ const PLI_RETRY: Duration = Duration::from_millis(200);
 
 /// The bitrate str0m's bandwidth estimate starts from, in kbps. Video is sized to it until the
 /// first estimate arrives.
-const BWE_INITIAL_KBPS: u64 = 1_000;
+pub(crate) const BWE_INITIAL_KBPS: u64 = 1_000;
 
 /// How often str0m reports peer and media statistics.
 const STATS_INTERVAL: Duration = Duration::from_millis(500);
@@ -734,7 +734,8 @@ impl<T: PacketTransport> Call<T> {
             let Some(sender) = peek_sender(&ciphertext) else {
                 return;
             };
-            let stream = stream_key(sender, header.screen);
+            // Layers arrive interleaved, each with its own frame ids, so each is gated on its own.
+            let stream = layer_key(stream_key(sender, header.screen), header.layer);
             let admit = self
                 .video_gate
                 .admit(stream, header.frame_id, header.keyframe);
@@ -747,6 +748,7 @@ impl<T: PacketTransport> Call<T> {
                     sender,
                     screen: header.screen,
                     keyframe: header.keyframe,
+                    layer: header.layer,
                 });
             }
             return;
@@ -785,6 +787,7 @@ impl<T: PacketTransport> Call<T> {
                 keyframe: header.keyframe,
                 codec: header.codec,
                 screen: header.screen,
+                layer: header.layer,
                 payload: payload.to_vec(),
             }),
             Err(e) => tracing::debug!(error = %e, "dropped a malformed video payload"),

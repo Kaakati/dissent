@@ -428,7 +428,16 @@ async fn a_locked_key_rotation_raises_its_notice_once_when_the_key_arrives() {
 
         // The key arrives. The rotation unlocks and its notice fires once.
         alice.engine.remember_secrets(id, &[(7, secret)]).await;
-        assert_eq!(notices(&mut events), 1, "the notice fires when the key arrives");
+        // The unlock can emit just after `remember_secrets` returns, so wait for it briefly.
+        let mut seen = notices(&mut events);
+        for _ in 0..50 {
+            if seen > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            seen += notices(&mut events);
+        }
+        assert_eq!(seen, 1, "the notice fires when the key arrives");
 
         // Seeing the key again, or the event again, raises nothing more.
         alice.engine.remember_secrets(id, &[(7, secret)]).await;

@@ -24,8 +24,8 @@ What runs today, in `dissent-media` and `dissent-core/src/calls.rs`:
   a failed send, or 500 ms of silence, without a handshake. Measured recovery is 30 ms for a killed
   forwarder and 545 ms for a frozen one.
 - **Video through a forwarder.** It is forwarded for the top speakers only, a whole keyframe or
-  nothing per downlink. `pick_layer` and `Sfu::set_listener_budget` exist, but no simulcast layers
-  are sent, so there is nothing to choose between.
+  nothing per downlink. Since phase 2 a sender sends simulcast layers and the forwarder picks one
+  per viewer ("Layers per viewer").
 
 So "beyond the mesh" isn't new. What this design adds is forwarders that aren't participants,
 layer selection, the boost limits, and volunteers in the cascade.
@@ -94,18 +94,59 @@ learns membership timing, but not call presence.
 
 ## Layers per viewer
 
-- **Simulcast for H.264, SVC for AV1.** A sender that is forwarded sends up to three layers: the
-  ladder's top rung within its boost ceiling (`12-boosts.md`), 360p, and 180p. H.264 sends them as
-  three simulcast streams, and AV1 as one stream with L1T3 or L3T3 SVC where the encoder supports
-  it. The layer id goes in the clear part of the video body, beside the keyframe flag, so a
-  forwarder picks without decrypting.
-- **Per viewer.** The forwarder keeps a budget per downlink, from the downlink's REMB/TWCC estimate,
-  through the existing `Sfu::set_listener_budget`. It runs `pick_layer` per speaker per viewer.
-  A viewer also sends a preference: the tile size it shows, plus "pinned" or "thumbnail". The
-  forwarder never sends a larger layer than the tile needs.
-- **Switching.** Switching up waits for a keyframe of the higher layer, which the forwarder asks the
-  sender for with PLI. Switching down takes effect at the next frame of the lower layer.
+Built in phase 2, except where it says otherwise.
+
+- **Simulcast.** A sender that is forwarded sends up to three layers: 180p, 360p, and the ladder's
+  top rung within its boost ceiling (`12-boosts.md`). Layer 0 is the smallest. A layer is sent only
+  while it is shorter than the top rung, at the top rung's aspect, so a camera on the 360p rung
+  sends two layers and one on the bottom rung one (`call_video::simulcast_layers`). The capture
+  thread runs the top rung on its main encoder, as before, and each lower layer on its own H.264
+  encoder fed a box-scaled copy of the frame (`Frame::scaled_i420`). Each layer numbers its frames
+  on its own. The lower layers cost about 150 and 400 kbps, which come off the uplink budget before
+  the top rung is planned, so the CPU governor and the ladder see the whole cost.
+- **AV1 is simulcast too, for now.** The top rung may be AV1, as before, but the lower layers are
+  always H.264. SVT-AV1 has no real-time SVC mode in this build, and a second SVT encoder per layer
+  costs too much CPU. A layer's codec rides in each frame's header, and a receiver keys its decoders
+  by codec, so a viewer switched from an AV1 top layer to the H.264 base just changes decoders.
+  L1T3 SVC can replace the lower AV1 layers once an encoder offers it and is measured.
+- **Where the layer id goes.** In the carrier's clear `flags` byte, bits 2 and 3, beside the
+  keyframe and screen bits (`video.rs`). The forwarder already reads that byte without a key, and
+  it is outside the SFrame ciphertext, so no key is needed. The other two places were worse:
+  - An SFrame header extension changes the SFrame layout, which every released receiver parses
+    before it decrypts, so a released viewer would drop the frame.
+  - An RTP header extension needs a negotiated extension id on every link, and the forwarder
+    relays carrier NALs (`send_raw_video`), not RTP packets, so it would have to rebuild it per hop.
+
+  A released reader looks at bits 0 and 1 only, so to it every frame is layer 0. Like the keyframe
+  bit, the layer bits are not authenticated: a forwarder could mislabel layers, which only spoils
+  the picture, as dropping frames already could.
+- **Per viewer.** A viewer tells its forwarder the width it draws each sender's camera and screen
+  at (`TileWidths`, from `Engine::set_video_tile`). The forwarder gives it the smallest layer at
+  least that wide, and the top layer for a tile wider than every layer. A stream it doesn't draw
+  gets the base layer. The budget is the smaller of `Sfu::set_listener_budget` and the downlink's
+  own bandwidth estimate less three speakers' audio. The estimate counts only once it falls below
+  the 1000 kbps it starts at: nothing probes a link for headroom, so above that it means nothing
+  (phase 1, "Capacity units"). "Pinned" and "thumbnail" preferences are not sent; the tile width
+  covers both.
+- **A tight budget (decided).** When a viewer's budget can't carry every stream at the layer its tile
+  wants, the forwarder lowers the other streams first, one layer at a time, the step that saves most
+  first, and lowers the active speaker (the loudest recent sender) only once every other stream is on
+  its base layer. This is Discord's choice. The speaker stays sharp, and the rest turn into
+  thumbnails. The base layer is the floor: a budget too small for every base layer still gets them.
+- **Switching.** A switch, up or down, waits for a keyframe of the new layer, and the forwarder asks
+  the sender for one with PLI. Until then the viewer keeps getting its old layer, so the picture
+  never stops and the decoder never sees two layers mixed.
+- **Senders encode only what is watched.** On each membership tick (0.5 s) the forwarder sends each
+  sender the mask of layers some viewer is on or is switching to (`WantedLayers`). The sender
+  encodes those, plus always the base layer: a released viewer, a cascade child and a forwarder
+  taken over on failover all get layer 0, so it must exist. The signalling runs beside the call
+  loop, since it is RPCs and the loop carries audio.
 - **Mesh stays single-layer.** Each mesh peer sends one stream sized for the weakest link, as today.
+  A sender sends one stream until a forwarder asks it for layers.
+- **Cascades get the base layer.** A cascade child is not a layer-aware viewer at the root, and a
+  forwarder with no layer table for a stream sends its viewers layer 0 only. So viewers below a
+  child get 180p from senders below another forwarder. Carrying tables and masks up and down the
+  tree is left for later.
 
 ## Bandwidth
 
@@ -152,9 +193,10 @@ as a mesh before it is forwarded:
   to devices that announced the feature bit, and an
   election that includes a non-participant is used only when every participant supports it.
   Otherwise the forwarder is a participant, as today.
-- **Layers.** A released receiver ignores layers it can't name, and gets the top layer from a
-  forwarder that knows it's old, as today. A released sender sends one layer, and the forwarder
-  passes it on.
+- **Layers.** A released receiver reads the layer bits as layer 0, and a forwarder sends it layer
+  0 only, since it never reported tile widths: two layers would reach its decoder as one broken
+  stream. A released sender sends one layer, and the forwarder passes it on to everyone. A released
+  forwarder never asks for layers, so its senders send one stream.
 - **Events.** The seeder setting is an appended, gen-sealed control event, so older clients reject it
   as forged and ignore it.
 
@@ -180,9 +222,29 @@ as a mesh before it is forwarded:
    Measuring headroom needs probing: `Bwe::set_desired_bitrate` per link, which sends padding up
    to the desired rate. That costs upload on every link, so it is an open choice. Tests: a 7-device call stays a mesh at level 2 with good links, is
    forwarded with a weak link, and is forwarded at level 0 with a released client.
-2. **Simulcast and per-viewer layers.** Three H.264 layers, AV1 SVC where available, a layer id in the
-   clear body, `pick_layer` live, tile-size preferences, PLI on switching up. Tests: a viewer on a
-   small budget gets 360p while another gets 720p, and a switch-up waits for a keyframe.
+2. **Simulcast and per-viewer layers.** Built, as "Layers per viewer" describes. The layer id is in
+   the carrier's clear flags. The forwarder gates incoming frames per layer and chooses per viewer
+   (`Sfu::set_sender_layers`, `set_viewer_tile`, `set_layer_aware`, `wanted_layers`). The capture
+   encodes the layers asked for (`call_video.rs`). The signalling is `call_layers.rs`: three
+   appended `CallMsg` variants, sent only to a device whose `Features` has `FEATURE_VIDEO_LAYERS`:
+   - `VideoLayers { room, screen, layers }`, sender to forwarder: its layers as (width, kbps).
+   - `TileWidths { room, tiles }`, viewer to forwarder: its whole set of tile widths. Sending it
+     makes the viewer layer-aware.
+   - `WantedLayers { room, screen, mask }`, forwarder to sender: the layers to encode.
+
+   Compatibility: no existing struct changed, and the variants are appended (the `wire_order`
+   tests pin them). A sender stays on one stream until a layer-aware forwarder asks, so a released
+   forwarder never sees more than one stream. A released sender announces no layers, and the
+   forwarder passes its one stream to everyone. A viewer that never sent `TileWidths` (a released
+   one) gets layer 0 only. Tests: unit tests of the layer choice (`sfu.rs`, `layer_tests`) and of
+   the capture's layers (`call_video.rs`), in-memory forwarder tests (`tests/video_layers.rs`), and
+   networked tests `simulcast_*` in `tests/it/calls.rs`: a narrow tile gets layer 0 while a wide one
+   gets a higher layer; a constrained viewer keeps the speaker high and gets the others on the base
+   while an unconstrained one gets all high; a released sender reaches everyone and a released
+   viewer gets the base only.
+
+   Left: AV1 SVC for the lower layers, layer tables through cascades, probing so the downlink
+   estimate can rise above its start, and a CPU measurement of three encoders on a slow laptop.
 3. **Volunteer forwarders.** The settings toggle, `ForwardOffer`, the candidate bonus, the "forwarded
    by" line, the threat-model section. Tests: a volunteer that is not in the call forwards a
    10-person call with no plaintext seen. Its loss fails over to a participant within 600 ms. A
@@ -202,7 +264,7 @@ as a mesh before it is forwarded:
    in the UI? It's visible to the call's members either way, through signalling.
 4. Is it acceptable that a boosted call falls back to level 0 limits when one released client joins,
    or should boosts wait until most members have updated?
-5. For video, which matters more on a budget: keeping every camera at a lower layer, or keeping the
-   active speaker sharp and the rest as thumbnails?
+5. ~~For video, which matters more on a budget?~~ Decided: keep the active speaker sharp, and lower
+   the others first.
 6. Should a relay host's app volunteer as a forwarder by default when they publish a relay, or stay
    a separate opt-in?

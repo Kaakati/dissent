@@ -176,7 +176,8 @@ export function buildView(shell: ShellSlice, target: ChatTarget | null, messages
     title: name,
     peer,
     topic: null,
-    placeholder: `Message ${name}`,
+    // A person is addressed with @, as the reference client does; a group by its name.
+    placeholder: target.kind === 'group' ? `Message ${name}` : `Message @${name}`,
     items,
     visibility: 'default',
     social: items.some((m) => m.reactions !== null),

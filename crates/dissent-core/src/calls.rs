@@ -133,12 +133,23 @@ pub(crate) enum CallMsg {
     /// variants: a released device cannot decode it and answers it as a bad request, which is how
     /// the sender learns that device is released. See `docs/design/13-forwarded-calls.md`.
     Features { room: RoomId, bits: u64 },
+    /// The simulcast layers the sender can send of its camera or screen, smallest first, as
+    /// (width in pixels, kbps). Sent to its forwarder. See `call_layers`.
+    VideoLayers { room: RoomId, screen: bool, layers: Vec<(u32, u32)> },
+    /// How wide the sender draws each other sender's video, as (sender id, screen, width in
+    /// pixels). Sent to its forwarder, which then counts it as a viewer that knows layers.
+    TileWidths { room: RoomId, tiles: Vec<(u64, bool, u32)> },
+    /// The layers a forwarder wants of the receiver's camera or screen, bit 0 for layer 0. Sent
+    /// by the forwarder to the sender, which then encodes only those.
+    WantedLayers { room: RoomId, screen: bool, mask: u8 },
 }
 
 /// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
 const FEATURE_BOOST_TIERS: u64 = 1;
+/// `CallMsg::Features` bit: the sender takes `VideoLayers`, `TileWidths` and `WantedLayers`.
+pub(crate) const FEATURE_VIDEO_LAYERS: u64 = 2;
 /// Every call feature this device supports.
-const FEATURES: u64 = FEATURE_BOOST_TIERS;
+const FEATURES: u64 = FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS;
 
 /// A device's roster for the DM or group call it is in.
 #[derive(Debug, Serialize, Deserialize)]
@@ -297,6 +308,20 @@ impl CallAudio for VoiceAudio {
 
 /// The forwarded tier. One elected device relays audio between the others. Every other device
 /// links to it, and it links to none of them directly.
+impl Forwarding {
+    pub(crate) fn role(&self) -> Role {
+        self.role
+    }
+
+    pub(crate) fn forwarder_sid(&self) -> u64 {
+        self.forwarder
+    }
+
+    pub(crate) fn sfu(&self) -> &AsyncMutex<Option<Sfu<CallLink>>> {
+        &self.sfu
+    }
+}
+
 pub(crate) struct Forwarding {
     role: Role,
     /// The sender id this device links to for media. A leaf's is its forwarder. A child's is the
@@ -548,6 +573,10 @@ pub(crate) struct Room {
     features: Mutex<BTreeMap<u64, (u64, Instant)>>,
     /// Devices this room has sent its own `Features` to, by sender id.
     told: Mutex<std::collections::BTreeSet<u64>>,
+    /// Simulcast signalling state of this room. See `call_layers`.
+    layer_signals: Mutex<crate::call_layers::LayerSignals>,
+    /// On a forwarder: the (sender id, screen) streams whose senders announced layers.
+    layered: Mutex<std::collections::BTreeSet<(u64, bool)>>,
     /// False on a staged room, which receives but does not send until it is swapped in.
     sending: AtomicBool,
     /// Media links this room has established. Counts links, not presence entries.
@@ -602,7 +631,7 @@ pub(crate) struct Ringing {
 pub(crate) struct CallHub {
     /// The pixel width each remote tile is drawn at, by the peer's root id and whether it is a
     /// screen. A preview is made that wide, so a small tile costs little.
-    tiles: Mutex<HashMap<(String, bool), u32>>,
+    pub(crate) tiles: Mutex<HashMap<(String, bool), u32>>,
     /// Where received frames go when a window decodes them itself. `None` for the JPEG previews.
     encoded_sink: Mutex<Option<EncodedSink>>,
     /// Where this engine's camera, lobby preview and screen take their pictures from. A device, unless a test set it.
@@ -610,7 +639,7 @@ pub(crate) struct CallHub {
     /// This device's camera while the lobby previews it, before a call. A call takes the camera
     /// over, so the preview is dropped when the call's camera turns on.
     lobby_camera: Mutex<Option<Sending>>,
-    current: Mutex<Option<Arc<Room>>>,
+    pub(crate) current: Mutex<Option<Arc<Room>>>,
     /// A migrated room being built. It carries audio and offers only once it is swapped in.
     staged: Mutex<Option<Arc<Room>>>,
     /// Live participant count at which a forwarded call grows into a cascade.
@@ -788,7 +817,7 @@ fn room_id(parts: &[&[u8]]) -> RoomId {
     *hasher.finalize().as_bytes()
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -896,6 +925,8 @@ impl Room {
             forwarder_since: Mutex::new(None),
             features: Mutex::new(BTreeMap::new()),
             told: Mutex::new(std::collections::BTreeSet::new()),
+            layer_signals: Mutex::new(crate::call_layers::LayerSignals::default()),
+            layered: Mutex::new(std::collections::BTreeSet::new()),
             sending: AtomicBool::new(true),
             links: AtomicUsize::new(0),
             clocked: AtomicBool::new(false),
@@ -932,6 +963,77 @@ impl Room {
             }
             peer.last_arrival = Some(now);
             peer.last_frame = Some(now);
+        }
+    }
+
+    pub(crate) fn id(&self) -> RoomId {
+        self.id
+    }
+
+    pub(crate) fn my_sid(&self) -> u64 {
+        self.my_sid
+    }
+
+    pub(crate) fn forwarding(&self) -> Option<&Forwarding> {
+        self.forwarding.as_ref()
+    }
+
+    /// The sender id a live device has in this call.
+    pub(crate) fn live_sid(&self, device: &DeviceId) -> Option<u64> {
+        lock(&self.live).iter().find(|(_, d)| *d == device).map(|(sid, _)| *sid)
+    }
+
+    /// The live device behind sender id `sid`.
+    pub(crate) fn device_of(&self, sid: u64) -> Option<DeviceId> {
+        lock(&self.live).get(&sid).copied()
+    }
+
+    /// The sender id of a person in this call, by their root id as the window names them.
+    pub(crate) fn sid_of_root(&self, root: &str) -> Option<u64> {
+        lock(&self.peers).iter().find(|(_, peer)| peer.root.to_string() == root).map(|(sid, _)| *sid)
+    }
+
+    /// The root id of the person behind sender id `sid`, as the window names them.
+    pub(crate) fn root_of_sid(&self, sid: u64) -> Option<String> {
+        lock(&self.peers).get(&sid).map(|peer| peer.root.to_string())
+    }
+
+    /// Whether the device with sender id `sid` sent `bit` in its `Features`.
+    pub(crate) fn peer_supports(&self, sid: u64, bit: u64) -> bool {
+        lock(&self.features).get(&sid).is_some_and(|(bits, _)| bits & bit != 0)
+    }
+
+    pub(crate) fn with_layers<R>(&self, f: impl FnOnce(&mut crate::call_layers::LayerSignals) -> R) -> R {
+        f(&mut lock(&self.layer_signals))
+    }
+
+    pub(crate) fn note_layered_stream(&self, sid: u64, screen: bool) {
+        lock(&self.layered).insert((sid, screen));
+    }
+
+    pub(crate) fn layered_streams(&self) -> Vec<(u64, bool)> {
+        lock(&self.layered).iter().copied().collect()
+    }
+
+    /// The layer table this device's camera or screen can send, as (width, kbps), smallest first.
+    /// `None` while that capture is off.
+    pub(crate) fn sending_layers(&self, screen: bool) -> Option<Vec<(u32, u32)>> {
+        let slot = if screen { &self.screen } else { &self.camera };
+        lock(slot).as_ref().map(|sending| sending.layers().into_iter().map(|l| (l.width, l.kbps)).collect())
+    }
+
+    /// The layers this device's camera or screen was asked for, `None` for one stream.
+    pub(crate) fn wanted_layers(&self, screen: bool) -> Option<u8> {
+        let slot = if screen { &self.screen } else { &self.camera };
+        lock(slot).as_ref().and_then(|sending| sending.wanted_layers())
+    }
+
+    /// Hands the layers a forwarder asked for to this device's camera or screen. `None` is one
+    /// adaptive stream, as in a mesh.
+    pub(crate) fn set_wanted_layers(&self, screen: bool, mask: Option<u8>) {
+        let slot = if screen { &self.screen } else { &self.camera };
+        if let Some(sending) = lock(slot).as_mut() {
+            sending.set_wanted_layers(mask);
         }
     }
 
@@ -1087,6 +1189,7 @@ fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, previ
 /// wide as the window draws the tile, when the window has said so, and the default otherwise.
 fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
     use crate::call_video::{LARGE_PREVIEW_INTERVAL, PREVIEW_INTERVAL};
+    room.with_layers(|l| l.received.insert((frame.sender, frame.screen), frame.layer));
     let root_id = lock(&room.peers)
         .get(&frame.sender)
         .map(|peer| peer.root.to_string())
@@ -1136,11 +1239,13 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
     fit_sending(room, mesh.video_available_kbps(), audio);
     set_av1(room, mesh.all_peers_have_av1());
     for (encoded, screen) in take_encoded(room) {
+        // A mesh sends one stream, which the capture tags layer 0.
         let meta = VideoMeta {
             frame_id: encoded.frame_id,
             keyframe: encoded.keyframe,
             codec: encoded.codec,
             screen,
+            layer: encoded.layer,
         };
         if let Err(e) = mesh.send_video(&encoded.data, meta).await {
             debug!(error = %e, "video frame not sent");
@@ -1173,11 +1278,14 @@ async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Partici
     fit_sending(room, participant.video_available_kbps(), audio);
     set_av1(room, participant.peer_has_av1());
     for (encoded, screen) in take_encoded(room) {
+        // A forwarded call can carry simulcast layers. The capture sends them only after the
+        // forwarder asked (`call_layers`), and tags its single stream layer 0 until then.
         let meta = VideoMeta {
             frame_id: encoded.frame_id,
             keyframe: encoded.keyframe,
             codec: encoded.codec,
             screen,
+            layer: encoded.layer,
         };
         if let Err(e) = participant.send_video(&encoded.data, meta).await {
             debug!(error = %e, "video frame not sent");
@@ -1818,7 +1926,7 @@ impl Engine {
     }
 
     /// Sends one signalling message and waits for its reply.
-    async fn call_rpc(&self, device: DeviceId, msg: CallMsg) -> Result<CallReply> {
+    pub(crate) async fn call_rpc(&self, device: DeviceId, msg: CallMsg) -> Result<CallReply> {
         let bytes = self.request_bytes(&Request::Call(Box::new(msg)))?;
         let raw = tokio::time::timeout(RPC_TIMEOUT, self.node().request(device, bytes))
             .await
@@ -1924,6 +2032,9 @@ impl Engine {
             }
             CallMsg::Presence(msg) => self.on_presence(from, *msg),
             CallMsg::Features { room, bits } => self.on_features(from, room, bits),
+            CallMsg::VideoLayers { room, screen, layers } => self.on_video_layers(from, room, screen, layers).await,
+            CallMsg::TileWidths { room, tiles } => self.on_tile_widths(from, room, tiles).await,
+            CallMsg::WantedLayers { room, screen, mask } => self.on_wanted_layers(from, room, screen, mask),
         }
     }
 
@@ -2199,7 +2310,7 @@ impl Engine {
         }
     }
 
-    fn current_room(&self, id: &RoomId) -> Option<Arc<Room>> {
+    pub(crate) fn current_room(&self, id: &RoomId) -> Option<Arc<Room>> {
         lock(&self.inner.calls.current)
             .clone()
             .filter(|room| room.id == *id)
@@ -2801,6 +2912,9 @@ impl Engine {
             return;
         };
         self.tell_features(room, false);
+        if room.forwarding.is_some() {
+            self.spawn_signal_layers(room);
+        }
         self.tier_check(room);
         self.forwarder_check(room);
         let tick = room.capacity_clock.fetch_add(1, Ordering::SeqCst);
@@ -3962,6 +4076,11 @@ impl Engine {
     pub(crate) fn own_call_capacity(&self) -> Option<u32> {
         let room = lock(&self.inner.calls.current).clone()?;
         Some(room.own_kbps.load(Ordering::SeqCst)).filter(|k| *k > 0)
+    }
+
+    /// For tests: the layers this device's camera or screen was asked for in its current call.
+    pub(crate) fn wanted_layers_now(&self, screen: bool) -> Option<u8> {
+        lock(&self.inner.calls.current).clone()?.wanted_layers(screen)
     }
 
     /// For tests: the election over measured capacities alone, with no defaults. Returns how many

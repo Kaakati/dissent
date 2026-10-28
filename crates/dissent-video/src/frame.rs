@@ -146,6 +146,42 @@ impl Frame {
         }
         (out_w as u32, out_h as u32, rgb)
     }
+
+    /// This frame scaled down to `width` x `height` as I420, for a smaller simulcast layer. Each
+    /// plane is box-averaged, like [`Frame::to_rgb_preview`]. A size larger than the frame is
+    /// clamped to it. The size must be even.
+    pub fn scaled_i420(&self, width: u32, height: u32) -> Result<Frame> {
+        check_size(width, height)?;
+        let i420 = self.to_i420();
+        let (w, h) = (i420.width as usize, i420.height as usize);
+        let (out_w, out_h) = ((width as usize).min(w), (height as usize).min(h));
+        if (out_w, out_h) == (w, h) {
+            return Ok(i420.into_owned());
+        }
+        let luma = w * h;
+        let chroma = luma / 4;
+        let mut data = Vec::with_capacity(frame_len(out_w as u32, out_h as u32));
+        box_plane(&i420.data[..luma], w, h, out_w, out_h, &mut data);
+        box_plane(&i420.data[luma..luma + chroma], w / 2, h / 2, out_w / 2, out_h / 2, &mut data);
+        box_plane(&i420.data[luma + chroma..], w / 2, h / 2, out_w / 2, out_h / 2, &mut data);
+        Frame::new(out_w as u32, out_h as u32, PixelFormat::I420, self.pts_us, data)
+    }
+}
+
+/// Appends `plane` (`w` x `h`) box-averaged down to `out_w` x `out_h`.
+fn box_plane(plane: &[u8], w: usize, h: usize, out_w: usize, out_h: usize, out: &mut Vec<u8>) {
+    for oy in 0..out_h {
+        let (sy0, sy1) = box_span(oy, out_h, h);
+        for ox in 0..out_w {
+            let (sx0, sx1) = box_span(ox, out_w, w);
+            let mut sum = 0u32;
+            for sy in sy0..sy1 {
+                sum += plane[sy * w + sx0..sy * w + sx1].iter().map(|&p| u32::from(p)).sum::<u32>();
+            }
+            let count = ((sy1 - sy0) * (sx1 - sx0)) as u32;
+            out.push(((sum + count / 2) / count) as u8);
+        }
+    }
 }
 
 /// The source columns or rows `[start, end)` that output index `i` of `out` covers, out of `src`.
@@ -316,5 +352,19 @@ mod preview_tests {
         assert_eq!((w, h), (2, 1));
         assert!((i32::from(out[0]) - 129).abs() <= 2, "a half-black pair is mid-grey: {}", out[0]);
         assert_eq!(out[3], 255, "a white pair stays white");
+    }
+
+    #[test]
+    fn a_scaled_frame_averages_each_plane_and_keeps_its_time() {
+        // 4x2 luma [0, 255, 100, 100] per row, chroma U 40 and 60, V 200 and 220.
+        let luma = [0u8, 255, 100, 100, 0, 255, 100, 100];
+        let data: Vec<u8> = luma.iter().chain(&[40u8, 60]).chain(&[200u8, 220]).copied().collect();
+        let frame = Frame::new(4, 2, PixelFormat::I420, 9, data).unwrap();
+        let small = frame.scaled_i420(2, 2).unwrap();
+        assert_eq!((small.width(), small.height(), small.pts_us()), (2, 2, 9));
+        assert_eq!(small.luma(), &[128, 100, 128, 100]);
+        assert_eq!(&small.data()[4..], &[50, 210], "each 1x1 chroma plane is the mean of its two samples");
+        assert_eq!(frame.scaled_i420(8, 8).unwrap(), frame, "a larger size is the frame itself");
+        assert!(frame.scaled_i420(3, 2).is_err(), "an odd size is refused");
     }
 }

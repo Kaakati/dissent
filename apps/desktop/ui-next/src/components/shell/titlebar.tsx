@@ -124,7 +124,7 @@ export function Titlebar() {
     <header
       data-tauri-drag-region
       onDoubleClick={onDoubleClick}
-      className="grid h-[30px] shrink-0 grid-cols-[1fr_auto_1fr] items-center bg-rail pl-s-2 text-muted-foreground select-none"
+      className="grid h-[30px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-s-3 bg-rail pl-s-2 text-muted-foreground select-none"
     >
       <nav className="flex gap-s-1" aria-label="History" data-tauri-drag-region>
         <Button variant="ghost" size="icon" className="size-7 disabled:opacity-100 disabled:text-faint" aria-label="Back" title="Back" disabled={!canBack} onClick={() => void goBack()}>
@@ -135,14 +135,14 @@ export function Titlebar() {
         </Button>
       </nav>
 
-      <div data-tauri-drag-region className="flex items-center justify-center">
+      <div data-tauri-drag-region data-titlebar-title className="flex items-center justify-center">
         <TitleText />
       </div>
 
-      <div className="flex min-w-0 items-center justify-end gap-s-3" data-tauri-drag-region>
-        {window.__DISSENT_MOCK__ ? <span className="whitespace-nowrap text-tiny font-semibold text-warn">Mock backend</span> : null}
+      <div className="flex min-w-0 items-center justify-end gap-s-3" data-tauri-drag-region data-titlebar-end>
+        {window.__DISSENT_MOCK__ ? <span className="shrink-0 whitespace-nowrap text-tiny font-semibold text-warn">Mock backend</span> : null}
         <NetStatusLine />
-        <div className="flex" data-tauri-drag-region>
+        <div className="flex shrink-0" data-tauri-drag-region>
           <button
             type="button"
             aria-label="Minimize"

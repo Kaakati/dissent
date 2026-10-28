@@ -700,6 +700,9 @@ check('the DM header has a video call button, and the sidebar heading is title c
 const fontFaces = await ev(`[...document.fonts].filter(f => f.family.replace(/"/g, '') === 'Google Sans Flex').length`);
 check('the UI font, Google Sans Flex, is bundled and registered', fontFaces >= 2 && (await ev(`document.fonts.check('14px "Google Sans Flex"')`)) === true, `faces: ${fontFaces}`);
 check('the DM search says "Search Maya"', (await ev(`document.querySelector('.search input')?.placeholder === 'Search Maya'`)) === true);
+check('the DM composer addresses the person with @', (await ev(`document.querySelector('.composer textarea')?.placeholder`)) === 'Message @Maya');
+const headerIcons = await ev(`[...document.querySelectorAll('.chat-header .header-tools .icon-btn > svg')].map((n) => Math.round(n.getBoundingClientRect().width))`);
+check('the DM header tools use the 20 px icon', headerIcons.length >= 3 && headerIcons.every((w) => w === 20), JSON.stringify(headerIcons));
 const dmTotal = await ev(`document.querySelectorAll('.msg').length`);
 const dmFirst = await ev(`document.querySelector('.msg .body')?.textContent ?? ''`);
 const dmWord = (dmFirst.trim().split(/\s+/).find((w) => w.length >= 4) ?? '').slice(0, 4);
@@ -2822,6 +2825,20 @@ check('a lookup over 5 s is slow', (await segments()).some((s) => s.text === '60
 await ev(`window.__mockNetLatency(null, 48)`);
 await sleep(500);
 check('no lookup answered shows a dash', (await line()).includes('—'), await line());
+
+// The centred title and the right-hand group never overlap: the latency line truncates first, at any width down to 1100 px.
+const titlebarFits = () => ev(`(() => {
+  const title = document.querySelector('[data-titlebar-title] > div').getBoundingClientRect();
+  const end = document.querySelector('[data-titlebar-end]');
+  const first = [...end.children].map((n) => n.getBoundingClientRect()).filter((r) => r.width > 0)[0];
+  const controls = end.lastElementChild.getBoundingClientRect();
+  return { gap: Math.round(first.left - title.right), controlsIn: controls.right <= window.innerWidth + 0.5 && controls.width === 138 };
+})()`);
+for (const w of [1440, 1100]) {
+  await b.resize(w, 800);
+  const fit = await titlebarFits();
+  check(`at ${w} px the title bar's text does not run into the title, and the window controls stay whole`, fit.gap >= 8 && fit.controlsIn, JSON.stringify(fit));
+}
 
 await b.close();
 }
