@@ -2217,7 +2217,7 @@ mod revocation_tests {
             5,
             Payload::DeviceRevoke(user.root.revoke(d1, 5)),
         );
-        let same_ms = (0..64)
+        let same_ms = (0..10_000)
             .map(|i| {
                 on_device(
                     &user,
