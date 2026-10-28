@@ -114,6 +114,10 @@ pub(crate) struct Inner {
     pub friends: crate::friends::FriendsState,
     /// Whether this device answers `HistorySupport` with yes. Off only in tests, to model an older device.
     pub history_support: AtomicBool,
+    /// Whether this device answers `RotationSupport` with yes. Off only in tests, to model an older device.
+    pub rotation_support: AtomicBool,
+    /// Which devices said they accept a leave rotation, and which communities hold one back. See `rotation`.
+    pub leave_gate: Mutex<crate::rotation::LeaveGate>,
     /// Contacts whose direct profile this run has exchanged. See `profile_sync`.
     pub profile_synced: Mutex<std::collections::BTreeSet<RootId>>,
     /// Set only in tests, to model a device from before `profile_sync` (v0.1.6): it neither syncs nor
@@ -247,6 +251,8 @@ impl Engine {
             relay_asks: Default::default(),
             friends: Default::default(),
             history_support: AtomicBool::new(true),
+            rotation_support: AtomicBool::new(true),
+            leave_gate: Default::default(),
             profile_synced: Default::default(),
             legacy_profiles: AtomicBool::new(false),
             pretend_in_call: AtomicBool::new(false),

@@ -74,14 +74,47 @@ What a departed member can do, after a leave:
 - It cannot read message text sent after its removal commit. A stock client has also deleted its local data.
 - It can still read sealed control events and reach the topic and token, until the secret rotates.
 
-**Rotation on leave (`ROTATE_ON_LEAVE`).** A rotation covers departed members as well as banned ones, using the same
-`SecretRotation` payload. The replay accepts it from this release. Issuing one is turned off in this release
-(`rotation::ROTATE_ON_LEAVE = false`), because older clients reject a rotation that covers a leaver, and would
-then be unable to read messages sent after it. Phase 2 turns it on, in the release after the one where every
-member's client accepts such a rotation. Nothing in the protocol tells a client the version of another member,
-so phase 2 needs a probe: a `RotationSupport` request, answered by new clients and refused by older ones, sent to
-every current member's devices, as `HistorySupport` does. Phase 2 is gated on that probe, and the flag can then go.
-Until then, a departed member keeps the secret, and a rotation by ban still covers only the banned.
+**Rotation on leave.** A rotation covers departed members as well as banned ones, using the same `SecretRotation`
+payload. Clients up to v0.1.11 reject a rotation that covers a leaver, and would then be unable to read messages sent
+after it, so issuing one is gated per community.
+
+- *Phase 1 (v0.1.12):* replay accepts such a rotation. Issuing one was off.
+- *Phase 2 (this release):* an admin issues a leave rotation only once every staying member device has said it
+  accepts one. `rotation::ROTATE_ON_LEAVE` is now a kill switch, on.
+
+**The probe.** Before a rotation that would cover a leaver, the admin's device sends `Request::RotationSupport` to
+every device of every member who stays: storage members and its own root's other devices included, banned and
+departed members and revoked devices left out. A new client answers `Response::RotationSupport(true)`. A client
+from before this cannot decode the request and answers with an error. An error, no answer within 5 seconds, or no
+counts as no, and the probe stops at the first one. A yes is kept in memory for ten minutes per device, so a
+maintenance pass only asks the devices it has no fresh yes from. The hold is logged once when it starts and once
+when it ends, not on every pass.
+
+When a device says no, the rotation covers only the banned members, as in phase 1, and every client accepts it. The
+departures stay owed: `rotation_due` keeps them, and each maintenance pass probes again. Once the last old device
+updates, or leaves, the next pass rotates for every departure since the last rotation. The quick retries right after
+a departure (`rotate_after_departure`) count a departure only while every staying device is known to say yes, so a
+held rotation is left to the maintenance pass and the departure does not trigger ten probes.
+
+**Why a probe, and not an advertised flag.** The candidates were a bit in an existing announcement (presence, call
+`Features`, key packages), a new sealed-control event per device, or an RPC probe.
+
+- A probe needs no change to anything signed, hashed or stored: one appended `Request` variant and one appended
+  `Response` variant. Older peers already answer an unknown request with an error, which reads as no, so they cannot
+  be cut off by a misread. `HistorySupport` and `MemberSealedSupport` work the same way.
+- Presence beacons are signed and ephemeral, and only online devices send them; a field appended to one would need
+  older decoders to tolerate trailing bytes in signed content. Call `Features` reach only devices in a call. Key
+  packages are MLS objects, and a pool entry is used once.
+- A sealed-control event would persist the claim, and so cover devices that are offline, but it would add an event
+  per device to every DAG, a new carrier kind for replay, and a claim that stays true after a downgrade.
+
+The cost of the probe is that an offline device blocks a leave rotation until it comes back, since its answer is
+unknown. That is the safe side: the departed member keeps the secret a little longer, as before this release, and
+no member loses access.
+
+**Known gaps.** A device that joins between the probe and the rotation is not asked; a client up to v0.1.11 that
+joins afterwards rejects the rotation in its replay. Clients from before this release that already accept leave
+rotations (v0.1.12) do not answer the probe, and hold a rotation back until they update.
 
 **Storage joins: a known gap.** `JoinAsStorage` carries no invite, and any holder of the secret can publish one under
 a fresh root. A storage member is served the secret and the ciphertext, so a departed member could rejoin as

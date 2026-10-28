@@ -136,8 +136,77 @@ async fn a_member_who_leaves_is_refused_once_the_secret_rotates() {
         eventually("bob reads it", || readable(&bob.engine, id, channel, "after the leave")).await;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         assert!(!readable(&carol.engine, id, channel, "after the leave"));
+
+        // A control event after the rotation is sealed under the new secret. Carol's old one does not open it.
+        alice.engine.rename_community(id, "After".into()).await.expect("alice renames");
+        let rename = latest_rename(&alice, id);
+        let old = carol.engine.access_keys(id).expect("carol kept her secret");
+        assert!(
+            dissent_events::control::open(&[(old.generation, old.secret)], &rename.event.body).is_err(),
+            "the leaver's secret must not open a later control event"
+        );
+        let new = alice.engine.access_keys(id).expect("alice's secret");
+        assert!(
+            dissent_events::control::open(&[(new.generation, new.secret)], &rename.event.body).is_ok(),
+            "the rotated secret opens it"
+        );
+        eventually("bob sees the rename", || name_of(&bob, id) == "After").await;
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leave_does_not_rotate_while_a_member_device_does_not_accept_it() {
+    crate::testutil::bounded(async {
+        use crate::membership::tests::{eventually, general, readable, three_members};
+        use std::sync::atomic::Ordering;
+        let (alice, bob, carol, id, _invite) = three_members().await;
+        // Bob models a released client, which would reject a rotation that covers a leaver.
+        bob.engine.inner.rotation_support.store(false, Ordering::Relaxed);
+
+        carol.engine.leave_community(id).await.expect("carol leaves");
+        eventually("alice sees carol leave", || {
+            alice.engine.community_view(id).map(|v| v.members.len()).ok() == Some(2)
+        })
+        .await;
+        // The departure's own retries, then a maintenance pass: still no rotation.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        alice.engine.mls_reconcile(id).await;
+        alice.engine.rotate_if_due(id).await;
+        assert_eq!(alice.engine.access_keys(id).map(|k| k.generation), Some(0));
+        assert_eq!(bob.engine.access_keys(id).map(|k| k.generation), Some(0));
+
+        // Bob keeps access: he reads alice's message and her control events.
+        let channel = general(&alice.engine, id);
+        alice
+            .engine
+            .send_message(id, channel, "still here".into())
+            .await
+            .expect("alice posts");
+        eventually("bob reads it", || readable(&bob.engine, id, channel, "still here")).await;
+        alice.engine.rename_community(id, "Still".into()).await.expect("alice renames");
+        eventually("bob sees the rename", || name_of(&bob, id) == "Still").await;
+
+        // Once bob accepts it, the next pass rotates for carol, and bob follows.
+        bob.engine.inner.rotation_support.store(true, Ordering::Relaxed);
+        alice.engine.rotate_if_due(id).await;
+        assert_eq!(alice.engine.access_keys(id).map(|k| k.generation), Some(1));
+        eventually("bob holds the rotated secret", || {
+            bob.engine.access_keys(id).map(|k| k.generation) == Some(1)
+        })
+        .await;
+    })
+    .await;
+}
+
+/// The rename that set `id`'s current name, as `node` stores it.
+fn latest_rename(node: &Node, id: CommunityId) -> dissent_events::SignedEvent {
+    let w = node.engine.read();
+    w.communities.get(&id).and_then(|c| c.latest_rename()).expect("a stored rename")
+}
+
+fn name_of(node: &Node, id: CommunityId) -> String {
+    node.engine.community_view(id).map(|v| v.name).unwrap_or_default()
 }
 
 #[tokio::test(flavor = "multi_thread")]

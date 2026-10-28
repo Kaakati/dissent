@@ -217,7 +217,7 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 
 ## What's next
 
-1. Change the server's secret when someone leaves, not only on a ban, once every member's app accepts it.
+1. Retire older apps from servers. The server's secret now changes when someone leaves, not only on a ban, but only once every member's devices run an app that accepts it. A server with one older app keeps the old behaviour until that app updates.
 2. Measure direct connections across real home and mobile networks, and run relays where they help most.
 3. Phone notifications through push relays, and a mobile app.
 4. A security review.

@@ -164,6 +164,9 @@ pub(crate) enum Request {
         community: CommunityId,
         url: String,
     },
+    /// Whether this device accepts a `SecretRotation` that covers a member who left. A device from before
+    /// this cannot decode it and answers with an error, which counts as no. Appended, see `rotation`.
+    RotationSupport,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -241,6 +244,8 @@ pub(crate) enum Response {
     /// The answer to `Request::RelayCheck`: the relay's latency in milliseconds when it passed, or why it
     /// did not. Appended.
     RelayCheck(std::result::Result<u64, String>),
+    /// Whether the responder accepts a leave rotation. See `Request::RotationSupport`. Appended.
+    RotationSupport(bool),
 }
 
 impl Request {
@@ -391,6 +396,12 @@ mod wire_order_tests {
         "ChannelKeys",
     ];
 
+    /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
+    const APPENDED_REQUEST: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport"];
+
+    /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport"];
+
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[
         "Join",
@@ -453,6 +464,30 @@ mod wire_order_tests {
         let names = variant_names(include_str!("rpc.rs"), "Response");
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         assert_eq!(names[..V0111_RESPONSE.len()], *V0111_RESPONSE, "Response order changed: see the note above");
+    }
+
+    #[test]
+    fn request_appended_variants_follow_v0111_in_order() {
+        let names = variant_names(include_str!("rpc.rs"), "Request");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let start = V0111_REQUEST.len();
+        assert_eq!(
+            names[start..start + APPENDED_REQUEST.len()],
+            *APPENDED_REQUEST,
+            "Request order changed: see the note above"
+        );
+    }
+
+    #[test]
+    fn response_appended_variants_follow_v0111_in_order() {
+        let names = variant_names(include_str!("rpc.rs"), "Response");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let start = V0111_RESPONSE.len();
+        assert_eq!(
+            names[start..start + APPENDED_RESPONSE.len()],
+            *APPENDED_RESPONSE,
+            "Response order changed: see the note above"
+        );
     }
 
     #[test]

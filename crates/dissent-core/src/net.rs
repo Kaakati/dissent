@@ -426,6 +426,9 @@ impl Engine {
             Request::HistorySupport => Response::HistorySupport(
                 self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            Request::RotationSupport => Response::RotationSupport(
+                self.inner.rotation_support.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }

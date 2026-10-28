@@ -5,40 +5,58 @@
 //! authenticated connection. Every device that learns a newer secret moves its gossip topic to it.
 //! When two admins rotate at once, the replay picks one winner (the lowest event id), and every
 //! device converges on it. See `docs/design/06-threat-model.md`, finding 2.
+//!
+//! A person who leaves is covered the same way, once every staying device answers `RotationSupport`
+//! with yes. See `docs/design/05-encrypted-servers.md`, "Leaving and the secret".
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::PoisonError;
+use std::time::{Duration, Instant};
 
 use dissent_events::{ChannelId, CommunityState, Payload, Role};
 use dissent_identity::{CommunityId, DeviceId, RootId};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::engine::{now_ms, Engine};
 use crate::rpc::{Request, Response};
 
 /// How long a community keeps its old topic running after a secret rotation.
-const TOPIC_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+const TOPIC_DRAIN: Duration = Duration::from_secs(10);
 
-/// Whether an admin rotates the secret when a member leaves, not only when one is banned.
+/// Whether an admin may rotate the secret when a member leaves, not only when one is banned. A kill switch.
 ///
-/// Off in this release. Older clients reject a `SecretRotation` that covers a person who left, so turning this on
-/// before every member runs a client that accepts it would leave those members unable to read new messages.
-/// Turn it on in the release after the one where every member's client accepts such a rotation, and check that
-/// with `RotationSupport` before (see `docs/design/05-encrypted-servers.md`, "Leaving and the secret").
-/// Tests run with it on, through `leave_rotation_on`.
-pub(crate) const ROTATE_ON_LEAVE: bool = false;
+/// Clients up to v0.1.11 reject a `SecretRotation` that covers a person who left, and a member on one would be
+/// unable to read new messages after it. So with this on, a leave rotation is still issued only once every staying
+/// member device has answered `RotationSupport` with yes (`leave_rotation_ready`). Until then a rotation covers only
+/// the banned, as in phase 1. See `docs/design/05-encrypted-servers.md`, "Leaving and the secret".
+pub(crate) const ROTATE_ON_LEAVE: bool = true;
 
-/// Whether leave rotations are issued now. Tests always issue them, so the leave path is exercised.
-pub(crate) fn leave_rotation_on() -> bool {
-    ROTATE_ON_LEAVE || cfg!(test)
-}
+/// How long a device's yes to `RotationSupport` counts before the device is asked again.
+const SUPPORT_FRESH: Duration = Duration::from_secs(10 * 60);
+/// How long one device has to answer `RotationSupport`.
+const ASK_WAIT: Duration = Duration::from_secs(5);
 
 /// How often a departure's rotation is retried while the removal commit is on its way, and how many times.
 /// After that the maintenance pass takes over.
-const ROTATE_STEP: std::time::Duration = std::time::Duration::from_secs(1);
+const ROTATE_STEP: Duration = Duration::from_secs(1);
 const ROTATE_TRIES: u32 = 10;
 
-/// The members a rotation issued now would cover: the banned ones not yet covered, and, with leave rotation on,
-/// the departed ones too.
+/// The devices that said yes to `RotationSupport`, with when, and the communities whose leave rotation is held
+/// back, so the reason is logged when the hold starts and not on every pass. In memory only.
+#[derive(Default)]
+pub(crate) struct LeaveGate {
+    yes: BTreeMap<DeviceId, Instant>,
+    held: BTreeSet<CommunityId>,
+}
+
+impl LeaveGate {
+    fn fresh(&self, device: &DeviceId) -> bool {
+        self.yes.get(device).is_some_and(|at| at.elapsed() < SUPPORT_FRESH)
+    }
+}
+
+/// The members a rotation issued now would cover: the banned ones not yet covered, and, with `on_leave`, the
+/// departed ones too.
 pub(crate) fn pending_rotation(st: &CommunityState, on_leave: bool) -> BTreeSet<RootId> {
     if on_leave {
         return st.rotation_due();
@@ -61,12 +79,69 @@ impl Engine {
         }
     }
 
-    /// Whether some departure or ban is still waiting for a rotation, as this device sees the state.
+    /// Whether some departure or ban is still waiting for a rotation, as this device sees the state. A departure
+    /// counts only while every staying device is known to accept its rotation, so a held-back leave rotation is
+    /// left to the maintenance pass instead of being retried here.
     fn rotation_pending(&self, community: CommunityId) -> bool {
+        let on_leave = ROTATE_ON_LEAVE && self.leave_support_known(community);
         let w = self.read();
         w.communities
             .get(&community)
-            .is_some_and(|c| !pending_rotation(c.state(), leave_rotation_on()).is_empty())
+            .is_some_and(|c| !pending_rotation(c.state(), on_leave).is_empty())
+    }
+
+    /// The devices that must accept a leave rotation before one is issued: every device of a member who stays,
+    /// storage members and this root's other devices included. Banned and departed members and revoked devices
+    /// are left out, since the rotation is what cuts them off.
+    fn staying_devices(&self, community: CommunityId) -> Vec<DeviceId> {
+        let w = self.read();
+        let Some(c) = w.communities.get(&community) else {
+            return Vec::new();
+        };
+        let st = c.state();
+        st.members
+            .iter()
+            .filter(|(root, m)| !m.left && !st.banned.contains(root))
+            .flat_map(|(root, _)| w.directory.devices_of(root))
+            .filter(|d| *d != w.device && !st.revoked_devices.contains_key(d))
+            .collect()
+    }
+
+    /// Whether every staying device said yes to `RotationSupport` lately, from the answers already held. Never asks.
+    fn leave_support_known(&self, community: CommunityId) -> bool {
+        let devices = self.staying_devices(community);
+        let gate = self.inner.leave_gate.lock().unwrap_or_else(PoisonError::into_inner);
+        devices.iter().all(|d| gate.fresh(d))
+    }
+
+    /// Asks each staying device without a recent yes whether it accepts a leave rotation, and says whether all do.
+    /// A device that does not answer, answers no, or cannot decode the question (every release up to v0.1.11)
+    /// counts as no: it would reject the rotation and lose access, so the rotation waits. A later pass asks again.
+    async fn leave_rotation_ready(&self, community: CommunityId) -> bool {
+        for device in self.staying_devices(community) {
+            if self.inner.leave_gate.lock().unwrap_or_else(PoisonError::into_inner).fresh(&device) {
+                continue;
+            }
+            let reply = tokio::time::timeout(ASK_WAIT, self.call(device, &Request::RotationSupport)).await;
+            let mut gate = self.inner.leave_gate.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(reply, Ok(Ok(Response::RotationSupport(true)))) {
+                gate.yes.insert(device, Instant::now());
+                continue;
+            }
+            if gate.held.insert(community) {
+                info!(
+                    community = %community,
+                    device = %device,
+                    "not rotating the secret for a departure: a member device has not said it accepts one"
+                );
+            }
+            return false;
+        }
+        let mut gate = self.inner.leave_gate.lock().unwrap_or_else(PoisonError::into_inner);
+        if gate.held.remove(&community) {
+            info!(community = %community, "every member device accepts a leave rotation");
+        }
+        true
     }
 
     /// Installs a community secret from rotation event `source`, saves it, and moves the
@@ -305,7 +380,7 @@ impl Engine {
     /// covered like a banned one, so one rotation covers every departure since the last.
     pub(crate) async fn rotate_if_due(&self, community: CommunityId) {
         let me = self.inner.me;
-        let (pending, generation, allowed) = {
+        let (due, bans, generation, allowed) = {
             let w = self.read();
             let Some(c) = w.communities.get(&community) else {
                 return;
@@ -313,10 +388,20 @@ impl Engine {
             let st = c.state();
             let allowed = st.owner == me
                 || st.roles.get(&me).is_some_and(|r| r.contains(&Role::Admin));
-            let pending: Vec<RootId> = pending_rotation(st, leave_rotation_on()).into_iter().collect();
-            (pending, st.secret_generation + 1, allowed)
+            (pending_rotation(st, true), pending_rotation(st, false), st.secret_generation + 1, allowed)
         };
-        if pending.is_empty() || !allowed || self.is_storage_here(community) {
+        if due.is_empty() || !allowed || self.is_storage_here(community) {
+            return;
+        }
+        // A departure is covered only once every staying device accepts that. Until then the rotation covers the
+        // bans alone, which every client accepts, and the departures wait for a later pass.
+        let leavers = due.len() > bans.len();
+        let pending: Vec<RootId> = if leavers && ROTATE_ON_LEAVE && self.leave_rotation_ready(community).await {
+            due.into_iter().collect()
+        } else {
+            bans.into_iter().collect()
+        };
+        if pending.is_empty() {
             return;
         }
         let banned_devices: Vec<DeviceId> = {
