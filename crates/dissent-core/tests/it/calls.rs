@@ -1477,6 +1477,11 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
     let _serial = crate::common::heavy_test_lock().await;
     bounded(async {
     let (everyone, forwarder) = simulcast_call(&[]).await;
+    // Only budgets set by this test limit the viewers, so a loaded runner's link estimates can't.
+    assert!(
+        dissent_core::test_support::use_link_estimates(&everyone[forwarder].engine, false).await,
+        "the forwarder ignores estimates"
+    );
     let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
     let senders = &others[..3];
     let (constrained, free) = (&everyone[others[3]], &everyone[others[4]]);
@@ -1522,8 +1527,6 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
     let base = tables.iter().map(|t| t[0].1).max().expect("three senders");
     let step = tables.iter().map(|t| t[1].1 - t[0].1).min().expect("three senders");
     let budget = top + 2 * base + step / 2;
-    // Only the budget set here limits the viewers, so a loaded runner's link estimates can't.
-    assert!(dissent_core::test_support::use_link_estimates(fwd, false).await, "the forwarder ignores estimates");
     assert!(
         dissent_core::test_support::set_viewer_budget(fwd, &root(constrained), budget).await,
         "the forwarder takes the budget"
