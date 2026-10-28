@@ -309,6 +309,23 @@ impl Engine {
         true
     }
 
+    /// For tests: whether downlink bandwidth estimates cap budgets on this device's relay. Returns
+    /// false when this device does not forward the call.
+    pub(crate) async fn use_link_estimates_now(&self, on: bool) -> bool {
+        let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        let Some(forwarding) = room.forwarding() else {
+            return false;
+        };
+        let mut sfu = forwarding.sfu().lock().await;
+        let Some(sfu) = sfu.as_mut() else {
+            return false;
+        };
+        sfu.set_use_estimates(on);
+        true
+    }
+
     /// Answers `TileWidths` from `from`. Only the forwarder of a forwarded call takes it.
     pub(crate) async fn on_tile_widths(&self, from: DeviceId, id: RoomId, tiles: Vec<(u64, bool, u32)>) -> CallReply {
         let Some(room) = self.current_room(&id) else {

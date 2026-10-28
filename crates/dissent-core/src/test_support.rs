@@ -145,6 +145,12 @@ pub async fn set_viewer_budget(engine: &crate::Engine, viewer_root: &str, kbps: 
     engine.set_viewer_budget_now(viewer_root, kbps).await
 }
 
+/// Whether downlink bandwidth estimates cap budgets on `engine`'s relay. Off, a set budget is the
+/// only limit. Returns false when `engine` does not forward the call.
+pub async fn use_link_estimates(engine: &crate::Engine, on: bool) -> bool {
+    engine.use_link_estimates_now(on).await
+}
+
 /// How many hosted relays `engine` holds a passed check for.
 pub fn relay_checks(engine: &crate::Engine) -> usize {
     engine.read().relay_checks.len()

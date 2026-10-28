@@ -99,6 +99,8 @@ pub struct Sfu<T: PacketTransport> {
     /// Each downlink's video budget from its own bandwidth estimate, in kbps, while that estimate
     /// is below where it starts. See `refresh_estimates`.
     estimated: BTreeMap<PeerId, u32>,
+    /// Whether downlink estimates cap budgets. Tests turn it off so a set budget is the only limit.
+    use_estimates: bool,
     /// Each (downlink, sender) pair that has received a keyframe, so its deltas may follow.
     video_started: HashSet<(Link, u64)>,
     /// Each (downlink, sender) pair that has asked for a keyframe and not yet got one.
@@ -129,6 +131,7 @@ impl<T: PacketTransport> Sfu<T> {
             rotation: 0,
             budgets: BTreeMap::new(),
             estimated: BTreeMap::new(),
+            use_estimates: true,
             video_started: HashSet::new(),
             video_wanted: HashSet::new(),
             video_source: BTreeMap::new(),
@@ -192,6 +195,16 @@ impl<T: PacketTransport> Sfu<T> {
     /// Records what a listener's link can carry, in kbps.
     pub fn set_listener_budget(&mut self, downlink: PeerId, kbps: u32) {
         self.budgets.insert(downlink, kbps);
+    }
+
+    /// Whether each downlink's own bandwidth estimate also caps its budget (on by default). Off, a
+    /// budget set with `set_listener_budget` is the only limit, so a test is not at the mercy of a
+    /// loaded machine's estimates.
+    pub fn set_use_estimates(&mut self, on: bool) {
+        self.use_estimates = on;
+        if !on {
+            self.estimated.clear();
+        }
     }
 
     /// The layer to send one listener, out of `layers_kbps` (ascending). A listener with no
@@ -614,6 +627,9 @@ impl<T: PacketTransport> Sfu<T> {
     /// (`BWE_INITIAL_KBPS`). Only an estimate that fell below it is a measured limit; at or above
     /// it the link counts as unlimited, as before layers. See `docs/design/13-forwarded-calls.md`.
     fn refresh_estimates(&mut self) {
+        if !self.use_estimates {
+            return;
+        }
         let audio = AUDIO_TOP_SPEAKERS * AUDIO_STREAM_KBPS;
         self.estimated = self
             .links
