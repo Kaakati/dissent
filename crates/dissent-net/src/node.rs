@@ -74,6 +74,12 @@ pub struct NodeConfig {
     /// Bind only to 127.0.0.1, so nothing listens on external interfaces. Used by tests and
     /// local multi-instance checks; avoids OS firewall prompts. Peers must be on this machine.
     pub loopback_only: bool,
+    /// Give the endpoint no IP transport, so every connection goes through a relay and no direct
+    /// path can form. Takes precedence over `loopback_only` and `bind_port`, and turns LAN discovery
+    /// off. The DHT lookup keeps its own socket: turn `dht_lookup` off too for a node with no UDP
+    /// socket at all. Needs a relay: an error with `RelayChoice::Disabled`. Off by default; used by
+    /// tests that must keep a path relayed.
+    pub relay_only: bool,
     /// Add the relays that communities name to this node. Off, the node uses only the relays in `relay`, so
     /// no community can have this device measured or dialled through its relay.
     pub community_relays: bool,
@@ -111,6 +117,7 @@ impl Default for NodeConfig {
             rpc: None,
             dht_lookup: true,
             loopback_only: false,
+            relay_only: false,
             community_relays: true,
             media: None,
             gossip_max_message: DEFAULT_GOSSIP_MAX_MESSAGE,
@@ -138,6 +145,7 @@ impl fmt::Debug for NodeConfig {
                 &self.extra_protocols.iter().map(|(alpn, _)| alpn).collect::<Vec<_>>(),
             )
             .field("loopback_only", &self.loopback_only)
+            .field("relay_only", &self.relay_only)
             .field("lan_discovery", &self.lan_discovery)
             .field("serves_lookups", &self.serves_lookups)
             .finish()
@@ -192,6 +200,9 @@ impl Node {
                 iroh_gossip::proto::MIN_MAX_MESSAGE_SIZE
             )));
         }
+        if cfg.relay_only && matches!(cfg.relay, RelayChoice::Disabled) {
+            return Err(NetError::Config("relay_only needs a relay, but relays are disabled".into()));
+        }
         let gossip_max = cfg.gossip_max_message;
         let lookup = MemoryLookup::with_provenance(source::CACHE);
         let lan_lookup = MemoryLookup::with_provenance(source::LAN);
@@ -233,7 +244,9 @@ impl Node {
         if let Some(ca) = cfg.relay_ca {
             builder = builder.ca_tls_config(ca);
         }
-        if cfg.loopback_only {
+        if cfg.relay_only {
+            builder = builder.clear_ip_transports();
+        } else if cfg.loopback_only {
             let addr = SocketAddr::from(([127, 0, 0, 1], cfg.bind_port));
             builder = builder
                 .clear_ip_transports()
@@ -274,7 +287,7 @@ impl Node {
             services.add(Recorded::new(source::N0_DNS, dns, dials.clone()));
         }
         let lan_keys = Arc::new(Mutex::new(Vec::new()));
-        let lan_task = if cfg.lan_discovery && !cfg.loopback_only {
+        let lan_task = if cfg.lan_discovery && !cfg.loopback_only && !cfg.relay_only {
             match lan::bind() {
                 Ok(socket) => {
                     let port = endpoint.bound_sockets().first().map_or(0, |a| a.port());

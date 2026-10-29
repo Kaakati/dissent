@@ -52,7 +52,7 @@ export function NetStatusLine() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex min-w-0 items-center gap-1.5 text-meta whitespace-nowrap text-muted-foreground tabular-nums" data-tauri-drag-region data-net-line>
+        <span className="flex min-w-0 max-w-[420px] items-center gap-1.5 text-meta whitespace-nowrap text-muted-foreground tabular-nums" data-tauri-drag-region data-net-line>
           <span className={cn('size-2 flex-none rounded-full', view.ok ? 'bg-success' : 'bg-offline')} aria-hidden="true" data-tauri-drag-region />
           <span className="truncate" data-tauri-drag-region>
             <Segments segments={view.segments} />

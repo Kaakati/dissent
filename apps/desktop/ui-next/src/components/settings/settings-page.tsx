@@ -105,7 +105,9 @@ export function SettingsPage() {
                 aria-current={current ? 'true' : undefined}
                 onClick={() => openSettings(n.key)}
                 className={cn(
-                  'flex h-9 w-full items-center gap-s-2 rounded-lg px-2.5 text-left text-ui font-medium text-muted-foreground hover:bg-hover hover:text-text',
+                  // The page focuses the current section on open; the ring shows only for keyboard focus (:focus-visible), so a
+                  // mouse open shows the selected row alone.
+                  'flex h-9 w-full items-center gap-s-2 rounded-lg px-2.5 text-left text-ui font-medium text-muted-foreground outline-none hover:bg-hover hover:text-text focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring',
                   current && 'bg-selected text-text-strong',
                 )}
               >
@@ -118,11 +120,13 @@ export function SettingsPage() {
         </nav>
       </div>
 
-      <div className="flex min-h-0 min-w-0 gap-s-8 overflow-y-auto bg-chat px-s-10 pt-[60px] pb-s-10">
-        <header>
+      {/* The title sits above the page, and the page keeps a readable width, as in the reference client: a title beside the
+          page wrapped onto two lines at 1440 px and left every section a different width. */}
+      <div className="flex min-h-0 min-w-0 flex-col gap-s-6 overflow-y-auto bg-chat px-s-10 pt-[60px] pb-s-10" data-settings-content>
+        <header className="w-full max-w-[740px]">
           <h1 className="text-title font-bold text-text-strong">{TITLES[section]}</h1>
         </header>
-        <div className="min-w-0">
+        <div className="w-full min-w-0 max-w-[740px]">
           <Body section={section} />
         </div>
       </div>

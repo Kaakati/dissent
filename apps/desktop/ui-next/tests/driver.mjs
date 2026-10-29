@@ -211,8 +211,11 @@ await sleep(250);
 await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.includes('Create a group')).click()`);
 await sleep(400);
 check('New conversation offers "Create a group"', (await dialogTitle()) === 'Create a group', `title: ${await dialogTitle()}`);
-check('the group dialog asks for three more people at the start', (await ev(`[...document.querySelectorAll('[role="dialog"] span')].some((s) => s.textContent === 'Pick 3 more')`)) === true);
-for (let i = 0; i < 3; i++) await ev(`document.querySelectorAll('[role="dialog"] ul[aria-label="Contacts"] input[type="checkbox"]')[${i}].click()`);
+check('the group dialog asks for two more people at the start', (await ev(`[...document.querySelectorAll('[role="dialog"] span')].some((s) => s.textContent === 'Pick 2 more')`)) === true);
+for (let i = 0; i < 2; i++) await ev(`document.querySelectorAll('[role="dialog"] ul[aria-label="Contacts"] input[type="checkbox"]')[${i}].click()`);
+await sleep(200);
+check('two picks are enough for a group of 3', (await ev(`[...document.querySelectorAll('[role="dialog"] button')].some((b) => b.textContent === 'Create group of 3' && !b.disabled)`)) === true);
+await ev(`document.querySelectorAll('[role="dialog"] ul[aria-label="Contacts"] input[type="checkbox"]')[2].click()`);
 await sleep(200);
 check('three picks say "group of 4 with you"', (await ev(`[...document.querySelectorAll('[role="dialog"] span')].some((s) => s.textContent.includes('group of 4'))`)) === true);
 check('the create button names the group size', (await ev(`[...document.querySelectorAll('[role="dialog"] button')].some((b) => b.textContent === 'Create group of 4')`)) === true);
@@ -660,7 +663,7 @@ check('F4 auto-accept option takes focus and Enter', acceptFocusedF === true);
 const netCentre = await ev(`(() => { const r = document.querySelector('span.truncate[data-tauri-drag-region]')?.getBoundingClientRect(); return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`);
 if (netCentre) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: netCentre.x, y: netCentre.y });
-  await sleep(400);
+  await sleep(800); // tooltips wait 300 ms
 }
 const tipF = await ev(`[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((n) => n.textContent).join('|')`);
 check('F5 network line tooltip lists the DHT size estimate', tipF.includes('DHT size estimate'), tipF.slice(0, 100));
@@ -685,6 +688,23 @@ check('Reset to default goes back to the OS Downloads folder', (await ev(`${stor
 await press(',', 2);
 await sleep(400);
 check('Ctrl+, opens Settings', (await ev(`!!document.querySelector('nav[aria-label="Settings sections"], [aria-label="Settings"]') || document.body.textContent.includes('My identity')`)) === true);
+check('the title bar names Settings while it is open', (await ev(`document.querySelector('[data-titlebar-title]')?.textContent`)) === 'Settings', String(await ev(`document.querySelector('[data-titlebar-title]')?.textContent`)));
+// The page title sits above the page on one line, and the page's blocks share one width (the banner block included).
+const settingsLayout = await ev(`(() => {
+  const h1 = document.querySelector('[data-settings-content] h1').getBoundingClientRect();
+  const blocks = [...document.querySelectorAll('[data-settings-content] section')].map((n) => Math.round(n.getBoundingClientRect().width));
+  const first = document.querySelector('[data-settings-content] section').getBoundingClientRect();
+  return { oneLine: h1.height <= 32, above: h1.bottom <= first.top, widths: [...new Set(blocks)] };
+})()`);
+check('the Settings title is one line above the page, and its blocks are one width', settingsLayout.oneLine && settingsLayout.above && settingsLayout.widths.length === 1 && settingsLayout.widths[0] <= 740, JSON.stringify(settingsLayout));
+// The page focuses the current section on open. A keyboard open shows its ring; a mouse open shows the selected row alone.
+const currentNavFocus = () => ev(`(() => { const n = document.querySelector('nav[aria-label="Settings sections"] button[aria-current="true"]'); return { focused: document.activeElement === n, visible: n.matches(':focus-visible') }; })()`);
+check('opened with Ctrl+, the current settings row has the keyboard focus ring', JSON.stringify(await currentNavFocus()) === '{"focused":true,"visible":true}', JSON.stringify(await currentNavFocus()));
+await press('Escape');
+await sleep(300);
+await b.click('button[aria-label="Settings"]');
+await sleep(400);
+check('opened with the mouse the current settings row is focused without a ring', JSON.stringify(await currentNavFocus()) === '{"focused":true,"visible":false}', JSON.stringify(await currentNavFocus()));
 
 // ==== chat sections (batch A) begin ====
 // ---- C1. DM header and search: the tools are there, typing filters and marks the matches, Esc clears the search ----
@@ -1236,6 +1256,24 @@ await b.ev(`[...document.querySelectorAll('${RIGHT} button')].find(n => /Mutual 
 await sleep(200);
 check('clicking the mutual servers count lists that many servers', (await b.ev(`document.querySelectorAll('${RIGHT} ul li').length === ${mutualCount}`)) === true, `count ${mutualCount}`);
 check('the panel shows Member Since with the date and year', (await b.ev(`(() => { const h = [...document.querySelectorAll('${RIGHT} h4')].find(n => n.textContent === 'Member Since'); return !!h && /[A-Z][a-z]{2} \\d{1,2}, \\d{4}/.test(h.nextElementSibling?.textContent ?? ''); })()`)) === true);
+// The reference layout: the mutuals as one muted 12 px line, 16 px message text with 12 px timestamps, and the chat header
+// running across the right column, which starts below it.
+// The reference's proportions: a 104 px banner, and the 80 px avatar raised so 56 px of it sits over the banner.
+const bannerFit = await b.ev(`(() => { const bn = document.querySelector('${RIGHT} [data-profile-banner]').getBoundingClientRect(); const av = document.querySelector('${RIGHT} [role="img"][aria-label="Online"]').parentElement.getBoundingClientRect(); return { banner: Math.round(bn.height), over: Math.round(bn.bottom - av.top) }; })()`);
+check('the DM panel banner is 104 px and the avatar overlaps it by 56 px', bannerFit.banner === 104 && bannerFit.over === 56, JSON.stringify(bannerFit));
+// DM rows: 42 px with 32 px avatars; a row with no status line shows its name alone, centred on one line.
+const dmRows = await b.ev(`['Maya', 'Leila', 'Rana'].map((name) => { const row = [...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((n) => n.textContent.endsWith(name)); const r = row.getBoundingClientRect(); const av = row.querySelector('[role="img"]').parentElement.getBoundingClientRect(); const label = [...row.querySelectorAll('span')].find((n) => n.textContent === name).getBoundingClientRect(); return { name, h: Math.round(r.height), av: Math.round(av.width), centred: Math.abs((label.top + label.bottom) / 2 - (r.top + r.bottom) / 2) <= 2 }; })`);
+check('DM rows are 42 px with 32 px avatars, and a name with no status is one centred line', dmRows.every((x) => x.h === 42 && x.av === 32 && x.centred), JSON.stringify(dmRows));
+check('the mutual friends and servers sit on one muted 12 px line', (await b.ev(`(() => { const line = document.querySelector('${RIGHT} [data-mutual-summary] > div'); const parts = [...line.querySelectorAll('button')]; return parts.length === 2 && line.getBoundingClientRect().height <= 24 && parts.every((n) => getComputedStyle(n).fontSize === '12px'); })()`)) === true);
+check('message text is 16 px and its timestamp 12 px', (await b.ev(`[getComputedStyle(document.querySelector('.msg .body')).fontSize, getComputedStyle(document.querySelector('.msg-head time')).fontSize].join()`)) === '16px,12px', await b.ev(`[getComputedStyle(document.querySelector('.msg .body')).fontSize, getComputedStyle(document.querySelector('.msg-head time')).fontSize].join()`));
+const spanning = await b.ev(`(() => { const h = document.querySelector('main .chat-header').getBoundingClientRect(); const r = document.querySelector('${RIGHT}').getBoundingClientRect(); return { headerRight: Math.round(h.right), rightRight: Math.round(r.right), below: r.top >= h.bottom }; })()`);
+check('the chat header spans above the right column, which starts below it', spanning.below && spanning.headerRight >= spanning.rightRight, JSON.stringify(spanning));
+// Compact density with the larger text: no message header or panel line runs past its box.
+await b.ev(`document.documentElement.dataset.density = 'compact'`);
+await sleep(200);
+const overflow = await b.ev(`[...document.querySelectorAll('.msg-head, ${RIGHT} [data-mutual-summary] > div, aside[aria-label="Channels and conversations"] button')].filter((n) => n.scrollWidth > n.clientWidth + 1).map((n) => n.textContent.slice(0, 30))`);
+check('in compact density no message header, mutuals line or sidebar row overflows', overflow.length === 0, JSON.stringify(overflow));
+await b.ev(`delete document.documentElement.dataset.density`);
 
 // Hide and show the panel from the chat header's toggle.
 await b.ev(`document.querySelector('button[aria-label="Hide profile panel"]')?.click()`);
@@ -1384,6 +1422,8 @@ check('C1 the lobby names the people in the call and who is not', (await b.ev(`[
 check('C1 the route note says the call is end-to-end encrypted and forwarded', (await b.ev(`document.body.textContent.includes('End-to-end encrypted. You’ll connect through Jonas')`)) === true);
 check('C1 the mic meter has 16 bars', (await b.ev(`document.querySelectorAll('[role="meter"] span').length === 16`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-lobby.png`);
+const lobbySearchGap = await b.ev(`(() => { const h = document.querySelector('main .chat-header').getBoundingClientRect(); const q = document.querySelector('main .chat-header .search').getBoundingClientRect(); return Math.round(h.right - q.right); })()`);
+check('C1 the lobby header search sits at the right edge, after the tools', lobbySearchGap <= 8, `${lobbySearchGap} px from the edge`);
 
 // The mic button in the lobby toggles, and Not now returns to the chat.
 await clickBy('button', 'Mute microphone');
@@ -1416,6 +1456,8 @@ check('C3 the tiles report their drawn width to the engine', (await b.ev(`Object
 check('C3 the share button opens the picker with the primary display', (await b.ev(`(async () => { const share = document.querySelector('button[aria-label="Share screen"]'); share.click(); await new Promise((r) => setTimeout(r, 300)); const items = [...document.querySelectorAll('[role="menuitem"]')].map((n) => n.textContent); return items.some((t) => t.includes('(primary)')); })()`)) === true);
 check('C3 the call header has the overflow menu and the search box', (await b.ev(`!!document.querySelector('button[aria-label="More group actions"]') && !!document.querySelector('input[aria-label="Search messages"]')`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-call-group.png`);
+const callSearchGap = await b.ev(`(() => { const h = document.querySelector('main .chat-header').getBoundingClientRect(); const q = document.querySelector('main .chat-header .search').getBoundingClientRect(); return Math.round(h.right - q.right); })()`);
+check('C3 the call header search sits at the right edge, after the tools', callSearchGap <= 8, `${callSearchGap} px from the edge`);
 
 // Mute and deafen in the call pane.
 await clickBy('section[aria-label="Call"] button', 'Mute microphone');
@@ -2832,12 +2874,12 @@ const titlebarFits = () => ev(`(() => {
   const end = document.querySelector('[data-titlebar-end]');
   const first = [...end.children].map((n) => n.getBoundingClientRect()).filter((r) => r.width > 0)[0];
   const controls = end.lastElementChild.getBoundingClientRect();
-  return { gap: Math.round(first.left - title.right), controlsIn: controls.right <= window.innerWidth + 0.5 && controls.width === 138 };
+  return { gap: Math.round(first.left - title.right), offCentre: Math.abs((title.left + title.right) / 2 - window.innerWidth / 2), controlsIn: controls.right <= window.innerWidth + 0.5 && controls.width === 138 };
 })()`);
-for (const w of [1440, 1100]) {
+for (const w of [1600, 1440, 1100]) {
   await b.resize(w, 800);
   const fit = await titlebarFits();
-  check(`at ${w} px the title bar's text does not run into the title, and the window controls stay whole`, fit.gap >= 8 && fit.controlsIn, JSON.stringify(fit));
+  check(`at ${w} px the title is centred in the window, the network line keeps 32 px clear of it, and the window controls stay whole`, fit.offCentre <= 1 && fit.gap >= 32 && fit.controlsIn, JSON.stringify(fit));
 }
 
 await b.close();
@@ -3355,6 +3397,677 @@ check('W24 no console errors', errors.length === 0, errors.slice(0, 3).join(' | 
 await b.close();
 }
 
+// ---- Volunteer forwarders: the rail menu's Help Forward Calls, and a call forwarded by a member who is not in it ----
+async function section_volunteers() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9813, profile: `${SCRATCH}/volunteers-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const openRailMenu = (name) => ev(`(() => { const b = document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']'); if (!b) return false; const r = b.getBoundingClientRect(); b.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); return true; })()`);
+const forwardItem = () => ev(`(() => { const n = [...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')); return n ? { checked: n.getAttribute('aria-checked'), text: n.textContent.trim() } : null; })()`);
+const closeMenus = async () => { await ev(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(250); };
+
+// The toggle is off by default, says what it does, and turns on and back off for that server only.
+await openRailMenu('Riverside Makers');
+await sleep(400);
+const off = await forwardItem();
+check('V1 a member sees Help Forward Calls in the server menu, off by default', off?.checked === 'false', JSON.stringify(off));
+check('V1 the item says the call shows your name', off?.text.includes('The call shows your name') === true, JSON.stringify(off));
+await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
+await sleep(400);
+check('V2 picking it turns forwarding on for that server', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === JSON.stringify(['c1']), String(await ev(`JSON.stringify(window.__mockForwardCalls)`)));
+await openRailMenu('Riverside Makers');
+await sleep(400);
+check('V2 the item shows it is on', (await forwardItem())?.checked === 'true');
+await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
+await sleep(400);
+check('V3 picking it again turns it off', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === '[]');
+await closeMenus();
+
+// A call forwarded by a member who is not in it names them, and lists only the people in the call.
+await ev(`window.__mockForwardedBy = 'Yusuf'`);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('workshop'))?.click()`);
+await sleep(900);
+const banner = await ev(`document.querySelector('section[aria-label="Call"] [role="status"]')?.textContent ?? ''`);
+check('V4 the call screen says Forwarded by Yusuf', banner.includes('Forwarded by Yusuf.'), banner);
+check('V4 the banner says the forwarder is not in the call and names no backup', banner.includes('aren’t in the call') && !banner.includes('backup'), banner);
+const details = await ev(`document.querySelector('aside[aria-label="Details"]')?.textContent ?? ''`);
+check('V5 the call details name the volunteer as the forwarder, with no backup', details.includes('Yusuf · not in the call') && !details.includes('Backup'), details.slice(0, 300));
+check('V5 the volunteer is not listed in the call', (await ev(`!document.querySelector('section[aria-label="Call"]')?.textContent.includes('Yusuf ') && ![...document.querySelectorAll('section[aria-label="Call"] [aria-label]')].some((n) => n.getAttribute('aria-label').startsWith('Yusuf'))`)) === true);
+await b.screenshot(`${SCRATCH}/shots/V-next-forwarded-by.png`);
+await ev(`window.__mockForwardedBy = undefined`);
+
+// The owner's Seeder may forward calls, in Server Settings > Boosts: off by default, and the owner turns it on.
+const pick = (prefix) => ev(`(() => { const n = [...document.querySelectorAll('[role^="menuitem"]')].find((n) => n.textContent.trim().startsWith(${JSON.stringify(prefix)})); if (!n) return false; n.click(); return true; })()`);
+await ev(`document.querySelector('button[aria-label="Create or join a server"]').click()`);
+await sleep(500);
+await ev(`(() => { const f = document.querySelector('[role="dialog"] input[aria-label="Server Name"]'); f.focus(); f.select(); })()`);
+await b.send('Input.insertText', { text: 'Seeder test' });
+await ev(`[...document.querySelectorAll('[role="dialog"] button:not([role="tab"])')].find((b) => b.textContent.trim() === 'Create').click()`);
+await sleep(1200);
+await openRailMenu('Seeder test');
+await sleep(400);
+await pick('Server Settings');
+await sleep(300);
+await pick('Server Profile');
+await sleep(600);
+const SSV = '[role="dialog"][aria-label="Server settings"]';
+await ev(`[...document.querySelectorAll('${SSV} button')].find((b) => b.textContent.trim() === 'Boosts')?.click()`);
+await sleep(500);
+const seederBox = () => ev(`(() => { const i = document.querySelector('${SSV} input[aria-label="Seeder may forward calls"]'); return i ? { checked: i.checked, disabled: i.disabled } : null; })()`);
+const before = await seederBox();
+check('V7 the owner sees Seeder may forward calls, off by default', before?.checked === false && before?.disabled === false, JSON.stringify(before));
+check('V7 the setting says what a seeder learns', (await ev(`document.querySelector('${SSV}')?.textContent.includes('learns who is in the call')`)) === true);
+await ev(`document.querySelector('${SSV} input[aria-label="Seeder may forward calls"]').click()`);
+await sleep(500);
+check('V8 the owner turns it on', (await seederBox())?.checked === true);
+await ev(`document.querySelector('${SSV} input[aria-label="Seeder may forward calls"]').click()`);
+await sleep(500);
+check('V8 and off again', (await seederBox())?.checked === false);
+
+// Storage grants: a seeder that joins asks for one, and an admin grants it from Members.
+await ev(`window.__mockAddSeeder('Seeder test', 'Home seeder')`);
+await sleep(800);
+check('G0 a new ask shows a notification once', (await ev(`[...document.body.querySelectorAll('*')].filter((n) => n.childElementCount === 0 && n.textContent.includes('Home seeder asks for a storage grant in Seeder test')).length`)) === 1);
+check('G0 Members in the settings nav shows a badge for the ask', (await ev(`[...document.querySelectorAll('${SSV} nav button')].find((b) => b.textContent.startsWith('Members'))?.querySelector('[data-asks-badge]')?.textContent`)) === '1');
+await openRailMenu('Seeder test');
+await sleep(400);
+const settingsEntry = await ev(`[...document.querySelectorAll('[role^="menuitem"]')].find((n) => n.textContent.trim().startsWith('Server Settings'))?.textContent ?? ''`);
+check('G0 the server menu Server Settings entry says a seeder asks for a grant', settingsEntry.includes('1 seeder asks for a grant'), settingsEntry);
+// Its Members item opens Server Settings at Members.
+await pick('Server Settings');
+await sleep(300);
+await pick('Members');
+await sleep(800);
+const seederRow = () => ev(`(() => { const li = document.querySelector('${SSV} [aria-label="Seeders"] li'); return li ? { name: li.textContent, grant: li.querySelector('[data-seeder-grant]')?.textContent } : null; })()`);
+const asked = await seederRow();
+check('G1 Members lists the seeder apart from people, asking for a grant', asked?.name.includes('Home seeder') && asked?.grant === 'Asks for a grant', JSON.stringify(asked));
+check('G1 the seeder is not in the people list', (await ev(`[...document.querySelectorAll('${SSV} ul[role="list"]:not([aria-label="Seeders"]) li')].every((li) => !li.textContent.includes('Home seeder'))`)) === true);
+await ev(`[...document.querySelectorAll('${SSV} [aria-label="Seeders"] button')].find((b) => b.textContent.trim() === 'Grant storage')?.click()`);
+await sleep(800);
+check('G2 granting storage shows the seeder as granted', (await seederRow())?.grant === 'Granted', JSON.stringify(await seederRow()));
+check('G2 the badge goes once the ask is granted', (await ev(`!document.querySelector('${SSV} [data-asks-badge]')`)) === true);
+await ev(`document.querySelector('button[aria-label="Close server settings"]')?.click()`);
+await sleep(300);
+
+const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
+check('V6 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+await b.close();
+}
+
+// ---- O. The server's channel order: an owner drags a text channel and a voice channel, each within its kind, with a
+// drop line; Alt+Shift+Up and Down and the Move Up and Move Down menu items move the focused one; a failed publish puts
+// the order back with a toast; a member's rows do not drag. ----
+async function section_channelorder() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9815, profile: `${SCRATCH}/channelorder-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+// Modifiers: Alt=1, Shift=8.
+const pressKey = async (key, vk, modifiers) => {
+  const base = { key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(300);
+};
+const textNames = () => ev(`[...document.querySelectorAll('${SIDE} span[title^="#"]')].map((n) => n.textContent)`);
+const voiceNames = () => ev(`[...document.querySelectorAll('${SIDE} button[title^="Join "], ${SIDE} button[title^="Connected to "]')].map((n) => n.querySelector('span[title]').textContent)`);
+// The button of the text row named `name`, or of the voice row with `voice`.
+const rowExpr = (name, voice = false) => voice
+  ? `[...document.querySelectorAll('${SIDE} button[title^="Join "]')].find((n) => n.title === 'Join ' + ${JSON.stringify(name)})`
+  : `document.querySelector('${SIDE} span[title=' + JSON.stringify('#' + ${JSON.stringify(name)}) + ']')?.closest('button')`;
+const point = (expr) => ev(`(() => { const n = ${expr}; if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, h: r.height }; })()`);
+const mouse = (type, x, y, buttons) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, buttons });
+// Presses the row `from`, moves below the middle of the row `below`, checks the drop line, and releases there.
+const dragBelow = async (from, below, voice = false) => {
+  const p0 = await point(rowExpr(from, voice));
+  const p1 = await point(rowExpr(below, voice));
+  if (!p0 || !p1) return { line: false, missing: true };
+  await mouse('mousePressed', p0.x, p0.y, 1);
+  for (const y of [p0.y + 8, p1.y + p1.h / 2 - 2, p1.y + p1.h / 2 + 4]) await mouse('mouseMoved', p0.x, y, 1);
+  await sleep(150);
+  const line = await ev(`document.querySelectorAll('${SIDE} [data-channel-drop-line]').length === 1`);
+  await mouse('mouseReleased', p0.x, p1.y + p1.h / 2 + 4, 0);
+  await sleep(500);
+  return { line };
+};
+
+// The owner's server, with a third text channel and two voice channels.
+await ev(`document.querySelector('button[aria-label="Open Source Arabic"]').click()`);
+await sleep(700);
+await ev(`(async () => {
+  const invoke = window.__TAURI__.core.invoke;
+  await invoke('create_channel', { communityId: 'c2', name: 'events' });
+  await invoke('create_voice_channel', { communityId: 'c2', name: 'hangout' });
+  await invoke('create_voice_channel', { communityId: 'c2', name: 'studio' });
+  window.__mockEngineEvent({ kind: 'community_updated', community_id: 'c2' });
+})()`);
+await until(async () => (await textNames()).length === 3 && (await voiceNames()).length === 2);
+check('O0 the owner\'s server lists three text and two voice channels', JSON.stringify(await textNames()) === '["general","reading-list","events"]' && JSON.stringify(await voiceNames()) === '["hangout","studio"]', JSON.stringify([await textNames(), await voiceNames()]));
+check('O0 the owner\'s rows say how to move them by key', (await ev(`${rowExpr('general')}?.getAttribute('aria-keyshortcuts')`)) === 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown');
+
+// A drag moves general below reading-list, shows the drop line on the way, and publishes the order.
+const openBefore = await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`);
+const dragged = await dragBelow('general', 'reading-list');
+check('O1 a drag shows one drop line where the channel will land', dragged.line === true, JSON.stringify(dragged));
+check('O1 the drag moves general below reading-list', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
+const published = await ev(`JSON.stringify(window.__mockReorders?.at(-1) ?? null)`);
+const shownIds = await ev(`JSON.stringify({ communityId: 'c2', text: [...document.querySelectorAll('${SIDE} span[title^="#"]')].map((n) => n.closest('button').dataset.channelId), voice: [...document.querySelectorAll('${SIDE} button[title^="Join "]')].map((n) => n.dataset.channelId) })`);
+check('O1 the order is published for the server, text and voice apart', published === shownIds && published.startsWith('{"communityId":"c2","text":["ch6","ch5"'), `${published} vs ${shownIds}`);
+check('O1 the drop line is gone after the drop', (await ev(`document.querySelectorAll('${SIDE} [data-channel-drop-line]').length`)) === 0);
+check('O1 a drag does not open the channel it moved', (await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`)) === openBefore, openBefore);
+
+// A voice channel moves among the voice channels only.
+const voiceDrag = await dragBelow('hangout', 'studio', true);
+check('O2 a voice channel drags within the voice channels, with the line', voiceDrag.line === true && JSON.stringify(await voiceNames()) === '["studio","hangout"]', JSON.stringify([voiceDrag, await voiceNames()]));
+check('O2 the text order is left as it was', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
+
+// Alt+Shift+Down on the focused channel moves it one place, announces it, keeps focus, and does not jump to an unread channel.
+await ev(`${rowExpr('general')}.focus()`);
+const activeBefore = await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`);
+await pressKey('ArrowDown', 40, 9);
+await sleep(300);
+check('O3 Alt+Shift+Down moves the focused channel one place down', JSON.stringify(await textNames()) === '["reading-list","events","general"]', JSON.stringify(await textNames()));
+check('O3 the keyboard move is announced with its new position', (await ev(`document.querySelector('${SIDE} [data-channel-order-status="text"]')?.textContent`)) === 'Moved general to position 3 of 3');
+check('O3 focus stays on the moved channel', (await ev(`document.activeElement === ${rowExpr('general')}`)) === true);
+check('O3 the key moves the channel rather than opening another one', (await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`)) === activeBefore);
+await pressKey('ArrowDown', 40, 9);
+check('O3 Alt+Shift+Down on the last channel leaves the order', JSON.stringify(await textNames()) === '["reading-list","events","general"]', JSON.stringify(await textNames()));
+await pressKey('ArrowUp', 38, 9);
+check('O3 Alt+Shift+Up moves it back up', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
+
+// The channel menu has Move Up and Move Down; the first channel's Move Up is disabled.
+const openMenu = (expr) => ev(`(() => { const n = ${expr}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + r.height / 2 })); })()`);
+const menuItem = (label) => `[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})`;
+await openMenu(rowExpr('reading-list'));
+await sleep(400);
+check('O4 the channel menu offers Move Up and Move Down', (await ev(`!!(${menuItem('Move Up')}) && !!(${menuItem('Move Down')})`)) === true);
+check('O4 Move Up is disabled on the first channel', (await ev(`${menuItem('Move Up')}?.getAttribute('aria-disabled') === 'true' || ${menuItem('Move Up')}?.hasAttribute('data-disabled')`)) === true);
+await ev(`${menuItem('Move Down')}.click()`);
+await sleep(500);
+check('O4 Move Down moves the channel one place down', JSON.stringify(await textNames()) === '["general","reading-list","events"]', JSON.stringify(await textNames()));
+
+// A failed publish shows the new order at once, then puts the old one back with a toast.
+await ev(`window.__mockReorderFails = true; window.__mockDelay = 700`);
+await ev(`${rowExpr('events')}.focus()`);
+await pressKey('ArrowUp', 38, 9);
+check('O5 the order moves at once, before the publish answers', JSON.stringify(await textNames()) === '["general","events","reading-list"]', JSON.stringify(await textNames()));
+await sleep(1000);
+check('O5 a failed publish puts the old order back', JSON.stringify(await textNames()) === '["general","reading-list","events"]', JSON.stringify(await textNames()));
+check('O5 the failure shows as a toast', (await ev(`[...document.querySelectorAll('[role="status"]')].some((n) => n.textContent.includes('Could not move the channel'))`)) === true);
+await ev(`window.__mockReorderFails = false; window.__mockDelay = 0`);
+
+// A member's rows do not drag, and they have no order menu or key hint.
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(900);
+const memberBefore = await textNames();
+check('O6 a member\'s channel rows carry no drag handle or key hint', (await ev(`document.querySelectorAll('${SIDE} [data-channel-id], ${SIDE} [aria-keyshortcuts^="Alt+Shift"]').length`)) === 0);
+const memberDrag = await dragBelow(memberBefore[0], memberBefore[1]);
+check('O6 a member cannot drag a channel: no line, and the order stays', memberDrag.line === false && JSON.stringify(await textNames()) === JSON.stringify(memberBefore), JSON.stringify([memberDrag, await textNames()]));
+
+await b.close();
+}
+
+// ---- O7. A short window: the channel list ends above the floating user panel, so no row shows through the gap under or
+// beside it, scrolled or not, and also while the panel is taller with the voice strip. ----
+async function section_shortsidebar() {
+const b = await launch({ url: `${BASE}/`, width: 1280, height: 460, port: 9817, profile: `${SCRATCH}/shortsidebar-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const LIST = 'aside[aria-label="Channels and conversations"] [data-sidebar-list]';
+// Where the list ends against the panel, and what shows in the gap under the panel and at the panel's top edge.
+const layout = () => ev(`(() => {
+  const list = document.querySelector('${LIST}');
+  const panel = document.querySelector('[data-user-panel]');
+  if (!list || !panel) return null;
+  const l = list.getBoundingClientRect();
+  const p = panel.getBoundingClientRect();
+  const inList = (x, y) => { const n = document.elementFromPoint(x, y); return !!n && list.contains(n); };
+  const xs = [l.left + 12, l.left + l.width / 2, l.right - 12];
+  return {
+    listBottom: Math.round(l.bottom),
+    panelTop: Math.round(p.top),
+    scrolls: list.scrollHeight > list.clientHeight + 1,
+    underPanel: xs.some((x) => inList(x, p.bottom + 3)),
+    besidePanel: xs.some((x) => x > p.right && inList(x, p.top + p.height / 2)),
+  };
+})()`);
+const clear = (s) => !!s && s.listBottom <= s.panelTop && !s.underPanel && !s.besidePanel;
+
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(900);
+const top = await layout();
+check('O7 at a short height the channel list scrolls', top?.scrolls === true, JSON.stringify(top));
+check('O7 the list ends above the user panel, with nothing of it under or beside the panel', clear(top), JSON.stringify(top));
+await ev(`(() => { const l = document.querySelector('${LIST}'); l.scrollTop = Math.floor((l.scrollHeight - l.clientHeight) / 2); })()`);
+await sleep(200);
+const middle = await layout();
+check('O7 scrolled halfway, no row shows through the gap under the panel', clear(middle), JSON.stringify(middle));
+await ev(`(() => { const l = document.querySelector('${LIST}'); l.scrollTop = l.scrollHeight; })()`);
+await sleep(200);
+const lastRow = await ev(`(() => { const l = document.querySelector('${LIST}'); const rows = l.querySelectorAll('button'); const last = rows[rows.length - 1].getBoundingClientRect(); return Math.round(last.bottom) <= Math.round(document.querySelector('[data-user-panel]').getBoundingClientRect().top); })()`);
+check('O7 scrolled to the end, the last row sits fully above the panel', lastRow === true);
+
+// In a voice channel the panel grows with the voice strip, and the list ends above its new top.
+await ev(`[...document.querySelectorAll('${LIST} button')].find((x) => x.textContent.includes('workshop'))?.click()`);
+await until(async () => (await ev(`document.querySelector('[data-user-panel]')?.textContent.includes('Voice connected')`)) === true, 8000);
+await sleep(300);
+const voice = await layout();
+check('O7 with the voice strip the list still ends above the taller panel', clear(voice) && (await ev(`document.querySelector('[data-user-panel]').textContent.includes('Voice connected')`)) === true, JSON.stringify(voice));
+await ev(`[...document.querySelectorAll('[data-user-panel] button')].find((x) => x.getAttribute('aria-label') === 'Disconnect')?.click()`);
+await b.close();
+}
+
+// ---- Paste: a picture on the clipboard is staged in the composer and goes out with the next send ----
+async function section_paste() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9861, profile: `${SCRATCH}/paste-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const openRow = async (label) => {
+  await ev(`[...document.querySelectorAll('${SIDE} button')].find((x) => x.textContent.includes(${JSON.stringify(label)}))?.click()`);
+  await sleep(700);
+};
+const composer = `document.querySelector('textarea[aria-label="Message"]')`;
+const enter = async () => {
+  const base = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'char', ...base, text: '\r' });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(900);
+};
+// Dispatches a paste on the composer, as Ctrl+V does: `files` are [name, type, size?], `text` the text/plain part.
+// Resolves to whether the composer took over the paste (preventDefault).
+const paste = (files, text = '') => ev(`(() => {
+  const dt = new DataTransfer();
+  if (${JSON.stringify(text)}) dt.setData('text/plain', ${JSON.stringify(text)});
+  for (const [name, type, size] of ${JSON.stringify(files)}) {
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])], name, { type });
+    if (size) Object.defineProperty(file, 'size', { value: size });
+    dt.items.add(file);
+  }
+  const t = ${composer};
+  t.focus();
+  const e = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+  t.dispatchEvent(e);
+  return e.defaultPrevented;
+})()`);
+const chips = () => ev(`[...document.querySelectorAll('[aria-label="Files to send"] .chip-name')].map((n) => n.textContent)`);
+const messageCount = () => ev(`document.querySelectorAll('.messages article.msg').length`);
+// The text of the newest message that carries the attachment `name` (an image shows as its "Open <name>" button).
+const withAttachment = (name) => ev(`[...document.querySelectorAll('.messages article.msg')].reverse().find((a) => [...a.querySelectorAll('[aria-label]')].some((n) => n.getAttribute('aria-label').endsWith(${JSON.stringify(name)})))?.textContent ?? ''`);
+
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(800);
+await openRow('general');
+const before = await messageCount();
+const took = await paste([['image.png', 'image/png']]);
+const named = await until(async () => (await chips()).length === 1 && (await chips()));
+check('PA1 pasting a clipboard picture stages one chip', took === true && Array.isArray(named) && named.length === 1, JSON.stringify(named));
+check('PA2 the pasted picture is named pasted-image-YYYYMMDD-HHMMSS.png', /^pasted-image-\d{8}-\d{6}\.png$/.test(named?.[0] ?? ''), String(named?.[0]));
+check('PA3 the paste saved the bytes through the backend', (await ev(`window.__mockPasted.length === 1 && window.__mockPasted[0].size === 11`)) === true);
+await sleep(600);
+check('PA4 nothing is sent before Enter', (await messageCount()) === before && (await ev(`${composer}.value`)) === '');
+
+// Text on the clipboard stays text, even with a picture beside it (a spreadsheet copy carries both).
+check('PA5 a text paste is left to the textarea', (await paste([], 'just words')) === false);
+check('PA6 text with a picture beside it is left to the textarea and stages nothing', (await paste([['image.png', 'image/png']], 'A1\tB1')) === false);
+await sleep(400);
+check('PA7 the text pastes added no chip', (await chips()).length === 1, JSON.stringify(await chips()));
+
+// Remove takes the chip away.
+await ev(`document.querySelector('[aria-label="Files to send"] button[aria-label^="Remove pasted-image-"]')?.click()`);
+await sleep(300);
+check('PA8 the chip\'s Remove button unstages the pasted picture', (await chips()).length === 0 && (await ev(`document.querySelector('[aria-label="Files to send"]').hidden`)) === true);
+
+// A file copied in Explorer keeps its name.
+await paste([['report.pdf', 'application/pdf']]);
+await until(async () => (await chips()).length === 1);
+check('PA9 a copied file keeps its own name', JSON.stringify(await chips()) === JSON.stringify(['report.pdf']), JSON.stringify(await chips()));
+await ev(`document.querySelector('[aria-label="Files to send"] button[aria-label="Remove report.pdf"]')?.click()`);
+await sleep(300);
+
+// Enter sends the caption and the picture together.
+await paste([['image.png', 'image/png']]);
+await until(async () => (await chips()).length === 1);
+const name = (await chips())[0];
+await ev(`${composer}.focus()`);
+await send('Input.insertText', { text: 'pasted screenshot' });
+await sleep(250);
+await enter();
+const sent = await until(() => withAttachment(name));
+check('PA10 Enter sends the caption with the pasted picture', sent.includes('pasted screenshot'), sent.slice(0, 200));
+check('PA11 the chip is gone after the send', (await chips()).length === 0);
+
+// A pasted file crosses in memory, so one over 256 MB is not read: a toast points to the attach button and drag and drop.
+// A small picture pasted with it is still staged.
+const pastedBefore = await ev(`window.__mockPasted.length`);
+await paste([['image.png', 'image/png'], ['video.mkv', 'video/x-matroska', 300 * 1024 ** 2]]);
+await until(async () => (await chips()).length === 1);
+const largeToast = () => ev(`[...document.querySelectorAll('[role="status"]')].some((n) => n.textContent.includes('Large files: use the attach button or drag and drop'))`);
+check('PA12 a pasted file over 256 MB shows the large-files toast', (await until(largeToast, 3000)) === true);
+check('PA13 the large file is neither read nor staged; the small picture beside it is', (await ev(`window.__mockPasted.length`)) === pastedBefore + 1 && /^pasted-image-/.test(JSON.stringify(await chips()).slice(2)), JSON.stringify(await chips()));
+await ev(`document.querySelector('[aria-label="Files to send"] button[aria-label^="Remove "]')?.click()`);
+await sleep(300);
+await paste([['image.png', 'image/png', 11 * 1024 ** 3]]);
+await sleep(500);
+check('PA14 a pasted file over 10 GB is not staged either', (await chips()).length === 0 && (await ev(`window.__mockPasted.length`)) === pastedBefore + 1);
+
+// A direct conversation takes a paste too.
+await ev(`document.querySelector('button[aria-label="Direct messages"]')?.click()`);
+await sleep(600);
+await openRow('Maya');
+await paste([['image.png', 'image/png']]);
+await until(async () => (await chips()).length === 1);
+const dmName = (await chips())[0] ?? '';
+check('PA15 a paste in a direct conversation stages the picture', /^pasted-image-/.test(dmName), JSON.stringify(await chips()));
+await enter();
+check('PA16 Enter sends the pasted picture to the direct conversation', (await until(() => withAttachment(dmName))) !== '' && (await chips()).length === 0);
+noConsoleErrors('paste', b.consoleErrors);
+await b.close();
+}
+
+// ---- Attachments: the sender sees its own picture at once; a recipient gets a Download row, never a broken image ----
+async function section_attachments() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9871, profile: `${SCRATCH}/attachments-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Book Club"]')?.click()`);
+await sleep(800);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((x) => x.textContent.includes('photos'))?.click()`);
+await sleep(900);
+// The message article whose text includes `text`, as a JS expression.
+const article = (text) => `[...document.querySelectorAll('.messages article.msg')].find((a) => a.textContent.includes(${JSON.stringify(text)}))`;
+// What a message's attachment shows: a loaded picture, a broken one, a card and its state, and the card's buttons.
+const shows = (text) => ev(`JSON.stringify((() => {
+  const a = ${article(text)};
+  if (!a) return null;
+  const imgs = [...a.querySelectorAll('.attachments img')];
+  const card = a.querySelector('.att-card');
+  return {
+    loaded: imgs.some((i) => i.complete && i.naturalWidth > 0 && !i.closest('.att-preview')),
+    broken: imgs.filter((i) => i.complete && i.naturalWidth === 0).length,
+    emptyPreview: [...a.querySelectorAll('.att-preview-btn')].some((x) => !x.querySelector('img')),
+    card: card?.dataset.state ?? null,
+    text: a.querySelector('.attachments')?.textContent ?? '',
+    buttons: [...a.querySelectorAll('.attachments button')].map((x) => x.getAttribute('aria-label') ?? x.textContent.trim()),
+    bar: !!a.querySelector('.att-card .att-progress'),
+    green: !!a.querySelector('.att-card .att-download.rounded-full'),
+  };
+})())`).then((s) => JSON.parse(s));
+
+// AT1 A picture someone else shared and this device does not have: a Download row with a round green button, no image.
+const ridge = await shows('The view from the ridge.');
+check('AT1 the recipient sees a Download row for a picture that is not here yet', ridge?.card === 'available' && ridge.buttons.includes('Download ridge-view.jpg') && ridge.green, JSON.stringify(ridge));
+check('AT2 the row names the picture and its size, and asks to download it', ridge?.text.includes('ridge-view.jpg') && ridge.text.includes('2.4 MB') && ridge.text.includes('Download to view'), ridge?.text);
+check('AT3 the recipient sees no image, broken or empty, before the download', ridge?.broken === 0 && !ridge.loaded && !ridge.emptyPreview, JSON.stringify(ridge));
+
+// AT4 Download shows progress on the row, then the picture. A draft typed meanwhile survives the reloads it brings.
+await ev(`document.querySelector('textarea[aria-label="Message"]').focus()`);
+await send('Input.insertText', { text: 'draft kept' });
+await sleep(200);
+await ev(`${article('The view from the ridge.')}.querySelector('button[aria-label="Download ridge-view.jpg"]').click()`);
+const moving = await until(async () => { const s = await shows('The view from the ridge.'); return s?.card === 'downloading' && s.bar && s; }, 3000);
+check('AT4 a download shows its progress on the row', !!moving && /%/.test(moving.text), JSON.stringify(moving));
+const done = await until(async () => { const s = await shows('The view from the ridge.'); return s?.loaded && s; }, 6000);
+check('AT5 once downloaded the picture shows inline, with no row left', !!done && done.card === null && done.broken === 0 && done.buttons.includes('Open ridge-view.jpg'), JSON.stringify(done ?? await shows('The view from the ridge.')));
+check('AT5b the composer draft survives the reloads of a download', (await ev(`document.querySelector('textarea[aria-label="Message"]').value`)) === 'draft kept');
+await ev(`(() => { const t = document.querySelector('textarea[aria-label="Message"]'); t.focus(); t.select(); })()`);
+await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+await sleep(200);
+
+// AT6 A download that fails says why and offers Retry; Retry then brings the picture.
+await ev(`${article('And the summit')}.querySelector('button[aria-label="Download summit.jpg"]').click()`);
+const failed = await until(async () => { const s = await shows('And the summit'); return s?.card === 'failed' && s; }, 5000);
+check('AT6 a failed download says why', !!failed && failed.text.includes('Download failed') && failed.text.includes('Try again when the sender is online'), JSON.stringify(failed));
+check('AT7 a failed download offers Retry and shows no image', !!failed && failed.buttons.includes('Retry download of summit.jpg') && failed.broken === 0 && !failed.loaded, JSON.stringify(failed));
+await ev(`${article('And the summit')}.querySelector('button[aria-label="Retry download of summit.jpg"]').click()`);
+const retried = await until(async () => { const s = await shows('And the summit'); return s?.loaded && s; }, 6000);
+check('AT8 Retry downloads the picture and shows it', !!retried && retried.card === null, JSON.stringify(retried ?? await shows('And the summit')));
+
+// AT9 A downloaded picture the webview cannot load falls back to its card, with Open and Show in folder.
+const raw = await until(async () => { const s = await shows('A raw from the old camera.'); return s?.card === 'downloaded' && s; }, 3000);
+check('AT9 a picture that cannot load shows its card, never a broken image', !!raw && raw.broken === 0 && raw.buttons.includes('Open old-camera.jpg') && raw.buttons.includes('Show old-camera.jpg in folder') && raw.text.includes('Cannot show this picture here'), JSON.stringify(raw ?? await shows('A raw from the old camera.')));
+
+// AT10 The sender's own dropped picture shows at once: no Download row, no progress, no "Download failed".
+await ev(`(() => {
+  const dt = new DataTransfer();
+  dt.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'trail-photo.png', { type: 'image/png' }));
+  document.querySelector('.messages').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+})()`);
+await until(async () => (await ev(`[...document.querySelectorAll('[aria-label="Files to send"] .chip-name')].map((n) => n.textContent).includes('trail-photo.png')`)) === true, 3000);
+await ev(`document.querySelector('textarea[aria-label="Message"]').focus()`);
+await send('Input.insertText', { text: 'my trail photo' });
+await sleep(200);
+const base = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, text: '\r' });
+await send('Input.dispatchKeyEvent', { type: 'char', ...base, text: '\r' });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+const mine = await until(async () => { const s = await shows('my trail photo'); return s?.loaded && s; }, 5000);
+check('AT10 the sender sees its own dropped picture at once', !!mine && mine.buttons.includes('Open trail-photo.png'), JSON.stringify(mine ?? await shows('my trail photo')));
+check('AT11 the sender sees no download state for its own picture', !!mine && mine.card === null && !mine.text.includes('Download') && !mine.bar && mine.broken === 0, JSON.stringify(mine));
+noConsoleErrors('attachments', b.consoleErrors);
+await b.close();
+}
+
+// ---- tooltips: one dark tooltip for the icon-only buttons, after a short delay, with no native title beside it ----
+async function section_tooltips() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9861, profile: `${SCRATCH}/tooltips-next-profile` });
+const { ev, send } = b;
+await sleep(1200);
+// The tooltips on the page: their text, side, shortcut hint and whether they show (a drag hides them with CSS).
+const tips = () => ev(`[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((n) => ({ text: n.textContent, side: n.dataset.side, shown: getComputedStyle(n).display !== 'none', shortcut: n.querySelector('[data-tip-shortcut]')?.textContent ?? null }))`);
+const shownTips = async () => (await tips()).filter((t) => t.shown);
+const hoverTip = async (selector) => {
+  await b.hover(selector);
+  await sleep(600);
+  return shownTips();
+};
+const RAIL = 'nav[aria-label="Servers and direct messages"]';
+await b.moveAway();
+
+// The server rail: the server's name, to the right of its icon, after the delay and not at once.
+await b.hover(`${RAIL} button[aria-label="Riverside Makers"]`);
+await sleep(80);
+check('T1 a tooltip waits for the delay before it shows', (await shownTips()).length === 0, JSON.stringify(await tips()));
+await sleep(500);
+const railTip = await shownTips();
+check('T2 hovering a server icon shows its name to the right', railTip.length === 1 && railTip[0].text === 'Riverside Makers' && railTip[0].side === 'right', JSON.stringify(railTip));
+// Moving to the neighbouring icon shows its tooltip at once: the provider skips the delay.
+await b.hover(`${RAIL} button[aria-label="Open Source Arabic"]`);
+await sleep(120);
+const nextTip = await shownTips();
+check('T3 the next server shows its tooltip at once when moving along the rail', nextTip.length === 1 && nextTip[0].text === 'Open Source Arabic', JSON.stringify(nextTip));
+const homeTip = await hoverTip(`${RAIL} button[aria-label="Direct messages"]`);
+check('T4 the Home button says Direct Messages', homeTip[0]?.text === 'Direct Messages', JSON.stringify(homeTip));
+await b.moveAway();
+await sleep(400);
+
+// A drag on the rail shows no tooltip, even over the icons it passes.
+const from = await ev(`(() => { const r = document.querySelector('${RAIL} button[aria-label="Book Club"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y });
+await sleep(600);
+await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', buttons: 1, clickCount: 1 });
+for (let dy = 6; dy <= 60; dy += 6) {
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y + dy, button: 'left', buttons: 1 });
+  await sleep(40);
+}
+await sleep(500);
+const dragTips = await shownTips();
+check('T5 no tooltip shows during a rail drag', dragTips.length === 0 && (await ev(`document.documentElement.dataset.dragging !== undefined`)) === true, JSON.stringify(dragTips));
+await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: from.x, y: from.y + 60, button: 'left', buttons: 0, clickCount: 1 });
+await sleep(300);
+check('T6 the drag guard clears when the pointer is released', (await ev(`document.documentElement.dataset.dragging === undefined`)) === true);
+await b.moveAway();
+
+// The DM header: call and video call, with no native title beside the tooltip.
+await ev(`document.querySelector('${RAIL} button[aria-label="Direct messages"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya')).click()`);
+await sleep(800);
+const callTip = await hoverTip('button[aria-label="Start voice call with Maya"]');
+check('T7 the header call button shows its tooltip', callTip[0]?.text === 'Start voice call with Maya', JSON.stringify(callTip));
+const videoTip = await hoverTip('button[aria-label="Start video call with Maya"]');
+check('T8 the header video button shows its tooltip', videoTip[0]?.text === 'Start video call with Maya', JSON.stringify(videoTip));
+check('T9 the header buttons carry no native title', (await ev(`[...document.querySelectorAll('.chat-header button')].every((n) => !n.hasAttribute('title'))`)) === true);
+
+// The composer's send button names its key.
+const sendTip = await hoverTip('.composer button[aria-label="Send message"]');
+check('T10 the send button shows "Send" with the Enter hint', sendTip[0]?.text === 'SendEnter' && sendTip[0]?.shortcut === 'Enter', JSON.stringify(sendTip));
+
+// The user panel: Mute shows its tooltip although it is disabled outside a call; Settings names its shortcut.
+const muteTip = await hoverTip('section[aria-label="You"] button[aria-label="Mute"]');
+check('T11 the user panel mute button shows "Mute"', muteTip[0]?.text === 'Mute', JSON.stringify(muteTip));
+const settingsTip = await hoverTip('section[aria-label="You"] button[aria-label="Settings"]');
+check('T12 the settings button shows its shortcut', settingsTip[0]?.shortcut === 'Ctrl+,' && settingsTip[0]?.text.startsWith('User Settings'), JSON.stringify(settingsTip));
+
+// The title bar's Back and window controls, below the bar.
+const backTip = await hoverTip('button[aria-label="Back"]');
+check('T13 Back shows its Alt+Left hint below the title bar', backTip[0]?.shortcut === 'Alt+←' && backTip[0]?.side === 'bottom', JSON.stringify(backTip));
+const closeTip = await hoverTip('header button[aria-label="Close"]');
+check('T14 the window controls show their names', closeTip[0]?.text === 'Close', JSON.stringify(closeTip));
+
+// The sidebar's icon buttons: the + by Direct Messages, then (in a server this person owns) the server header, the
+// + of a channel section and a channel row's Edit Channel gear. The header keeps its menu with the tooltip on it.
+const dmPlusTip = await hoverTip('aside[aria-label="Channels and conversations"] button[aria-label="New conversation"]');
+check('T16 the + by Direct Messages shows "Create DM"', dmPlusTip[0]?.text === 'Create DM', JSON.stringify(dmPlusTip));
+await ev(`document.querySelector('${RAIL} button[aria-label="Open Source Arabic"]').click()`);
+await sleep(900);
+// The earlier drag dropped over another server, so no click reached the dragged one; the next click still opens a server.
+check('T16b a click after a rail drag opens the server', (await ev(`document.querySelector('aside[aria-label="Channels and conversations"] [data-server-name]')?.textContent`)) === 'Open Source Arabic');
+const headerTip = await hoverTip('aside[aria-label="Channels and conversations"] button[aria-label="Open Source Arabic menu"]');
+check('T17 the server header shows "Server options" below it, with no native title inside', headerTip[0]?.text === 'Server options' && headerTip[0]?.side === 'bottom' && (await ev(`!document.querySelector('aside[aria-label="Channels and conversations"] button[aria-label="Open Source Arabic menu"] [title]')`)) === true, JSON.stringify(headerTip));
+await b.click('aside[aria-label="Channels and conversations"] button[aria-label="Open Source Arabic menu"]');
+await sleep(400);
+check('T18 the server header still opens its menu', (await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].some((n) => n.textContent.includes('Create invite'))`)) === true);
+await b.press('Escape');
+await sleep(300);
+const createTip = await hoverTip('aside[aria-label="Channels and conversations"] button[aria-label="Create channel"]');
+check('T19 the + of Text channels shows "Create Channel"', createTip[0]?.text === 'Create Channel', JSON.stringify(createTip));
+// The gear shows on the row's hover, so the pointer goes over the row first.
+const GEAR_ROW = 'aside[aria-label="Channels and conversations"] div.group:has(span[title="#reading-list"])';
+await b.hover(`${GEAR_ROW} > button`);
+await sleep(300);
+const gearTip = await hoverTip(`${GEAR_ROW} button[aria-label="Edit Channel"]`);
+check('T20 a channel row\'s gear shows "Edit Channel"', gearTip[0]?.text === 'Edit Channel', JSON.stringify(gearTip));
+await b.moveAway();
+await sleep(400);
+check('T15 moving away closes the tooltip', (await shownTips()).length === 0, JSON.stringify(await tips()));
+
+noConsoleErrors('tooltips', b.consoleErrors);
+await b.close();
+}
+
+// ---- Mentions in direct messages and groups: the "@" list, the sent mentions, the highlight, the badge and the alert ----
+async function section_dmmentions() {
+const b = await launch({ url: `${BASE}/?nolive`, width: 1600, height: 1000, port: 9863, profile: `${SCRATCH}/dmmentions-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const row = (title) => `[...document.querySelectorAll('${SIDE} button')].find((x) => x.title === ${JSON.stringify(title)})`;
+const openRow = async (title) => {
+  await ev(`${row(title)}?.click()`);
+  await sleep(700);
+};
+const composer = `document.querySelector('textarea[aria-label="Message"]')`;
+const typeIn = async (text) => {
+  await ev(`${composer}.focus()`);
+  await send('Input.insertText', { text });
+  await sleep(250);
+};
+const key = async (k, code, vk, text) => {
+  const base = { key: k, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+  await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base, ...(text ? { text } : {}) });
+  if (text) await send('Input.dispatchKeyEvent', { type: 'char', ...base, text });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await sleep(300);
+};
+const enter = () => key('Enter', 'Enter', 13, '\r');
+const listRows = () => ev(`[...document.querySelectorAll('[role="listbox"] [role="option"]')].map((n) => n.textContent)`);
+const lastMentions = () => ev(`JSON.stringify((window.__mockConvMentions ?? []).at(-1) ?? null)`);
+const maya = await ev(`window.__mockRootOf('Maya')`);
+const jonas = await ev(`window.__mockRootOf('Jonas')`);
+
+// A direct conversation offers the other person.
+await ev(`document.querySelector('button[aria-label="Direct messages"]')?.click()`);
+await sleep(700);
+await openRow('Maya');
+await typeIn('@Ma');
+const dmRows = await until(async () => { const r = await listRows(); return r.length ? r : null; }, 3000);
+check('DMM1 "@" in a direct conversation offers the other person', Array.isArray(dmRows) && dmRows.length === 1 && dmRows[0].includes('Maya'), JSON.stringify(dmRows));
+await enter();
+check('DMM2 picking inserts "@Maya "', (await ev(`${composer}.value`)) === '@Maya ', String(await ev(`${composer}.value`)));
+await typeIn('see the plan');
+await enter();
+await sleep(400);
+check('DMM3 the DM is sent with Maya mentioned', (await lastMentions()) === JSON.stringify([maya]), String(await lastMentions()));
+check('DMM4 the sent DM shows Maya as a mention pill', (await ev(`[...document.querySelectorAll('.messages article.msg')].reverse().find((a) => a.textContent.includes('see the plan'))?.querySelector('.mention-pill')?.textContent`)) === '@Maya');
+
+// A group offers its members, never @everyone.
+await openRow('Saturday workshop crew');
+await typeIn('@every');
+await sleep(300);
+check('DMM5 a group offers no @everyone', (await listRows()).length === 0, JSON.stringify(await listRows()));
+await ev(`(() => { const t = ${composer}; t.focus(); t.select(); })()`);
+await key('Backspace', 'Backspace', 8);
+await typeIn('@Jo');
+const groupRows = await until(async () => { const r = await listRows(); return r.length ? r : null; }, 3000);
+check('DMM6 "@" in a group offers its members', Array.isArray(groupRows) && groupRows.some((r) => r.includes('Jonas')) && !groupRows.some((r) => r.includes('Sami')), JSON.stringify(groupRows));
+await enter();
+await typeIn('bring the clamps');
+await enter();
+await sleep(400);
+check('DMM7 the group message is sent with Jonas mentioned', (await lastMentions()) === JSON.stringify([jonas]), String(await lastMentions()));
+// Plain text sends no mentions.
+const before = await ev(`(window.__mockConvMentions ?? []).length`);
+await typeIn('no names here');
+await enter();
+await sleep(400);
+check('DMM8 a message that names nobody sends no mentions', (await ev(`JSON.stringify((window.__mockConvMentions ?? []).slice(${before}))`)) === '[[]]', String(await ev(`JSON.stringify((window.__mockConvMentions ?? []).slice(${before}))`)));
+
+// An incoming mention: a red badge on the group's row, the highlight once opened, and the badge clears.
+await openRow('Maya');
+await ev(`(() => { window.__mockGroupPost('grp1', ${JSON.stringify(jonas)}, '@Sami can you check', [window.__mockMe]); window.__mockEngineEvent({ kind: 'group', group_id: 'grp1' }); })()`);
+const badge = await until(() => ev(`${row('Saturday workshop crew')}?.querySelector('[aria-label="1 mention"]')?.textContent ?? null`), 3000);
+check('DMM9 a mention in a group shows a red mention badge on its row', badge === '1', String(badge));
+await openRow('Saturday workshop crew');
+check('DMM10 the mentioning message is highlighted', (await until(() => ev(`[...document.querySelectorAll('.messages article.msg.mention')].some((a) => a.textContent.includes('can you check'))`), 3000)) === true);
+check('DMM11 the highlighted message shows the pill for the viewer', (await ev(`[...document.querySelectorAll('.messages article.msg.mention')].pop()?.querySelector('.mention-pill')?.textContent`)) === '@Sami');
+await openRow('Maya');
+check('DMM12 opening the group clears its mention badge', (await until(() => ev(`!${row('Saturday workshop crew')}?.querySelector('[aria-label$="mention"], [aria-label$="mentions"]')`), 3000)) === true);
+check('DMM13 your own message that mentions someone else is not highlighted', (await ev(`[...document.querySelectorAll('.messages article.msg.mention')].length`)) === 0);
+
+// A muted group stays quiet for plain messages, and a mention alerts through the mute.
+await ev(`(() => {
+  window.localStorage.setItem('dissent.muted.v1', JSON.stringify({ 'group:grp1': null }));
+})()`);
+await send('Page.navigate', { url: `${BASE}/?nolive` });
+await sleep(2200);
+await ev(`document.querySelector('button[aria-label="Direct messages"]')?.click()`);
+await sleep(700);
+await ev(`(() => {
+  window.__mockNotified = [];
+  document.hasFocus = () => false;
+  window.__mockGroupPost('grp1', ${JSON.stringify(jonas)}, 'quiet update');
+  window.__mockEngineEvent({ kind: 'group', group_id: 'grp1' });
+})()`);
+await sleep(800);
+check('DMM14 a plain message in a muted group does not notify', (await ev(`window.__mockNotified.length`)) === 0, String(await ev(`window.__mockNotified.length`)));
+await ev(`(() => {
+  window.__mockGroupPost('grp1', ${JSON.stringify(jonas)}, '@Sami urgent', [window.__mockMe]);
+  window.__mockEngineEvent({ kind: 'group', group_id: 'grp1' });
+})()`);
+await sleep(800);
+check('DMM15 a mention in a muted group notifies', (await ev(`window.__mockNotified.length`)) === 1, String(await ev(`JSON.stringify(window.__mockNotified)`)));
+check('DMM16 a muted group still shows its mention badge', (await until(() => ev(`${row('Saturday workshop crew')}?.querySelector('[aria-label="1 mention"]')?.textContent ?? null`), 3000)) === '1');
+await ev(`(() => { delete document.hasFocus; window.localStorage.removeItem('dissent.muted.v1'); })()`);
+noConsoleErrors('dmmentions', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -3377,6 +4090,13 @@ const SECTIONS = [
   ['shell', section_shell],
   ['emoticons', section_emoticons],
   ['websitehandles', section_websitehandles],
+  ['volunteers', section_volunteers],
+  ['channelorder', section_channelorder],
+  ['shortsidebar', section_shortsidebar],
+  ['paste', section_paste],
+  ['dmmentions', section_dmmentions],
+  ['attachments', section_attachments],
+  ['tooltips', section_tooltips],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

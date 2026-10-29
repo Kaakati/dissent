@@ -6,7 +6,7 @@ use dissent_core::{
 };
 use tauri::State;
 
-use crate::commands::{engine, err, parse, AppState};
+use crate::commands::{engine, err, mentions_of_arg, parse, AppState, MentionsArg};
 
 const DEFAULT_LIMIT: usize = 100;
 
@@ -134,9 +134,11 @@ pub async fn send_group_message(
     state: State<'_, AppState>,
     group_id: String,
     text: String,
+    mentions: Option<MentionsArg>,
 ) -> Result<DmItem, String> {
     let conv: ConvId = parse("group id", &group_id)?;
-    engine(&state).await?.send_to_conversation(conv, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.send_to_conversation_with(conv, text, mentions).await.map_err(err)
 }
 
 #[tauri::command]

@@ -3,12 +3,13 @@
 import { api, listenTo, onEngineEvent } from './api';
 import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
-import { attachmentProgress, clearMentions, reloadForEvent, startChat, useChat } from './chat';
+import { clearMentions, reloadForEvent, startChat, useChat } from './chat';
 import { handleDeepLinks } from './deep-link';
 import { has } from './features';
 import { useShell, type ShellState } from './store';
 import type { CallState, EngineEvent, ShellSettings, TypingTarget, UpdateInfo, UserStatus } from './types';
 import { useShellPrefs } from './shell-prefs';
+import { onStorageAskEvent } from './storage-asks';
 
 // The alerts for a new message, and the reload of the open conversation when the event is for it.
 function onMessageEvent(ev: EngineEvent): void {
@@ -66,8 +67,8 @@ export function startShellEvents(): void {
   onEngineEvent((ev) => {
     void shell().handleEngineEvent(ev);
     onMessageEvent(ev);
+    onStorageAskEvent(ev);
   }).catch(() => {});
-  listenTo<Parameters<typeof attachmentProgress>[0]>('dissent://attachment-progress', (p) => attachmentProgress(p)).catch(() => {});
   listenTo<{ conv?: string } | null>('dissent://notification-click', (p) => {
     const conv = p?.conv;
     if (typeof conv === 'string' && conv.startsWith('reminder:')) void openReminderMessage(conv.slice('reminder:'.length)).catch(() => {});

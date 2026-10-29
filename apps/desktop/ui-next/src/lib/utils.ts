@@ -11,7 +11,7 @@ const twMerge = extendTailwindMerge({
       spacing: ["s-1","s-2","s-3","s-4","s-5","s-6","s-8","s-10","s-12"],
     },
     classGroups: {
-      "font-size": ["text-body","text-ui","text-meta","text-tiny","text-head","text-title"],
+      "font-size": ["text-body","text-ui","text-caption","text-meta","text-tiny","text-head","text-title"],
     },
   },
 })

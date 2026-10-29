@@ -10,6 +10,7 @@ import { listKey, rowsFor } from '@/components/chat/message-list';
 import { buildView, type ChatView } from '@/components/chat/use-chat-view';
 import '@/components/chat/chat.css';
 import { UpdateButton } from '@/components/settings/update-dialog';
+import { Tip } from '@/components/ui/tip';
 import { UserAvatar } from '@/components/user-avatar';
 import { useCallRoom } from '@/lib/calls';
 import { applyHardwareVideo, hardwareVideoWanted, registerCanvas, resetForCall, useEncodedVideoOn } from '@/lib/webcodecs';
@@ -45,6 +46,8 @@ export function CallHeader() {
           End-to-end encrypted
         </span>
       </div>
+      {/* The spacer pushes the tools, the update button and the search to the right edge, as in the chat header. */}
+      <span className="flex-1" aria-hidden="true" />
       <div className="header-tools">
         <MoreTools />
       </div>
@@ -207,24 +210,26 @@ function CallStage({ call, chatOpen, onToggleChat }: { call: CallState; chatOpen
         <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
           <MessageCircle className="size-7" />
         </ControlButton>
-        <button
-          type="button"
-          aria-label="Leave call"
-          title="Leave call"
-          onClick={() => void leaveCall()}
-          className="grid h-14 w-[72px] place-items-center rounded-[28px] bg-danger text-white hover:bg-danger-hover focus-visible:outline-2 focus-visible:outline-ring"
-        >
-          <PhoneOff className="size-7" aria-hidden="true" />
-        </button>
+        <Tip label="Leave call">
+          <button
+            type="button"
+            aria-label="Leave call"
+            onClick={() => void leaveCall()}
+            className="grid h-14 w-[72px] place-items-center rounded-[28px] bg-danger text-white hover:bg-danger-hover focus-visible:outline-2 focus-visible:outline-ring"
+          >
+            <PhoneOff className="size-7" aria-hidden="true" />
+          </button>
+        </Tip>
       </div>
     </section>
   );
 }
 
-// The route sentence the engine writes, with the quality beside it. A forwarded call names its forwarder and backup.
+// The route sentence the engine writes, with the quality beside it. A forwarded call names its forwarder and backup, or the
+// member outside the call who forwards it.
 function RouteBanner({ call }: { call: CallState }) {
   const { route, quality } = call;
-  const { forwarder, backup } = routeParties(call);
+  const { forwarder, backup, volunteer } = routeParties(call);
   const forwarded = forwarder !== null;
   const reading = quality
     ? `${quality.rtt_ms === null ? '—' : Math.round(quality.rtt_ms)} ms · ${quality.loss_pct.toFixed(1)}% loss · ${Math.round(quality.jitter_ms)} ms jitter`
@@ -236,7 +241,9 @@ function RouteBanner({ call }: { call: CallState }) {
         {forwarded ? (
           <>
             <strong className="font-semibold text-text-strong">{`Forwarded by ${forwarder}.`}</strong>{' '}
-            {`Their computer passes everyone’s sealed streams along and can’t open them. ${backup ?? 'Someone else'} is ready as backup.`}
+            {volunteer
+              ? 'They aren’t in the call. Their computer passes everyone’s sealed streams along and can’t open them.'
+              : `Their computer passes everyone’s sealed streams along and can’t open them. ${backup ?? 'Someone else'} is ready as backup.`}
           </>
         ) : (
           <>
@@ -428,22 +435,23 @@ function ControlButton({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={pressed}
-      aria-expanded={expanded}
-      title={disabled ? 'Coming soon' : label}
-      aria-disabled={disabled || undefined}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        'grid size-14 place-items-center rounded-full bg-elevated text-text-strong hover:bg-elevated-hover focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50',
-        pressed && 'bg-danger-tint text-danger-text',
-      )}
-    >
-      {children}
-    </button>
+    <Tip label={disabled ? 'Coming soon' : label} wrap={disabled}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={pressed}
+        aria-expanded={expanded}
+        aria-disabled={disabled || undefined}
+        disabled={disabled}
+        onClick={onClick}
+        className={cn(
+          'grid size-14 place-items-center rounded-full bg-elevated text-text-strong hover:bg-elevated-hover focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50',
+          pressed && 'bg-danger-tint text-danger-text',
+        )}
+      >
+        {children}
+      </button>
+    </Tip>
   );
 }
 
@@ -472,15 +480,16 @@ function CallChat({ side, onClose }: { side: boolean; onClose: () => void }) {
         <MessageCircle className="size-[18px] shrink-0 text-muted-foreground" aria-hidden="true" />
         <h3 className="shrink-0 text-ui font-semibold text-text-strong">Call chat</h3>
         {audience ? <span className="min-w-0 flex-1 truncate text-meta text-muted-foreground" title={audience} data-call-chat-audience>{`· ${audience}`}</span> : <span className="flex-1" />}
-        <button
-          type="button"
-          aria-label="Hide call chat"
-          title="Hide call chat"
-          onClick={onClose}
-          className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-elevated-hover hover:text-text-strong focus-visible:outline-2 focus-visible:outline-ring"
-        >
-          <X className="size-4" aria-hidden="true" />
-        </button>
+        <Tip label="Hide call chat">
+          <button
+            type="button"
+            aria-label="Hide call chat"
+            onClick={onClose}
+            className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-elevated-hover hover:text-text-strong focus-visible:outline-2 focus-visible:outline-ring"
+          >
+            <X className="size-4" aria-hidden="true" />
+          </button>
+        </Tip>
       </div>
       <CallMessages view={view} />
       {view ? <Composer key={view.target.key} view={view} /> : null}
@@ -568,7 +577,7 @@ function CallMessages({ view }: { view: ChatView | null }) {
 export function CallDetails() {
   const call = useShell((s) => s.call);
   if (!call) return null;
-  const { forwarder, backup } = routeParties(call);
+  const { forwarder, backup, volunteer } = routeParties(call);
   const quality = call.quality;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -576,7 +585,12 @@ export function CallDetails() {
         <h3 className="truncate">Call details</h3>
       </div>
       <div className="dissent-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-s-2 pb-s-2">
-        {forwarder ? <Section title="Forwarded by" text={`${forwarder} · chosen automatically for a strong, wired connection`} /> : null}
+        {forwarder ? (
+          <Section
+            title="Forwarded by"
+            text={volunteer ? `${forwarder} · not in the call, helping forward this server’s calls` : `${forwarder} · chosen automatically for a strong, wired connection`}
+          />
+        ) : null}
         {backup ? <Section title="Backup" text={`${backup} · connected and ready to take over`} /> : null}
         {quality ? (
           <Section
@@ -591,11 +605,13 @@ export function CallDetails() {
   );
 }
 
-// The forwarder and the backup of a call: named by the route, or the participant the engine flags as forwarding.
-function routeParties(call: CallState): { forwarder: string | null; backup: string | null } {
+// The forwarder and the backup of a call: a member outside the call who forwards it (`volunteer`), named by the route, or
+// the participant the engine flags as forwarding.
+function routeParties(call: CallState): { forwarder: string | null; backup: string | null; volunteer: boolean } {
+  if (call.forwarded_by) return { forwarder: call.forwarded_by, backup: null, volunteer: true };
   const flagged = call.participants.find((p) => p.forwarder);
   const forwarder = call.route?.forwarder ?? (flagged ? flagged.display_name : null);
-  return { forwarder: forwarder || null, backup: call.route?.backup || null };
+  return { forwarder: forwarder || null, backup: call.route?.backup || null, volunteer: false };
 }
 
 function Section({ title, text }: { title: string; text: string }) {

@@ -10,6 +10,7 @@ import { chooseDevice } from '@/lib/voice';
 import { clockLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { HeaderSearch } from '@/components/chat/chat-header';
 import { UserAvatar } from '@/components/user-avatar';
@@ -67,6 +68,8 @@ export function LobbyHeader() {
           {live?.started_ms ? `Call in progress · ${clockLabel(live.started_ms)}` : 'Call in progress'}
         </span>
       </div>
+      {/* The spacer pushes Join, the update button and the search to the right edge, as in the chat header. */}
+      <span className="flex-1" aria-hidden="true" />
       <div className="header-tools">
         <Button onClick={() => void joinLobby()} className="h-8 bg-success px-s-4 text-white hover:bg-success/90">
           Join
@@ -173,16 +176,18 @@ function Preview() {
           <span className="text-meta text-muted-foreground">{cameraOn ? 'Starting your camera' : 'Your camera is off'}</span>
         </div>
       )}
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={toggleCamera}
-        aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
-        aria-pressed={cameraOn}
-        className="absolute top-s-3 right-s-3 z-10"
-      >
-        {cameraOn ? <Video className="size-4" /> : <VideoOff className="size-4" />}
-      </Button>
+      <Tip label={cameraOn ? 'Turn Off Camera' : 'Turn On Camera'}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleCamera}
+          aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
+          aria-pressed={cameraOn}
+          className="absolute top-s-3 right-s-3 z-10"
+        >
+          {cameraOn ? <Video className="size-4" /> : <VideoOff className="size-4" />}
+        </Button>
+      </Tip>
       <div className="absolute right-s-3 bottom-s-3 left-s-3 flex items-center justify-between gap-s-3">
         <div role="meter" aria-label="Microphone level" aria-valuemin={0} aria-valuemax={METER_BARS} aria-valuenow={lit} className="flex h-3.5 items-center gap-0.5">
           {Array.from({ length: METER_BARS }, (_, i) => (
@@ -195,16 +200,17 @@ function Preview() {
             />
           ))}
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggle}
-          aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
-          aria-pressed={!micOn}
-          title={micOn ? 'Mute' : 'Unmute'}
-        >
-          {micOn ? <Mic className="size-4" /> : <MicOff className="size-4" />}
-        </Button>
+        <Tip label={micOn ? 'Mute' : 'Unmute'}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggle}
+            aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
+            aria-pressed={!micOn}
+          >
+            {micOn ? <Mic className="size-4" /> : <MicOff className="size-4" />}
+          </Button>
+        </Tip>
       </div>
     </div>
   );

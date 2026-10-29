@@ -1,6 +1,7 @@
 // The reactions under a message: a pill per emoji with its count, the mine state, and a button that opens the picker.
 // Ported from the old UI's views/chat.js (reactionsNode, whoReacted).
 import { SmilePlus } from 'lucide-react';
+import { Tip } from '@/components/ui/tip';
 import { toggleReaction } from '@/lib/chat-actions';
 import type { ChatTarget, Id, Reaction } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -52,15 +53,16 @@ export function Reactions({ target, messageId, reactions }: { target: ChatTarget
           </button>
         );
       })}
-      <button
-        type="button"
-        className="reaction add"
-        aria-label="Add reaction"
-        title="Add reaction"
-        onClick={(e) => pickReaction(target, messageId, reactions, e.currentTarget)}
-      >
-        <SmilePlus aria-hidden="true" />
-      </button>
+      <Tip label="Add Reaction">
+        <button
+          type="button"
+          className="reaction add"
+          aria-label="Add reaction"
+          onClick={(e) => pickReaction(target, messageId, reactions, e.currentTarget)}
+        >
+          <SmilePlus aria-hidden="true" />
+        </button>
+      </Tip>
     </div>
   );
 }

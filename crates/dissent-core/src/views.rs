@@ -179,6 +179,10 @@ pub struct MemberInfo {
     pub status: crate::presence::Presence,
     /// Whether this app verifies the member as a relay host of this server. See `boosts`.
     pub relay_host: bool,
+    /// Whether the member is a seeder: a storage member, outside the encrypted group.
+    pub storage: bool,
+    /// For a seeder: whether an admin granted it storage (`StorageGrant`). False for a person.
+    pub storage_granted: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -336,6 +340,8 @@ pub struct ConversationSummary {
     /// Unread messages from others since the conversation was last marked read, counted up to 100.
     /// Computed when the summary is built, never stored.
     pub unread: u32,
+    /// Unread messages from others that mention this device, counted up to 100. Part of `unread`. See `dm_mentions.rs`.
+    pub mentions: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -367,6 +373,10 @@ pub struct DmItem {
     pub edited: bool,
     /// True once the author deleted the message. `text` is empty then.
     pub deleted: bool,
+    /// True when the message mentions this device and someone else wrote it. See `dm_mentions.rs`.
+    pub mentions_me: bool,
+    /// The members the message mentions, for the mention pills.
+    pub mentions: Vec<MentionView>,
 }
 
 /// Change notifications. Serialised as `{"kind": "...", ...}`.
@@ -453,6 +463,14 @@ pub enum EngineEvent {
     /// The latest latency measurements for the status bar, in milliseconds: the median DHT lookup time and the home relay's
     /// round trip. `None` when there is no reading. Sent every DHT probe, so the bar updates without polling.
     NetLatency { dht_ms: Option<u64>, relay_ms: Option<u64> },
+    /// A seeder asked this owner or admin device for a storage grant it has not asked for before. Sent
+    /// once per ask, so the UI can say so once. See `storage_grants`.
+    StorageGrantAsked {
+        community_id: String,
+        community_name: String,
+        root_id: String,
+        display_name: String,
+    },
 }
 
 /// Moderation actions. Serialised as `ban`, `grant_admin`, and so on.

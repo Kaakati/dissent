@@ -4,10 +4,10 @@
 // Wire order guard. serde's derive tags each variant of these enums by its position in the enum, and postcard
 // writes that tag. So the declaration order is the wire format, and a change to it is a wire change.
 //
-// The lists pin the order as of v0.1.11. To add a variant, APPEND it at the END of the enum. Never insert,
-// reorder, rename or remove one: every later tag would shift, and an older peer or an older stored event would
-// decode the wrong variant. A variant added after v0.1.11 needs no entry here. If a variant must change shape,
-// bump the wire version rather than editing these lists.
+// The lists pin the order as of v0.1.11, and the variants appended since are pinned after it. To add a variant,
+// APPEND it at the END of the enum, and append its name at the end of the list. Never insert, reorder, rename or
+// remove one: every later tag would shift, and an older peer or an older stored event would decode the wrong
+// variant. If a variant must change shape, bump the wire version rather than editing these lists.
 
 const V0111_PAYLOAD: &[&str] = &[
     "ChannelCreate",
@@ -49,6 +49,13 @@ const V0111_PAYLOAD: &[&str] = &[
     "PrivateSealed",
     "ProfileBannerSet",
     "ChannelCreatePrivate",
+    // Appended after v0.1.11.
+    "CommunityIconAnimated",
+    "RelayHostSet",
+    "MembersHostRelays",
+    "ChannelOrder",
+    "SeederForwardsCalls",
+    "StorageGrant",
 ];
 
 /// The variant names of `enum_name` in declaration order, read from `source`. See the note above.

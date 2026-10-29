@@ -17,25 +17,29 @@ Two terms matter for reading the result.
 
 ## Running it on two networks
 
-You need two computers or phones, each on a different network. For example, one is at home on Wi-Fi and the other is on a phone's hotspot. Both need the probe binary. Build it with `cargo build --release -p dissent-probe`.
+For a full test plan (which network pairs to try, what to send back, running from the released `dissent-tools-*` archive), see [REAL_NETWORKS.md](REAL_NETWORKS.md). The archive ships it as `PROBE-REAL-NETWORKS.md`.
 
-1. On the first device, start the listener:
+You need two computers, each on a different network. For example, one is at home on Wi-Fi and the other is on a phone's hotspot. Both need the probe binary, from the release's tools archive or built with `cargo build --release -p dissent-probe`.
 
-   ```sh
-   dissent-probe listen
-   ```
-
-   It prints an address that starts with letters and digits. Copy the whole line.
-
-2. On the second device, dial that address:
+1. On the first device, start the listener and name its network:
 
    ```sh
-   dissent-probe dial <paste the address here>
+   dissent-probe listen --network "home Wi-Fi"
    ```
 
-   To collect results from many runs, add `--json`. It prints one JSON object, and the schema is in `apps/probe/src/lib.rs`. Add `--duration 10` to shorten the upgrade step.
+   It prints one line that starts with `dissent-probe dial`. Copy the whole line.
+
+2. On the second device, paste that line, put this device's network at the end, and run it:
+
+   ```sh
+   dissent-probe dial <address> --peer-network "home Wi-Fi" --network "phone hotspot"
+   ```
+
+   Each run saves a JSON result file to `probe-results/` (`--out DIR` to change, `--no-save` to skip). `--json` also prints the report on stdout, and the schema is in `apps/probe/src/lib.rs`. Add `--duration 10` to shorten the upgrade step.
 
 3. Stop the listener with Ctrl-C when you are done.
+
+`dissent-probe check --network "home Wi-Fi"` measures one network alone: UDP, NAT mapping, IPv4 and IPv6, latency to each relay, and DHT reachability. `dissent-probe summary` prints a table of every result file in `probe-results/`.
 
 Both sides use iroh's public relays and the public DHT by default. The listener must keep running until the dial finishes.
 
@@ -52,6 +56,8 @@ Give the same relay options to both sides if you want to compare them.
 ```text
 connect           812 ms, path relayed, rtt 96 ms
 time to direct    4120 ms (over 30 s, 60 samples)
+ping rtt          median 84 ms, p95 190 ms, p99 210 ms, 87% direct
+relay             listener https://euc1-1.relay.n0.iroh.link./, dialer home https://euc1-1.relay.n0.iroh.link./
 media path        relayed at start, direct at end
 media delivered   497/500 (99.4%), round trip
 media rtt         median 41.2 ms, p95 88.0 ms
@@ -61,6 +67,7 @@ media jitter      3.1 ms
 - **Time to direct** is the moment the first direct sample appeared. "never" means the two networks never found a direct route. That is common when one side is behind a strict NAT, and the relay carries the call.
 - **Media delivered** is the share of packets that came back. The probe sends each packet to the other side, which sends it back. A loss of a few percent is normal on mobile. Much worse than that means the path is unreliable for calls.
 - **Media rtt** is the full round trip, so one-way delay is about half.
+- **Ping rtt** comes from the upgrade pings. Each ping opens a new connection, so a sample is about two round trips. Compare paths with media rtt.
 - **Jitter** is how much the delay changes from packet to packet. Calls get choppy when it grows.
 
 ## Limits

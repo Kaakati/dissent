@@ -1,6 +1,6 @@
 # Design 07: private channels
 
-Status: the two-step form is in v0.1.10. The one-event creation form and files in private channels are in the next checkpoint, after it. A private channel is visible only to chosen members and roles, and its messages are readable only by them. It builds on `05-encrypted-servers.md` (member-only control, epoch keys) and `06-threat-model.md` (finding 2).
+Status: the two-step form is in v0.1.10. The one-event creation form (`ChannelCreatePrivate`) and files in private channels are in v0.1.11. A private channel is visible only to chosen members and roles, and its messages are readable only by them. It builds on `05-encrypted-servers.md` (member-only control, epoch keys) and `06-threat-model.md` (finding 2).
 
 ## What a private channel is
 

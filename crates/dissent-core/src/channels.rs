@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use dissent_events::state::{BITRATE_RANGE, MAX_USER_LIMIT, SLOWMODE_STEPS};
+use dissent_events::state::{BITRATE_RANGE, MAX_ORDERED_CHANNELS, MAX_USER_LIMIT, SLOWMODE_STEPS};
 use dissent_events::{ChannelId, ChannelVisibility, Payload};
 use dissent_identity::CommunityId;
 use serde::{Deserialize, Serialize};
@@ -185,6 +185,44 @@ pub(crate) fn split_for_older_clients(payload: Payload) -> Vec<Payload> {
 }
 
 impl Engine {
+    /// Sets the order the server lists its channels in, for everyone: `text` and `voice` top first. Owner and
+    /// admins only. Each id must be a channel of that kind. A channel left out keeps its place after the listed
+    /// ones, as replay places it.
+    pub async fn reorder_channels(&self, community: CommunityId, text: Vec<ChannelId>, voice: Vec<ChannelId>) -> Result<()> {
+        self.may_manage(community)?;
+        {
+            let w = self.read();
+            let c = w
+                .communities
+                .get(&community)
+                .ok_or_else(|| crate::engine::not_found(&community))?;
+            let state = c.state();
+            if text.len() + voice.len() > MAX_ORDERED_CHANNELS {
+                return Err(CoreError::Invalid(format!("an order lists at most {MAX_ORDERED_CHANNELS} channels")));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for (ids, is_voice) in [(&text, false), (&voice, true)] {
+                for id in ids {
+                    if !state.channels.contains_key(id) {
+                        return Err(CoreError::NotFound(format!("channel {id}")));
+                    }
+                    if state.voice_channels.contains(id) != is_voice {
+                        return Err(CoreError::Invalid("text and voice channels are ordered apart".into()));
+                    }
+                    if !seen.insert(*id) {
+                        return Err(CoreError::Invalid(format!("channel {id} is listed twice")));
+                    }
+                }
+            }
+        }
+        self.author_publish(community, ChannelId::CONTROL, Payload::ChannelOrder { text, voice })
+            .await?;
+        self.emit(crate::views::EngineEvent::CommunityUpdated {
+            community_id: community.to_string(),
+        });
+        Ok(())
+    }
+
     /// Deletes a channel and its messages for everyone. Owner and admins only.
     pub async fn delete_channel(&self, community: CommunityId, channel: ChannelId) -> Result<()> {
         self.may_manage(community)?;

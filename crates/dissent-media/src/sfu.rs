@@ -116,6 +116,8 @@ pub struct Sfu<T: PacketTransport> {
     /// The layer each (viewer, stream) is being sent now. It changes at a keyframe of the new one.
     sending_layer: BTreeMap<(Link, u64), u8>,
     observer: Option<Observer>,
+    /// Drops every packet instead of forwarding it, as a broken or hostile forwarder would. Tests only.
+    blackhole: bool,
     stats: SfuStats,
 }
 
@@ -140,6 +142,7 @@ impl<T: PacketTransport> Sfu<T> {
             layer_aware: HashSet::new(),
             sending_layer: BTreeMap::new(),
             observer: None,
+            blackhole: false,
             stats: SfuStats::default(),
         }
     }
@@ -190,6 +193,21 @@ impl<T: PacketTransport> Sfu<T> {
     /// The downlinks with a live link.
     pub fn downlinks(&self) -> Vec<PeerId> {
         self.links.keys().copied().collect()
+    }
+
+    /// Makes this forwarder keep its links but drop every packet, as a stalled or hostile one would.
+    /// For tests of the participants' stall detection.
+    pub fn set_blackhole(&mut self, on: bool) {
+        self.blackhole = on;
+    }
+
+    /// Drops a downlink and what it reported, as if its link had closed. Returns whether it had
+    /// one. A forwarder uses it for a participant who left the call or was banned.
+    pub fn remove_downlink(&mut self, downlink: PeerId) -> bool {
+        self.tiles.retain(|(viewer, _), _| *viewer != downlink);
+        self.layer_aware.remove(&downlink);
+        self.budgets.remove(&downlink);
+        self.links.remove(&downlink).is_some()
     }
 
     /// Records what a listener's link can carry, in kbps.
@@ -443,6 +461,10 @@ impl<T: PacketTransport> Sfu<T> {
     }
 
     async fn forward(&mut self, from: Link, frame: RawFrame) {
+        if self.blackhole {
+            self.stats.frames_dropped += 1;
+            return;
+        }
         match frame {
             RawFrame::Audio(wire) => self.forward_audio(from, wire).await,
             RawFrame::Video(raw) => self.forward_video(from, raw).await,

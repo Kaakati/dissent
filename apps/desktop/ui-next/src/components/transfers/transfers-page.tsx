@@ -4,6 +4,7 @@ import { useEffect, type ReactNode } from 'react';
 import { create } from 'zustand';
 import { Folder, Pause, Play, RotateCcw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { useShell } from '@/lib/store';
 import {
   cancelTransfer,
@@ -163,9 +164,11 @@ function TransferRow({ transfer: t }: { transfer: TransferItem }) {
 // The round buttons for a row's state: active pauses, paused resumes, failed retries, done shows the file's folder.
 function TransferActions({ transfer: t }: { transfer: TransferItem }) {
   const round = (label: string, icon: ReactNode, onClick: () => void) => (
-    <Button variant="ghost" size="icon" aria-label={label} title={label} onClick={onClick} className="size-9 rounded-full bg-sidebar text-text hover:bg-sidebar hover:text-text">
-      {icon}
-    </Button>
+    <Tip label={label}>
+      <Button variant="ghost" size="icon" aria-label={label} onClick={onClick} className="size-9 rounded-full bg-sidebar text-text hover:bg-sidebar hover:text-text">
+        {icon}
+      </Button>
+    </Tip>
   );
   const cancel = round('Cancel', <X className="size-4" />, () => void cancelTransfer(t.id));
   const remove = round('Remove from list', <Trash2 className="size-4" />, () => void removeTransfer(t.id));

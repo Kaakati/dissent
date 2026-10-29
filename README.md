@@ -277,6 +277,10 @@ AV1 video is behind the `svt-av1` feature of `dissent-video`, which builds SVT-A
 
 Ideas, bug reports and code are all welcome. Please open an issue to talk about larger changes before starting on them. If you find a security problem, please report it privately rather than in a public issue.
 
+## Disclaimer
+
+Dissent is open-source, peer-to-peer software. Nobody owns, runs or moderates the network it forms, and the developers and contributors have no access to, or control over, what people share on it. Each person is responsible for their own content and conduct. Read the full [Disclaimer and Limitation of Liability](DISCLAIMER.md) before using Dissent.
+
 ## License
 
 Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE), at your choice. The interface icons come from [Lucide](https://lucide.dev) and are used under the ISC License. The Google Sans Flex typeface is bundled under the SIL Open Font License in `apps/desktop/ui-next/public/fonts`. Voice calls use the [Opus](https://opus-codec.org) codec, included under its BSD license in `crates/dissent-audio/vendor/libopus`.

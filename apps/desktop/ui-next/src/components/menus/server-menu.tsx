@@ -1,6 +1,6 @@
 // The server's menu, opened from the name at the top of the channel list. Ported from toggleMenu in
 // the old UI's views/sidebar.js. "Hide server details from seeders" comes with the member-only batch.
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { AtSign, Copy, Image as ImageIcon, LogOut, Plus, Settings, UserPlus } from 'lucide-react';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
@@ -16,12 +16,19 @@ import { has } from '@/lib/features';
 import { confirm } from '@/lib/dialog';
 import type { MenuEntry } from '@/lib/menu';
 import { toast } from '@/lib/toasts';
+import { asksLabel, loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
 import type { CommunityView } from '@/lib/types';
 
 export function ServerMenu({ community, children }: { community: CommunityView; children: ReactNode }) {
   const manage = community.my_role === 'owner' || community.my_role === 'admin';
+  const asks = useStorageAsks((s) => s.asks[community.id]?.length ?? 0);
+  useEffect(() => {
+    if (manage) void loadStorageAsks(community.id);
+  }, [manage, community.id]);
   const entries: MenuEntry[] = [
-    community.my_role === 'owner' ? { label: 'Server Settings', icon: Settings, onPick: () => openServerSettings(community.id) } : null,
+    community.my_role === 'owner'
+      ? { label: 'Server Settings', icon: Settings, sub: asksLabel(asks) || undefined, onPick: () => openServerSettings(community.id) }
+      : null,
     { label: 'Create invite', icon: UserPlus, onPick: () => openInviteDialog(community.id) },
     { label: 'Claim handle', icon: AtSign, onPick: () => openClaimHandleDialog(community.id) },
     {

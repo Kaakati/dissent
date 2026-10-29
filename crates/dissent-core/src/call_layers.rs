@@ -75,6 +75,11 @@ impl Engine {
         };
         let me = room.my_sid();
         let forwarder = forwarding.forwarder_sid();
+        // A volunteer's relay has no window and no capture: it only asks its senders for layers.
+        if forwarding.is_volunteer_relay() {
+            self.tell_wanted(room, me).await;
+            return;
+        }
         // A capture turned on after the forwarder asked starts on one stream. It takes the mask
         // asked for, since the forwarder sends a mask only when it changes.
         if self.simulcast_on() {
@@ -102,12 +107,13 @@ impl Engine {
         self.inner.simulcast.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// The device behind sender id `sid` in this call, when it supports layers.
+    /// The device behind sender id `sid` in this call, when it supports layers. A volunteer
+    /// forwarder counts, though it is not in the call.
     fn layer_peer(&self, room: &Room, sid: u64) -> Option<DeviceId> {
         if !room.peer_supports(sid, crate::calls::FEATURE_VIDEO_LAYERS) {
             return None;
         }
-        room.device_of(sid)
+        room.signal_device(sid)
     }
 
     async fn tell_tiles(&self, room: &Arc<Room>, forwarder: u64) {
@@ -328,7 +334,7 @@ impl Engine {
 
     /// Answers `TileWidths` from `from`. Only the forwarder of a forwarded call takes it.
     pub(crate) async fn on_tile_widths(&self, from: DeviceId, id: RoomId, tiles: Vec<(u64, bool, u32)>) -> CallReply {
-        let Some(room) = self.current_room(&id) else {
+        let Some(room) = self.current_room(&id).or_else(|| self.relay_room(&id)) else {
             return CallReply::Refused("not in this call".into());
         };
         let Some(viewer) = room.live_sid(&from) else {
@@ -343,7 +349,7 @@ impl Engine {
 
     /// Answers `VideoLayers` from `from`. Only the forwarder of a forwarded call takes it.
     pub(crate) async fn on_video_layers(&self, from: DeviceId, id: RoomId, screen: bool, layers: Vec<(u32, u32)>) -> CallReply {
-        let Some(room) = self.current_room(&id) else {
+        let Some(room) = self.current_room(&id).or_else(|| self.relay_room(&id)) else {
             return CallReply::Refused("not in this call".into());
         };
         let Some(sender) = room.live_sid(&from) else {
@@ -361,10 +367,11 @@ impl Engine {
         let Some(room) = self.current_room(&id) else {
             return CallReply::Refused("not in this call".into());
         };
-        let Some(forwarding) = room.forwarding() else {
+        if room.forwarding().is_none() {
             return CallReply::Refused("this call is not forwarded".into());
-        };
-        if room.live_sid(&from) != Some(forwarding.forwarder_sid()) {
+        }
+        // The forwarder may be a volunteer, which is not live.
+        if !room.is_forwarder_device(&from) {
             return CallReply::Refused("only the forwarder asks for layers".into());
         }
         self.apply_wanted(&room, screen, mask);

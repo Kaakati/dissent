@@ -34,14 +34,14 @@ const CARRIED_MEMBER: u8 = 1;
 /// for it, since the kind and generation are clear.
 const CARRIED_PRIVATE: u8 = 3;
 
-/// Carrier kind of a private channel's access event. The body is a postcard `Payload`, which is the
-/// community-secret seal of `ChannelCreatePrivate` or `ChannelAccess`: the same generation and seal as other
-/// control. Only a holder of that generation's secret can open it, so a banned member, after a rotation,
+/// Carrier kind of a private channel's access event, and of a channel order. The body is a postcard `Payload`,
+/// which is the community-secret seal of `ChannelCreatePrivate`, `ChannelAccess` or `ChannelOrder`: the same
+/// generation and seal as other control. Only a holder of that generation's secret can open it, so a banned member, after a rotation,
 /// cannot read a private channel's name or readers. See `carry_sealed`.
 const CARRIED_SEALED: u8 = 4;
 
-/// Wraps a community-secret seal of a private channel's access event in the carrier, so an older client shows
-/// it as locked rather than failing the batch it is in. `sealed` must be a payload from `seal`.
+/// Wraps a community-secret seal of a private channel's access event, or of a channel order, in the carrier, so an
+/// older client shows it as locked rather than failing the batch it is in. `sealed` must be a payload from `seal`.
 pub fn carry_sealed(sealed: &Payload) -> Result<Payload> {
     let Payload::SealedControl { generation, .. } = sealed else {
         return Err(Error::Encoding("only a sealed control payload is carried".into()));
@@ -61,8 +61,9 @@ pub fn carry_sealed(sealed: &Payload) -> Result<Payload> {
     })
 }
 
-/// Opens a carried private-channel access event with the ring, as the body it was sealed for. Only
-/// `ChannelCreatePrivate` and `ChannelAccess` are accepted, so the carrier cannot carry another kind.
+/// Opens a carried control event with the ring, as the body it was sealed for. Only `ChannelCreatePrivate`,
+/// `ChannelAccess`, `ChannelOrder`, `SeederForwardsCalls` and `StorageGrant` are accepted, so the carrier cannot
+/// carry another kind.
 fn open_sealed_carried(body: &EventBody, ciphertext: &[u8], ring: &[SealKey]) -> std::result::Result<Payload, OpenError> {
     let carried = carried(ciphertext).ok_or(OpenError::Forged)?;
     if carried.kind != CARRIED_SEALED {
@@ -79,7 +80,11 @@ fn open_sealed_carried(body: &EventBody, ciphertext: &[u8], ring: &[SealKey]) ->
     sealed.payload = inner;
     let payload = open(ring, &sealed)?;
     match payload {
-        Payload::ChannelCreatePrivate { .. } | Payload::ChannelAccess { .. } => Ok(payload),
+        Payload::ChannelCreatePrivate { .. }
+        | Payload::ChannelAccess { .. }
+        | Payload::ChannelOrder { .. }
+        | Payload::SeederForwardsCalls { .. }
+        | Payload::StorageGrant { .. } => Ok(payload),
         _ => Err(OpenError::Forged),
     }
 }
@@ -319,6 +324,9 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::ChannelAccess { .. }
             | Payload::ChannelCreatePrivate { .. }
             | Payload::CommunityIconAnimated { .. }
+            | Payload::ChannelOrder { .. }
+            | Payload::SeederForwardsCalls { .. }
+            | Payload::StorageGrant { .. }
     )
 }
 

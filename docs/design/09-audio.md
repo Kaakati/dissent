@@ -301,7 +301,7 @@ Other mid-call changes: device switches restart the voice worker, so they build 
 reference and the mic frames, and `echo_recovers_after_the_mic_is_muted_and_unmuted` checks that unmuting
 recovers. Noise suppression and AGC changes keep the canceller, as they should.
 
-## Double talk: options compared (design, not built)
+## Double talk: options compared (design, before the sonora engine)
 
 Measured here, before choosing: the 10 dB near-voice loss is not a measurement artefact. The controls in
 `measure_near_only_loss_controls` (same chain, same metric): with no echo and a silent far end the near voice
@@ -439,6 +439,34 @@ and WebView2 profiles), a DM call with the microphone and speaker of one machine
   opens the microphone before the speaker when capture is on at the start (`apps/desktop/src-tauri/src/voice.rs`).
 - Cushion 40 ms, after the microphone change: zero underruns in every window on both sides, including the first.
 
-Chosen: 40 ms, so mouth-to-ear delay is 20 ms less than the 60 ms cushion. The microphone still blocks for its open
-time if it is opened mid-call (unmute, or a device change restarts the worker). That open can still starve a
-speaker that is playing; this was not measured mid-call.
+Chosen: 40 ms, so mouth-to-ear delay is 20 ms less than the 60 ms cushion.
+
+### Mid-call microphone: mute, device switch, and a two-instance artefact
+
+The microphone now opens on its own thread (`MicFeed` in `apps/desktop/src-tauri/src/voice.rs`), so its open never
+blocks the voice loop. It opens once when the voice thread starts and stays open for the whole call. Mute does not
+open or close it: muted frames still go through the chain, so its echo state stays in step, but nothing is sent. A
+device change restarts the worker, as before.
+
+Measured with two debug instances on one machine (DM call, caller on the Focusrite input after a switch, callee
+without a usable microphone where stated):
+
+- Helper thread alone, mute still closing the device: the five mute toggles gave 327 underruns on the caller in one
+  window, and a second round gave 2,484, 516 and 65, with late ticks. The helper thread did not remove the stall.
+- After the mute change, ten toggles on the caller with the microphone open: zero underruns and zero late ticks on
+  the caller in every window.
+- The same run had a device switch to the Focusrite input. The caller stayed clean. The callee logged 839 underruns
+  and 20 late ticks in one window about 15 s after the switch.
+- Both sides with no microphone open (a temporary build, since removed): ten toggles and a switch gave zero
+  underruns on both sides, with at most one late tick.
+- Both sides capturing from the default webcam microphone, no switch: underruns at call start and during the toggles
+  (caller 32 and 110, callee 61, 502, 33 and 3), with zero or one late tick. The shared Focusrite clock is not the
+  cause, since this run did not use it.
+- Only the caller capturing (the callee's input set to a device that does not exist, so its capture retries): ten
+  toggles on the caller gave zero underruns in every window, with one late tick.
+
+Reading: with two instances on one machine, both sides capture and play through the same audio engine. The underruns
+appear when both capture, and the caller stays clean when only it captures. Treat the remaining mid-call underruns as
+an artefact of two instances on one machine. They are not confirmed for a call between two machines, which is the
+real setup and cannot be run here. If two machines show them, the next step is to move the microphone read to a 5 ms
+pump with a larger playout cushion, and measure the mic-read path separately from the open.

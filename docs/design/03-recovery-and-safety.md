@@ -27,7 +27,7 @@ When a peer receives a valid rotation from an old root to a new root:
 
 - Record that the new root replaces the old root. Look up the new root wherever the old one was used.
 - Show a clear key-change warning in any conversation with that person, so they can compare safety numbers again.
-- Carry roles and memberships across to the new root. This is future core work. Until it lands, a rotated member appears as a new member.
+- Carry roles, memberships, handles, moderation and ownership across to the new root. Replay does this (`CommunityState::migrate` in `dissent-events`).
 - Refuse any rotation that does not verify. Do not show a warning for a rotation that fails.
 
 ## Safety numbers
@@ -52,7 +52,7 @@ A device without the root key can chat but cannot add or revoke devices. Only ro
 - Keep events from that device with earlier timestamps.
 - Refuse a revocation that does not verify against the root the device belongs to.
 
-The rule above depends on events and the hybrid logical clock, which are future core work.
+Replay applies this rule with `Payload::DeviceRevoke` and the hybrid logical clock (`dissent-events`).
 
 ## DNS-verified handles (optional)
 

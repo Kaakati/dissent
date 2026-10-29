@@ -118,3 +118,40 @@ async fn dial_through_unknown_relay_needs_its_certificate() {
     b.shutdown().await.expect("shutdown b");
     a.shutdown().await.expect("shutdown a");
 }
+
+/// With `relay_only`, two nodes on one machine stay on the relay: the endpoint has no IP transport,
+/// so no direct path can form, however long they talk.
+#[tokio::test]
+async fn relay_only_nodes_stay_relayed() {
+    let relay = spawn_relay().await;
+    let cfg = || NodeConfig {
+        relay_only: true,
+        dht_lookup: false,
+        ..node_config(vec![relay.url.clone()], vec![relay.cert.clone()])
+    };
+    let a = Node::spawn(&DeviceKey::generate(), cfg()).await.expect("spawn a");
+    let b = Node::spawn(&DeviceKey::generate(), cfg()).await.expect("spawn b");
+    tokio::time::timeout(Duration::from_secs(20), a.online()).await.expect("a online");
+    tokio::time::timeout(Duration::from_secs(20), b.online()).await.expect("b online");
+    let a_addr = a.addr().await;
+    assert!(a_addr.direct.is_empty(), "a relay-only node has no direct address: {a_addr:?}");
+
+    // Long enough for a hole punch, which takes well under a second on loopback.
+    for _ in 0..6 {
+        let report = tokio::time::timeout(Duration::from_secs(30), b.ping(&a_addr))
+            .await
+            .expect("ping timed out")
+            .expect("ping through the relay");
+        assert_eq!(report.path, PathKind::Relayed, "{report:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    b.shutdown().await.expect("shutdown b");
+    a.shutdown().await.expect("shutdown a");
+}
+
+#[tokio::test]
+async fn relay_only_without_a_relay_is_refused() {
+    let cfg = NodeConfig { relay: RelayChoice::Disabled, relay_only: true, ..Default::default() };
+    assert!(Node::spawn(&DeviceKey::generate(), cfg).await.is_err());
+}

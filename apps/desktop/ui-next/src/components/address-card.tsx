@@ -5,6 +5,7 @@ import { addressOf, shortAddress } from '@/lib/address';
 import { copyText } from '@/lib/clipboard';
 import { qrMatrix } from '@/lib/qr';
 import { toast } from '@/lib/toasts';
+import { Tip } from '@/components/ui/tip';
 
 type Kind = 'user' | 'server' | 'device';
 
@@ -43,9 +44,11 @@ export function AddressCard({ kind, id, label, qr = false }: { kind: Kind; id?: 
         <span className="id-label text-muted-foreground">{label ?? `${what} address`}</span>
         <code className="mono id-value" title={full}>{shortAddress(full) || '—'}</code>
         {full ? (
-          <button type="button" className="icon-btn" aria-label={`Copy ${kind} address`} title={`Copy ${kind} address`} onClick={copy}>
-            <Copy className="size-4" aria-hidden="true" />
-          </button>
+          <Tip label="Copy">
+            <button type="button" className="icon-btn" aria-label={`Copy ${kind} address`} onClick={copy}>
+              <Copy className="size-4" aria-hidden="true" />
+            </button>
+          </Tip>
         ) : null}
       </div>
       {qr && full ? <QrCode text={full} label={`QR code of the ${kind} address`} /> : null}

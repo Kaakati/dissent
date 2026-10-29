@@ -295,3 +295,52 @@ async fn a_direct_message_is_announced_once() {
     finish(vec![alice, bob]).await;
     }).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_of_three_is_allowed_and_one_other_is_not() {
+    bounded(async {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let carol = peer("carol").await;
+    for other in [&bob, &carol] {
+        make_contacts_ready(&alice, other).await;
+    }
+    make_contacts_ready(&bob, &carol).await;
+    let bob_root = bob.identity.root_id();
+    let carol_root = carol.identity.root_id();
+
+    let err = alice
+        .engine
+        .create_group("pair".into(), vec![bob_root])
+        .await
+        .expect_err("one other member is a DM, not a group");
+    assert!(matches!(err, CoreError::Invalid(_)), "{err:?}");
+
+    let created = alice
+        .engine
+        .create_group("trio".into(), vec![bob_root, carol_root])
+        .await
+        .expect("alice creates a group of three");
+    assert_eq!(created.members.len(), 3);
+    let conv: ConvId = created.id.parse().expect("id parses");
+    eventually("bob joins", || conv_named(&bob, "trio")).await;
+    eventually("carol joins", || conv_named(&carol, "trio")).await;
+
+    alice
+        .engine
+        .send_to_conversation(conv, "hello trio".into())
+        .await
+        .expect("alice writes");
+    for p in [&bob, &carol] {
+        eventually("member reads", || {
+            p.engine
+                .conversation_messages(conv, 10)
+                .iter()
+                .any(|m| m.text == "hello trio")
+                .then_some(())
+        })
+        .await;
+    }
+    finish(vec![alice, bob, carol]).await;
+    }).await;
+}

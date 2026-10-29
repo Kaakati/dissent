@@ -14,6 +14,9 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use url::Url;
 
+pub mod check;
+pub mod results;
+
 /// number0's public relays, as `iroh::defaults::prod::default_relay_map()` returns them in iroh 1.4.1.
 /// Copied from the desktop app, which keeps the same list. Update both when iroh changes.
 pub const N0_RELAYS: &[&str] = &[
@@ -168,14 +171,18 @@ impl Default for DialOptions {
 ///   "upgrade": {
 ///     "duration_s": 30,
 ///     "time_to_direct_ms": 4120,            // null if no direct path was seen
+///     "direct_pct": 93.3,                   // share of answered pings on a direct or mixed path
+///     "rtt_ms": { "min": 30, "median": 41, "p90": 60, "p95": 70, "p99": 90, "max": 95 },  // answered pings
 ///     "samples": [ { "t_ms": 812, "path": "relayed", "rtt_ms": 95 } ]  // path/rtt null on failure
 ///   },
 ///   "media": {
 ///     "sent": 500, "delivered": 498, "delivered_pct": 99.6,   // round trip via the echo
-///     "rtt_ms": { "median": 41.2, "p95": 88.0 },              // null if nothing arrived
+///     "rtt_ms": { "min": 30.1, "median": 41.2, "p90": 70.3, "p95": 88.0, "p99": 120.4, "max": 140.0 },
 ///     "jitter_ms": 3.1,                                       // mean |rtt change| between packets
 ///     "path_start": "direct", "path_end": "direct"
 ///   },
+///   "listener_relay": "https://...",        // relay in the listener's address: a relayed path uses it
+///   "dialer_relay": "https://...",          // this side's home relay at the end of the run
 ///   "relays": ["https://..."],              // extra --relay URLs only, not number0's
 ///   "public_relays": true,
 ///   "loopback": false
@@ -187,6 +194,10 @@ pub struct ProbeReport {
     pub connect: Connect,
     pub upgrade: Upgrade,
     pub media: Media,
+    /// The relay in the listener's address. A relayed path goes through it.
+    pub listener_relay: Option<String>,
+    /// The dialer's own home relay at the end of the run.
+    pub dialer_relay: Option<String>,
     pub relays: Vec<String>,
     pub public_relays: bool,
     pub loopback: bool,
@@ -206,6 +217,11 @@ pub struct Connect {
 pub struct Upgrade {
     pub duration_s: f64,
     pub time_to_direct_ms: Option<u64>,
+    /// Share of answered pings on a direct or mixed path. `None` when no ping was answered.
+    pub direct_pct: Option<f64>,
+    /// Round trips of the answered pings. Each ping opens a new QUIC connection, so a sample is the
+    /// handshake plus one request: about two network round trips. `Media::rtt_ms` is one round trip.
+    pub rtt_ms: Option<Rtt>,
     pub samples: Vec<Sample>,
 }
 
@@ -229,8 +245,12 @@ pub struct Media {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Rtt {
+    pub min: f64,
     pub median: f64,
+    pub p90: f64,
     pub p95: f64,
+    pub p99: f64,
+    pub max: f64,
 }
 
 /// The name used in reports for a path kind.
@@ -298,9 +318,20 @@ pub async fn dial(
         let next = tick + PING_EVERY;
         tokio::time::sleep_until(next.into()).await;
     }
+    let answered: Vec<&Sample> = samples.iter().filter(|s| s.path.is_some()).collect();
+    let direct_pct = (!answered.is_empty()).then(|| {
+        let direct = answered
+            .iter()
+            .filter(|s| matches!(s.path, Some("direct" | "mixed")))
+            .count();
+        direct as f64 * 100.0 / answered.len() as f64
+    });
+    let ping_rtts: Vec<f64> = answered.iter().filter_map(|s| s.rtt_ms).map(|ms| ms as f64).collect();
     let upgrade = Upgrade {
         duration_s: opts.duration.as_secs_f64(),
         time_to_direct_ms: time_to_direct,
+        direct_pct,
+        rtt_ms: rtt_summary(&ping_rtts),
         samples,
     };
 
@@ -317,6 +348,9 @@ pub async fn dial(
         },
         upgrade,
         media,
+        listener_relay: target.relay.as_ref().map(|u| u.to_string()),
+        // The relay in our own address, not the net report's pick, which is empty between reports.
+        dialer_relay: node.addr().await.relay.map(|u| u.to_string()),
         relays: net.relays.iter().map(|u| u.to_string()).collect(),
         public_relays: !net.no_public_relays,
         loopback: net.loopback,
@@ -408,8 +442,8 @@ async fn run_media(node: &Node, target: &PeerAddr, duration: Duration) -> Result
     })
 }
 
-/// Median and 95th percentile, or `None` when there are no samples.
-fn rtt_summary(samples: &[f64]) -> Option<Rtt> {
+/// Nearest-rank percentiles, or `None` when there are no samples.
+pub fn rtt_summary(samples: &[f64]) -> Option<Rtt> {
     if samples.is_empty() {
         return None;
     }
@@ -417,8 +451,12 @@ fn rtt_summary(samples: &[f64]) -> Option<Rtt> {
     sorted.sort_by(f64::total_cmp);
     let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
     Some(Rtt {
+        min: at(0.0),
         median: at(0.5),
+        p90: at(0.9),
         p95: at(0.95),
+        p99: at(0.99),
+        max: at(1.0),
     })
 }
 
@@ -442,6 +480,17 @@ pub fn summary_table(report: &ProbeReport) -> String {
         "time to direct    {direct} (over {:.0} s, {} samples)",
         report.upgrade.duration_s,
         report.upgrade.samples.len()
+    ));
+    if let (Some(pct), Some(rtt)) = (report.upgrade.direct_pct, &report.upgrade.rtt_ms) {
+        line(format!(
+            "ping rtt          median {:.0} ms, p95 {:.0} ms, p99 {:.0} ms, {pct:.0}% direct",
+            rtt.median, rtt.p95, rtt.p99
+        ));
+    }
+    line(format!(
+        "relay             listener {}, dialer home {}",
+        report.listener_relay.as_deref().unwrap_or("none"),
+        report.dialer_relay.as_deref().unwrap_or("none")
     ));
     line(format!(
         "media path        {} at start, {} at end",
@@ -542,6 +591,8 @@ mod tests {
         let rtt = rtt_summary(&samples).unwrap();
         assert_eq!(rtt.median, 51.0);
         assert_eq!(rtt.p95, 95.0);
+        assert_eq!(rtt.p99, 99.0);
+        assert_eq!((rtt.min, rtt.max), (1.0, 100.0));
         assert!(rtt_summary(&[]).is_none());
     }
 

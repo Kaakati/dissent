@@ -100,6 +100,8 @@ function onKey(e: KeyboardEvent): void {
     onRailKey(e);
     return;
   }
+  // A row that moves itself with these keys (a server on the rail, a channel in the sidebar) has handled them.
+  if (e.defaultPrevented) return;
   e.preventDefault();
   const dir = e.key === 'ArrowUp' ? -1 : 1;
   if (e.shiftKey) jumpUnread(dir);

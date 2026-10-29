@@ -352,6 +352,9 @@ impl Engine {
                     | crate::calls::CallMsg::VideoLayers { .. }
                     | crate::calls::CallMsg::TileWidths { .. }
                     | crate::calls::CallMsg::WantedLayers { .. }
+                    | crate::calls::CallMsg::ForwardOffer(_)
+                    | crate::calls::CallMsg::ForwarderStalled { .. }
+                    | crate::calls::CallMsg::RelayLeaf { .. }
             ))
         {
             return Response::Error("bad request: unknown call message".into());
@@ -426,6 +429,7 @@ impl Engine {
             Request::HistorySupport => Response::HistorySupport(
                 self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            Request::StorageGrantAsk { community } => self.answer_storage_ask(conn_from, community),
             Request::RotationSupport => Response::RotationSupport(
                 self.inner.rotation_support.load(std::sync::atomic::Ordering::Relaxed),
             ),

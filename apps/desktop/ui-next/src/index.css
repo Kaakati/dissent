@@ -90,10 +90,11 @@
   --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px;
 
   /* ---- type scale: size / line height ---- */
-  --fs-body: 15px; --lh-body: 22px;
+  --fs-body: 16px; --lh-body: 22px;
   --fs-ui: 14px; --lh-ui: 20px;
   --fs-row: var(--fs-ui); --lh-row: var(--lh-ui);
   --fs-sm: 13px; --lh-sm: 18px;
+  --fs-caption: 12px; --lh-caption: 16px; /* message timestamps and the profile's mutuals line */
   --fs-meta: 11px; --lh-meta: 16px;
   --fs-tiny: 10px; --lh-tiny: 16px;
   --fs-head: 19px; --lh-head: 24px;
@@ -189,6 +190,8 @@
   --text-ui--line-height: var(--lh-ui);
   --text-sm: var(--fs-sm);
   --text-sm--line-height: var(--lh-sm);
+  --text-caption: var(--fs-caption);
+  --text-caption--line-height: var(--lh-caption);
   --text-meta: var(--fs-meta);
   --text-meta--line-height: var(--lh-meta);
   --text-tiny: var(--fs-tiny);
@@ -252,4 +255,16 @@
 }
 @media (prefers-reduced-motion: reduce) {
   [data-shake] { animation: none !important; }
+}
+
+/* Tooltips are not hoverable (TipProvider), so they never take the pointer: one that opens over its own trigger would
+   otherwise read as the pointer leaving the trigger and close at once. */
+[data-radix-popper-content-wrapper]:has(> [data-slot="tooltip-content"]),
+[data-slot="tooltip-content"] {
+  pointer-events: none;
+}
+
+/* No tooltip while a pointer drag is under way (components/ui/tip.tsx sets the attribute). */
+html[data-dragging] [data-slot="tooltip-content"] {
+  display: none;
 }

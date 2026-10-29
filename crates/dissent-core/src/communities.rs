@@ -259,6 +259,9 @@ impl Engine {
             self.refuse_known_dead_invite(id, invite_id)?;
         }
         self.announce_join_as(id, &served, with_group, storage, link.invite_id()).await;
+        if storage {
+            self.spawn_grant_asks(id);
+        }
         self.emit(EngineEvent::CommunitiesChanged);
         self.summary(&id)
     }

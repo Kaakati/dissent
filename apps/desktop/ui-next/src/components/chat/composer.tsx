@@ -1,7 +1,7 @@
 // The composer: a growing textarea, Enter to send and Shift+Enter for a new line, one send at a time (the text leaves the box
 // at once and comes back if the send fails), the reply bar, staged files, the + menu and the typing signals. Ported from
 // the old UI's views/chat.js (composer, send, togglePlusMenu, uploadFile) and the old UI's views/attachments.js (staged chips).
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from 'react';
 import { Link, Paperclip, Plus, SendHorizontal, Smile, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { openFileSendDialog } from '@/components/dialogs/file-send-dialog';
@@ -15,7 +15,7 @@ import { useShell } from '@/lib/store';
 import { convertEmoticons, convertWhileTyping, isInsertion } from '@/lib/emoticons';
 import { useShellPrefs } from '@/lib/shell-prefs';
 import { MAX_ROWS, activeMention, candidatesFor, mentionArg, mentionText, picksInText, type Candidate, type MentionPick } from '@/lib/mentions';
-import { pickFiles, sendFiles, sendMessage, sendReply } from '@/lib/chat-actions';
+import { pickFiles, sendFiles, sendMessage, sendReply, stagePasted } from '@/lib/chat-actions';
 import { copyText } from '@/lib/clipboard';
 import { has } from '@/lib/features';
 import { openContextMenu, type MenuEntry } from '@/lib/menu';
@@ -25,6 +25,7 @@ import { openEmojiPicker } from './emoji-picker';
 import { IconBtn } from './parts';
 import { MentionList } from './mention-list';
 import { StagedChip } from './attachments';
+import type { CommunityView, GroupSummary, Id, Member } from '@/lib/types';
 import type { ChatView } from './use-chat-view';
 
 // The markdown marker for a formatting shortcut: Ctrl+B bold, Ctrl+I italic, Ctrl+U underline, Ctrl+Shift+X strike.
@@ -43,6 +44,18 @@ async function uploadFile(): Promise<void> {
   else useChat.getState().stageFiles(files);
 }
 
+// The people "@" can name in the open conversation, and whether @everyone is offered. A server channel offers its
+// members; a direct conversation, the other person; a group, its members. Null where mentions are off.
+function mentionPool(view: ChatView, community: CommunityView | null, group: GroupSummary | null): { members: Member[]; everyone: boolean } | null {
+  if (!has('mentions')) return null;
+  if (view.target.kind === 'channel') return community ? { members: community.members, everyone: community.can_mention_everyone === true } : null;
+  if (!has('dm_mentions')) return null;
+  const asMember = (root_id: Id, display_name: string): Member => ({ root_id, display_name, role: 'member', banned: false });
+  if (view.target.kind === 'dm') return { members: [asMember(view.target.peer, view.title)], everyone: false };
+  const groupId = view.target.groupId;
+  return { members: group?.id === groupId ? group.members.map((m) => asMember(m.root_id, m.display_name)) : [], everyone: false };
+}
+
 async function copyContactLink(): Promise<void> {
   const link = await contactLink();
   if (link && (await copyText(link))) toast('Contact link copied', 'info');
@@ -57,16 +70,17 @@ export function Composer({ view }: { view: ChatView }) {
   const [text, setText] = useState('');
   // "@" autocomplete: the token under the caret, the highlighted row, and the members picked so far.
   const community = useShell((s) => s.community);
+  const group = useShell((s) => s.group);
+  const pool = mentionPool(view, community, group);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [picks, setPicks] = useState<MentionPick[]>([]);
   const me = useShell((s) => s.me);
-  const matches: Candidate[] = mention && has('mentions') && view.target.kind === 'channel' && community
-    ? candidatesFor(community.members, mention.query, community.can_mention_everyone === true, me?.root_id)
-    : [];
+  const matches: Candidate[] = mention && pool ? candidatesFor(pool.members, mention.query, pool.everyone, me?.root_id) : [];
   const rows = matches.slice(0, MAX_ROWS);
   const input = useRef<HTMLTextAreaElement>(null);
   const sending = useRef(false); // one send at a time
+  const mounted = useRef(true); // a paste saved after the composer closed (another conversation opened) is not staged
   // Link previews are off until the sender turns them on. The first text with a link asks once, here in the composer.
   const [previews, setPreviews] = useState<{ on: boolean; prompted: boolean } | null>(null);
   const [askPreviews, setAskPreviews] = useState(false);
@@ -76,6 +90,13 @@ export function Composer({ view }: { view: ChatView }) {
     Promise.all([api.linkPreviews(), api.linkPreviewPrompted()])
       .then(([on, prompted]) => setPreviews({ on, prompted }))
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   // A reply starts with the composer focused, as the reply's button does.
@@ -127,7 +148,7 @@ export function Composer({ view }: { view: ChatView }) {
     setText('');
     let ok: boolean;
     try {
-      const mentions = view.target.kind === 'channel' && has('mentions') ? mentionArg(picksInText(trimmed, picks)) : undefined;
+      const mentions = pool ? mentionArg(picksInText(trimmed, picks)) : undefined;
       if (files.length) ok = await sendFiles(view.target, files.map((f) => f.path), trimmed || null, mentions);
       else if (reply) ok = await sendReply(view.target, reply.id, trimmed, mentions);
       else ok = await sendMessage(view.target, trimmed, mentions);
@@ -170,7 +191,7 @@ export function Composer({ view }: { view: ChatView }) {
       return;
     }
     setText(e.target.value);
-    setMention(view.target.kind === 'channel' && has('mentions') ? activeMention(e.target.value, e.target.selectionStart) : null);
+    setMention(pool ? activeMention(e.target.value, e.target.selectionStart) : null);
     setMentionIndex(0);
     typed(view.target, e.target.value);
   };
@@ -244,6 +265,19 @@ export function Composer({ view }: { view: ChatView }) {
     }
   };
 
+  // A picture or files on the clipboard are staged, as picked files are, and go out with the next send. Text on the
+  // clipboard wins, so a paste from a spreadsheet or a document (which also carries a picture of it) stays text.
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const data = e.clipboardData;
+    if (!view.files || !data || data.getData('text/plain') !== '') return;
+    const files = data.files.length ? [...data.files] : [...data.items].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter((f) => f !== null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void stagePasted(files).then((staged) => {
+      if (staged.length && mounted.current) useChat.getState().stageFiles(staged);
+    });
+  };
+
   // Server: invite. Direct conversation: copy my contact link, so the other person can add me without a shared server.
   const openPlusMenu = (anchor: HTMLElement) => {
     const r = anchor.getBoundingClientRect();
@@ -269,7 +303,7 @@ export function Composer({ view }: { view: ChatView }) {
               </span>
               <IconBtn
                 label="Cancel reply"
-                title="Cancel reply (Esc)"
+                shortcut="Esc"
                 icon={X}
                 onClick={() => {
                   useChat.getState().cancelReply();
@@ -301,9 +335,9 @@ export function Composer({ view }: { view: ChatView }) {
         <div className="composer">
           {rows.length ? <MentionList rows={rows} total={matches.length} query={mention?.query ?? ''} active={mentionIndex} onPick={pickMention} /> : null}
           <IconBtn lg label="More actions" title={`Attach a file (up to ${MAX_FILE_LABEL})`} icon={Plus} aria-haspopup="menu" onClick={(e) => openPlusMenu(e.currentTarget)} />
-          <textarea ref={input} rows={1} placeholder={view.placeholder} aria-label="Message" value={text} onChange={onChange} onKeyDown={onKeyDown} />
+          <textarea ref={input} rows={1} placeholder={view.placeholder} aria-label="Message" value={text} onChange={onChange} onKeyDown={onKeyDown} onPaste={onPaste} />
           <IconBtn lg label="Insert emoji" title="Emoji" icon={Smile} onClick={(e) => openEmojiPicker(e.currentTarget, insertEmoji, 'Insert emoji')} />
-          <IconBtn lg className="send" label="Send message" title="Send" icon={SendHorizontal} disabled={overLimit} onClick={() => void send()} />
+          <IconBtn lg className="send" label="Send message" title="Send" shortcut="Enter" icon={SendHorizontal} disabled={overLimit} onClick={() => void send()} />
         </div>
       </div>
     </div>

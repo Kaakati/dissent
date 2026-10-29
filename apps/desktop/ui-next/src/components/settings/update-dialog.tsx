@@ -4,6 +4,7 @@
 import { useState, type ReactNode } from 'react';
 import { Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { api, listenTo } from '@/lib/api';
 import { openDialog } from '@/lib/dialog';
 import { useShell } from '@/lib/store';
@@ -43,16 +44,17 @@ export function UpdateButton() {
   if (!update || dismissed) return null;
   const label = `Update available: v${update.version}`;
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      title={label}
-      aria-label={label}
-      onClick={() => openUpdateDialog(update)}
-      className="size-8 rounded-full bg-success-tint text-success hover:bg-[rgb(35_165_90_/_0.28)] hover:text-success [&_svg]:size-[18px]"
-    >
-      <Download />
-    </Button>
+    <Tip label={label} side="bottom">
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={label}
+        onClick={() => openUpdateDialog(update)}
+        className="size-8 rounded-full bg-success-tint text-success hover:bg-[rgb(35_165_90_/_0.28)] hover:text-success [&_svg]:size-[18px]"
+      >
+        <Download />
+      </Button>
+    </Tip>
   );
 }
 

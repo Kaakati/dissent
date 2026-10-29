@@ -289,6 +289,24 @@ pub enum Payload {
     /// community. Off by default; the latest by HLC wins. Admin and owner only. Sealed, so a client that
     /// predates it rejects it as forged. Appended. See `docs/design/12-boosts.md`.
     MembersHostRelays { on: bool },
+    /// The order the server lists its text channels and its voice channels in, top first. Owner and admin
+    /// only, on the control channel. The latest by HLC wins. Replay ignores an id that is not a live channel
+    /// of that kind, and lists the channels left out after the listed ones, in creation order. See
+    /// `state::CommunityState::channel_order`. Carried: see `control::carry_sealed`. Appended, see
+    /// `docs/design/02-communities-and-dms.md`, "Channel order".
+    ChannelOrder {
+        text: Vec<ChannelId>,
+        voice: Vec<ChannelId>,
+    },
+    /// Whether the community's seeders may forward its voice calls, as volunteers do. Off by default;
+    /// the latest by HLC wins. Owner only, on the control channel. Carried: see `control::carry_sealed`.
+    /// Appended. See `docs/design/13-forwarded-calls.md`, phase 4.
+    SeederForwardsCalls { on: bool },
+    /// An admin's grant to `root` to hold the community as storage (a seeder), or its withdrawal when
+    /// `granted` is false. The latest by HLC per root wins. Admin and owner only, on the control
+    /// channel. Phase 1 records and shows grants; a storage join does not need one yet. Carried: see
+    /// `control::carry_sealed`. Appended. See `docs/design/05-encrypted-servers.md`, "Storage joins".
+    StorageGrant { root: RootId, granted: bool },
 }
 
 /// One of a community's traits: an optional emoji (empty when there is none) and a short label. See

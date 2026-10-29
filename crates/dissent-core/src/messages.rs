@@ -283,14 +283,22 @@ impl Engine {
         // Control payloads are sealed under the epoch key while member-only control is on, and under
         // the current secret otherwise. Without a key, nothing is sent.
         if dissent_events::is_sealable(&body.payload) {
-            // A private channel's name and readers are carried, under the same seal as the other control.
-            let private = matches!(body.payload, Payload::ChannelCreatePrivate { .. } | Payload::ChannelAccess { .. });
+            // A private channel's name and readers, the channel order and the seeder setting are carried, under
+            // the same seal as the other control, so a client from before them shows them as locked.
+            let carried = matches!(
+                body.payload,
+                Payload::ChannelCreatePrivate { .. }
+                    | Payload::ChannelAccess { .. }
+                    | Payload::ChannelOrder { .. }
+                    | Payload::SeederForwardsCalls { .. }
+                    | Payload::StorageGrant { .. }
+            );
             body.payload = match &member {
                 Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,
                 None => {
                     let keys = access.get(&community).ok_or_else(|| not_found(&community))?;
                     let sealed = dissent_events::seal(&keys.secret, keys.generation, &body)?;
-                    if private {
+                    if carried {
                         dissent_events::carry_sealed(&sealed)?
                     } else {
                         sealed

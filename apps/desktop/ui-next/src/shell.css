@@ -9,15 +9,31 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) 0;
+    --right-col: 0px;
+    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) var(--right-col);
   }
   .app-shell[data-right="members"],
   .app-shell[data-right="profile"],
   .app-shell[data-right="call"] {
-    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) var(--right-w);
+    --right-col: var(--right-w);
   }
   .app-shell[data-right="wide"] {
-    grid-template-columns: var(--rail-w) var(--sidebar-w) minmax(0, 1fr) var(--right-wide-w);
+    --right-col: var(--right-wide-w);
+  }
+  /* The main column spans the right column too, so its header runs across the full width (as in the reference client)
+     and the right column starts under it. The header is the first child and spans both tracks; the body and the overlay
+     keep the first. The right panel is placed over the second track, below the header (right-panel.tsx). */
+  .app-main {
+    grid-column: 3 / -1;
+    grid-row: 1;
+    grid-template-columns: minmax(0, 1fr) var(--right-col);
+    grid-template-rows: var(--header-h) minmax(0, 1fr);
+  }
+  .app-main > * {
+    grid-column: 1;
+  }
+  .app-main > :first-child {
+    grid-column: 1 / -1;
   }
 
   /* Presence dot. --presence-ring is the surface it sits on: the sidebar by default, the user panel where it is set. */

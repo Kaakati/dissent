@@ -73,22 +73,24 @@ function DmTools({ view, profile }: { view: ChatView; profile: PeerProfile | nul
     <>
       {has('calls') ? (
         <IconBtn
+          tipSide="bottom"
           label={view.group ? `Start a voice call in ${who}` : `Start voice call with ${who}`}
           icon={Phone}
           onClick={() => void startConversationCall(view.group ? { groupId: peer } : { peer })}
         />
       ) : null}
       {has('calls') && !view.group ? (
-        <IconBtn label={`Start video call with ${who}`} icon={Video} onClick={() => void startVideoConversationCall(peer)} />
+        <IconBtn tipSide="bottom" label={`Start video call with ${who}`} icon={Video} onClick={() => void startVideoConversationCall(peer)} />
       ) : null}
       {has('groups') ? (
         <IconBtn
+          tipSide="bottom"
           label="Add friends to group"
           icon={UsersRound}
           onClick={() => openNewGroupDialog({ preselect: [{ root_id: peer, display_name: who, suffix }] })}
         />
       ) : null}
-      <IconBtn label={profileOpen ? 'Hide profile panel' : 'Show profile panel'} icon={PanelRight} pressed={profileOpen} onClick={toggleProfile} />
+      <IconBtn tipSide="bottom" label={profileOpen ? 'Hide profile panel' : 'Show profile panel'} icon={PanelRight} pressed={profileOpen} onClick={toggleProfile} />
     </>
   );
 }
@@ -129,8 +131,8 @@ function ChannelTools({ view }: { view: ChatView }) {
   const membersOpen = useRight((s) => s.membersOpen);
   return (
     <>
-      <IconBtn label="Pinned messages" icon={Pin} onClick={(e) => void openPins(e, view)} />
-      <IconBtn label={membersOpen ? 'Hide member list' : 'Show member list'} icon={UsersRound} pressed={membersOpen} onClick={toggleMembers} />
+      <IconBtn tipSide="bottom" label="Pinned messages" icon={Pin} onClick={(e) => void openPins(e, view)} />
+      <IconBtn tipSide="bottom" label={membersOpen ? 'Hide member list' : 'Show member list'} icon={UsersRound} pressed={membersOpen} onClick={toggleMembers} />
       <MoreTools />
     </>
   );
@@ -141,6 +143,7 @@ export function MoreTools() {
   const membersOpen = useRight((s) => s.membersOpen);
   return (
     <IconBtn
+      tipSide="bottom"
       lg
       label="More group actions"
       title="More"

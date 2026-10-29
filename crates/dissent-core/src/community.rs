@@ -405,7 +405,7 @@ impl Community {
                 self.max_hlc = Some(ev.body.hlc);
             }
             joined |= open_event_keyed(ev, self.replayer.ring(), self.replayer.epoch_ring())
-                .is_ok_and(|plain| matches!(plain.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }));
+                .is_ok_and(|plain| is_join(&plain.body.payload));
         }
         if joined || self.rejected_ids() != rejected_before {
             self.join_times_refresh();
@@ -421,7 +421,13 @@ impl Community {
     }
 }
 
-/// HLC of the latest accepted Join per author.
+/// A join that names its author: a person's, or a seeder's storage join, so a seeder is shown by the
+/// name it joined with rather than as `anon·<suffix>`.
+fn is_join(payload: &Payload) -> bool {
+    matches!(payload, Payload::Join { .. } | Payload::JoinVia { .. } | Payload::JoinAsStorage { .. })
+}
+
+/// HLC of the latest accepted Join per author, storage joins included.
 fn join_times(
     dag: &Dag,
     ring: &[SealKey],
@@ -434,7 +440,7 @@ fn join_times(
         let Ok(ev) = open_event_keyed(stored, ring, epochs) else {
             continue;
         };
-        if !matches!(ev.body.payload, Payload::Join { .. } | Payload::JoinVia { .. }) || bad.contains(&ev.id) {
+        if !is_join(&ev.body.payload) || bad.contains(&ev.id) {
             continue;
         }
         let latest = out.entry(ev.body.author).or_insert(ev.body.hlc);

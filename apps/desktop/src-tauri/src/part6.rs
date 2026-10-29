@@ -235,6 +235,20 @@ pub async fn delete_channel(
     engine(&state).await?.delete_channel(community, channel).await.map_err(err)
 }
 
+/// Sets the server's channel order for everyone: text and voice channel ids, top first.
+#[tauri::command]
+pub async fn reorder_channels(
+    state: State<'_, AppState>,
+    community_id: String,
+    text: Vec<String>,
+    voice: Vec<String>,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let ids = |list: Vec<String>| -> Result<Vec<ChannelId>, String> { list.iter().map(|id| parse("channel id", id)).collect() };
+    let (text, voice) = (ids(text)?, ids(voice)?);
+    engine(&state).await?.reorder_channels(community, text, voice).await.map_err(err)
+}
+
 /// The invites this device made for a community.
 #[tauri::command]
 pub async fn list_invites(

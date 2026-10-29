@@ -18,17 +18,17 @@ interface AlertMessage {
   sender: string;
   where: string; // "#channel" or the group's name, empty for a DM
   text: string;
-  mentions?: boolean; // channel messages only
+  mentions?: boolean; // the message mentions the user
 }
 
 // One decision for the sound and the desktop notification. Muted, own, ignored and closed conversations never do, and
 // neither does Do Not Disturb. A channel message alerts when the server's notification setting says so (the engine
-// decides that before this runs), and a mention alerts through a channel mute, as a DM does.
+// decides that before this runs), and a mention alerts through a mute, in a channel, a DM or a group alike.
 function shouldAlert(msg: AlertMessage): boolean {
   const s = useShell.getState();
   const me = s.me;
   // A mention alerts even in a muted channel, the same as a DM; nothing alerts under Do Not Disturb.
-  if (isMuted(msg.key) && !(msg.kind === 'channel' && msg.mentions)) return false;
+  if (isMuted(msg.key) && !msg.mentions) return false;
   if (!me || msg.from === me.root_id || s.ignored.includes(msg.from)) return false;
   if (s.status.status === 'dnd') return false;
   if (msg.kind === 'channel') return true;
@@ -88,21 +88,24 @@ export async function alertForChannelMessage(ev: { community_id: Id; channel_id:
   });
 }
 
+// Whether a direct or group message mentions the user, as the engine decided it.
+const mentionsMe = (m: { mentions_me?: boolean }): boolean => has('dm_mentions') && m.mentions_me === true;
+
 // Any DM message from the peer alerts. Call after the conversation list is reloaded, so a closed DM is not listed.
 export async function alertForDm(peer: Id): Promise<void> {
-  const [latest] = (await api.dmMessages(peer, 1)) as { id: Id; from: Id; text: string }[];
+  const [latest] = (await api.dmMessages(peer, 1)) as { id: Id; from: Id; text: string; mentions_me?: boolean }[];
   const conv = useShell.getState().conversations.find((c): c is DirectSummary => c.kind === 'dm' && c.peer === peer);
   if (!latest || !conv) return;
-  alertFor({ kind: 'dm', key: `dm:${peer}`, id: latest.id, from: latest.from, sender: conv.display_name, where: '', text: latest.text });
+  alertFor({ kind: 'dm', key: `dm:${peer}`, id: latest.id, from: latest.from, sender: conv.display_name, where: '', text: latest.text, mentions: mentionsMe(latest) });
 }
 
-// Any group message alerts. Membership lines in a group are not messages.
+// Any group message alerts, and one that mentions the user alerts through a mute. Membership lines are not messages.
 export async function alertForGroup(groupId: Id): Promise<void> {
-  const [latest] = (await api.groupMessages(groupId, 1)) as { id: Id; from: Id; text: string; system?: boolean }[];
+  const [latest] = (await api.groupMessages(groupId, 1)) as { id: Id; from: Id; text: string; system?: boolean; mentions_me?: boolean }[];
   const conv = useShell.getState().conversations.find((c): c is GroupSummary => c.kind === 'group' && c.id === groupId);
   if (!latest || !conv || latest.system) return;
   const sender = conv.members?.find((m) => m.root_id === latest.from)?.display_name ?? 'Someone';
-  alertFor({ kind: 'group', key: `group:${groupId}`, id: latest.id, from: latest.from, sender, where: conv.name, text: latest.text });
+  alertFor({ kind: 'group', key: `group:${groupId}`, id: latest.id, from: latest.from, sender, where: conv.name, text: latest.text, mentions: mentionsMe(latest) });
 }
 
 // A desktop notification was clicked. The backend has restored the window; this opens the conversation it was for.

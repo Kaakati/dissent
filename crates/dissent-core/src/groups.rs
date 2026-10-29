@@ -39,7 +39,7 @@ use crate::views::{ConversationSummary, DmItem, EngineEvent};
 use crate::world::World;
 
 /// Group DMs take at least this many members besides the creator.
-pub const MIN_GROUP_MEMBERS: usize = 3;
+pub const MIN_GROUP_MEMBERS: usize = 2;
 /// Group DMs take at most this many members besides the creator.
 pub const MAX_GROUP_MEMBERS: usize = 16;
 /// Longest group name, in Unicode scalar values.
@@ -929,12 +929,19 @@ impl Engine {
     /// Sends a text message to a conversation. Before the conversation has a group, the text waits
     /// locally and is sealed once it does.
     pub async fn send_to_conversation(&self, conv: ConvId, text: String) -> Result<DmItem> {
+        self.send_to_conversation_with(conv, text, crate::Mentions::default()).await
+    }
+
+    /// Sends a text message that mentions the people in `mentions`. A conversation has no `@everyone`, so that flag
+    /// is dropped. The mentions ride in the sealed payload as in a channel (see `crate::dm_mentions`).
+    pub async fn send_to_conversation_with(&self, conv: ConvId, text: String, mentions: crate::Mentions) -> Result<DmItem> {
         let text = clean_message(&text)?;
         let (embeds, extras) = self.build_embeds(&text).await;
-        let plain = if embeds.is_empty() {
+        let mentions = crate::dm_mentions::for_conversation(mentions);
+        let plain = if embeds.is_empty() && mentions.is_empty() {
             text
         } else {
-            crate::attachments::pack_all_with(&text, &[], &embeds, &[], None, &extras)?
+            crate::attachments::pack_all_with(&text, &[], &embeds, &[], Some(&mentions), &extras)?
         };
         self.send_conversation_plain(conv, plain).await
     }

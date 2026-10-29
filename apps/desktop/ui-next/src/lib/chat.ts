@@ -194,9 +194,9 @@ function markLatestRead(key: string, items: { id: string; ms: number }[]): void 
   const last = items[items.length - 1];
   if (!last) return;
   markSeen(key, last.id, Number(last.ms));
-  // A conversation with unread messages is read in the engine too, so its count (and the rail's) clears.
+  // A conversation with unread messages or mentions is read in the engine too, so its counts (and the rail's) clear.
   const counted = key.startsWith('dm:') || key.startsWith('group:');
-  if (counted && useShell.getState().conversations.some((c) => convKey(c) === key && (c.unread ?? 0) > 0)) {
+  if (counted && useShell.getState().conversations.some((c) => convKey(c) === key && ((c.unread ?? 0) > 0 || (c.mentions ?? 0) > 0))) {
     void api.markRead(key).then(() => useShell.getState().loadConversations()).catch(() => {});
   }
   useShell.setState((s) => {
@@ -314,11 +314,17 @@ export function markOpenRead(): void {
 export async function reloadForEvent(ev: EngineEvent): Promise<void> {
   const { target } = useChat.getState();
   if (!target) return;
-  if (ev.kind === 'attachment_changed') {
-    // A preview arrived. The conversation is re-read, but nothing is marked read or alerted.
+  if (ev.kind === 'attachment_progress') {
+    attachmentProgress(ev);
+    return;
+  }
+  if (ev.kind === 'attachment_changed' || (ev.kind === 'transfers_changed' && showsMovingFile())) {
+    // A preview arrived, or a download shown here finished or failed. The conversation is re-read, but nothing is marked
+    // read or alerted. The app lets the webview read a finished file before this event reaches the UI.
     await reloadOpen();
     return;
   }
+  if (ev.kind === 'transfers_changed') return;
   if ((ev.kind === 'message' || ev.kind === 'messages_changed') && target.kind === 'channel' && target.communityId === ev.community_id && target.channelId === ev.channel_id) {
     await reloadOpen();
     markOpenRead();
@@ -333,6 +339,14 @@ export async function reloadForEvent(ev: EngineEvent): Promise<void> {
   }
 }
 
+// Whether the open conversation shows a download that is running or waiting, so a transfer change can be about it. Any
+// other transfer change leaves the conversation alone.
+function showsMovingFile(): boolean {
+  const { target, messages, dmMessages } = useChat.getState();
+  const items = target?.kind === 'channel' ? messages : dmMessages;
+  return items.some((m) => m.attachments?.some((a) => a.state === 'downloading' || a.state === 'waiting'));
+}
+
 // The attachment with this id in the open conversation, or null. The same object until the message changes.
 export function findAttachment(id: Id): Attachment | null {
   const { messages, dmMessages } = useChat.getState();
@@ -343,7 +357,8 @@ export function findAttachment(id: Id): Attachment | null {
   return null;
 }
 
-// Upload progress updates the attachment in place; the next reload brings the final state.
+// Download progress updates the attachment in place; the next reload brings the final state. A file already on this
+// device stays as it is, so a late progress event never turns a shown picture back into a download.
 export function attachmentProgress(p: { message_id: Id; attachment_id: Id; progress: number; rate_bps?: number; eta_s?: number; transfer?: unknown } | null): void {
   if (!p) return;
   const update = <T extends { id: string; attachments?: Attachment[] | null }>(items: T[]): T[] => {
@@ -353,7 +368,7 @@ export function attachmentProgress(p: { message_id: Id; attachment_id: Id; progr
     const message = items[at];
     next[at] = {
       ...message,
-      attachments: (message.attachments ?? []).map((a) => (a.id === p.attachment_id
+      attachments: (message.attachments ?? []).map((a) => (a.id === p.attachment_id && a.state !== 'downloaded'
         ? {
           ...a,
           state: 'downloading' as const,

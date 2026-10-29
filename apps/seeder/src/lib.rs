@@ -212,6 +212,14 @@ pub struct CommunityLine {
     pub id: String,
     pub members: usize,
     pub messages: usize,
+    /// Whether the owner lets this seeder forward the server's voice calls ("Seeder may forward
+    /// calls"). Absent from a status file written before it, which reads as off.
+    #[serde(default)]
+    pub forwards_calls: bool,
+    /// Whether an admin granted this seeder storage in the server (`StorageGrant`). It asks for one
+    /// when it joins; a storage join does not need one yet. Absent from an older status file: off.
+    #[serde(default)]
+    pub storage_granted: bool,
 }
 
 /// Runs the seeder until Ctrl-C, SIGTERM, or a stop request. Called by the console and by the
@@ -371,6 +379,8 @@ pub async fn collect_status(engine: &Engine, started_ms: u64) -> StatusFile {
             id: summary.id,
             members: view.members.len(),
             messages,
+            forwards_calls: engine.seeder_forwards_calls(id),
+            storage_granted: engine.holds_storage_grant(id),
         });
     }
     let net = engine.net_status().await;
@@ -391,6 +401,8 @@ pub fn log_status(status: &StatusFile) {
             id = %c.id,
             members = c.members,
             messages = c.messages,
+            forwards_calls = c.forwards_calls,
+            storage_granted = c.storage_granted,
             "community status"
         );
     }
@@ -479,7 +491,14 @@ pub fn service_command(action: ServiceCmd) -> Result<()> {
                         let age = now_ms().saturating_sub(s.updated_ms) / 1000;
                         println!("communities: {} (status written {age} s ago, pid {})", s.communities.len(), s.pid);
                         for c in &s.communities {
-                            println!("  {}: {} members, {} messages", c.name, c.members, c.messages);
+                            println!(
+                                "  {}: {} members, {} messages{}{}",
+                                c.name,
+                                c.members,
+                                c.messages,
+                                if c.storage_granted { "" } else { ", no storage grant yet" },
+                                if c.forwards_calls { ", forwards calls" } else { "" }
+                            );
                         }
                     }
                     None => println!("communities: no status.json in {} yet", dir.display()),
@@ -838,6 +857,8 @@ mod tests {
                 id: "abc".into(),
                 members: 4,
                 messages: 5,
+                forwards_calls: true,
+                storage_granted: true,
             }],
         };
         write_status(&dir, &status).unwrap();

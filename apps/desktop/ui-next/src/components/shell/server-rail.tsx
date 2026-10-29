@@ -5,14 +5,14 @@
 // events, not HTML5 drag and drop, which the webview does not deliver reliably. The order is this device's own and is
 // saved with set_server_order; Home and "+" stay where they are.
 import { has } from '@/lib/features';
-import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent, type ReactElement } from 'react';
 import { Plus } from 'lucide-react';
 import { OwlMark } from '@/components/owl-mark';
 import { GroupAvatar } from '@/components/shell/sidebar';
 import { UserAvatar } from '@/components/user-avatar';
 import { openServerDialog } from '@/components/dialogs/server-dialog';
 import { Button } from '@/components/ui/button';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tip } from '@/components/ui/tip';
 import { bannersStill, subscribeBannerMotion } from '@/lib/banners';
 import { iconSrc } from '@/lib/images';
 import { hueBackground, hueOf, initials } from '@/lib/identity';
@@ -41,14 +41,12 @@ interface Press {
   dragging: boolean;
 }
 
-function Labelled({ label, children }: { label: string; children: ReactNode }) {
+// A rail item's tooltip: its name, to the right of the icon, as in the reference client.
+function Labelled({ label, children }: { label: string; children: ReactElement }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="right" sideOffset={16}>
-        {label}
-      </TooltipContent>
-    </Tooltip>
+    <Tip label={label} side="right" sideOffset={16}>
+      {children}
+    </Tip>
   );
 }
 
@@ -126,7 +124,12 @@ export function ServerRail() {
     if (!p || p.pointerId !== e.pointerId) return;
     press.current = null;
     if (!p.dragging) return;
+    // The click that follows this release is skipped. A drop over another server produces no click on this one, so the
+    // flag clears after the release's own events instead of swallowing the next real click.
     justDragged.current = true;
+    setTimeout(() => {
+      justDragged.current = false;
+    }, 0);
     setDrag(null);
     const from = communities.findIndex((c) => c.id === p.id);
     const dropAt = slotAt(e.clientY);

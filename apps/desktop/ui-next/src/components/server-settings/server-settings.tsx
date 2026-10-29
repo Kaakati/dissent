@@ -22,6 +22,7 @@ import { boostLabel, videoLabel } from '@/lib/boosts';
 import { useDialogs } from '@/lib/dialog';
 import { iconSrc } from '@/lib/images';
 import { useShell } from '@/lib/store';
+import { loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
 import { toast } from '@/lib/toasts';
 import type { CommunityView, Id, Trait } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -160,6 +161,10 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
   const edit = (patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch }));
 
   const members = community.members.filter((m) => !m.banned);
+  const asks = useStorageAsks((s) => s.asks[community.id]?.length ?? 0);
+  useEffect(() => {
+    void loadStorageAsks(community.id);
+  }, [community.id]);
   const online = members.filter((m) => (m.status ?? (m.online ? 'online' : 'offline')) !== 'offline').length;
 
   return (
@@ -183,6 +188,11 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
                   )}
                 >
                   {n.label}
+                  {n.key === 'members' && asks ? (
+                    <span data-asks-badge aria-label={`${asks} seeder${asks === 1 ? '' : 's'} asking for a grant`} className="ml-auto grid min-w-5 place-items-center rounded-full bg-danger px-1.5 text-meta font-semibold text-white">
+                      {asks}
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>
@@ -215,7 +225,12 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
               </aside>
             </div>
           ) : null}
-          {section === 'members' ? <PeopleList people={members} empty="No members yet." /> : null}
+          {section === 'members' ? (
+            <>
+              <PeopleList people={members.filter((m) => !m.storage)} empty="No members yet." />
+              <SeederList community={community} seeders={members.filter((m) => m.storage)} />
+            </>
+          ) : null}
           {section === 'invites' ? <InviteList communityId={community.id} /> : null}
           {section === 'bans' ? <PeopleList people={community.members.filter((m) => m.banned)} empty="Nobody is banned." /> : null}
           {section === 'boosts' ? <BoostsSection community={community} /> : null}
@@ -469,6 +484,7 @@ function BoostsSection({ community }: { community: CommunityView }) {
           <Hint>Off: only the owner and admins can add a relay here. On: any member can, and the apps still check each one.</Hint>
         </Block>
       ) : null}
+      <SeederForwardsBlock community={community} />
       <Block title="Host a relay">
         <Hint>Run the Dissent relay (see the relay guide), then add its address here. Each member’s app checks it before it counts.</Hint>
         <div className="flex gap-s-2">
@@ -483,6 +499,88 @@ function BoostsSection({ community }: { community: CommunityView }) {
         ) : null}
       </Block>
     </div>
+  );
+}
+
+// Seeder may forward calls: the owner lets the server's seeders forward its voice calls when nobody in a call
+// forwards better, as members who turn on Help Forward Calls do. Off by default. Admins see it, but only the owner
+// changes it, which the engine enforces too.
+function SeederForwardsBlock({ community }: { community: CommunityView }) {
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.getSeederForwardsCalls(community.id).then((v) => live && setOn(v), () => live && setOn(null));
+    return () => {
+      live = false;
+    };
+  }, [community.id]);
+  if (on === null) return null;
+  const owner = community.my_role === 'owner';
+  const change = async (next: boolean) => {
+    try {
+      await api.setSeederForwardsCalls(community.id, next);
+      setOn(next);
+    } catch (err) {
+      toast(err);
+    }
+  };
+  return (
+    <Block title="Calls">
+      <CheckRow>
+        <input
+          type="checkbox"
+          className={CHECK_CLASS}
+          aria-label="Seeder may forward calls"
+          checked={on}
+          disabled={!owner}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        Seeder may forward calls
+      </CheckRow>
+      <Hint>
+        On: this server’s seeder can pass a voice call’s sealed streams along when it is the best-connected device, and the
+        call shows its name. It can’t open them, but it learns who is in the call and who speaks.
+      </Hint>
+      {owner ? null : <Hint>Only the owner can change this.</Hint>}
+    </Block>
+  );
+}
+
+// The server's seeders, storage members outside the encrypted group, and whether an admin granted each one storage.
+// A seeder asks the owner and admins for a grant when it joins. Grants are not required yet; they will be, once seeders
+// have had time to ask (docs/design/05-encrypted-servers.md, "Storage joins").
+function SeederList({ community, seeders }: { community: CommunityView; seeders: CommunityView['members'] }) {
+  const asks = useStorageAsks((s) => s.asks[community.id] ?? []);
+  const key = seeders.map((m) => `${m.root_id}:${m.storage_granted ? 1 : 0}`).join(',');
+  useEffect(() => {
+    void loadStorageAsks(community.id);
+  }, [community.id, key]);
+  if (!seeders.length) return null;
+  const grant = async (rootId: string, granted: boolean) => {
+    try {
+      await api.grantStorage(community.id, rootId, granted);
+      await useShell.getState().loadCommunity(community.id);
+    } catch (err) {
+      toast(err);
+    }
+  };
+  return (
+    <Block title="Seeders">
+      <Hint>A seeder keeps the server’s history available. It can’t read messages. Grant the seeders you run or trust.</Hint>
+      <ul role="list" aria-label="Seeders" className="m-0 flex list-none flex-col gap-s-1 p-0">
+        {seeders.map((m) => (
+          <li key={m.root_id} data-seeder={m.root_id} className="flex h-11 items-center gap-s-3 rounded-lg border border-border bg-panel px-s-3">
+            <span className="min-w-0 flex-1 truncate text-ui font-medium text-text-strong">{m.display_name}</span>
+            <span data-seeder-grant className="text-sm text-muted-foreground">
+              {m.storage_granted ? 'Granted' : asks.includes(m.root_id) ? 'Asks for a grant' : 'Not granted'}
+            </span>
+            <Button variant={m.storage_granted ? 'ghost' : 'default'} onClick={() => void grant(m.root_id, !m.storage_granted)}>
+              {m.storage_granted ? 'Withdraw grant' : 'Grant storage'}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </Block>
   );
 }
 

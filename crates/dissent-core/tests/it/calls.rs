@@ -11,7 +11,7 @@ use std::time::Duration;
 /// Makes `a` and `b` contacts of each other, so a DM call between them is allowed.
 /// Creates a community with a voice channel and joins every peer to it. Returns the community,
 /// the voice channel, and the peers in the same order.
-async fn voice_community(owner: &Peer, others: &[&Peer]) -> (CommunityId, ChannelId) {
+pub(crate) async fn voice_community(owner: &Peer, others: &[&Peer]) -> (CommunityId, ChannelId) {
     let community = rustaceans(owner, others[0]).await;
     for other in &others[1..] {
         let invite = owner
@@ -846,7 +846,7 @@ async fn losing_the_cascade_root_keeps_everyone_hearing() {
 }
 
 /// The root id of the forwarder as a call sees it, if the call is forwarded.
-fn forwarder_root(engine: &dissent_core::Engine) -> Option<String> {
+pub(crate) fn forwarder_root(engine: &dissent_core::Engine) -> Option<String> {
     engine.call_state().and_then(|v| {
         v.participants
             .iter()
@@ -1223,7 +1223,7 @@ async fn an_outsider_sees_no_live_call() {
 }
 
 /// Puts `count` peers in one voice channel at boost `level`, each announcing `kbps` of upload.
-async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Peer>, CommunityId, ChannelId) {
+pub(crate) async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Peer>, CommunityId, ChannelId) {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..count {
@@ -1241,7 +1241,7 @@ async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Peer>, Communi
 }
 
 /// Waits until every peer in `peers` sees a call of `peers.len()` at `topology`, with audio.
-async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
+pub(crate) async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
     for p in peers {
         eventually_within(Duration::from_secs(150), what, || {
             p.engine.call_state().filter(|v| {
@@ -1421,13 +1421,13 @@ async fn simulcast_call(released: &[usize]) -> (Vec<Peer>, usize) {
     (everyone, index)
 }
 
-fn root(p: &Peer) -> String {
+pub(crate) fn root(p: &Peer) -> String {
     p.identity.root_id().to_string()
 }
 
 /// Mutes every device but `senders`. The forwarder sends video only of the top three speakers, so
 /// the senders must be them.
-async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
+pub(crate) async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
     for (i, p) in everyone.iter().enumerate() {
         if !senders.contains(&i) {
             p.engine.set_mute(true).await.expect("mute");
@@ -1436,7 +1436,7 @@ async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
 }
 
 /// The layer of the last frame `viewer` received of `sender`'s camera.
-fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
+pub(crate) fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
     dissent_core::test_support::received_layer(&viewer.engine, &root(sender), false)
 }
 

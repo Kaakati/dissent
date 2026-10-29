@@ -43,6 +43,10 @@ pub struct CommunityState {
     pub channels: BTreeMap<ChannelId, String>,
     /// Channels made with `VoiceChannelCreate`. Each is also in `channels`.
     pub voice_channels: BTreeSet<ChannelId>,
+    /// The HLC of each live channel's create event. Channels an order leaves out are listed by it.
+    pub channel_created: BTreeMap<ChannelId, Hlc>,
+    /// The latest accepted `ChannelOrder`, with its HLC. Read it through [`CommunityState::channel_order`].
+    pub channel_order: Option<(Hlc, ChannelOrderSpec)>,
     pub messages: BTreeMap<ChannelId, Vec<MessageView>>,
     /// Owner is not implicitly a member. The creator emits a Join like everyone else.
     pub members: BTreeMap<RootId, Member>,
@@ -65,6 +69,10 @@ pub struct CommunityState {
     /// HLC. Off until an admin turns it on. See `docs/design/12-boosts.md`.
     pub members_host_relays: bool,
     pub members_host_relays_hlc: Hlc,
+    /// Whether the community's seeders may forward its voice calls, from the latest accepted
+    /// `SeederForwardsCalls`, with its HLC. Off until the owner turns it on.
+    pub seeder_forwards_calls: bool,
+    pub seeder_forwards_calls_hlc: Hlc,
     /// Whether control events are member-sealed, from the latest accepted `MemberOnlyControl`, and
     /// its HLC. Off until an owner turns it on.
     pub member_only: bool,
@@ -103,6 +111,9 @@ pub struct CommunityState {
     /// The relays each member says they host for this community, from their latest accepted
     /// `RelayHostSet`, with its HLC. Apps verify them before counting a host. See `boosts`.
     pub relay_hosts: BTreeMap<RootId, (Hlc, Vec<String>)>,
+    /// Each root's latest accepted `StorageGrant`: whether an admin granted it storage, with the HLC.
+    /// Read it through [`CommunityState::storage_granted`]. Phase 1 only records it.
+    pub storage_grants: BTreeMap<RootId, (Hlc, bool)>,
     /// Settings from the accepted `ChannelUpdate`s. A channel not listed here has the defaults.
     pub channel_settings: BTreeMap<ChannelId, ChannelSettings>,
     /// Invites by id, from `InviteCreate`.
@@ -116,6 +127,18 @@ pub struct CommunityState {
     /// change that removes a reader from a private channel.
     pub key_generation: BTreeMap<ChannelId, u64>,
 }
+
+/// A server's channel order as published: text channels and voice channels, top first. See
+/// `Payload::ChannelOrder`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelOrderSpec {
+    pub text: Vec<ChannelId>,
+    pub voice: Vec<ChannelId>,
+}
+
+/// Most channel ids one `ChannelOrder` may list, text and voice together. Replay rejects a longer one as
+/// `Malformed`.
+pub const MAX_ORDERED_CHANNELS: usize = 500;
 
 /// Who may read a private channel: whether it is private, and the roles and members listed. See
 /// `Payload::ChannelAccess`.
@@ -391,6 +414,8 @@ impl CommunityState {
             handle_skeletons: BTreeMap::new(),
             channels: BTreeMap::new(),
             voice_channels: BTreeSet::new(),
+            channel_created: BTreeMap::new(),
+            channel_order: None,
             messages: BTreeMap::new(),
             members: BTreeMap::new(),
             aliases: BTreeMap::new(),
@@ -402,6 +427,8 @@ impl CommunityState {
             relays_hlc: Hlc::default(),
             members_host_relays: false,
             members_host_relays_hlc: Hlc::default(),
+            seeder_forwards_calls: false,
+            seeder_forwards_calls_hlc: Hlc::default(),
             member_only: false,
             member_only_hlc: Hlc::default(),
             history: HistorySetting::All,
@@ -417,12 +444,48 @@ impl CommunityState {
             profile: None,
             profile_banners: BTreeMap::new(),
             relay_hosts: BTreeMap::new(),
+            storage_grants: BTreeMap::new(),
             channel_settings: BTreeMap::new(),
             invites: BTreeMap::new(),
             last_post: BTreeMap::new(),
             channel_access: BTreeMap::new(),
             key_generation: BTreeMap::new(),
         }
+    }
+
+    /// The text channels and the voice channels, each in the order the server lists them, top first. The
+    /// latest accepted `ChannelOrder` comes first, without the ids in it that are not live channels of that
+    /// kind, or that it repeats. The channels it leaves out follow in creation order, so a channel made
+    /// after the order goes at the end. With no order, both lists are in creation order.
+    /// Whether an admin's latest `StorageGrant` for `root` grants it storage.
+    pub fn storage_granted(&self, root: &RootId) -> bool {
+        self.storage_grants.get(root).is_some_and(|(_, granted)| *granted)
+    }
+
+    pub fn channel_order(&self) -> (Vec<ChannelId>, Vec<ChannelId>) {
+        let mut created: Vec<(Hlc, ChannelId)> = self
+            .channels
+            .keys()
+            .map(|id| (self.channel_created.get(id).copied().unwrap_or_default(), *id))
+            .collect();
+        created.sort_unstable();
+        let spec = self.channel_order.as_ref().map(|(_, spec)| spec);
+        let arrange = |voice: bool, listed: &[ChannelId]| {
+            let of_kind = |id: &ChannelId| self.channels.contains_key(id) && self.voice_channels.contains(id) == voice;
+            let mut out: Vec<ChannelId> = Vec::new();
+            let mut seen = BTreeSet::new();
+            for id in listed {
+                if of_kind(id) && seen.insert(*id) {
+                    out.push(*id);
+                }
+            }
+            out.extend(created.iter().map(|(_, id)| *id).filter(|id| of_kind(id) && !seen.contains(id)));
+            out
+        };
+        (
+            arrange(false, spec.map_or(&[][..], |s| &s.text)),
+            arrange(true, spec.map_or(&[][..], |s| &s.voice)),
+        )
     }
 
     /// The settings of a channel, with the defaults where none were set.
@@ -938,6 +1001,29 @@ impl CommunityState {
                     return Err(Rejection::NoPermission);
                 }
             }
+            Payload::SeederForwardsCalls { .. } => {
+                require_control(chan)?;
+                if rank < Rank::Owner {
+                    return Err(Rejection::NoPermission);
+                }
+            }
+            Payload::StorageGrant { .. } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+            }
+            // Ids that are not live channels are not refused, since a channel may be deleted while an order is in
+            // flight. `channel_order` skips them.
+            Payload::ChannelOrder { text, voice } => {
+                require_control(chan)?;
+                if rank < Rank::Admin {
+                    return Err(Rejection::NoPermission);
+                }
+                if text.len() + voice.len() > MAX_ORDERED_CHANNELS {
+                    return Err(Rejection::Malformed);
+                }
+            }
         }
         Ok(())
     }
@@ -957,6 +1043,7 @@ impl CommunityState {
                 // Made private from its first state: the channel and its access are one event.
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());
+                self.channel_created.insert(id, ev.body.hlc);
                 self.messages.entry(id).or_default();
                 let spec = ChannelAccessSpec {
                     private: true,
@@ -968,6 +1055,7 @@ impl CommunityState {
             Payload::ChannelCreate { name } | Payload::VoiceChannelCreate { name } => {
                 let id = ChannelId(ev.id.0);
                 self.channels.insert(id, name.clone());
+                self.channel_created.insert(id, ev.body.hlc);
                 self.messages.entry(id).or_default();
                 if matches!(ev.body.payload, Payload::VoiceChannelCreate { .. }) {
                     self.voice_channels.insert(id);
@@ -1137,6 +1225,7 @@ impl CommunityState {
             Payload::ChannelDelete { channel } => {
                 self.channels.remove(channel);
                 self.voice_channels.remove(channel);
+                self.channel_created.remove(channel);
                 self.messages.remove(channel);
                 self.channel_settings.remove(channel);
                 self.last_post.retain(|(c, _), _| c != channel);
@@ -1334,6 +1423,26 @@ impl CommunityState {
                 if ev.body.hlc > self.members_host_relays_hlc {
                     self.members_host_relays = *on;
                     self.members_host_relays_hlc = ev.body.hlc;
+                }
+            }
+            Payload::SeederForwardsCalls { on } => {
+                if ev.body.hlc > self.seeder_forwards_calls_hlc {
+                    self.seeder_forwards_calls = *on;
+                    self.seeder_forwards_calls_hlc = ev.body.hlc;
+                }
+            }
+            Payload::StorageGrant { root, granted } => {
+                if self.storage_grants.get(root).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.storage_grants.insert(*root, (ev.body.hlc, *granted));
+                }
+            }
+            Payload::ChannelOrder { text, voice } => {
+                if self.channel_order.as_ref().is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    let spec = ChannelOrderSpec {
+                        text: text.clone(),
+                        voice: voice.clone(),
+                    };
+                    self.channel_order = Some((ev.body.hlc, spec));
                 }
             }
         }

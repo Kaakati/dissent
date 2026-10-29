@@ -1,7 +1,7 @@
 # Design 08: encrypted file sharing
 
-Status: `crates/dissent-files` implements storage, encryption and transfer, with tests. Core and
-net do not mount it yet. The integration steps are at the end.
+Status: `crates/dissent-files` implements storage, encryption and transfer, with tests. Core mounts
+it and sends, fetches and mirrors attachments (`dissent-core/src/attachments.rs`, `mirror_hint.rs`).
 
 ## Why iroh-blobs and not IPFS
 
@@ -110,9 +110,10 @@ Video thumbnails are not made yet. That needs a decoder for the video's first fr
 ## Next steps
 
 - Padding to fixed size buckets, if length leaks prove a real concern.
-- Core and UI integration, listed below.
 
 ## Integration steps for core and net
+
+Done. These were the steps, kept for reference.
 
 1. Mount the protocol handler. Call `Files::protocol_handler()` and accept it under
    `dissent_files::ALPN` on the router that owns the endpoint. Net builds its own router today, so

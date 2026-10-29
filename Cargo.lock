@@ -2580,8 +2580,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap 4.6.7",
+ "dissent-discovery",
  "dissent-identity",
  "dissent-net",
+ "iroh",
  "serde",
  "serde_json",
  "tokio",

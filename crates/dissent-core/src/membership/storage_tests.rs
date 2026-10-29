@@ -181,3 +181,97 @@ async fn seeder_refuses_member_sealed_events_without_a_valid_tag() {
     })
     .await;
 }
+
+/// A seeder is named by its storage join everywhere a name is shown: the member list, a profile, a
+/// mention. All of them read `World::display_name`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_is_shown_by_the_name_it_joined_with() {
+    crate::testutil::bounded(async {
+        let alice = Node::named("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Named".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let seeder = Node::named("Home seeder").await;
+        seeder.engine.join_as_storage(&invite).await.expect("seeder joins as storage");
+        let seeder_root = seeder.engine.me().root_id;
+        eventually("alice lists the seeder by its name", || {
+            alice.engine.community_view(id).is_ok_and(|v| {
+                v.members.iter().any(|m| m.root_id == seeder_root && m.display_name == "Home seeder")
+            })
+        })
+        .await;
+        let root: crate::RootId = seeder_root.parse().unwrap();
+        assert_eq!(alice.engine.read().display_name(&root), "Home seeder", "the shared name lookup");
+    })
+    .await;
+}
+
+/// Storage grants, phase 1: a seeder asks the owner for a grant when it joins, the owner sees the ask
+/// and grants it, and both see the grant. A person's ask is refused. See `storage_grants`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeder_asks_for_a_storage_grant_and_the_owner_grants_it() {
+    crate::testutil::bounded(async {
+        let alice = Node::named("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Granted".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let mut events = alice.engine.subscribe();
+        let seeder = Node::named("seeder").await;
+        seeder.engine.join_as_storage(&invite).await.expect("seeder joins as storage");
+        let seeder_root: crate::RootId = seeder.engine.me().root_id.parse().unwrap();
+        eventually("the owner holds the seeder's ask", || {
+            alice.engine.storage_grant_asks(id) == vec![seeder_root.to_string()]
+        })
+        .await;
+        // The seeder asks again after 5 s. The owner is told once per ask, not once per message.
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        let mut told = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            if let crate::EngineEvent::StorageGrantAsked { root_id, display_name, .. } = ev {
+                told.push((root_id, display_name));
+            }
+        }
+        assert_eq!(told, vec![(seeder_root.to_string(), "seeder".to_string())], "one notice for the ask");
+        assert!(!alice.engine.storage_granted(id, &seeder_root), "no grant yet: phase 1 does not need one");
+
+        alice.engine.grant_storage(id, seeder_root, true).await.expect("the owner grants storage");
+        eventually("the seeder sees its grant", || seeder.engine.storage_granted(id, &seeder_root)).await;
+        assert!(alice.engine.storage_grant_asks(id).is_empty(), "a granted ask is no longer pending");
+        let listed = alice.engine.community_view(id).expect("view");
+        assert!(listed
+            .members
+            .iter()
+            .any(|m| m.root_id == seeder_root.to_string() && m.storage && m.storage_granted));
+
+        // A person is not a seeder, so its ask is refused.
+        let bob = Node::named("bob").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("alice sees bob", || {
+            alice.engine.community_view(id).is_ok_and(|v| v.members.iter().any(|m| m.display_name == "bob"))
+        })
+        .await;
+        let reply = bob
+            .engine
+            .call(alice.engine.inner.identity.device_id(), &crate::rpc::Request::StorageGrantAsk { community: id })
+            .await
+            .expect("delivered");
+        assert!(matches!(reply, crate::rpc::Response::Error(_)), "a person's ask is refused: {reply:?}");
+
+        // A withdrawn grant reads as no grant.
+        alice.engine.grant_storage(id, seeder_root, false).await.expect("withdraw");
+        eventually("the grant is withdrawn", || !seeder.engine.storage_granted(id, &seeder_root)).await;
+    })
+    .await;
+}

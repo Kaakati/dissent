@@ -15,7 +15,7 @@ import { useShell } from '@/lib/store';
 import type { Person } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
-const MIN_PEOPLE = 3;
+const MIN_PEOPLE = 2;
 
 function GroupBody({ preselect, close }: { preselect: Person[]; close: () => void }) {
   const contacts = useShell((s) => s.contacts?.contacts ?? []);
@@ -43,7 +43,7 @@ function GroupBody({ preselect, close }: { preselect: Person[]; close: () => voi
 
   return (
     <>
-      <p className="text-sm text-muted-foreground">Pick at least 3 people. Only the people in the group can read it.</p>
+      <p className="text-sm text-muted-foreground">Pick at least 2 people. Only the people in the group can read it.</p>
       <div className="flex flex-wrap items-center gap-s-2 rounded-lg border border-input-border bg-input p-s-2 focus-within:shadow-[0_0_0_2px_var(--accent)]">
         {people
           .filter((p) => picked.includes(p.root_id))

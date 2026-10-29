@@ -75,7 +75,7 @@
 }
 .msg-head .author:hover { text-decoration: underline; }
 .msg-head .author-handle { display: inline-flex; align-items: center; gap: 3px; align-self: center; font: var(--fs-meta) / var(--lh-meta) var(--font); color: var(--muted-foreground); min-width: 0; }
-.msg-head time { font: var(--fs-meta) / var(--lh-meta) var(--font); color: var(--muted-foreground); flex: none; }
+.msg-head time { font: var(--fs-caption) / var(--lh-caption) var(--font); color: var(--muted-foreground); flex: none; }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .body a { color: var(--link); }
 .body.deleted, .pending-note { color: var(--muted-foreground); font-style: italic; }
@@ -126,7 +126,7 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .msg.system { align-items: center; padding: 6px var(--msg-right) 6px 0; margin-top: var(--s-2); color: var(--muted-foreground); font: var(--fs-sm) / var(--lh-sm) var(--font); }
 .msg.system .gutter { display: grid; place-items: center; color: var(--success); }
 .msg.system strong { color: var(--text-strong); font-weight: 500; }
-.msg.system time { font-size: var(--fs-meta); }
+.msg.system time { font-size: var(--fs-caption); }
 /* Jump flash: an overlay whose opacity fades, nothing else moves. */
 .msg::after { content: ""; position: absolute; inset: 0; background: var(--accent-text); opacity: 0; pointer-events: none; }
 .msg.flash::after { animation: msg-flash 1.2s ease-out; }
@@ -245,8 +245,8 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .att-preview { position: relative; width: fit-content; max-width: 100%; margin: 0; }
 .att-preview-btn { display: block; max-width: 100%; padding: 0; border: 0; border-radius: var(--r-2); background: var(--rail); overflow: hidden; cursor: pointer; }
 .att-preview-btn:disabled { cursor: progress; }
-.att-preview-btn img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.att-preview-meta { margin-top: 4px; }
+.att-preview-btn img { display: block; width: 100%; height: 100%; object-fit: cover; filter: blur(6px); transform: scale(1.08); }
+.att-preview > .att-card { margin-top: 6px; }
 .att-lock { display: inline-grid; place-items: center; color: var(--muted-foreground); }
 .att-lock svg { width: 12px; height: 12px; }
 .att-image .att-lock { position: absolute; right: var(--s-2); bottom: var(--s-2); width: 20px; height: 20px; border-radius: var(--r-1); background: rgb(17 18 20 / .7); color: var(--text); pointer-events: none; }
@@ -263,6 +263,8 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .att-ext.danger { background: rgb(208 16 90 / .2); color: var(--danger-text); }
 .att-meta { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font: 12px / 18px var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .att-state.danger { color: var(--danger-text); }
+.att-error { color: var(--danger-text); font: 12px / 18px var(--font); overflow-wrap: anywhere; }
+.att-card .att-retry { flex: none; gap: 6px; }
 .att-card .icon-btn { flex: none; width: 36px; height: 36px; border-radius: var(--r-2); background: var(--elevated); color: var(--text); }
 .att-card .icon-btn:hover:not(:disabled) { background: var(--elevated-hover); }
 .att-card .icon-btn > svg { width: 18px; height: 18px; }

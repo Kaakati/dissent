@@ -4,6 +4,7 @@
 import type { MouseEvent, ReactNode } from 'react';
 import { EllipsisVertical, MessageCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { openConversationMenu } from '@/components/menus/conversation-menu';
 import { PRESENCE_LABEL } from '@/components/presence';
 import { UserAvatar } from '@/components/user-avatar';
@@ -39,16 +40,17 @@ function PersonText({ person, sub }: { person: Person; sub: string }) {
 // A round action in a friend row: 36 px, the sidebar surface.
 function RoundButton({ label, icon, onClick, haspopup }: { label: string; icon: ReactNode; onClick: (e: MouseEvent<HTMLButtonElement>) => void; haspopup?: boolean }) {
   return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      aria-haspopup={haspopup ? 'menu' : undefined}
-      onClick={onClick}
-      className="grid size-9 shrink-0 place-items-center rounded-full bg-sidebar text-text transition-colors hover:bg-elevated-hover"
-    >
-      {icon}
-    </button>
+    <Tip label={label}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-haspopup={haspopup ? 'menu' : undefined}
+        onClick={onClick}
+        className="grid size-9 shrink-0 place-items-center rounded-full bg-sidebar text-text transition-colors hover:bg-elevated-hover"
+      >
+        {icon}
+      </button>
+    </Tip>
   );
 }
 

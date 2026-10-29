@@ -1,8 +1,9 @@
 // The second column. Home: a find box, quick links and direct messages. A server: its name, quick links, text
 // channels and voice channels with the people in them. Controls whose views are not ported yet are shown disabled.
 // Ported from the old UI's views/sidebar.js.
-import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Radio, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
+import { Fragment, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { ArrowDown, ArrowUp, ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Radio, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
+import { ChannelDropLine, moveChannel, useChannelReorder } from '@/components/shell/channel-reorder';
 import { openChannelSettings } from '@/components/channel-settings/channel-settings';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
@@ -13,6 +14,7 @@ import { openVoiceChannel } from '@/lib/calls';
 import { NewConversationMenu, openConversationMenu } from '@/components/menus/conversation-menu';
 import { ServerMenu } from '@/components/menus/server-menu';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { Separator } from '@/components/ui/separator';
 import { UserAvatar } from '@/components/user-avatar';
 import { bannerBackground, bannerOf, bannersStill, subscribeBannerMotion } from '@/lib/banners';
@@ -153,29 +155,31 @@ function ServerTop({ community, scrollTop }: { community: CommunityView; scrollT
       ) : null}
       <div className="relative flex h-14 items-center px-s-2">
         <ServerMenu community={community}>
-          <button
-            type="button"
-            aria-haspopup="menu"
-            aria-label={`${community.name} menu`}
-            className={cn(
-              'flex h-10 w-full items-center justify-between gap-s-2 rounded-lg px-s-2 text-body font-semibold',
-              onBanner ? 'text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)] hover:bg-black/20' : 'text-text-strong hover:bg-hover',
-            )}
-          >
-            <span data-server-name className="min-w-0 truncate" title={community.name}>{community.name}</span>
-            {community.boost?.level ? (
-              <span
-                data-boost-level={community.boost.level}
-                title={boostLabel(community.boost.level, community.boost.hosts.length)}
-                aria-label={boostLabel(community.boost.level, community.boost.hosts.length)}
-                className={cn('ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-meta font-semibold', onBanner ? 'bg-black/35 text-white' : 'bg-elevated text-text')}
-              >
-                <Radio className="size-3" aria-hidden="true" />
-                {`Lv ${community.boost.level}`}
-              </span>
-            ) : null}
-            <ChevronDown className={cn('size-4 shrink-0', onBanner ? 'text-white' : 'text-muted-foreground')} aria-hidden="true" />
-          </button>
+          <Tip label="Server options" side="bottom">
+            <button
+              type="button"
+              aria-haspopup="menu"
+              aria-label={`${community.name} menu`}
+              className={cn(
+                'flex h-10 w-full items-center justify-between gap-s-2 rounded-lg px-s-2 text-body font-semibold',
+                onBanner ? 'text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)] hover:bg-black/20' : 'text-text-strong hover:bg-hover',
+              )}
+            >
+              {/* No native titles inside: the button's tooltip is the one that shows (the name is also the title bar's). */}
+              <span data-server-name className="min-w-0 truncate">{community.name}</span>
+              {community.boost?.level ? (
+                <span
+                  data-boost-level={community.boost.level}
+                  aria-label={boostLabel(community.boost.level, community.boost.hosts.length)}
+                  className={cn('ml-auto inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-meta font-semibold', onBanner ? 'bg-black/35 text-white' : 'bg-elevated text-text')}
+                >
+                  <Radio className="size-3" aria-hidden="true" />
+                  {`Lv ${community.boost.level}`}
+                </span>
+              ) : null}
+              <ChevronDown className={cn('size-4 shrink-0', onBanner ? 'text-white' : 'text-muted-foreground')} aria-hidden="true" />
+            </button>
+          </Tip>
         </ServerMenu>
       </div>
     </div>
@@ -212,6 +216,8 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
   const openConversation = useShell((s) => s.openConversation);
   const muted = useMutes((s) => convKey(conv) in s.mutes);
   const count = conv.unread ?? 0;
+  // Unread mentions show in red, as a channel's do, and through a mute, since a mention alerts through one.
+  const mentions = has('dm_mentions') ? (conv.mentions ?? 0) : 0;
 
   const id = conv.kind === 'group' ? conv.id : conv.peer;
   const active = route.kind === 'home' && !page && peer === id;
@@ -247,7 +253,11 @@ function ConversationRow({ conv }: { conv: ConversationSummary }) {
           <span className={cn('truncate text-meta leading-4 font-normal text-muted-foreground', live && 'text-success-text')}>{sub}</span>
         ) : null}
       </span>
-      {count > 0 && !active && !muted ? (
+      {mentions > 0 && !active ? (
+        <span aria-label={`${mentions} ${mentions === 1 ? 'mention' : 'mentions'}`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-danger px-1 text-tiny leading-none font-bold text-white">
+          {mentions > 99 ? '99+' : mentions}
+        </span>
+      ) : count > 0 && !active && !muted ? (
         <span aria-label={`${count} unread`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-accent px-1 text-tiny leading-none font-bold text-white">
           {count > 99 ? '99+' : count}
         </span>
@@ -299,14 +309,18 @@ function HomeList() {
         action={
           has('groups') ? (
             <NewConversationMenu>
-              <Button variant="ghost" size="icon" aria-label="New conversation" title="New conversation" aria-haspopup="menu">
-                <Plus className="size-4" />
-              </Button>
+              <Tip label="Create DM">
+                <Button variant="ghost" size="icon" aria-label="New conversation" aria-haspopup="menu">
+                  <Plus className="size-4" />
+                </Button>
+              </Tip>
             </NewConversationMenu>
           ) : (
-            <Button variant="ghost" size="icon" aria-label="Add contact" title="Add contact" onClick={() => openAddContactDialog()}>
-              <Plus className="size-4" />
-            </Button>
+            <Tip label="Add contact">
+              <Button variant="ghost" size="icon" aria-label="Add contact" onClick={() => openAddContactDialog()}>
+                <Plus className="size-4" />
+              </Button>
+            </Tip>
           )
         }
       />
@@ -321,15 +335,27 @@ function HomeList() {
 
 // ---- server: channels and voice ----
 
+// Moving a channel one place from its menu: the place it has among the shown rows of its kind, how many there are, and
+// the move. Absent when the server's channel order cannot be changed here.
+interface MenuMove {
+  index: number;
+  count: number;
+  place: (to: number) => void;
+}
+
 // The owner's actions on a channel row, as a menu: right click, or Shift+F10 on the focused row. The same two actions
-// are the hover and focus buttons of ChannelActions, so a pointer-less user reaches them too.
-function openChannelMenu(e: { preventDefault: () => void; clientX: number; clientY: number; currentTarget: HTMLElement }, communityId: Id, channelId: Id): void {
+// are the hover and focus buttons of ChannelActions, so a pointer-less user reaches them too. Move Up and Move Down
+// are the menu's form of Alt+Shift+Up and Down.
+function openChannelMenu(e: { preventDefault: () => void; clientX: number; clientY: number; currentTarget: HTMLElement }, communityId: Id, channelId: Id, move?: MenuMove): void {
   e.preventDefault();
   // A keyboard menu key sends no pointer position, so the menu opens by the row.
   const r = e.currentTarget.getBoundingClientRect();
   openContextMenu(e.clientX || r.left + 20, e.clientY || r.bottom, [
     { label: 'Create invite', icon: UserPlus, onPick: () => openInviteDialog(communityId) },
     { label: 'Edit Channel', icon: Settings, onPick: () => openChannelSettings(communityId, channelId) },
+    move ? 'sep' : null,
+    move ? { label: 'Move Up', icon: ArrowUp, disabled: move.index === 0, onPick: () => move.place(move.index - 1) } : null,
+    move ? { label: 'Move Down', icon: ArrowDown, disabled: move.index >= move.count - 1, onPick: () => move.place(move.index + 1) } : null,
   ]);
 }
 
@@ -338,12 +364,16 @@ function ChannelActions({ communityId, channelId }: { communityId: Id; channelId
   const button = 'grid size-6 place-items-center rounded-sm bg-elevated text-muted-foreground hover:bg-elevated-hover hover:text-text-strong';
   return (
     <span className="absolute top-1/2 right-1 hidden -translate-y-1/2 items-center gap-0.5 group-focus-within:flex group-hover:flex">
-      <button type="button" aria-label="Create invite" title="Create invite" onClick={() => openInviteDialog(communityId)} className={button}>
-        <UserPlus className="size-3.5" />
-      </button>
-      <button type="button" aria-label="Edit Channel" title="Edit Channel" onClick={() => openChannelSettings(communityId, channelId)} className={button}>
-        <Settings className="size-3.5" />
-      </button>
+      <Tip label="Create Invite">
+        <button type="button" aria-label="Create invite" onClick={() => openInviteDialog(communityId)} className={button}>
+          <UserPlus className="size-3.5" />
+        </button>
+      </Tip>
+      <Tip label="Edit Channel">
+        <button type="button" aria-label="Edit Channel" onClick={() => openChannelSettings(communityId, channelId)} className={button}>
+          <Settings className="size-3.5" />
+        </button>
+      </Tip>
     </span>
   );
 }
@@ -358,11 +388,14 @@ function ServerList({ community }: { community: CommunityView }) {
   const openPage = useShell((s) => s.openPage);
   const activeTransfers = transfers.filter((t) => ['active', 'paused', 'waiting'].includes(t.state)).length;
   const canManage = community.my_role === 'owner' || community.my_role === 'admin';
+  const canReorder = canManage && has('channel_order');
   const prefs = useServerPrefs((s) => s.prefs[community.id]) ?? DEFAULT_PREFS;
   const mutes = useMutes((s) => s.mutes);
   // Hide Muted Channels hides a muted text channel, except the one open now, so the user keeps their place. As the DM
   // rows do, a timed mute that has run out is still listed until a check removes it.
   const text = community.channels.filter((c) => !c.voice && !(prefs.hide_muted_channels && channelKey(community.id, c.id) in mutes && c.id !== channelId));
+  const shown = text.map((c) => c.id);
+  const reorder = useChannelReorder(canReorder, text, (id, to) => moveChannel(community, shown, id, to));
   return (
     <>
       <QuickLink icon={<UserPlus />} label="Invite people" onClick={() => openInviteDialog(community.id)} />
@@ -374,24 +407,37 @@ function ServerList({ community }: { community: CommunityView }) {
         title="Text channels"
         action={
           canManage ? (
-            <Button variant="ghost" size="icon" aria-label="Create channel" title="Create channel" onClick={() => openCreateChannelDialog(community.id)}>
-              <Plus className="size-4" />
-            </Button>
+            <Tip label="Create Channel">
+              <Button variant="ghost" size="icon" aria-label="Create channel" onClick={() => openCreateChannelDialog(community.id)}>
+                <Plus className="size-4" />
+              </Button>
+            </Tip>
           ) : null
         }
       />
       {text.length ? (
-        text.map((ch) => {
+        text.map((ch, index) => {
           const active = ch.id === channelId && !voiceChannelId && !page;
           const isUnread = unread.has(`ch:${community.id}:${ch.id}`) && !active;
+          const move = canReorder ? { index, count: text.length, place: (to: number) => reorder.place(ch.id, to) } : undefined;
           return (
-            <div key={ch.id} className="group relative flex shrink-0 flex-col">
+            <Fragment key={ch.id}>
+            {reorder.lineAt(index) ? <ChannelDropLine /> : null}
+            <div
+              ref={reorder.rowRef(ch.id)}
+              style={reorder.rowStyle(ch.id)}
+              className={cn('group relative flex shrink-0 flex-col', reorder.dragging(ch.id) && 'z-[3] opacity-80')}
+            >
             <button
               type="button"
-              className={rowClass(active, isUnread)}
+              className={cn(rowClass(active, isUnread), canReorder && 'touch-none')}
               aria-current={active ? 'true' : undefined}
-              onClick={() => void openChannel(ch.id)}
-              onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id) : undefined}
+              aria-keyshortcuts={canReorder ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
+              onClick={() => {
+                if (reorder.clickOpens()) void openChannel(ch.id);
+              }}
+              onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id, move) : undefined}
+              {...reorder.handlers(ch.id, index)}
             >
               {isUnread ? <UnreadDot /> : null}
               {ch.private ? (
@@ -406,23 +452,30 @@ function ServerList({ community }: { community: CommunityView }) {
             </button>
             {canManage ? <ChannelActions communityId={community.id} channelId={ch.id} /> : null}
             </div>
+            </Fragment>
           );
         })
       ) : (
         <p className="p-s-2 text-sm text-muted-foreground">No channels yet.</p>
       )}
-      {has('calls') ? <VoiceSection community={community} canManage={canManage} /> : null}
+      {reorder.lineAt(text.length) ? <ChannelDropLine /> : null}
+      <div role="status" aria-live="polite" className="sr-only" data-channel-order-status="text">
+        {reorder.announcement}
+      </div>
+      {has('calls') ? <VoiceSection community={community} canManage={canManage} canReorder={canReorder} /> : null}
     </>
   );
 }
 
-function VoiceSection({ community, canManage }: { community: CommunityView; canManage: boolean }) {
+function VoiceSection({ community, canManage, canReorder }: { community: CommunityView; canManage: boolean; canReorder: boolean }) {
   const voiceChannelId = useShell((s) => s.voiceChannelId);
   const connection = useShell((s) => s.voiceConnection);
   const me = useShell((s) => s.me);
   const call = useShell((s) => s.call);
   const remote = community.voice_channels ?? [];
   const channels = community.channels.filter((c) => c.voice);
+  const shown = channels.map((c) => c.id);
+  const reorder = useChannelReorder(canReorder, channels, (id, to) => moveChannel(community, shown, id, to));
   return (
     <>
       <SectionHead
@@ -430,13 +483,15 @@ function VoiceSection({ community, canManage }: { community: CommunityView; canM
         title="Voice channels"
         action={
           canManage ? (
-            <Button variant="ghost" size="icon" aria-label="Create voice channel" title="Create voice channel" onClick={() => openCreateChannelDialog(community.id, 'voice')}>
-              <Plus className="size-4" />
-            </Button>
+            <Tip label="Create Voice Channel">
+              <Button variant="ghost" size="icon" aria-label="Create voice channel" onClick={() => openCreateChannelDialog(community.id, 'voice')}>
+                <Plus className="size-4" />
+              </Button>
+            </Tip>
           ) : null
         }
       />
-      {channels.map((ch) => {
+      {channels.map((ch, index) => {
         const active = voiceChannelId === ch.id;
         const connected = connection?.channelId === ch.id;
         const others: VoiceParticipant[] = remote.find((v) => v.id === ch.id)?.participants ?? [];
@@ -444,14 +499,26 @@ function VoiceSection({ community, canManage }: { community: CommunityView; canM
         const participants: VoiceParticipant[] = connected && me && call
           ? [{ root_id: me.root_id, display_name: me.display_name, muted: call.muted, deafened: call.deafened, speaking: false }, ...others]
           : others;
+        const move = canReorder ? { index, count: channels.length, place: (to: number) => reorder.place(ch.id, to) } : undefined;
         return (
-          <div key={ch.id} className="group relative flex flex-col gap-0.5">
+          <Fragment key={ch.id}>
+          {reorder.lineAt(index) ? <ChannelDropLine /> : null}
+          <div
+            ref={reorder.rowRef(ch.id)}
+            style={reorder.rowStyle(ch.id)}
+            className={cn('group relative flex flex-col gap-0.5', reorder.dragging(ch.id) && 'z-[3] opacity-80')}
+          >
             <button
               type="button"
-              className={cn(rowClass(active, false), 'font-medium')}
+              className={cn(rowClass(active, false), 'font-medium', canReorder && 'touch-none')}
               aria-current={active ? 'true' : undefined}
+              aria-keyshortcuts={canReorder ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
               title={connected ? `Connected to ${ch.name}` : `Join ${ch.name}`}
-              onClick={() => void openVoiceChannel(ch.id)}
+              onClick={() => {
+                if (reorder.clickOpens()) void openVoiceChannel(ch.id);
+              }}
+              onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id, move) : undefined}
+              {...reorder.handlers(ch.id, index)}
             >
               <Volume2 className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate" title={ch.name}>{ch.name}</span>
@@ -465,8 +532,13 @@ function VoiceSection({ community, canManage }: { community: CommunityView; canM
               </div>
             ) : null}
           </div>
+          </Fragment>
         );
       })}
+      {reorder.lineAt(channels.length) ? <ChannelDropLine /> : null}
+      <div role="status" aria-live="polite" className="sr-only" data-channel-order-status="voice">
+        {reorder.announcement}
+      </div>
     </>
   );
 }
@@ -500,7 +572,7 @@ function SkeletonRows() {
   );
 }
 
-// The column: the top, then the scrolling list. The space at the bottom keeps the last row clear of the user panel.
+// The column: the top, then the scrolling list. The list stops above the user panel, so no row is ever under it.
 export function Sidebar() {
   const route = useShell((s) => s.route);
   const community = useShell((s) => s.community);
@@ -516,14 +588,15 @@ export function Sidebar() {
       {route.kind === 'home' ? <HomeTop /> : null}
       {route.kind === 'server' && community ? <ServerTop community={community} scrollTop={scrollTop} /> : null}
       {route.kind === 'server' && !community ? <div className="h-14 shrink-0 px-s-2 pt-4"><span className="block h-6 w-[70%] rounded-sm bg-elevated" /></div> : null}
+      {/* The list ends a gap above the floating user panel (user-bar.tsx sets --user-panel-h), so no row shows under it. */}
       <div
-        className="dissent-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2"
+        data-sidebar-list
+        className="dissent-scroll mb-[calc(var(--user-panel-h,60px)+var(--s-2)*2)] flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2"
         onScroll={route.kind === 'server' ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
       >
         {route.kind === 'home' ? <HomeList /> : null}
         {route.kind === 'server' && community ? <ServerList community={community} /> : null}
         {route.kind === 'server' && !community ? <SkeletonRows /> : null}
-        <div className="h-[74px] shrink-0" />
       </div>
     </aside>
   );

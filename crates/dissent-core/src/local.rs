@@ -41,6 +41,9 @@ pub const CAPABILITIES: &[&str] = &[
     "mentions",
     "server_prefs",
     "private_channels",
+    "forward_calls",
+    "channel_order",
+    "dm_mentions",
 ];
 
 /// Which text a user note stores.
@@ -452,6 +455,7 @@ mod tests {
             contact_since_ms: None,
             first_seen_ms: None,
             unread: 0,
+            mentions: 0,
         }
     }
 

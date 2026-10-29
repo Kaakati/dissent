@@ -167,6 +167,9 @@ pub(crate) enum Request {
     /// Whether this device accepts a `SecretRotation` that covers a member who left. A device from before
     /// this cannot decode it and answers with an error, which counts as no. Appended, see `rotation`.
     RotationSupport,
+    /// A seeder asks an owner or admin device for a `StorageGrant` in `community`. Answered with `Ack`.
+    /// Appended, see `storage_grants`.
+    StorageGrantAsk { community: CommunityId },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -397,7 +400,7 @@ mod wire_order_tests {
     ];
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_REQUEST: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport"];
+    const APPENDED_REQUEST: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport"];
@@ -416,8 +419,10 @@ mod wire_order_tests {
     ];
 
     /// The CallMsg variants appended after v0.1.11, in tag order: `Features` (boost tiers), then the
-    /// simulcast messages (`call_layers`). Pinned too, so a later variant goes after them.
-    const APPENDED_CALLMSG: &[&str] = &["Features", "VideoLayers", "TileWidths", "WantedLayers"];
+    /// simulcast messages (`call_layers`), then volunteer forwarders (`calls::volunteers`). Pinned
+    /// too, so a later variant goes after them.
+    const APPENDED_CALLMSG: &[&str] =
+        &["Features", "VideoLayers", "TileWidths", "WantedLayers", "ForwardOffer", "ForwarderStalled", "RelayLeaf"];
 
     /// The variant names of `enum_name` in declaration order, read from `source`. See the note above.
     fn variant_names(source: &str, enum_name: &str) -> Vec<String> {

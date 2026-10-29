@@ -340,6 +340,9 @@ pub struct AttachmentView {
     /// `0..1`.
     pub progress: f64,
     pub local_path: Option<String>,
+    /// Why the last download failed, in words the card shows beside Retry. Set only while `state` is `failed` or
+    /// `disk_full`.
+    pub error: Option<String>,
     /// True until the file is on this device.
     pub needed: bool,
     pub seed: bool,
@@ -351,6 +354,33 @@ pub struct AttachmentView {
     pub sources: Vec<FileSourceView>,
     /// Verified pieces of the download, while it has any.
     pub pieces: Option<PieceCounts>,
+}
+
+/// Where one attachment stands on this device, before it becomes an [`AttachmentView`].
+struct LocalState {
+    state: &'static str,
+    progress: f64,
+    local_path: Option<PathBuf>,
+    error: Option<String>,
+}
+
+/// Splits a transfer's stored error, `"<kind>: <reason>"`, into its kind and reason. A missing error is a plain failure.
+fn split_failure(error: Option<&str>) -> (&str, String) {
+    match error.and_then(|e| e.split_once(": ")) {
+        Some((kind, reason)) => (kind, reason.to_string()),
+        None => ("failed", error.unwrap_or("The download stopped.").to_string()),
+    }
+}
+
+/// Why a download failed, as the attachment card says it.
+fn failure_reason(e: &FilesError) -> String {
+    match e {
+        FilesError::NoProviders => "No device that has this file is known yet. Try again when the sender is online.".into(),
+        FilesError::Fetch(_) => "Could not reach a device that has this file. Try again when the sender is online.".into(),
+        FilesError::Decrypt => "The file that arrived did not match the one shared, so it was not saved.".into(),
+        FilesError::Io(e) => format!("Could not save the file: {e}"),
+        other => other.to_string(),
+    }
 }
 
 /// One provider of a download, as the attachment card and the details panel show it.
@@ -508,24 +538,8 @@ impl World {
                     .iter()
                     .find(|t| t.of == a.file.hash)
                     .map(|t| self.thumb_view(&id, t));
-                let (state, progress, local_path) = if let Some(path) = self.attach.downloads.get(&id) {
-                    (
-                        "downloaded".to_string(),
-                        1.0,
-                        Some(path.to_string_lossy().into_owned()),
-                    )
-                } else if let Some(t) = self.attach.transfers.get(&id) {
-                    let state = match t.state.as_str() {
-                        "active" | "waiting" => "downloading",
-                        "paused" => "paused",
-                        _ => "failed",
-                    };
-                    (state.to_string(), t.progress, None)
-                } else if a.file.size > MAX_FILE_SIZE {
-                    ("too_large".to_string(), 0.0, None)
-                } else {
-                    ("available".to_string(), 0.0, None)
-                };
+                let LocalState { state, progress, local_path, error } = self.local_state(&id, &a.file);
+                let state = state.to_string();
                 let live = self.source_counts.get(&id);
                 let transfer = self.attach.transfers.get(&id);
                 let elapsed_ms = transfer.map_or(0, |t| now_ms().saturating_sub(t.started_ms));
@@ -545,15 +559,44 @@ impl World {
                     needed: state != "downloaded",
                     state,
                     progress,
-                    local_path,
+                    local_path: local_path.map(|p| p.to_string_lossy().into_owned()),
+                    error,
                     seed: a.seed,
                     thumb,
-                    transfer_id: transfer.map(|_| id),
+                    transfer_id: transfer.filter(|t| t.direction == "download").map(|_| id),
                     sources,
                     pieces: live.map(piece_counts),
                 }
             })
             .collect()
+    }
+
+    /// Where one attachment stands on this device. A file this device shared shows from the path it was shared
+    /// from, and is never a failed download. Once that file is gone it is `available`: its ciphertext is still in the
+    /// local store, so a download decrypts it without the network.
+    fn local_state(&self, id: &str, file: &FileRef) -> LocalState {
+        let at = |state, progress| LocalState { state, progress, local_path: None, error: None };
+        if let Some(path) = self.attach.downloads.get(id) {
+            return LocalState { local_path: Some(path.clone()), ..at("downloaded", 1.0) };
+        }
+        match self.attach.transfers.get(id) {
+            Some(t) if t.direction == "upload" => match t.local_path.as_ref().filter(|p| p.is_file()) {
+                Some(path) => LocalState { local_path: Some(path.clone()), ..at("downloaded", 1.0) },
+                None => at("available", 0.0),
+            },
+            Some(t) => match t.state.as_str() {
+                "active" | "waiting" => at("downloading", t.progress),
+                "paused" => at("paused", t.progress),
+                "failed" => {
+                    let (kind, reason) = split_failure(t.error.as_deref());
+                    LocalState { error: Some(reason), ..at(if kind == "disk_full" { "disk_full" } else { "failed" }, t.progress) }
+                }
+                // A finished download whose saved file is no longer recorded can be fetched again.
+                _ => at("available", 0.0),
+            },
+            None if file.size > MAX_FILE_SIZE => at("too_large", 0.0),
+            None => at("available", 0.0),
+        }
     }
 
     /// The preview of an attachment on this device.
@@ -608,7 +651,7 @@ impl Engine {
                 })
                 .await
                 .map_err(files_err)?;
-            self.record_upload(&file);
+            self.record_upload(&file, path);
             if let Some(thumb) = self.thumbnail_of(path, &file).await {
                 thumbs.push(thumb);
             }
@@ -617,6 +660,11 @@ impl Engine {
                 from: self.inner.me,
                 seed,
             });
+        }
+        if !out.is_empty() {
+            // The app lets the webview read the shared files on this event, before the message is shown.
+            self.persist_attach();
+            self.emit(EngineEvent::TransfersChanged);
         }
         Ok((out, thumbs))
     }
@@ -635,6 +683,10 @@ impl Engine {
         let Thumbnail { jpeg, width, height } = tokio::task::spawn_blocking(move || make_thumbnail(&data))
             .await
             .ok()??;
+        // The sender's own preview is kept where a fetched one would go, so its message never waits for a fetch.
+        if let Err(e) = keep_picture(&self.read().paths, file, &jpeg) {
+            debug!(error = %e, "could not keep our own thumbnail");
+        }
         let stored = self
             .inner
             .files
@@ -654,7 +706,9 @@ impl Engine {
         })
     }
 
-    fn record_upload(&self, file: &FileRef) {
+    /// Records a file this device shared, with the path it was shared from. The sender's message shows that file
+    /// while it stays there; it never downloads its own file.
+    fn record_upload(&self, file: &FileRef, source: &Path) {
         let mut guard = self.write();
         let id = attachment_id(file);
         guard.attach.transfers.insert(
@@ -668,7 +722,7 @@ impl Engine {
                 state: "done".into(),
                 progress: 1.0,
                 started_ms: now_ms(),
-                local_path: None,
+                local_path: Some(source.to_path_buf()),
                 error: None,
             },
         );
@@ -746,7 +800,8 @@ impl Engine {
     ) -> Result<TransferView> {
         let (file, roots, message_id) = self.locate_attachment(community, &message, &attachment)?;
         let id = attachment_id(&file);
-        if self.read().attach.downloads.contains_key(&id) {
+        if self.read().local_state(&id, &file).state == "downloaded" {
+            // Already here: downloaded before, or shared from this device and still where it was shared from.
             return self.transfer_view(&id);
         }
         if file.size > MAX_FILE_SIZE {
@@ -1036,7 +1091,7 @@ impl Engine {
         let node = self.node();
         let dest = self.download_dir();
         if let Err(e) = std::fs::create_dir_all(&dest) {
-            self.fail(id, "failed", format!("cannot create downloads: {e}"));
+            self.fail(id, "failed", format!("Could not create the download folder: {e}"));
             return;
         }
         let engine = Engine {
@@ -1085,10 +1140,10 @@ impl Engine {
                 });
                 self.emit(EngineEvent::TransfersChanged);
             }
-            Err(FilesError::DiskFull { .. }) => self.fail(id, "disk_full", "not enough disk space".into()),
+            Err(FilesError::DiskFull { .. }) => self.fail(id, "disk_full", "Not enough disk space.".into()),
             Err(e) => {
                 debug!(error = %e, "download failed");
-                self.fail(id, "failed", e.to_string());
+                self.fail(id, "failed", failure_reason(&e));
             }
         }
     }
@@ -1955,9 +2010,17 @@ impl Engine {
         resolve_download_dir(w.attach.download_dir.as_deref(), w.attach.default_download_dir.as_deref(), &w.paths.downloads())
     }
 
-    /// Every file this device saved from a download, in any folder it has used. The app opens and reveals only these.
+    /// Every file this device saved from a download, in any folder it has used, and every file it shared, where it
+    /// was shared from. The app shows, opens and reveals only these.
     pub fn saved_files(&self) -> Vec<PathBuf> {
-        self.read().attach.downloads.values().cloned().collect()
+        let w = self.read();
+        let shared = w
+            .attach
+            .transfers
+            .values()
+            .filter(|t| t.direction == "upload")
+            .filter_map(|t| t.local_path.clone());
+        w.attach.downloads.values().cloned().chain(shared).collect()
     }
 
     /// Sets the folder finished downloads are written to, or resets it to the default with `None`.

@@ -1,9 +1,10 @@
 // The 30 px custom title bar: in-app Back and Forward, the context label, and the window controls. The bar is a drag
 // region; every element that is not a button carries the drag attribute too, as the current UI does.
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, ArrowUpDown, Bookmark, Server, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpDown, Bookmark, Server, Settings, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OwlMark } from '@/components/owl-mark';
+import { Tip } from '@/components/ui/tip';
 import { NetStatusLine } from '@/components/network/net-status';
 import { imageOf } from '@/lib/images';
 import { currentWindow } from '@/lib/tauri';
@@ -27,6 +28,7 @@ function TitleText() {
   const route = useShell((s) => s.route);
   const community = useShell((s) => s.community);
   const titleOverride = useShell((s) => s.titleOverride);
+  const settings = useShell((s) => s.settings !== null);
   const serverMark = (id: string, name: string) => (
     <span
       className="relative inline-grid size-4 place-items-center overflow-hidden rounded-[5px] text-[7px] font-bold text-white"
@@ -41,6 +43,10 @@ function TitleText() {
   let mark: ReactNode = <OwlMark className="size-4 text-brand" />;
   if (titleOverride) {
     text = titleOverride;
+  } else if (settings) {
+    // The full-page Settings covers the place, so the bar names the page, not the conversation behind it.
+    text = 'Settings';
+    mark = <Settings className="size-4" aria-hidden="true" />;
   } else if (page === 'contacts') {
     text = 'Friends';
     mark = <Users className="size-4" aria-hidden="true" />;
@@ -124,15 +130,21 @@ export function Titlebar() {
     <header
       data-tauri-drag-region
       onDoubleClick={onDoubleClick}
-      className="grid h-[30px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-s-3 bg-rail pl-s-2 text-muted-foreground select-none"
+      className="grid h-[30px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-s-8 bg-rail text-muted-foreground select-none"
     >
-      <nav className="flex gap-s-1" aria-label="History" data-tauri-drag-region>
-        <Button variant="ghost" size="icon" className="size-7 disabled:opacity-100 disabled:text-faint" aria-label="Back" title="Back" disabled={!canBack} onClick={() => void goBack()}>
-          <ArrowLeft className="size-4" />
-        </Button>
-        <Button variant="ghost" size="icon" className="size-7 disabled:opacity-100 disabled:text-faint" aria-label="Forward" title="Forward" disabled={!canForward} onClick={() => void goForward()}>
-          <ArrowRight className="size-4" />
-        </Button>
+      {/* The side columns are equal and the bar has no padding of its own, so the title sits at the exact centre of the window;
+          the inset of Back is the nav's. The 32 px column gap keeps the network line clear of the title. */}
+      <nav className="flex gap-s-1 pl-s-2" aria-label="History" data-tauri-drag-region>
+        <Tip label="Back" shortcut="Alt+←" side="bottom" wrap>
+          <Button variant="ghost" size="icon" className="size-7 disabled:opacity-100 disabled:text-faint" aria-label="Back" disabled={!canBack} onClick={() => void goBack()}>
+            <ArrowLeft className="size-4" />
+          </Button>
+        </Tip>
+        <Tip label="Forward" shortcut="Alt+→" side="bottom" wrap>
+          <Button variant="ghost" size="icon" className="size-7 disabled:opacity-100 disabled:text-faint" aria-label="Forward" disabled={!canForward} onClick={() => void goForward()}>
+            <ArrowRight className="size-4" />
+          </Button>
+        </Tip>
       </nav>
 
       <div data-tauri-drag-region data-titlebar-title className="flex items-center justify-center">
@@ -143,45 +155,48 @@ export function Titlebar() {
         {window.__DISSENT_MOCK__ ? <span className="shrink-0 whitespace-nowrap text-tiny font-semibold text-warn">Mock backend</span> : null}
         <NetStatusLine />
         <div className="flex shrink-0" data-tauri-drag-region>
-          <button
-            type="button"
-            aria-label="Minimize"
-            title="Minimize"
-            onClick={control((w) => w.minimize())}
-            className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-hover hover:text-text-strong', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
-          >
-            <Glyph><path d="M1 6h10" /></Glyph>
-          </button>
-          <button
-            type="button"
-            aria-label="Maximize"
-            title="Maximize"
-            onClick={control(async (w) => {
-              await w.toggleMaximize();
-              setMaximized(await (w.isMaximized?.() ?? Promise.resolve(false)));
-            })}
-            className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-hover hover:text-text-strong', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
-          >
-            <Glyph>
-              {maximized ? (
-                <>
-                  <path d="M3 3V1.5h7.5V9H9" />
-                  <rect x="1.5" y="3.5" width="7" height="7" />
-                </>
-              ) : (
-                <rect x="1.5" y="1.5" width="9" height="9" />
-              )}
-            </Glyph>
-          </button>
-          <button
-            type="button"
-            aria-label="Close"
-            title="Close"
-            onClick={control((w) => w.close())}
-            className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-danger hover:text-white', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
-          >
-            <Glyph><path d="M1 1l10 10M11 1 1 11" /></Glyph>
-          </button>
+          <Tip label="Minimize" side="bottom">
+            <button
+              type="button"
+              aria-label="Minimize"
+              onClick={control((w) => w.minimize())}
+              className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-hover hover:text-text-strong', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
+            >
+              <Glyph><path d="M1 6h10" /></Glyph>
+            </button>
+          </Tip>
+          <Tip label={maximized ? 'Restore' : 'Maximize'} side="bottom">
+            <button
+              type="button"
+              aria-label="Maximize"
+              onClick={control(async (w) => {
+                await w.toggleMaximize();
+                setMaximized(await (w.isMaximized?.() ?? Promise.resolve(false)));
+              })}
+              className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-hover hover:text-text-strong', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
+            >
+              <Glyph>
+                {maximized ? (
+                  <>
+                    <path d="M3 3V1.5h7.5V9H9" />
+                    <rect x="1.5" y="3.5" width="7" height="7" />
+                  </>
+                ) : (
+                  <rect x="1.5" y="1.5" width="9" height="9" />
+                )}
+              </Glyph>
+            </button>
+          </Tip>
+          <Tip label="Close" side="bottom">
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={control((w) => w.close())}
+              className={cn('flex h-[30px] w-[46px] items-center justify-center hover:bg-danger hover:text-white', !win && 'cursor-default hover:bg-transparent hover:text-muted-foreground')}
+            >
+              <Glyph><path d="M1 1l10 10M11 1 1 11" /></Glyph>
+            </button>
+          </Tip>
         </div>
       </div>
     </header>

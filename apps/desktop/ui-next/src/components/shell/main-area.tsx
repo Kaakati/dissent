@@ -40,7 +40,7 @@ export function MainArea({ children, headerExtra, header, overlay }: { children?
   );
   const { title, view } = viewOf(place);
   return (
-    <main className="relative grid min-h-0 min-w-0 grid-rows-[56px_minmax(0,1fr)] bg-chat">
+    <main className="app-main relative grid min-h-0 min-w-0 bg-chat">
       {header ?? (
         <header className="flex items-center gap-s-2 px-s-4 shadow-[inset_0_-1px_0_var(--border)]">
           {place.page === 'contacts' ? <Users className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}

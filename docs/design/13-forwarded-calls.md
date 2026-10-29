@@ -1,6 +1,7 @@
 # Design 13: forwarded calls beyond the mesh
 
-Status: design only. Nothing here is built unless it says so. It extends `04-calls.md`, whose
+Status: phases 1 to 4 are built; phase 5 is design only. Nothing here is built unless it
+says so. It extends `04-calls.md`, whose
 "Peer-SFU", "Stages" and "Tier migration" sections describe what already runs, and
 `12-boosts.md`, whose ceilings name a mesh limit per level.
 
@@ -15,8 +16,9 @@ What runs today, in `dissent-media` and `dissent-core/src/calls.rs`:
   step. From `cascade_at` devices (`CASCADE_AT`, 50) a forwarded call becomes a cascade: a root and
   child forwarders with standbys (`cascade.rs`). It runs over the network, tested on loopback with
   `cascade_at` lowered to 9.
-- **Who forwards.** Only a participant. `elect_forwarder` ranks the call's own devices by announced
-  upload capacity, then the spec's rules (not on battery, wired, CPU ok, central, lowest id).
+- **Who forwards.** A participant, or since phase 3 a volunteer member who is not in the call
+  (`calls/volunteers.rs`). `elect_forwarder` ranks the call's own devices by announced upload
+  capacity, then the spec's rules (not on battery, wired, CPU ok, central, lowest id).
 - **End to end.** The forwarder holds no media key. It routes SFrame frames by the key id and passes
   them on unchanged. It sees levels, sizes, timing and sender ids, never content (`04-calls.md`,
   "What a forwarder sees").
@@ -37,60 +39,123 @@ in this order of preference for a given call:
 
 1. **A participant.** This is today's rule, and it stays the default. The forwarder hears and is
    heard. Its own speech enters through an in-process link, so it pays no extra hop.
-2. **A volunteer member.** A member who opted in under Settings › Voice ("Forward calls for my
-   servers when I'm idle"), whose device is online, on mains power and wired, but not in the call.
-   They join the call's room as a forwarder only: no audio and no video, never listed as in the
-   call, shown only as "forwarded by <name>" in the call's route line.
+2. **A volunteer member.** Built in phase 3. A member who turned on "Help Forward Calls" for that
+   server (decided: per server, off by default; it is in the server's menu beside the other
+   per-server choices, since members have no Server Settings page), whose device is online and in
+   no call of its own. They forward the call only: no audio and no video, never listed as in the
+   call, shown as "Forwarded by <name>" on the call screen (decided: named, not anonymous).
+   "On mains power and wired" is not checked yet: the app does not read the power source or link
+   type, so a volunteer reports a wired device on mains, as the election assumes of participants.
 3. **The seeder.** An always-on member (`apps/seeder`). It is often the best-connected device a
    server has. A seeder is a storage member. It is outside the MLS group and holds no epoch key, so
    it can't read media, and forwarding needs none. It needs a call role it doesn't have today:
    `JoinAsStorage` members may only join and leave (state.rs). So the seeder forwards only if the
    owner turns on "Seeder may forward calls" (an appended, admin-only control event, off by default).
+   Decided: the seeder may forward only with that owner setting. Built in phase 4: the setting is
+   `Payload::SeederForwardsCalls { on }`, appended and carried. No call role in replay is needed,
+   since forwarding publishes no event: the seeder's engine reads the setting and volunteers on its
+   own, and every device in the call checks it before it keeps the seeder's offer.
 
 A **relay host** (`12-boosts.md`) is not a forwarder kind of its own. The relay binary carries
 packets, not calls, and making it a media forwarder would put a str0m stack in `apps/relay`. Instead,
-a host who also runs the app counts as a volunteer member. Hosting a relay is shown as a tie-break
-hint in the election, since their device likely has upload.
+a host who also runs the app counts as a volunteer member, but only if they also turn on Help
+Forward Calls (decided: hosting a relay and forwarding are separate opt-ins). Hosting a relay is a
+tie-break in the election, since their device likely has upload. It breaks ties between volunteers
+only, so a call with no volunteers elects exactly as before, the same as released clients do.
 
 **Who may forward is checked on every device**, from the community state it already has, before it
 links to a forwarder:
 
-- the device belongs to a current, non-banned member, or to the seeder while its setting is on;
-- for a non-participant, the member has an active "forwarder offer" for this call (below).
+- the device belongs to a current, non-banned member, in the server's MLS group (so it has a
+  sender id), or to the seeder while its setting is on;
+- for a non-participant, the member has an active "forwarder offer" for this call (below), and
+  every device in the call supports volunteers.
 
-A device that fails the check is never linked to, whatever a tier message says.
+A device that fails the check is never linked to, whatever a tier message says: a tier message
+naming one is refused. The check runs when an offer arrives, before every link, and on every
+membership tick of a volunteer-forwarded call, so a ban or a lapsed offer fails the call over at
+once. The volunteer checks the other way too: its relay takes a link only from a current,
+unbanned member, and drops a leaf that is banned or leaves the server.
 
 ## Offers and election
 
 - **Forwarder offer.** A non-participant offers itself with a signed, short-lived message on the
   call's existing signalling path (`CallMsg`, appended variant `ForwardOffer { room, capacity_kbps,
-  wired, on_battery, expires_ms }`). It is signed by its device key and dropped after 60 s unless
-  renewed. Participants already announce capacities the same way.
-- **One candidate set.** Every device ranks the same set: participants plus live offers. It uses the
-  same `elect` as today, so all devices agree without a vote. A non-participant gets a small bonus
-  in the ranking, because it isn't spending upload on its own media. The bonus is capped, so a
-  strong participant still wins over a weak volunteer.
-- **Replacement.** The pool of four forwarder links stays. A volunteer or seeder that leaves, sleeps
-  or stops renewing its offer drops out of the candidate set, and the pool fails over as today. If
-  no candidate's capacity covers the call, the call stays forwarded by the best participant. That
-  is today's behaviour, so the call never stops for want of a volunteer.
+  wired, on_battery, features, ttl_ms, sig }`). It is signed by its device key under
+  `dissent/call-forward-offer/v1`, renewed every `forward_offer_every` (20 s) and dropped after
+  three of those (60 s, the most a receiver keeps one) unless renewed. Two changes from the first
+  design: the lifetime is relative (`ttl_ms`, not `expires_ms`), so the devices' clocks need not
+  agree, and a `ttl_ms` of zero withdraws the offer. And the offer carries the volunteer's
+  `Features` bits, since a device that is not live in the call cannot send `Features`.
+- **Who gets offers.** A volunteer learns of calls from the presence rosters every device in a
+  voice channel call already sends to the server's members. While it is in no call of its own, it
+  offers to one call at a time: the one it relays, else the largest it hears of with six or more
+  people (a smaller call is a mesh, which no forwarder serves). It sends the offer to every device
+  in that call, and withdraws its offer to any other. Joining a call of its own, turning the switch
+  off, or closing the app withdraws its offers, so the call fails over at once.
+- **One candidate set.** Every device ranks the same set: participants plus live offers
+  (`elect_with_volunteers`). As in a tier change today, participants count at the election's
+  default capacity, since devices see measured capacities at different times; a volunteer counts at
+  its offered capacity. A non-participant gets a bonus of a tenth of its capacity, at most 1 Mbps,
+  because it isn't spending upload on its own media. The bonus is capped, so a strong participant
+  still wins over a weak volunteer. With no volunteers the ranking is exactly today's.
+- **How a volunteer starts forwarding.** The migration that elects it is the usual one: a signed
+  tier message names the volunteer's sender id as the forwarder, and each device in the call builds
+  its staged room with that forwarder. Every device that migrates also sends its tier message to the
+  volunteer. The volunteer builds a relay for the generation it names (the tier message's room,
+  roster hash and forwarder give the generation id), and the leaves link to it as to any forwarder.
+  The relay is a `Sfu` with no leaf side: no capture, no playout, no key. A device that follows a
+  tier message naming a volunteer must hold that volunteer's live offer itself, so every device that
+  links agrees on when the offer lapses.
+- **Replacement.** A volunteer whose offer is withdrawn or lapses, or who is banned, fails the
+  check above. Each device then migrates the call at once to a participant forwarder, elected on
+  the roster alone so every device picks the same one, through the same staged migration as any
+  tier change. This deviates from the first design: the pool of four forwarder links is not used
+  for it, since core links each leaf to one forwarder. Measured on loopback, from the volunteer's
+  app closing to every participant on the new forwarder: about 0.7 s. If no candidate's capacity
+  covers the call, the call stays forwarded by the best participant. That is today's behaviour, so
+  the call never stops for want of a volunteer.
+- **A volunteer that stalls.** A volunteer that stays linked but drops frames, broken or hostile,
+  is caught by its leaves. Each leaf watches its own receive and send times. One that has heard no
+  audio through the volunteer for 5 s reports it to every device in the call
+  (`CallMsg::ForwarderStalled { room, forwarder, spoke }`, appended), and again every 2 s while it
+  still hears nothing. `spoke` says whether the leaf itself has been sending audio for that whole
+  time, with no pause over 1 s. A report counts for 3 s. Once reports from two leaves (a majority
+  of any forwarded call, which has at least seven) are fresh and at least one of them spoke, every
+  device excludes that volunteer for the rest of the call and fails over as for a lapse. The
+  speaker's report is the evidence: it was speaking while another leaf heard nothing, so the
+  forwarder dropped it. A quiet call, where leaves hear nothing because nobody speaks, never adds
+  up to a stall. The exclusion is kept per call, not per room, so it holds through the failover
+  migration and any later one, and stall reports carry over into the new room. Measured on
+  loopback, from the volunteer dropping everything to every participant on a participant
+  forwarder: about 5.7 s, the 5 s window plus the failover. Known edge: a lone speaker in a call
+  where everyone else is silent hears nothing, so a second leaf whose own link fails then looks
+  like a stall, and the call moves to a participant; that costs a migration, not the call.
 - **Re-election.** Today's `forwarder_since` sustain applies: a better forwarder must stay better
   for its sustain time before the call moves to it, so offers that come and go don't churn the call.
+  A call forwarded by a participant moves to a volunteer that wins the election and holds that for
+  `reelect_sustain`. A call forwarded by a volunteer keeps it while its offer holds; the capacity
+  re-election does not replace a volunteer.
 
 ## SFrame end to end
 
 Nothing changes in the cipher layer. A forwarder of any kind:
 
-- holds no SFrame key and no MLS epoch key, and is never added to the call's key;
+- holds no SFrame key in its relay, and is never added to the call's key. A volunteer's relay is a
+  `Sfu`, which takes no key, beside a mesh that never links and holds a random key. A volunteer is
+  a member, though, so it does hold the server's MLS epoch secret that a voice channel's key is
+  exported from: a modified client could derive the key and decrypt what it forwards. That is what
+  any member could hear by joining the call, but without being listed in it, so the call screen
+  names the volunteer ("Forwarded by"). See `06-threat-model.md`. The seeder holds no epoch key at all;
 - forwards frames unchanged, so the 9-byte stamp, the auth digests and the replay windows hold
   across it;
 - sees what `04-calls.md` lists: levels, sizes, timing, the key id (sender index and epoch bits),
   and RTP headers.
 
 The new forwarder kinds add exposure. A volunteer or the seeder learns who is in a call they're not
-in, who speaks and when, and each participant's IP address or relay. That has to go into
-`06-threat-model.md` before phase 2, as "A forwarder who is not in the call". The seeder already
-learns membership timing, but not call presence.
+in, who speaks and when, and each participant's IP address or relay. It is in `06-threat-model.md`
+as "A forwarder who is not in the call". The seeder already learns membership timing, but not call
+presence.
 
 ## Layers per viewer
 
@@ -189,16 +254,18 @@ as a mesh before it is forwarded:
   and `JoinMsg` is a released struct, so it can't grow. A new appended variant `CallMsg::Features {
   room, bits }` goes to each peer on join. A released client fails to decode it and replies with an
   error, and that error is the signal that the peer is old. Until a peer answers, it counts as old.
-- **Non-participant forwarders.** A released client can't decode `ForwardOffer`. So offers go only
-  to devices that announced the feature bit, and an
-  election that includes a non-participant is used only when every participant supports it.
-  Otherwise the forwarder is a participant, as today.
+- **Non-participant forwarders.** A released client can't decode `ForwardOffer`. A volunteer is not
+  in the call, so it cannot read the call's `Features` before it offers: it sends the offer to every
+  device it hears of, and a released one answers with a decode error, as it does for `Features`.
+  An election that includes a non-participant is used only when every live device sent
+  `FEATURE_VOLUNTEERS` (bit 4) in the last 30 s. Otherwise the forwarder is a participant, as
+  today, and a volunteer already forwarding is replaced by one.
 - **Layers.** A released receiver reads the layer bits as layer 0, and a forwarder sends it layer
   0 only, since it never reported tile widths: two layers would reach its decoder as one broken
   stream. A released sender sends one layer, and the forwarder passes it on to everyone. A released
   forwarder never asks for layers, so its senders send one stream.
-- **Events.** The seeder setting is an appended, gen-sealed control event, so older clients reject it
-  as forged and ignore it.
+- **Events.** The seeder setting is an appended control event in the carrier, so older clients
+  show it as locked and ignore it.
 
 ## Phased plan
 
@@ -245,26 +312,67 @@ as a mesh before it is forwarded:
 
    Left: AV1 SVC for the lower layers, layer tables through cascades, probing so the downlink
    estimate can rise above its start, and a CPU measurement of three encoders on a slow laptop.
-3. **Volunteer forwarders.** The settings toggle, `ForwardOffer`, the candidate bonus, the "forwarded
-   by" line, the threat-model section. Tests: a volunteer that is not in the call forwards a
-   10-person call with no plaintext seen. Its loss fails over to a participant within 600 ms. A
-   banned member's offer is refused.
-4. **Seeder forwarding.** The owner setting, a forwarder-only role for the seeder in `apps/seeder`,
-   and the replay rule that allows it. Tests: the seeder forwards only while the setting is on.
+3. **Volunteer forwarders.** Built, as "Who forwards" and "Offers and election" describe: the
+   per-server toggle (`Engine::set_forward_calls`, kept in `forward_calls.bin` on the device), the
+   signed `ForwardOffer`, the capped bonus, the volunteer's keyless relay, the "Forwarded by" label
+   (`CallView::forwarded_by`), and the threat-model section. Signalling for layers reaches a
+   volunteer forwarder too, so viewers still get the layer their tile needs. Tests: unit tests of the
+   election with volunteers, the offer signature and the released decode (`calls/volunteers.rs`);
+   networked tests in `tests/it/volunteers.rs`: a volunteer outside a call of seven is elected and
+   carries its audio and video, at a high layer for a wide tile and the base for a narrow one, and is
+   listed by nobody; when it closes its app, the call fails over to a participant (about 0.7 s on
+   loopback, against the 600 ms the first plan aimed for) and keeps its audio; a banned member's and
+   an outsider's offers are refused and the call stays with a participant; one released client in
+   the call keeps the volunteer out though the new devices hold its offer; a volunteer that drops
+   every packet (`test_support::drop_relayed`) keeps a quiet call, then is excluded once two members
+   speak, the call fails over in about 5.7 s, keeps its audio, and doesn't elect it again though
+   its offer is still live. UI driver section `volunteers`: the toggle and the label.
+
+   A fix found on the way: a room swapped in by a migration started no presence clock, so after a
+   migration the call's roster stopped being re-sent and lapsed for the server's other members
+   (`call_presence_ttl`, 90 s). `swap_in` now starts one.
+
+   Left: reading the power source and link type for the offer, measuring a volunteer's upload
+   (it offers the election's default), the same stall check for a participant forwarder, and the
+   seeder (phase 4).
+4. **Seeder forwarding.** Built. The owner's "Seeder may forward calls" (Server Settings › Boosts,
+   off by default) is `Payload::SeederForwardsCalls { on }`: owner only, the latest by HLC wins,
+   appended after `ChannelOrder` and carried like it (`control::carry_sealed`), so an older client
+   shows it as locked. While it is on, a seeder volunteers in that server as a member who turned on
+   Help Forward Calls does, through the same offers, election, relay, failover and stall check.
+   What differs, since a seeder is a storage member outside the MLS group:
+   - **Its sender id.** It has no leaf index, so it takes the id `device_sid` gives its device. Each
+     device in the call refuses its offer if a group member already has that id, and keeps the
+     seeder's id beside the group's while its offer holds, through membership ticks and migrations.
+   - **The leaves' ids.** It cannot read them from a group, so each leaf tells its volunteer its own
+     sender id before it links (`CallMsg::RelayLeaf { room, gen, sid }`, appended). The seeder takes
+     an id only from a current member, and refuses one another device already named. A member
+     volunteer checks it against its group.
+   - **Compatibility.** A seeder counts only while every device in the call sent
+     `FEATURE_SEEDER_FORWARDERS` (bit 8), which says it sends `RelayLeaf`.
+   - **Its name.** "Forwarded by" uses the name of its storage join, as every name lookup now does.
+   - **Turning it off** makes every device's check fail, so the call fails over at once, and the
+     seeder withdraws its offer.
+   `apps/seeder` shows "forwards calls" per server in its status. Tests: a unit test of the setting's
+   permissions (`relay_host_tests.rs`); the networked `volunteers::a_seeder_forwards_calls_only_while_the_owner_allows_it`:
+   with the setting off, a seeder's offer is refused and no seeder forwards; the owner turns it on and
+   the seeder carries a call of seven, audio and video at a viewer's layer, named "Forwarded by
+   seeder"; the owner turns it off and the call fails over to a participant. UI driver checks for
+   the owner's toggle.
 5. **Volunteers in the cascade.** Live offers become cascade children and standbys before
    participants do. Tests: the loopback cascade test with two volunteers, and losing a volunteer
    child keeps everyone hearing.
 
 ## Open questions for the user
 
-1. Should volunteers be opt-in per server, or one switch for all your servers?
-2. Should the seeder forward at all, given it then learns who is in each call and who speaks? Or
-   should forwarding stay with people only?
-3. Should a non-participant forwarder be named in the call ("forwarded by Ada"), or kept anonymous
-   in the UI? It's visible to the call's members either way, through signalling.
+1. ~~Should volunteers be opt-in per server, or one switch for all your servers?~~ Decided: per
+   server, off by default.
+2. ~~Should the seeder forward at all?~~ Decided: only if the server's owner allows it (phase 4).
+3. ~~Should a non-participant forwarder be named in the call, or kept anonymous?~~ Decided: named,
+   "Forwarded by <name>".
 4. Is it acceptable that a boosted call falls back to level 0 limits when one released client joins,
    or should boosts wait until most members have updated?
 5. ~~For video, which matters more on a budget?~~ Decided: keep the active speaker sharp, and lower
    the others first.
-6. Should a relay host's app volunteer as a forwarder by default when they publish a relay, or stay
-   a separate opt-in?
+6. ~~Should a relay host's app volunteer as a forwarder by default when they publish a relay?~~
+   Decided: no, hosting a relay and forwarding stay separate opt-ins.

@@ -128,6 +128,8 @@ pub(crate) struct Inner {
     /// Set only in tests, to model a released device from before `CallMsg::Features`: it sends none,
     /// and cannot decode one, so it answers it as a bad request.
     pub legacy_calls: AtomicBool,
+    /// Seeders that asked this device for a storage grant. See `storage_grants`.
+    pub(crate) storage_asks: crate::storage_grants::StorageAsks,
     /// Set only in tests: every community's boost level reads as this. `u8::MAX` means not set.
     pub boost_level_override: std::sync::atomic::AtomicU8,
     /// Whether every other member device supports history messages, as last checked, per community.
@@ -257,6 +259,7 @@ impl Engine {
             legacy_profiles: AtomicBool::new(false),
             pretend_in_call: AtomicBool::new(false),
             legacy_calls: AtomicBool::new(false),
+            storage_asks: crate::storage_grants::StorageAsks::default(),
             boost_level_override: std::sync::atomic::AtomicU8::new(u8::MAX),
             history_ready: Mutex::new(crate::history::load_ready(&paths_for_ready)),
             history_checking: Default::default(),
@@ -313,6 +316,8 @@ impl Engine {
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::typing::typing_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::dht_probe::dht_probe_loop(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::calls::volunteers::volunteer_loop(Arc::downgrade(&engine.inner)));
+        engine.resume_grant_asks();
         engine.prune_thumbnails();
         Ok((engine, rx))
     }
@@ -321,6 +326,8 @@ impl Engine {
     pub async fn shutdown(self) -> Result<()> {
         // Peers drop us now, rather than when our last beacon runs out.
         let _ = tokio::time::timeout(crate::presence::OFFLINE_WAIT, self.send_offline()).await;
+        // Calls this device forwards as a volunteer fail over now.
+        self.withdraw_on_shutdown().await;
         self.flush_mls(true);
         self.inner.dirty_logs.flush();
         {

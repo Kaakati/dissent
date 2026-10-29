@@ -1,14 +1,16 @@
 // The server rail's menu, opened by right click or Shift+F10 on a server icon. Each item is one Dissent can back. Mark As
 // Read clears every text channel's unread dot and mention count. Invite to Server, Create Channel and the Server
 // Settings sections go to the dialogs and the Server Settings page, for owners and admins. Leave Server asks first and is
-// for members who are not the owner. Ported from the server context menu of the Discord reference, adapted to what the
-// engine has: no categories, boosts, emoji, stickers or events.
+// for members who are not the owner. Help Forward Calls lets this device relay the server's voice calls while it is in
+// none (off by default). Ported from the server context menu of the Discord reference, adapted to what the engine has: no
+// categories, boosts, emoji, stickers or events.
 import type { MouseEvent } from 'react';
 import { Bell, BellOff, LogOut, Plus, Settings, UserPlus } from 'lucide-react';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
 import { openServerSettings, type Section } from '@/components/server-settings/server-settings';
 import { leaveCommunity, markRead } from '@/lib/actions';
+import { asksLabel, loadStorageAsks } from '@/lib/storage-asks';
 import { api } from '@/lib/api';
 import { has } from '@/lib/features';
 import { confirm } from '@/lib/dialog';
@@ -114,8 +116,10 @@ export async function openServerRailMenu(e: MouseEvent<HTMLElement>, communityId
   }
   const withPrefs = has('server_prefs');
   if (withPrefs) await loadServerPrefs(communityId);
+  const forwarding = has('forward_calls') ? await api.getForwardCalls(communityId).catch(() => null) : null;
   const prefs = prefsOf(communityId);
   const manage = view.my_role === 'owner' || view.my_role === 'admin';
+  const asks = manage ? asksLabel((await loadStorageAsks(view.id)).length) : '';
   const entries: MenuEntry[] = [
     { label: 'Mark As Read', onPick: () => void markServerRead(view) },
     { label: 'Invite to Server', icon: UserPlus, onPick: () => openInviteDialog(view.id) },
@@ -138,13 +142,23 @@ export async function openServerRailMenu(e: MouseEvent<HTMLElement>, communityId
           onPick: () => void updateServerPrefs(view.id, { hide_muted_channels: !prefs.hide_muted_channels }),
         }
       : null,
+    forwarding !== null
+      ? {
+          label: 'Help Forward Calls',
+          sub: 'Relay this server’s calls while you’re not in one. The call shows your name.',
+          checkbox: true,
+          checked: forwarding,
+          onPick: () => void api.setForwardCalls(view.id, !forwarding).catch(toast),
+        }
+      : null,
     manage
       ? {
           label: 'Server Settings',
           icon: Settings,
+          sub: asks || undefined,
           submenu: [
             { label: 'Server Profile', onPick: () => void openSettingsAt(view.id, 'profile') },
-            { label: 'Members', onPick: () => void openSettingsAt(view.id, 'members') },
+            { label: 'Members', sub: asks || undefined, onPick: () => void openSettingsAt(view.id, 'members') },
             { label: 'Invites', onPick: () => void openSettingsAt(view.id, 'invites') },
             { label: 'Bans', onPick: () => void openSettingsAt(view.id, 'bans') },
           ],

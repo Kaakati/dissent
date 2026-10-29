@@ -195,7 +195,7 @@ function RowActions({ item, view }: { item: ViewItem; view: ChatView }) {
   return (
     <div className="msg-actions">
       {view.social ? (
-        <IconBtn label="Reply" title="Reply (R)" icon={Reply} onClick={() => useChat.getState().startReply(item.id, item.authorName || 'unknown')} />
+        <IconBtn label="Reply" shortcut="R" icon={Reply} onClick={() => useChat.getState().startReply(item.id, item.authorName || 'unknown')} />
       ) : null}
       {view.social ? (
         <IconBtn label="Add reaction" icon={SmilePlus} aria-haspopup="dialog" onClick={(e) => pickReaction(view.target, item.id, item.reactions, e.currentTarget)} />
@@ -204,7 +204,7 @@ function RowActions({ item, view }: { item: ViewItem; view: ChatView }) {
       {canDelete(item, view) ? (
         <IconBtn
           label="Delete message"
-          title="Delete (Shift+click skips the confirm)"
+          title="Delete · Shift+click skips the confirm"
           icon={Trash2}
           danger
           onClick={(e) => void removeMessage(view.target, item.id, e.shiftKey)}

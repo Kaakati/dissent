@@ -143,6 +143,8 @@ export interface ShellState {
   loadStatus: () => Promise<void>;
   loadCommunities: () => Promise<void>;
   moveServer: (communityId: Id, index: number) => Promise<void>;
+  // Sets the open server's channel order for everyone: the text and the voice channel ids, top first.
+  reorderChannels: (text: Id[], voice: Id[]) => Promise<void>;
   loadConversations: () => Promise<void>;
   loadCommunity: (communityId: Id) => Promise<void>;
   loadContacts: () => Promise<void>;
@@ -301,6 +303,31 @@ export const useShell = create<ShellState>()((set, get) => ({
     } catch (err) {
       set({ communities: before });
       toast(err);
+    }
+  },
+
+  // The channel order moves at once. It is published for the whole server, and a failed publish puts the old order
+  // back, with the error as a toast.
+  reorderChannels: async (text, voice) => {
+    const before = get().community;
+    if (!before) return;
+    const rank = (ids: Id[]) => new Map(ids.map((id, i) => [id, i]));
+    const arrange = (view: CommunityView, order: Map<Id, number>) => {
+      const of = (voiceKind: boolean) => view.channels
+        .filter((c) => Boolean(c.voice) === voiceKind)
+        .map((c, i) => ({ c, i }))
+        .sort((x, y) => (order.get(x.c.id) ?? order.size + x.i) - (order.get(y.c.id) ?? order.size + y.i))
+        .map(({ c }) => c);
+      return { ...view, channels: [...of(false), ...of(true)] };
+    };
+    const old = rank(before.channels.map((c) => c.id));
+    set({ community: arrange(before, rank([...text, ...voice])) });
+    try {
+      await api.reorderChannels(before.id, text, voice);
+    } catch (err) {
+      const now = get().community;
+      if (now?.id === before.id) set({ community: arrange(now, old) });
+      toast(`Could not move the channel: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 

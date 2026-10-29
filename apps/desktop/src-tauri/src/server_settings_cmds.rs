@@ -92,6 +92,35 @@ pub async fn set_members_host_relays(state: State<'_, AppState>, community_id: S
     engine(&state).await?.set_members_host_relays(community, on).await.map_err(err)
 }
 
+/// Whether the server's seeders may forward its voice calls ("Seeder may forward calls").
+#[tauri::command]
+pub async fn get_seeder_forwards_calls(state: State<'_, AppState>, community_id: String) -> Result<bool, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    Ok(engine(&state).await?.seeder_forwards_calls(community))
+}
+
+/// Lets the server's seeders forward its voice calls, or stops them. The owner only. Off by default.
+#[tauri::command]
+pub async fn set_seeder_forwards_calls(state: State<'_, AppState>, community_id: String, on: bool) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_seeder_forwards_calls(community, on).await.map_err(err)
+}
+
+/// Grants a seeder storage in the server, or withdraws the grant. Owners and admins only.
+#[tauri::command]
+pub async fn grant_storage(state: State<'_, AppState>, community_id: String, root_id: String, granted: bool) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let root: dissent_core::RootId = parse("root id", &root_id)?;
+    engine(&state).await?.grant_storage(community, root, granted).await.map_err(err)
+}
+
+/// The seeders that asked this device for a storage grant and have none yet, as root ids.
+#[tauri::command]
+pub async fn storage_grant_asks(state: State<'_, AppState>, community_id: String) -> Result<Vec<String>, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    Ok(engine(&state).await?.storage_grant_asks(community))
+}
+
 /// Asks a member of the server to run the relay check on `url` from their own network. It is feedback
 /// for the host only: the answer is the relay's latency in milliseconds when it passed, or the reason
 /// it did not. A relay counts toward a level only after the app's own check passes, never from this.

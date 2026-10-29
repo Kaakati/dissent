@@ -184,11 +184,12 @@ impl Engine {
         let acts = w.conv_acts.get(&conv).map_or(&[][..], Vec::as_slice);
         let ov = Overlay::build(acts, msgs);
         let by_id: HashMap<[u8; 32], &ConvMsg> = msgs.iter().map(|m| (m.id, m)).collect();
+        let members = w.conv_book.convs.get(&conv).map_or(&[][..], |meta| meta.members.as_slice());
         let mut sorted: Vec<&ConvMsg> = msgs.iter().collect();
         sorted.sort_by_key(|m| m.hlc);
         sorted
             .into_iter()
-            .map(|m| self.view(&w, &ov, &by_id, m))
+            .map(|m| self.view(&w, &ov, &by_id, members, m))
             .collect()
     }
 
@@ -201,7 +202,7 @@ impl Engine {
             .ok_or_else(|| CoreError::NotFound(format!("message {text}")))
     }
 
-    fn view(&self, w: &World, ov: &Overlay, by_id: &HashMap<[u8; 32], &ConvMsg>, m: &ConvMsg) -> DmItem {
+    fn view(&self, w: &World, ov: &Overlay, by_id: &HashMap<[u8; 32], &ConvMsg>, members: &[RootId], m: &ConvMsg) -> DmItem {
         let deleted = ov.deleted.contains(&m.id);
         let delivery = if m.from == self.inner.me {
             w.conv_book.status.get(&m.id).map_or("sending", |s| s.as_str())
@@ -209,7 +210,15 @@ impl Engine {
             "delivered"
         };
         let text = ov.edits.get(&m.id).map_or(m.text.as_str(), String::as_str);
+        // An edit is plain text, so the mentions come from the message as it was sent.
+        let (mentions_me, mentions) = if deleted {
+            (false, Vec::new())
+        } else {
+            crate::dm_mentions::resolve(w, members, m.from, &m.text)
+        };
         DmItem {
+            mentions_me,
+            mentions,
             id: id_text(&m.id),
             from: m.from.to_string(),
             text: if deleted { String::new() } else { crate::attachments::text_of(text) },
@@ -493,9 +502,20 @@ impl Engine {
 
     /// Replies to message `target` in `conv`. The reply is a message of its own.
     pub async fn conv_reply(&self, conv: ConvId, target: &str, text: String) -> Result<DmItem> {
+        self.conv_reply_with(conv, target, text, crate::Mentions::default()).await
+    }
+
+    /// Replies to message `target` in `conv`, mentioning the people in `mentions` (see `dm_mentions.rs`).
+    pub async fn conv_reply_with(&self, conv: ConvId, target: &str, text: String, mentions: crate::Mentions) -> Result<DmItem> {
         let target = parse_message_id(target)?;
         self.live_message_author(conv, target)?;
         let text = clean_message(&text)?;
+        let mentions = crate::dm_mentions::for_conversation(mentions);
+        let text = if mentions.is_empty() {
+            text
+        } else {
+            crate::attachments::pack_all(&text, &[], &[], &[], Some(&mentions))?
+        };
         let id = self.post_action(conv, Action::Reply { target, text }).await?;
         self.item_of(conv, id)
     }
@@ -531,8 +551,13 @@ impl Engine {
 
     /// Replies to `target` in the 1:1 conversation with `peer`.
     pub async fn dm_reply(&self, peer: RootId, target: &str, text: String) -> Result<DmItem> {
+        self.dm_reply_with(peer, target, text, crate::Mentions::default()).await
+    }
+
+    /// Replies to `target` in the 1:1 conversation with `peer`, mentioning the people in `mentions`.
+    pub async fn dm_reply_with(&self, peer: RootId, target: &str, text: String, mentions: crate::Mentions) -> Result<DmItem> {
         let conv = self.ensure_dm(peer)?;
-        self.conv_reply(conv, target, text).await
+        self.conv_reply_with(conv, target, text, mentions).await
     }
 
     /// Adds or removes our reaction on `target` in the 1:1 conversation with `peer`.

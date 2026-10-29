@@ -1,8 +1,9 @@
 //! Attachments: the native file picker, drag and drop onto the window, and opening or revealing downloaded files.
 //!
-//! Opening and revealing only work for files Dissent saved itself, in whichever download folder it used. The webview
-//! may read those files and the thumbnails, never the rest of a download folder. Paths are resolved first (symlinks
-//! and `..` included), so a message can never make the app open an arbitrary file.
+//! Opening and revealing only work for files Dissent saved itself, in whichever download folder it used, and for files
+//! this device shared, where they were shared from. The webview may read those files and the thumbnails, never the
+//! rest of a download folder. Paths are resolved first (symlinks and `..` included), so a message can never make the
+//! app open an arbitrary file.
 
 use std::path::{Path, PathBuf};
 
@@ -96,6 +97,42 @@ pub async fn pick_files(app: AppHandle) -> Result<Vec<PickedFile>, String> {
     Ok(out)
 }
 
+/// The folder under the data dir that holds pasted files. They stay after the send, as a picked file stays where it
+/// is: the sender's own message shows its picture from that file.
+const PASTED_DIR: &str = "pasted";
+
+/// The file name a paste is saved under: the last part of what the webview gave, without any folders.
+fn pasted_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if base.is_empty() || base == "." || base == ".." {
+        "pasted-file".into()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Writes pasted bytes to `<data dir>/pasted/<unique>/<name>` and describes the file, so it is staged and sent like a
+/// picked one. Each paste gets its own folder, so two pastes with the same name stay apart.
+pub fn save_pasted(data_dir: &Path, name: &str, bytes: &[u8]) -> Result<PickedFile, String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+    let dir = data_dir.join(PASTED_DIR).join(format!("{nanos}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(pasted_name(name));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    describe(&path)
+}
+
+/// Saves a file pasted into the composer. The webview has its bytes but no path, so they arrive as base64.
+#[tauri::command]
+pub async fn stage_pasted_file(state: tauri::State<'_, AppState>, name: String, bytes: String) -> Result<PickedFile, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(bytes).map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || save_pasted(&data_dir, &name, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Opens the folder that holds a saved download, with the file selected.
 #[tauri::command]
 pub async fn reveal_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
@@ -174,6 +211,26 @@ mod tests {
         assert_eq!(mime_for(Path::new("notes.PDF")), "application/pdf");
         assert_eq!(mime_for(Path::new("archive.unknownext")), "application/octet-stream");
         assert_eq!(mime_for(Path::new("no-extension")), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_paste_is_saved_under_its_own_name_and_folder() {
+        let data = scratch("pasted");
+        let a = save_pasted(&data, "pasted-image-20261029-120000.png", b"png").unwrap();
+        let b = save_pasted(&data, "pasted-image-20261029-120000.png", b"png2").unwrap();
+        assert_eq!(a.name, "pasted-image-20261029-120000.png");
+        assert_eq!((a.size, a.mime.as_str()), (3, "image/png"));
+        assert_ne!(a.path, b.path);
+        assert!(Path::new(&a.path).starts_with(data.join(PASTED_DIR)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_pasted_name_cannot_leave_its_folder() {
+        assert_eq!(pasted_name("..\\..\\evil.exe"), "evil.exe");
+        assert_eq!(pasted_name("../a/b.png"), "b.png");
+        assert_eq!(pasted_name(".."), "pasted-file");
+        assert_eq!(pasted_name(""), "pasted-file");
     }
 
     #[test]

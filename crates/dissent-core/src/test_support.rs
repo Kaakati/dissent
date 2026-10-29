@@ -46,6 +46,7 @@ pub fn fast_timings() -> crate::Timings {
         typing_expiry: Duration::from_secs(2),
         typing_every: Duration::from_secs(1),
         dht_probe_every: Duration::from_secs(2),
+        forward_offer_every: Duration::from_secs(1),
     }
 }
 
@@ -149,6 +150,33 @@ pub async fn set_viewer_budget(engine: &crate::Engine, viewer_root: &str, kbps: 
 /// only limit. Returns false when `engine` does not forward the call.
 pub async fn use_link_estimates(engine: &crate::Engine, on: bool) -> bool {
     engine.use_link_estimates_now(on).await
+}
+
+/// On a volunteer `engine`: how many leaves its relays for calls it is not in carry.
+pub async fn relay_downlinks(engine: &crate::Engine) -> usize {
+    engine.relay_downlinks_now().await
+}
+
+/// On a volunteer `engine`: makes its relays keep their links but drop every packet while `on`, as a
+/// stalled or hostile forwarder would.
+pub async fn drop_relayed(engine: &crate::Engine, on: bool) {
+    engine.drop_relayed_now(on).await;
+}
+
+/// How many live offers to forward `engine`'s current call it holds from volunteers.
+pub fn forward_offers(engine: &crate::Engine) -> usize {
+    engine.forward_offers_now()
+}
+
+/// Sends `engine`'s signed offer to forward the call in `channel` straight to `device`, as a
+/// volunteer would, and returns the reply: "ack", or why it was refused.
+pub async fn offer_to_forward(
+    engine: &crate::Engine,
+    community: dissent_identity::CommunityId,
+    channel: dissent_events::ChannelId,
+    device: dissent_identity::DeviceId,
+) -> String {
+    engine.offer_to_forward_now(community, channel, device).await
 }
 
 /// How many hosted relays `engine` holds a passed check for.

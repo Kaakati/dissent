@@ -58,14 +58,17 @@ function AvatarSection() {
 function BannerSection() {
   const me = useShell((s) => s.me);
   return (
-    <Block title="Banner" className="max-w-[440px]">
-      <BannerPicker
-        value={bannerOf(me?.banner, me?.banner_preset, me?.banner_poster)}
-        onPreset={(id) => void setProfileBannerPreset(id)}
-        onUpload={(bytes, animated) => (animated ? setProfileBannerAnimated(bytes, animated.poster) : setProfileBanner(bytes))}
-        onRemove={() => void clearProfileBanner()}
-      />
-      <Hint>Shown behind your profile card, in DMs and on your full profile. A 16:9 picture of up to 512 KB, a looping GIF of up to 2 MB, or a colour.</Hint>
+    // The picker keeps its narrow width; the block (and its divider) spans the page like every other block.
+    <Block title="Banner">
+      <div className="flex max-w-[440px] flex-col gap-s-3">
+        <BannerPicker
+          value={bannerOf(me?.banner, me?.banner_preset, me?.banner_poster)}
+          onPreset={(id) => void setProfileBannerPreset(id)}
+          onUpload={(bytes, animated) => (animated ? setProfileBannerAnimated(bytes, animated.poster) : setProfileBanner(bytes))}
+          onRemove={() => void clearProfileBanner()}
+        />
+        <Hint>Shown behind your profile card, in DMs and on your full profile. A 16:9 picture of up to 512 KB, a looping GIF of up to 2 MB, or a colour.</Hint>
+      </div>
     </Block>
   );
 }

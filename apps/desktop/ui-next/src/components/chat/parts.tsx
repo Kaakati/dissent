@@ -1,10 +1,12 @@
 // Small parts the chat pane shares: icon buttons, the centred empty state, skeleton rows, and search highlights.
 import type { ButtonHTMLAttributes, ComponentType, KeyboardEvent, MouseEvent, ReactNode } from 'react';
 import type { LucideProps } from 'lucide-react';
+import { Tip } from '@/components/ui/tip';
 import { toast } from '@/lib/toasts';
 import { cn } from '@/lib/utils';
 
-// The current UI's .icon-btn: a 32 px square, muted, with the surface on hover.
+// The current UI's .icon-btn: a 32 px square, muted, with the surface on hover. Its tooltip (ui/tip.tsx) shows `title`
+// when given, else the label, with `shortcut` after it; there is no native title, so the two never show together.
 export function IconBtn({
   label,
   icon: Icon,
@@ -12,6 +14,9 @@ export function IconBtn({
   lg = false,
   danger = false,
   className,
+  title,
+  shortcut,
+  tipSide,
   ...rest
 }: {
   label: string;
@@ -19,18 +24,21 @@ export function IconBtn({
   pressed?: boolean;
   lg?: boolean;
   danger?: boolean;
+  shortcut?: string;
+  tipSide?: 'top' | 'right' | 'bottom' | 'left';
 } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
-    <button
-      type="button"
-      className={cn('icon-btn', lg && 'lg', pressed && 'on', danger && 'danger-text', className)}
-      aria-label={label}
-      title={label}
-      aria-pressed={pressed === undefined ? undefined : pressed}
-      {...rest}
-    >
-      <Icon aria-hidden="true" />
-    </button>
+    <Tip label={title ?? label} shortcut={shortcut} side={tipSide} wrap={Boolean(rest.disabled)}>
+      <button
+        type="button"
+        className={cn('icon-btn', lg && 'lg', pressed && 'on', danger && 'danger-text', className)}
+        aria-label={label}
+        aria-pressed={pressed === undefined ? undefined : pressed}
+        {...rest}
+      >
+        <Icon aria-hidden="true" />
+      </button>
+    </Tip>
   );
 }
 

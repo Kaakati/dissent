@@ -7,7 +7,8 @@ import { has } from './features';
 import { markOpenRead, reloadOpen } from './chat';
 import { reloadCallChat } from './call-chat';
 import { noteReaction } from './quick-reactions';
-import { extOf, isExecutable } from './attachments';
+import { extOf, guessMime, isExecutable } from './attachments';
+import type { StagedFile } from './chat';
 import { useShell } from './store';
 import { toast } from './toasts';
 import type { Attachment, ChatTarget, Id } from './types';
@@ -37,16 +38,16 @@ async function run(fn: () => Promise<unknown>, { read = true, lists = false }: {
 export function sendMessage(target: ChatTarget, text: string, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
   switch (target.kind) {
     case 'channel': return run(() => api.sendMessage(target.communityId, target.channelId, text, mentions));
-    case 'dm': return run(() => api.sendDm(target.peer, text), { lists: true });
-    case 'group': return run(() => api.sendGroupMessage(target.groupId, text), { lists: true });
+    case 'dm': return run(() => api.sendDm(target.peer, text, mentions), { lists: true });
+    case 'group': return run(() => api.sendGroupMessage(target.groupId, text, mentions), { lists: true });
   }
 }
 
 export function sendReply(target: ChatTarget, messageId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
   switch (target.kind) {
     case 'channel': return run(() => api.sendReply(target.communityId, target.channelId, messageId, text, mentions));
-    case 'dm': return run(() => api.dmReply(target.peer, messageId, text), { lists: true });
-    case 'group': return run(() => api.groupReply(target.groupId, messageId, text), { lists: true });
+    case 'dm': return run(() => api.dmReply(target.peer, messageId, text, mentions), { lists: true });
+    case 'group': return run(() => api.groupReply(target.groupId, messageId, text, mentions), { lists: true });
   }
 }
 
@@ -105,6 +106,47 @@ export async function pickFiles(): Promise<{ path: string; name: string; size: n
     toast(err);
     return [];
   }
+}
+
+const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp' };
+
+// The name of a pasted picture, in local time: pasted-image-20261029-142233.png. The webview names a bitmap from the
+// clipboard "image.png" (or nothing); a copied file keeps its own name.
+export function pastedName(file: { name: string; type: string }, at = new Date()): string {
+  if (file.name && !/^image\.\w+$/i.test(file.name)) return file.name;
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
+  return `pasted-image-${stamp}.${IMAGE_EXT[file.type] ?? 'png'}`;
+}
+
+function base64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let text = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(text);
+}
+
+// A pasted file crosses to the backend in memory, as base64. Above this it is not read: the attach button and drag and
+// drop hand the backend a path instead.
+export const MAX_PASTE_BYTES = 256 * 1024 ** 2;
+
+// Files pasted into the composer. The webview has their bytes but no path, so the backend saves each one and it is staged
+// as a picked file is.
+export async function stagePasted(files: File[]): Promise<StagedFile[]> {
+  const staged: StagedFile[] = [];
+  if (files.some((f) => f.size > MAX_PASTE_BYTES)) toast('Large files: use the attach button or drag and drop');
+  for (const file of files) {
+    if (file.size > MAX_PASTE_BYTES) continue;
+    const name = pastedName(file);
+    const mime = file.type || guessMime(name);
+    try {
+      const saved = await api.stagePastedFile(name, base64(await file.arrayBuffer()));
+      staged.push({ path: saved.path, name: saved.name, size: saved.size, mime: saved.mime || mime });
+    } catch (err) {
+      toast(err);
+    }
+  }
+  return staged;
 }
 
 // A download of one attachment: the server id for a channel, none for a direct conversation.

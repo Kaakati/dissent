@@ -4,7 +4,7 @@
 use dissent_core::{ConvId, DmItem, RootId};
 use tauri::State;
 
-use crate::commands::{engine, err, parse, AppState};
+use crate::commands::{engine, err, mentions_of_arg, parse, AppState, MentionsArg};
 
 #[tauri::command]
 pub async fn dm_reply(
@@ -12,9 +12,11 @@ pub async fn dm_reply(
     peer: String,
     message_id: String,
     text: String,
+    mentions: Option<MentionsArg>,
 ) -> Result<DmItem, String> {
     let peer: RootId = parse("peer id", &peer)?;
-    engine(&state).await?.dm_reply(peer, &message_id, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.dm_reply_with(peer, &message_id, text, mentions).await.map_err(err)
 }
 
 #[tauri::command]
@@ -62,9 +64,11 @@ pub async fn group_reply(
     group_id: String,
     message_id: String,
     text: String,
+    mentions: Option<MentionsArg>,
 ) -> Result<DmItem, String> {
     let conv: ConvId = parse("group id", &group_id)?;
-    engine(&state).await?.conv_reply(conv, &message_id, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.conv_reply_with(conv, &message_id, text, mentions).await.map_err(err)
 }
 
 #[tauri::command]

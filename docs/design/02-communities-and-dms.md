@@ -30,12 +30,20 @@ skips it, and so does a reader whose body does not decode, so older clients show
   (`mention_reads.bin`) and nobody else sees it.
 - **Alerts.** A mention alerts even in a muted channel, but not under Do Not Disturb. That rule is
   in the UI.
-- **Not yet.** Direct and group messages carry no mention fields.
+- **Direct and group messages.** They carry mentions the same way, in the same trailer extension of
+  the sealed payload, so the wire format is unchanged and older clients show the text. A person counts
+  only if they are a member of the conversation. There is no `@everyone`: the flag is dropped on send
+  and ignored on arrival. Your own message is never highlighted for you. An edit is plain text, so a
+  message keeps the mentions it was sent with. A conversation's unread mention count
+  (`ConversationSummary.mentions`) is the number of its unread messages that mention this device, and
+  marking it read clears it. A mention alerts through a muted DM or group, as in a channel. The
+  capability is `dm_mentions`. See `crates/dissent-core/src/dm_mentions.rs`. Files sent to a DM or
+  group do not carry mentions yet (`send_dm_files` takes none).
 
 ## Server settings
 
 The owner opens **Server Settings** from the server menu. It is a full-page view with a left nav:
-Server Profile, then People (Members, Invites, Bans). There is no Roles page and no Delete Server,
+Server Profile and Boosts, then People (Members, Invites, Bans). There is no Roles page and no Delete Server,
 because the engine has neither yet. Members who are not the owner do not see the entry.
 
 Server Profile is a form beside a live preview card. The card is the same component the invite card
@@ -84,6 +92,39 @@ of closing. The icon applies at once, through the existing icon flow.
 - **Limits.** An owner who rotated to a new root cannot prove a rename this way, so invite cards show
   the genesis name until the joiner is in. The banner and profile are not verified beyond the
   answering member's signature, as icons are not. Once joined, the DAG decides.
+
+## Channel order
+
+Owners and admins drag channels in the sidebar to reorder them. The order belongs to the whole server, so it is a
+signed, replicated control event, unlike the server rail's order, which is each person's own (`set_server_order`).
+There are no categories, so a server has two lists, text channels and voice channels. A channel moves only within
+its own kind.
+
+- **Payload.** `Payload::ChannelOrder { text: Vec<ChannelId>, voice: Vec<ChannelId> }`, both top first, appended to
+  `Payload`. It is on the control channel and comes from the owner or an admin: whoever may create, change and delete
+  channels. Replay rejects it from anyone else as `NoPermission`. It rejects it as `Malformed` off the control channel
+  or with more than `MAX_ORDERED_CHANNELS` (500) ids in all. The order with the highest HLC wins, so concurrent
+  reorders converge.
+- **Resolving it** (`CommunityState::channel_order`). Each list keeps the ids that are live channels of that kind, in
+  the order given, and skips the rest: unknown or deleted ids, a voice id in the text list or the reverse, and
+  repeats. These don't reject the event, since a channel can be deleted while an order is in flight. The channels the
+  list leaves out follow in creation order, which is the create event's `(HLC, id)`. So a channel made after the
+  last reorder goes at the end of its kind. With no order at all, both lists are in creation order. Before this,
+  views listed channels by id, which looked random. `community_view` lists the text channels, then the voice
+  channels, each in this order.
+- **Compatibility.** The payload is sealed like other control, then wrapped in the carrier (`carry_sealed`, kind
+  `CARRIED_SEALED`), as a private channel's access events are. With member-only control on, it uses the member-sealed
+  carrier instead. A client from before the carrier finds no key for `CARRIER_GENERATION` and shows the event as
+  locked. A client that knows the carrier but not this kind fails to decode the inner payload and rejects that one
+  event as `Forged`. Either way, sync doesn't stall, and **older clients keep their own order**, which is by id.
+- **Engine.** `Engine::reorder_channels(community, text, voice)` checks the role and that every id is a channel of
+  that kind, listed once, then publishes. The desktop command is `reorder_channels { communityId, text, voice }`,
+  behind the `channel_order` capability.
+- **UI** (`components/shell/channel-reorder.tsx`). Rows drag with pointer events, as the rail's do. A line shows where
+  the channel will land. Alt+Shift+Up and Down move the focused channel, the same keys as the rail, since Alt+Up and
+  Down already switch channels. The new position is announced. The channel menu has Move Up and Move Down. The order
+  applies at once. If publishing fails, it goes back and a toast says so. People who can't manage channels get no
+  drag, no keys and no menu items. A muted channel hidden by Hide Muted Channels keeps its place among the others.
 
 ## Animated banners
 

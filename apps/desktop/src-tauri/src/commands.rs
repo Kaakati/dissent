@@ -558,9 +558,15 @@ pub async fn dm_messages(
 }
 
 #[tauri::command]
-pub async fn send_dm(state: State<'_, AppState>, peer: String, text: String) -> Result<DmItem, String> {
+pub async fn send_dm(
+    state: State<'_, AppState>,
+    peer: String,
+    text: String,
+    mentions: Option<MentionsArg>,
+) -> Result<DmItem, String> {
     let peer: RootId = parse("peer id", &peer)?;
-    engine(&state).await?.send_dm(peer, text).await.map_err(err)
+    let mentions = mentions_of_arg(mentions)?;
+    engine(&state).await?.send_dm_with(peer, text, mentions).await.map_err(err)
 }
 
 /// Sends a message that was refused, again. `message_id` is the id the chat shows.

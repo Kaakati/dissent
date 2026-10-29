@@ -31,14 +31,33 @@ pub(crate) fn count_unread(me: &RootId, since_ms: u64, messages: impl Iterator<I
         .count() as u32
 }
 
-/// The unread count of a conversation for this device. A 1:1 DM also counts its plaintext messages
-/// from before sealing.
-fn unread_of(w: &World, meta: &ConvMeta, peer: Option<RootId>) -> u32 {
+/// The read marker of a conversation on this device: messages up to it are read.
+fn read_since(w: &World, meta: &ConvMeta, peer: Option<RootId>) -> u64 {
     let key = match peer {
         Some(p) => format!("dm:{p}"),
         None => format!("group:{}", meta.id),
     };
-    let since = crate::local::read_marker_in(w, &key).unwrap_or(0);
+    crate::local::read_marker_in(w, &key).unwrap_or(0)
+}
+
+/// Unread messages of a conversation that mention this device, counted up to `UNREAD_CAP`. Plaintext DMs from before
+/// sealing carry no mentions.
+fn unread_mentions_of(w: &World, meta: &ConvMeta, peer: Option<RootId>) -> u32 {
+    let since = read_since(w, meta, peer);
+    let acts = w.conv_acts.get(&meta.id).map_or(&[][..], Vec::as_slice);
+    let msgs = w.conv_msgs.get(&meta.id).map_or(&[][..], Vec::as_slice);
+    let deleted = crate::conv_actions::deleted_messages(acts, msgs);
+    msgs.iter()
+        .filter(|m| m.hlc.wall_ms > since && !deleted.contains(&m.id))
+        .filter(|m| crate::dm_mentions::mentions_me(&w.me, &meta.members, m.from, &m.text))
+        .take(UNREAD_CAP as usize)
+        .count() as u32
+}
+
+/// The unread count of a conversation for this device. A 1:1 DM also counts its plaintext messages
+/// from before sealing.
+fn unread_of(w: &World, meta: &ConvMeta, peer: Option<RootId>) -> u32 {
+    let since = read_since(w, meta, peer);
     let acts = w.conv_acts.get(&meta.id).map_or(&[][..], Vec::as_slice);
     let msgs = w.conv_msgs.get(&meta.id).map_or(&[][..], Vec::as_slice);
     let deleted = crate::conv_actions::deleted_messages(acts, msgs);
@@ -104,6 +123,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         contact_since_ms: peer.and_then(|p| w.contact_times.since.get(&p).copied()),
         first_seen_ms: peer.and_then(|p| w.contact_times.first_seen.get(&p).copied()),
         unread: unread_of(w, meta, peer),
+        mentions: unread_mentions_of(w, meta, peer),
     }
 }
 
@@ -162,6 +182,8 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
         reactions: Vec::new(),
         edited: false,
         deleted: false,
+        mentions_me: false,
+        mentions: Vec::new(),
     }
 }
 
@@ -209,11 +231,16 @@ impl Engine {
     /// Sends a direct message to `peer`, sealed in their 1:1 conversation. A conversation that
     /// is not ready yet keeps the text until it is.
     pub async fn send_dm(&self, peer: RootId, text: String) -> Result<DmItem> {
+        self.send_dm_with(peer, text, crate::Mentions::default()).await
+    }
+
+    /// Sends a direct message that mentions the people in `mentions` (see `dm_mentions.rs`).
+    pub async fn send_dm_with(&self, peer: RootId, text: String, mentions: crate::Mentions) -> Result<DmItem> {
         if peer == self.inner.me {
             return Err(CoreError::Invalid("cannot send a direct message to yourself".into()));
         }
         let conv = self.ensure_dm(peer)?;
-        self.send_to_conversation(conv, text).await
+        self.send_to_conversation_with(conv, text, mentions).await
     }
 
     /// Makes sure the 1:1 conversation with `peer` is known, and returns its id.

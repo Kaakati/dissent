@@ -56,7 +56,7 @@ Per-sender keys come from that secret. RFC 9605 section 5.2 defines the derivati
 - The SFrame key ID is built from the sender's MLS member index. Every sender in the call therefore has its own key, and the receiver learns the sender from the authenticated header.
 - The spike uses MLS epoch 0 and gives the member index 24 bits, so sender IDs run up to 16,777,215.
 
-The MLS epoch belongs in the key ID. When the group changes, the epoch changes, and old frames stop decrypting. Rekeying during a call is not built yet.
+The MLS epoch belongs in the key ID. When the group changes, the epoch changes, and old frames stop decrypting. The call rekeys when the group epoch changes (`dissent-core/src/calls.rs`), so a member removed from the group loses the call key.
 
 ## Frame path
 
@@ -332,15 +332,17 @@ Video frames use the same SFrame media key and per-sender key IDs as audio (the 
 - **Hardware encoders:** NVENC, Media Foundation, VideoToolbox and VAAPI. They are the next step. Each needs a binding and a runtime probe, and `VideoEncoder` is the seam.
 - **VP8.** H.264 is the fallback instead.
 - **Cursor capture.** xcap draws no cursor, so `Cursor::Included` returns `Unsupported`.
-- **Wiring into `dissent-media`, the app and the UI.**
-- **SVT log noise.** SVT-AV1 writes `Svt[info]` and `SvtMalloc[info]` lines to stderr. Set the `SVT_LOG` environment variable to a level above info (see `Lib/Codec/svt_log.c` in SVT-AV1) before the app ships.
+
+The wiring into `dissent-media`, the app and the UI was done in phase 2, below. SVT's log noise is handled there too: `dissent-video` sets `SVT_LOG=2` (error only) unless the caller already set it.
 
 
 ## Video phase 2 plan
 
-Status: **phase 2 built.** `dissent-media` carries video over the H.264 carrier with BWE, the gate and the SFU routing. `dissent-core` runs the camera and the screen share in the call loop, sizes their bitrate from the link's estimate minus the audio reservation, and shows previews, including a self tile. The desktop app and ui-next show them. AV1 is negotiated in calls when every peer supports it (behind the `svt-av1` feature; the desktop release does not enable it yet). The lobby shows a preview of your own camera. The share button lists the displays and windows that `xcap` reports, and falls back to the primary display.
+Status: **phase 2 built.** `dissent-media` carries video over the H.264 carrier with BWE, the gate and the SFU routing. `dissent-core` runs the camera and the screen share in the call loop, sizes their bitrate from the link's estimate minus the audio reservation, and shows previews, including a self tile. The desktop app and ui-next show them. AV1 is negotiated in calls when every peer supports it (behind the `svt-av1` feature, which the desktop release enables). The lobby shows a preview of your own camera. The share button lists the displays and windows that `xcap` reports, and falls back to the primary display.
 
-### What the sources show
+### What the sources showed before phase 2
+
+This is the baseline phase 2 started from. The status above says what is built now.
 
 1. **str0m packetizes AV1 and H.264 itself.** `Writer::write` runs the codec packetizer for the payload type (`str0m/src/packet/h264.rs`, `av1.rs`). Those packetizers parse NAL units or OBUs, so an SFrame ciphertext handed to them would come out mangled. Opus is the only pass-through: `OpusPacketizer` only splits at the MTU. Audio frames are one Opus packet and never fragment, which is why audio works today.
 2. **The call negotiates Opus only.** `new_rtc` (`dissent-media/src/call.rs:115`) calls `clear_codecs()` and `enable_opus(true, false)`. The only media line is audio (`call.rs:273`). `MediaAdded` handling covers audio only (`call.rs:654`).
@@ -476,7 +478,7 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 ### Open decisions for the lead
 
 1. Keyframe cap: which encoder control to use, `max_qp_allowed` on all frames or a shorter keyframe interval for SVT, and whether OpenH264 needs a re-encode check. Needs an encoder spike.
-2. Screen share is in the first cut, as asked. It is not built yet (see Status).
+2. Screen share is in the first cut, as asked. It is built (see the phase 2 status).
 
 ## Limits of the spike
 
@@ -490,16 +492,13 @@ The SFrame header stays in the clear, so the forwarder still routes by key ID. A
 
 ## Next steps
 
-1. Choose the signalling transport for 1:1 calls, either the DM device connection or gossip.
-2. Test calls across a real relay path. The loopback test uses a direct path only, so the relay fallback is still unproven.
-3. Wire the MLS exporter from `dissent-mls` in place of the raw `MediaKey`, using the RFC label.
-4. Add the Opus codec and an audio device path, then measure latency and loss on real networks.
-5. Add epoch changes to the key ID and rekeying when membership changes.
-6. A forwarder that is also a speaker, with its own participant link, and cascades over real links.
+The spike's other next steps are built. 1:1 calls signal over the authenticated device RPC. The call key comes from the MLS exporter under the RFC label. `dissent-audio` carries Opus and the audio devices. The key ID carries the epoch, and the call rekeys when membership changes. Voice channel calls move to a forwarded call and a cascade (see "Tier migration"). Still open:
+
+1. Test calls across a real relay path. The loopback test uses a direct path only, so the relay fallback is still unproven.
 
 ## Tier migration
 
-A voice channel call starts as a mesh and moves between tiers as its live roster changes. The tiers are a mesh (up to six devices), a forwarded call (one elected forwarder relays between the others, from seven devices), and a cascade (a forwarded call above `cascade_at`, not built yet).
+A voice channel call starts as a mesh and moves between tiers as its live roster changes. The tiers are a mesh (up to six devices), a forwarded call (one elected forwarder relays between the others, from seven devices), and a cascade (a forwarded call above `cascade_at`, relayed through a tree of forwarders).
 
 - **Live roster.** Each device keeps the devices that are in the call, by sender id. The roster grows on joins and answers, and shrinks on leaves and bans.
 - **Hysteresis.** `TierPolicy::tier_for` moves a mesh up at seven devices and a forwarded call down at five, so a count that hovers at one edge does not flap. A device migrates only after its roster has wanted another tier for ten seconds.
@@ -509,7 +508,7 @@ A voice channel call starts as a mesh and moves between tiers as its live roster
 
 Migration is per device, so two devices can reach the same tier a little apart. The generation id and the tier message keep them in step.
 
-## Webview decode with WebCodecs (design, not built)
+## Webview decode with WebCodecs (built, on by default)
 
 **Why.** Today a remote frame is decoded in Rust, scaled by the box filter, encoded as a JPEG, base64-encoded into an event, and decoded again by the webview. Measured on one 720p30 H.264 tile, the Rust part (decode, scale and JPEG) costs 53 to 59% of a core at 1280 px, and the webview's base64 and image decode cost 5 to 7 ms per frame on its main thread. The JPEG step exists only to get pictures into the webview. `VideoDecoder` can decode the encoded frame in the webview, on the GPU or a hardware decoder, so the picture never needs a Rust decode, a scale or a JPEG.
 

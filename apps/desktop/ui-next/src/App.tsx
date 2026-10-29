@@ -28,7 +28,7 @@ import { useRightColumn } from '@/components/right/right-column';
 import { Onboarding } from '@/components/startup/onboarding';
 import { SettingsPage } from '@/components/settings/settings-page';
 import { Toaster } from '@/components/toaster';
-import { TooltipProvider } from '@/components/ui/tooltip';
+import { TipProvider } from '@/components/ui/tip';
 import { useShell } from '@/lib/store';
 
 export default function App() {
@@ -45,7 +45,7 @@ export default function App() {
   const board = useCallBoard();
   const right = useRightColumn();
   return (
-    <TooltipProvider delayDuration={0}>
+    <TipProvider>
       <div className="flex h-[calc(100vh/var(--ui-zoom,1))] flex-col overflow-hidden bg-chat text-text">
         <Titlebar />
         <div className="app-shell" data-right={transfers ? 'members' : right.mode}>
@@ -74,6 +74,6 @@ export default function App() {
         <KeyboardShortcuts />
         <Toaster />
       </div>
-    </TooltipProvider>
+    </TipProvider>
   );
 }

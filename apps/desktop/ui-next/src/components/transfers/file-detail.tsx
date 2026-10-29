@@ -3,6 +3,7 @@
 // DirectTransferDetail is the panel for a direct device-to-device transfer in a DM (the FilesDirect board).
 import { Lock, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Tip } from '@/components/ui/tip';
 import { imageOf } from '@/lib/images';
 import { initials } from '@/lib/identity';
 import { useShell } from '@/lib/store';
@@ -45,9 +46,11 @@ function Head({ title, onClose }: { title: string; onClose: () => void }) {
   return (
     <div className="flex items-center justify-between">
       <h3 className="text-head font-bold text-text-strong">{title}</h3>
-      <Button variant="ghost" size="icon" aria-label="Close transfer details" title="Close transfer details" onClick={onClose}>
-        <X className="size-4" />
-      </Button>
+      <Tip label="Close">
+        <Button variant="ghost" size="icon" aria-label="Close transfer details" onClick={onClose}>
+          <X className="size-4" />
+        </Button>
+      </Tip>
     </div>
   );
 }

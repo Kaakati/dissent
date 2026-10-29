@@ -114,6 +114,14 @@ the ten-minute window and the nonce, under a key only that community's members h
 
 ### Seeders
 
+**Storage grants (phase 1).** A storage join still needs no grant, so the gap in `05-encrypted-servers.md`
+("Storage joins") stays open until phase 2: a departed member can rejoin as storage under a fresh root. What phase
+1 adds is visibility. Every seeder is listed in Server Settings › Members as granted or not, and an ungranted
+seeder asks the owner and admins for a grant, so a seeder nobody recognises stands out. A grant is a signed
+control event under the community secret, so only an owner or admin can issue one. Its ask reveals nothing new:
+the seeder's root and device are already in the member list. An ask is kept in memory only, from a current,
+unbanned storage member, and a person's ask is refused.
+
 A seeder is a member that keeps the records of its communities' members and answers lookups from
 members. It learns what any member learns: device ids and addresses of the members it holds, and
 which device each member asks about. A seeder cannot forge a record, because devices sign their own,
@@ -309,6 +317,53 @@ iroh-relay's `Clients::disconnect`, and the relay keeps running for everyone els
 other members see no disruption. The relay cannot tell which community a packet belongs to, only which
 device keys it moves between.
 
+## A forwarder who is not in the call: what a volunteer sees
+
+A member can turn on "Help Forward Calls" for one server (off by default). While their device is in
+no call of its own, it may be elected to forward a voice channel call in that server that it is not
+in (`docs/design/13-forwarded-calls.md`, phase 3). Every participant's media then goes through it.
+Its relay holds no media key and forwards SFrame frames unchanged, so it cannot read what is said
+or shown. For as long as it forwards, it learns:
+
+- **Who is in the call.** Every leaf links to it, so it learns each participant's device key and,
+  through the server's member list, who they are. A participant forwarder learns this too, but a
+  volunteer is not in the call: it learns the roster of a call it chose not to join.
+- **Who speaks, and when.** The audio-level byte of each frame, the frame timing and sizes, and
+  which senders send video and at which layer, as any forwarder does (finding 6).
+- **Each participant's address.** The IP address of each leaf's link, or the relay it comes
+  through.
+
+The volunteer is not listed as a participant, so the call screen names it: "Forwarded by <name>".
+Signalling already showed it to the call's devices. What limits the exposure:
+
+- **Members only.** Each device in the call accepts an offer only from a current, unbanned member
+  of the server, in its MLS group, and checks again before it links and on every membership tick.
+  A ban fails the call over to a participant at once. An outsider's or a banned member's offer is
+  refused. The offer is signed by the volunteer's device key and lapses after 60 s unless renewed.
+- **Opt-in, and separate.** Volunteering is per server and off by default. Hosting a relay for the
+  server does not turn it on. A seeder forwards only while the owner's "Seeder may forward calls" is
+  on, which is off by default and only the owner can change.
+
+**A seeder that forwards** learns the same: the call's roster, who speaks, and the participants'
+addresses, which it otherwise never sees, since it is in no call. It holds no MLS epoch key, so
+unlike a member volunteer it cannot decrypt the media even with a modified client. It learns each
+leaf's sender id from the leaf (`RelayLeaf`); a member could name another member's id first and
+make the seeder refuse that member's link. That disrupts the call, as a hostile participant
+already can.
+- **Older clients.** A call with a device that does not support volunteers never uses one.
+
+**Residual risk: a volunteer is a member, and members hold the key.** A voice channel's key is
+exported from the server's MLS group, which every member is in. An honest volunteer never derives
+it: its relay takes no key, and its unused mesh holds a random one. But a modified client could
+derive the key and decrypt the media it forwards. That is no more than a member could hear by
+joining the call, except that it is not listed among the participants. The "Forwarded by" label is
+what keeps it visible. A participant who doesn't want a member outside the call to carry it can
+see who does, and the server's admins can ban a member who abuses it. A volunteer can also degrade
+the call by dropping frames. Its leaves catch that: once two of them have heard no audio through it
+for 5 s, one of them while speaking itself, every device excludes the volunteer for the rest of the
+call and moves to a participant forwarder. A volunteer that drops only some frames, or only one
+leaf's, stays below that and is not caught. A participant forwarder is not checked this way yet.
+
 ## Relay choice: who picks relays, and what the list reveals
 
 A device uses up to 30 relays (`MAX_RELAY_LIST`). Each one comes from one of three sources, and Settings >
@@ -372,7 +427,7 @@ refuses, so a check never causes an audio gap.
 
    Joiners apply the same check to a welcome, so they're never welcomed into a group containing
    non-members.
-2. **Phases 1 and 2 fixed; phase 3 partly fixed, the DHT record and control payloads are sealed, emoji is open.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Each ban rotates the secret: the new one is sealed under the group in a `SecretRotation` event, and storage members and joiners fetch it from an active member. A banned device is refused every community request, even with a valid token. A retired secret works for 30 days, so invites made before a ban keep working for that long. When two admins rotate at once, the replay keeps the rotation with the lowest event id, and every device adopts it. The losing secret is retired, with grace, like any other. Before the fix, anyone who knew a community id
+2. **Phases 1 and 2 fixed; phase 3 partly fixed, the DHT record and control payloads are sealed, and reaction emoji are sealed under MLS.** Invites carry a per-community secret, which salts the gossip topic and keys a token on every community request. Each ban rotates the secret: the new one is sealed under the group in a `SecretRotation` event, and storage members and joiners fetch it from an active member. A banned device is refused every community request, even with a valid token. A retired secret works for 30 days, so invites made before a ban keep working for that long. When two admins rotate at once, the replay keeps the rotation with the lowest event id, and every device adopts it. The losing secret is retired, with grace, like any other. Before the fix, anyone who knew a community id
    can join its gossip topic or sync it, and read control events: display names, handles, roles,
    bans, membership timing and reaction emoji. DHT nodes learn the community id and the plaintext
    name in the community record. **Fix:**
@@ -416,7 +471,7 @@ refuses, so a check never causes an audio gap.
   - *Leaving does not rotate the community secret.* Under the switch, a departed member loses the epoch keys. Before the switch, it keeps the community secret until the next ban rotation, as before.
   - *Two admins rotating at once.* Events sealed under the losing secret open only on devices that held it. Other devices show them as locked, so their replay can differ until they fetch it. The history fetch reaches only the devices that answer, so this is a known gap.
   - *Residual cleartext metadata for old events.* Anyone with the DAG sees the event id, author root and device, channel, parents, hlc, the generation and the payload length of a community-secret control event. Clear kinds remain: message content kinds, `Delete`, reaction emoji, and `SecretRotation`. A rotation names the banned roots it covers, so a banned root's id and the time of the ban are visible, though not the ban's author or reason.
-  **Still open in phase 3:** reaction emoji. Member-only control does not cover it.
+  **Reaction emoji:** a reaction is sealed under MLS (`SealedKind::React` and `Unreact`), like message text, so only members see the emoji. Its target and author stay in clear. Member-only control does not apply to it, because a reaction is not a control event. Reactions from before this sealing carry their emoji in clear.
 3. **Fixed: key-change warnings.** The engine raises `IdentityChanged` when someone you share a
    server with or have messaged rotates their key through recovery, or when a person you've
    messaged gains a new device. The change is recorded on their profile, and the app shows a
@@ -440,8 +495,9 @@ refuses, so a check never causes an audio gap.
    which uses AES-256-GCM. That is an IETF draft suite, and its wire format may change before the
    RFC.
 6. **Accepted, documented:** a peer forwarder in a large call sees who is speaking and how
-   loudly, through the audio-level byte. Message metadata (author, time, channel) is visible to
-   members, as in any group chat.
+   loudly, through the audio-level byte. So does a volunteer forwarder, a member outside the call,
+   which also learns the call's roster and addresses (see "A forwarder who is not in the call").
+   Message metadata (author, time, channel) is visible to members, as in any group chat.
 7. **Fixed: data at rest.** The identity file, the MLS state, the decrypted content log and each founder's
    community signing key (`community.key`) are sealed with XChaCha20-Poly1305 under a per-file subkey of the data
    key. The community key's label names its community, so a copied file doesn't open in another community's folder.

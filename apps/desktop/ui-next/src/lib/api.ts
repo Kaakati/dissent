@@ -107,6 +107,10 @@ export const api = {
   // Boosts: the relays this person hosts for a server. An empty list withdraws.
   setHostedRelays: (communityId: Id, relays: string[]) => call<void>('set_hosted_relays', { communityId, relays }),
   setMembersHostRelays: (communityId: Id, on: boolean) => call<void>('set_members_host_relays', { communityId, on }),
+  grantStorage: (communityId: Id, rootId: Id, granted: boolean) => call<void>('grant_storage', { communityId, rootId, granted }),
+  storageGrantAsks: (communityId: Id) => call<Id[]>('storage_grant_asks', { communityId }),
+  getSeederForwardsCalls: (communityId: Id) => call<boolean>('get_seeder_forwards_calls', { communityId }),
+  setSeederForwardsCalls: (communityId: Id, on: boolean) => call<void>('set_seeder_forwards_calls', { communityId, on }),
   // Feedback for the host: a member of the server runs the relay check. Resolves to the latency in ms, or rejects with why.
   checkRelay: (communityId: Id, url: string) => call<number>('check_relay', { communityId, url }),
   setCommunityBannerPreset: (communityId: Id, preset: number) => call<void>('set_community_banner_preset', { communityId, preset }),
@@ -136,6 +140,8 @@ export const api = {
   updateChannel: (communityId: Id, channelId: Id, patch: ChannelPatch) =>
     call<ChannelView>('update_channel', { communityId, channelId, ...patch }),
   deleteChannel: (communityId: Id, channelId: Id) => call<void>('delete_channel', { communityId, channelId }),
+  // The server's channel order, for everyone: text and voice channel ids, top first. Owners and admins only.
+  reorderChannels: (communityId: Id, text: Id[], voice: Id[]) => call<void>('reorder_channels', { communityId, text, voice }),
   listInvites: (communityId: Id) => call<unknown>('list_invites', { communityId }),
   revokeInvite: (communityId: Id, inviteId: Id) => call<void>('revoke_invite', { communityId, inviteId }),
   // Paged reads: the `limit` messages before `beforeId` (the newest when it is null), oldest first.
@@ -165,18 +171,22 @@ export const api = {
   getServerPrefs: (communityId: Id) => call<ServerPrefs>('get_server_prefs', { communityId }),
   setServerPrefs: (communityId: Id, prefs: ServerPrefs) => call<void>('set_server_prefs', { communityId, prefs }),
   serverAlerts: (communityId: Id, mentioned: boolean, byName: boolean) => call<boolean>('server_alerts', { communityId, mentioned, byName }),
+  getForwardCalls: (communityId: Id) => call<boolean>('get_forward_calls', { communityId }),
+  setForwardCalls: (communityId: Id, on: boolean) => call<void>('set_forward_calls', { communityId, on }),
   react: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
     call<void>('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
     call<void>('unreact', { communityId, channelId, messageId, emoji }),
 
   // ---- the same actions in a direct message (`peer`) and a group (`groupId`) ----
-  dmReply: (peer: Id, messageId: Id, text: string) => call<unknown>('dm_reply', { peer, messageId, text }),
+  dmReply: (peer: Id, messageId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('dm_reply', mentions ? { peer, messageId, text, mentions } : { peer, messageId, text }),
   dmReact: (peer: Id, messageId: Id, emoji: string) => call<void>('dm_react', { peer, messageId, emoji }),
   dmUnreact: (peer: Id, messageId: Id, emoji: string) => call<void>('dm_unreact', { peer, messageId, emoji }),
   dmEdit: (peer: Id, messageId: Id, text: string) => call<unknown>('dm_edit', { peer, messageId, text }),
   dmDelete: (peer: Id, messageId: Id) => call<void>('dm_delete', { peer, messageId }),
-  groupReply: (groupId: Id, messageId: Id, text: string) => call<unknown>('group_reply', { groupId, messageId, text }),
+  groupReply: (groupId: Id, messageId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('group_reply', mentions ? { groupId, messageId, text, mentions } : { groupId, messageId, text }),
   groupReact: (groupId: Id, messageId: Id, emoji: string) => call<void>('group_react', { groupId, messageId, emoji }),
   groupUnreact: (groupId: Id, messageId: Id, emoji: string) => call<void>('group_unreact', { groupId, messageId, emoji }),
   groupEdit: (groupId: Id, messageId: Id, text: string) => call<unknown>('group_edit', { groupId, messageId, text }),
@@ -184,6 +194,9 @@ export const api = {
 
   // ---- file attachments ----
   pickFiles: () => call<string[]>('pick_files'),
+  // A file pasted into the composer, as base64. The backend saves it and returns it as a picked file.
+  stagePastedFile: (name: string, bytes: string) =>
+    call<{ path: string; name: string; size: number; mime: string }>('stage_pasted_file', { name, bytes }),
   // `seed` keeps an encrypted copy on the community seeder (servers only). Defaults to true on the engine side.
   sendFiles: (communityId: Id, channelId: Id, paths: string[], text: string, opts: SendFileOptions = {}) =>
     call<unknown>('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true, ...(opts.mentions ? { mentions: opts.mentions } : {}) }),
@@ -229,7 +242,8 @@ export const api = {
   // ---- direct messages ----
   listConversations: () => call<ConversationSummary[]>('list_conversations'),
   dmMessages: (peer: Id, limit: number) => call<unknown[]>('dm_messages', { peer, limit }),
-  sendDm: (peer: Id, text: string) => call<unknown>('send_dm', { peer, text }),
+  sendDm: (peer: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('send_dm', mentions ? { peer, text, mentions } : { peer, text }),
   retryMessage: (messageId: Id) => call<void>('retry_message', { messageId }),
 
   // ---- app and network ----
@@ -273,7 +287,8 @@ export const api = {
   // ---- group conversations ----
   createGroup: (name: string, peers: Id[]) => call<unknown>('create_group', { name, peers }),
   groupMessages: (groupId: Id, limit: number) => call<unknown[]>('group_messages', { groupId, limit }),
-  sendGroupMessage: (groupId: Id, text: string) => call<unknown>('send_group_message', { groupId, text }),
+  sendGroupMessage: (groupId: Id, text: string, mentions?: { users: Id[]; everyone: boolean }) =>
+    call<unknown>('send_group_message', mentions ? { groupId, text, mentions } : { groupId, text }),
   addGroupMembers: (groupId: Id, peers: Id[]) => call<void>('add_group_members', { groupId, peers }),
   leaveGroup: (groupId: Id) => call<void>('leave_group', { groupId }),
   groupInviteLink: (groupId: Id) => call<string>('group_invite_link', { groupId }),

@@ -31,6 +31,9 @@ pub struct Timings {
     pub history_first_retry: Duration,
     /// How often the DHT latency shown in the status bar is measured. Whole seconds.
     pub dht_probe_every: Duration,
+    /// How often a volunteer renews its offer to forward a call. An offer lapses after three of
+    /// these unless renewed. See `call_volunteers`.
+    pub forward_offer_every: Duration,
 }
 
 impl Default for Timings {
@@ -48,6 +51,7 @@ impl Default for Timings {
             typing_every: Duration::from_secs(3),
             history_first_retry: Duration::from_secs(1),
             dht_probe_every: Duration::from_secs(15),
+            forward_offer_every: Duration::from_secs(20),
         }
     }
 }
@@ -77,6 +81,7 @@ mod tests {
         assert_eq!(t.typing_expiry, Duration::from_secs(6));
         assert_eq!(t.typing_every, Duration::from_secs(3));
         assert_eq!(t.dht_probe_every, Duration::from_secs(15));
+        assert_eq!(t.forward_offer_every, Duration::from_secs(20));
     }
 
     #[test]

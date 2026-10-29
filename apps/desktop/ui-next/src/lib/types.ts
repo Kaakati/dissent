@@ -77,6 +77,8 @@ export interface Member {
   status?: Presence;
   online?: boolean;
   relay_host?: boolean; // this device verifies the member as a relay host of the server
+  storage?: boolean; // a seeder: a storage member, outside the encrypted group
+  storage_granted?: boolean; // for a seeder: an admin granted it storage
 }
 
 export interface VoiceChannelView {
@@ -160,6 +162,7 @@ export interface DirectSummary {
   last_ms?: number;
   live_call?: LiveCall | null;
   unread?: number; // unread messages from others, up to 100; the engine counts them
+  mentions?: number; // the unread ones that mention the user (dm_mentions)
 }
 
 export interface GroupSummary {
@@ -172,6 +175,7 @@ export interface GroupSummary {
   last_ms?: number;
   live_call?: LiveCall | null;
   unread?: number; // unread messages from others, up to 100; the engine counts them
+  mentions?: number; // the unread ones that mention the user (dm_mentions)
 }
 
 export type ConversationSummary = DirectSummary | GroupSummary;
@@ -215,6 +219,7 @@ export interface CallState {
   participants: VoiceParticipant[];
   route?: CallRoute;
   quality?: CallQuality;
+  forwarded_by?: string | null; // a member who forwards the call without being in it, never listed as a participant
   channel_name?: string;
   community_name?: string;
   where?: string;
@@ -340,6 +345,7 @@ export type TypingTarget =
 export type EngineEvent =
   | { kind: 'communities_changed' }
   | { kind: 'community_updated'; community_id: Id }
+  | { kind: 'storage_grant_asked'; community_id: Id; community_name: string; root_id: Id; display_name: string }
   | { kind: 'message'; community_id: Id; channel_id: Id }
   | { kind: 'messages_changed'; community_id: Id; channel_id: Id }
   | { kind: 'dm_changed'; peer: Id }
@@ -349,6 +355,8 @@ export type EngineEvent =
   | { kind: 'contacts' }
   | { kind: 'presence' }
   | { kind: 'attachment_changed'; message_id: Id; attachment_id: Id } // a thumbnail arrived: re-read, no alert
+  | { kind: 'attachment_progress'; message_id: Id; attachment_id: Id; progress: number } // a download moved: update in place
+  | { kind: 'transfers_changed' } // a download started, finished, failed or paused, or files were shared: re-read
   | { kind: 'call_missed'; call_id: string }
   | { kind: 'call_answered_elsewhere'; call_id: string }
   | { kind: 'reminder_due'; reminder: Reminder } // a saved reminder's time came; the core has removed it from the list
@@ -534,6 +542,7 @@ export interface Attachment {
   verified?: boolean;
   needed?: number; // bytes, for disk_full
   note?: string; // why a download waits
+  error?: string | null; // why the last download failed, shown beside Retry
   status?: string; // a sending line
   sources?: FileSourceView[];
   rate_bps?: number;

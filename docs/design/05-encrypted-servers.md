@@ -121,9 +121,17 @@ a fresh root. A storage member is served the secret and the ciphertext, so a dep
 storage under a new root and receive both. This release refuses a storage join from any root that is a person here,
 active or departed, and from the owner. It does not stop a fresh root. Planned fix:
 
-- *Phase 1:* new clients accept an admin-signed `StorageGrant { root }`, appended as a sealed control payload, so
-  older clients show it as locked. The seeder asks for a grant when it joins.
-- *Phase 2:* a storage join needs a grant, once released seeders are old enough to have asked for one.
+- *Phase 1 (built):* new clients accept an admin-signed `StorageGrant { root, granted }`, appended and carried
+  (`control::carry_sealed`), so older clients show it as locked. Owners and admins only; the latest per root wins,
+  and `granted: false` withdraws it. After a storage join the seeder asks the owner's and admins' devices for one
+  (`Request::StorageGrantAsk`, appended), again with a pause that doubles from 5 s to 10 min until it has one, and
+  again on each start. A granter's device keeps the ask in memory, and Server Settings › Members lists each seeder
+  as granted, asking or not granted, with Grant storage and Withdraw grant. The seeder's status says when it has no
+  grant yet. Replay records grants (`CommunityState::storage_granted`) but a storage join does not need one yet
+  (`storage_grants.rs`, tests in `relay_host_tests.rs` and `membership/storage_tests.rs`).
+- *Phase 2:* a storage join needs a grant, once released seeders are old enough to have asked for one. The grant
+  must then come before the join in replay order, or the join is refused, so a seeder joins, asks, and is refused
+  until the grant lands; phase 2 has to settle whether a later grant re-admits it.
 
 **Plain `Join` and `JoinVia`.** These have the same exposure. `Join` has no invite at all: replay accepts it from any
 root that can publish under the secret, and the only check is a non-empty name. `JoinVia` names an invite id,
@@ -200,7 +208,7 @@ new kinds must use it.
 - A moderator cannot commit. If no owner or admin is online, joins and removals wait.
 - Unban does not re-add the device. The member must request `MlsJoin` again.
 - A new device of an existing member must also send `MlsJoin`.
-- Commits over about 4 KB exceed iroh-gossip's default message size. Gossip must be built with a larger `max_message_size` before commits reach peers reliably.
+- Gossip carries only the commit announcement, not the commit bytes (see "Who commits"), and its message limit is 128 KiB (`DEFAULT_GOSSIP_MAX_MESSAGE` in `dissent-net`).
 
 ## History messages (v0.1.7)
 

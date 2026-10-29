@@ -371,10 +371,12 @@ impl World {
 
     pub fn community_view(&self, c: &Community) -> CommunityView {
         let suppress_everyone = crate::server_prefs::of(self, c.id()).suppress_everyone;
-        let channels = c
-            .state()
-            .channels
+        // Text channels, then voice channels, each in the server's order.
+        let (text, voice) = c.state().channel_order();
+        let channels = text
             .iter()
+            .chain(&voice)
+            .filter_map(|id| c.state().channels.get(id).map(|name| (id, name)))
             // A private channel is listed only to the people who can read it.
             .filter(|(id, _)| c.state().can_read(**id, self.me))
             .map(|(id, name)| {
@@ -402,6 +404,8 @@ impl World {
                 banned: c.state().banned.contains(root),
                 status: self.presence_of(root, now),
                 relay_host: hosts.contains(root),
+                storage: c.state().members.get(root).is_some_and(|m| m.storage),
+                storage_granted: c.state().members.get(root).is_some_and(|m| m.storage) && c.state().storage_granted(root),
             })
             .collect();
         CommunityView {

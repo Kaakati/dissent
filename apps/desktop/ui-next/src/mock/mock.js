@@ -178,7 +178,15 @@ if (!window.__TAURI__) {
       channels: [{ id: 'ch7', name: 'general' }, { id: 'ch8', name: 'photos' }],
       roles: { [LINUS]: 'owner', [ME]: 'member', [GRACE]: 'member' },
       banned: new Set(),
-      msgs: { ch7: [msg(0, 60, GRACE, 'Saturday walk along the ridge, anyone?')], ch8: [] },
+      // #photos: pictures someone else shared, one per download case, for the attachments section of the driver.
+    msgs: {
+      ch7: [msg(0, 60, GRACE, 'Saturday walk along the ridge, anyone?')],
+      ch8: [
+        { ...msg(0, 30, GRACE, 'The view from the ridge.'), attachments: [att('ridge-view.jpg', 2.4 * MB, 'image/jpeg')] },
+        { ...msg(0, 25, GRACE, 'And the summit, if it comes through.'), attachments: [att('summit.jpg', 3.2 * MB, 'image/jpeg', 'available', { failOnce: true })] },
+        { ...msg(0, 20, GRACE, 'A raw from the old camera.'), attachments: [att('old-camera.jpg', 5.1 * MB, 'image/jpeg', 'downloaded', { local_path: 'C:/Users/ada/Downloads/old-camera.jpg' })] },
+      ],
+    },
     },
   };
 
@@ -332,6 +340,15 @@ if (!window.__TAURI__) {
   const mockStart = Date.now();
   const readAt = {};
   const readMs = (key) => readAt[key] ?? mockStart;
+  // A direct or group message mentions this person when someone else wrote it and named them, as the engine decides.
+  const mentionsMe = (m) => m.from !== ME && !m.deleted && (m.mentions ?? []).includes(ME);
+  const unreadMentions = (items, since) => Math.min(items.filter((m) => m.ms > since && mentionsMe(m)).length, 100);
+  // The mentions a conversation send carries: the people only, as the engine keeps them. `__mockConvMentions` logs them.
+  const convMentions = (mentions) => {
+    const users = [...new Set(mentions?.users ?? [])];
+    (window.__mockConvMentions ??= []).push(users);
+    return users;
+  };
   const conversations = () =>
     Object.entries(dms)
       .map(([peer, items]) => {
@@ -339,7 +356,7 @@ if (!window.__TAURI__) {
         const since = readMs(`dm:${peer}`);
         // Like the engine's count: messages from others after the marker, not deleted, up to 100.
         const unread = items.filter((m) => m.from !== ME && m.ms > since && !m.deleted).length;
-        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100) };
+        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100), mentions: unreadMentions(items, since) };
       })
       .sort((a, b) => b.last_ms - a.last_ms);
   const view = (c) => ({
@@ -371,7 +388,10 @@ if (!window.__TAURI__) {
       banned: c.banned.has(r),
       status: MEMBER_STATUS[r],
       relay_host: Boolean(c.relayHosts?.[r]?.length),
-    })),
+    })).concat(Object.entries(c.seeders ?? {}).map(([r, granted]) => ({
+      root_id: r, suffix: suffix(r), display_name: people[r], avatar: null, handle: null, role: 'member', banned: false,
+      status: 'online', relay_host: false, storage: true, storage_granted: granted,
+    }))),
     boost: boostOf(c),
   });
   // The reply reference: a snippet of the original, or text null when it is deleted or sealed for this device.
@@ -419,13 +439,14 @@ if (!window.__TAURI__) {
   const dmItem = (m, list = []) => ({
     id: m.id, from: m.from, text: m.deleted ? '' : m.text, ms: m.ms, pending: m.pending, embeds: m.embeds ?? [], queued: Boolean(m.queued),
     edited: Boolean(m.edited), deleted: Boolean(m.deleted), system: m.system === true,
+    mentions_me: mentionsMe(m), mentions: m.deleted ? [] : (m.mentions ?? []).map((u) => ({ id: u, display_name: people[u] })),
     ...(window.__mockNoReactions ? {} : { reply_to: m.replyTo ? dmReplyRef(list, m.replyTo) : null, reactions: dmReactions(m) }),
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
   });
   // The shared bodies of the dm_* and group_* commands; `list` is the DM's or the group's items.
-  const dmReplyIn = (list, prefix, messageId, text) => {
+  const dmReplyIn = (list, prefix, messageId, text, mentions) => {
     need(list.some((m) => m.id === messageId), 'Cannot reply: message not found');
-    const item = { id: id(`${prefix}${++seq}`), from: ME, text, ms: Date.now(), pending: false, replyTo: messageId, reactions: [] };
+    const item = { id: id(`${prefix}${++seq}`), from: ME, text, ms: Date.now(), pending: false, replyTo: messageId, reactions: [], mentions: convMentions(mentions) };
     list.push(item);
     return dmItem(item, list);
   };
@@ -463,9 +484,11 @@ if (!window.__TAURI__) {
   ];
   const PICK_BIG = { path: 'C:/Users/ada/Downloads/dataset.tar', name: 'dataset.tar', size: 11.2 * GB, mime: 'application/x-tar' };
   const guessMime = (name) => ({ png: 'image/png', jpg: 'image/jpeg', md: 'text/markdown', pdf: 'application/pdf', zip: 'application/zip', tar: 'application/x-tar', txt: 'text/plain' })[name.split('.').pop().toLowerCase()] ?? 'application/octet-stream';
+  // Files pasted into the composer, as `stage_pasted_file` saved them. The driver reads `window.__mockPasted`.
+  const pasted = (window.__mockPasted = []);
   const uploaded = (paths) => paths.map((p) => {
     const name = p.split(/[\\/]/).pop();
-    const picked = [...PICK, PICK_BIG].find((f) => f.path === p);
+    const picked = [...PICK, PICK_BIG, ...pasted].find((f) => f.path === p);
     const size = picked?.size ?? 1 * MB;
     const mime = picked?.mime ?? guessMime(name);
     return att(name, size, mime, 'downloaded', { local_path: localPathFor(name, mime) });
@@ -482,6 +505,17 @@ if (!window.__TAURI__) {
     servers[communityId].msgs[channelId].push({ ...msg(0, 0, LINUS, `@${people[ME]} the laser is free after all.`), mentions: [{ id: ME, display_name: people[ME] }], mentions_me: true, mentions_everyone: false });
   };
   window.__mockEngineEvent = (ev) => emit(ev);
+  // A seeder joins the server named `serverName` as storage and asks this device for a grant.
+  window.__mockAddSeeder = (serverName, seederName) => {
+    const c = Object.values(servers).find((s) => s.name === serverName);
+    const r = id(`seeder${seederName}`);
+    people[r] = seederName;
+    c.seeders = { ...(c.seeders ?? {}), [r]: false };
+    c.storageAsks = [...(c.storageAsks ?? []), r];
+    emit({ kind: 'community_updated', community_id: c.id });
+    emit({ kind: 'storage_grant_asked', community_id: c.id, community_name: c.name, root_id: r, display_name: seederName });
+    return r;
+  };
   const rootOf = (name) => Object.keys(people).find((k) => people[k] === name);
   window.__mockRootOf = rootOf;
   window.__mockPostDm = (name, text) => {
@@ -494,15 +528,6 @@ if (!window.__TAURI__) {
   };
   window.__mockPostGroupMessage = (groupId, text) => {
     groups[groupId].items.push({ id: id(`g${++seq}`), from: LINUS, text, ms: Date.now(), pending: false, embeds: [] });
-  };
-  const refreshFor = (communityId, m) => {
-    if (communityId) {
-      const channelId = Object.keys(servers[communityId].msgs).find((ch) => servers[communityId].msgs[ch].includes(m));
-      emit({ kind: 'message', community_id: communityId, channel_id: channelId });
-    } else {
-      const peer = Object.keys(dms).find((p) => dms[p].includes(m));
-      emit({ kind: 'dm', peer });
-    }
   };
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
@@ -697,6 +722,26 @@ if (!window.__TAURI__) {
       emitTo('dissent://avatar-changed', { root_id: ME });
       return null;
     },
+    // Storage grants: an admin grants a seeder storage, and the asks it has not answered.
+    grant_storage: ({ communityId, rootId, granted }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'NoPermission');
+      c.seeders = { ...(c.seeders ?? {}), [rootId]: granted };
+      emit({ kind: 'community_updated', community_id: communityId });
+      return null;
+    },
+    storage_grant_asks: ({ communityId }) => {
+      const c = servers[communityId];
+      return (c.storageAsks ?? []).filter((r) => !c.seeders?.[r]);
+    },
+    // Seeder may forward calls: the owner's setting, off by default.
+    get_seeder_forwards_calls: ({ communityId }) => Boolean(servers[communityId]?.seederForwardsCalls),
+    set_seeder_forwards_calls: ({ communityId, on }) => {
+      const c = servers[communityId];
+      need(myRole(c) === 'owner', 'NoPermission');
+      c.seederForwardsCalls = on;
+      return null;
+    },
     set_members_host_relays: ({ communityId, on }) => {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'NoPermission');
@@ -852,6 +897,21 @@ if (!window.__TAURI__) {
       delete c.msgs[channelId];
       return null;
     },
+    // `window.__mockReorderFails = true` makes the publish fail, so the driver sees the order roll back.
+    reorder_channels: async ({ communityId, text, voice }) => {
+      await pause();
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only the owner and admins can change this');
+      if (window.__mockReorderFails) throw 'The order was not sent: no peers reachable';
+      (window.__mockReorders ??= []).push({ communityId, text, voice });
+      const rank = new Map([...text, ...voice].map((id, i) => [id, i]));
+      const of = (isVoice) => c.channels.map((ch, i) => ({ ch, i })).filter(({ ch }) => Boolean(ch.voice) === isVoice)
+        .sort((x, y) => (rank.get(x.ch.id) ?? rank.size + x.i) - (rank.get(y.ch.id) ?? rank.size + y.i)).map(({ ch }) => ch);
+      c.channels = [...of(false), ...of(true)];
+      c.voice = c.voice && of(true).map((ch) => c.voice.find((v) => v.id === ch.id)).filter(Boolean);
+      emit({ kind: 'community_updated', community_id: communityId });
+      return null;
+    },
     create_voice_channel: ({ communityId, name }) => {
       const c = servers[communityId];
       need(['owner', 'admin'].includes(myRole(c)), 'Only owner or admin can create channels');
@@ -953,6 +1013,11 @@ if (!window.__TAURI__) {
       handles[ME] = handle;
       return null;
     },
+    stage_pasted_file: ({ name, bytes }) => {
+      const file = { path: `C:/Users/ada/AppData/Dissent/pasted/${++seq}/${name}`, name, size: atob(bytes).length, mime: guessMime(name) };
+      pasted.push(file);
+      return { ...file };
+    },
     pick_files: () => (window.__mockPickBig ? [...PICK, PICK_BIG] : [...PICK]).map((f) => ({ ...f })),
     send_files: ({ communityId, channelId, paths, text }) => {
       const c = servers[communityId];
@@ -966,8 +1031,10 @@ if (!window.__TAURI__) {
       return dmItem(item);
     },
     download_attachment: ({ communityId, messageId, attachmentId }) => {
-      const { m, a } = findAttachment(communityId, messageId, attachmentId);
+      const { a } = findAttachment(communityId, messageId, attachmentId);
       need(a, 'Attachment not found');
+      // The sender's own file and a finished download are here already: nothing is fetched, as in the engine.
+      if (a.state === 'downloaded') return null;
       // Resuming a paused download continues from where it stopped; a disk_full retry starts again.
       let step = a.state === 'paused' ? Math.round((a.progress ?? 0) * 5) : 0;
       a.state = 'downloading';
@@ -976,32 +1043,37 @@ if (!window.__TAURI__) {
         ? [{ display_name: 'Maya', route: 'direct', rate_bps: 4 * MB }, { display_name: 'Jonas', route: 'direct', rate_bps: 1.2 * MB }, { display_name: 'Seeder', route: 'direct', rate_bps: 2 * MB }]
         : [{ display_name: people[GRACE], route: 'direct', rate_bps: 3 * MB }];
       a.pieces = { total: 24, verified: Math.round(step / 5 * 24) };
-      refreshFor(communityId, m); // the card reads sources from the reloaded message
+      a.error = null;
       a.needed = undefined;
+      // As the engine does: transfers_changed when a download starts, finishes or fails, attachment_progress between.
+      const changed = () => emit({ kind: 'transfers_changed' });
+      changed(); // the card reads sources from the reloaded message
       const tick = () => {
         step += 1;
-        if (['photos.zip', 'notes.md'].includes(a.name) && step === 3) {
+        if ((['photos.zip', 'notes.md'].includes(a.name) || a.failOnce) && step === 3) {
           a.state = 'failed';
           a.progress = null;
-          refreshFor(communityId, m);
+          a.error = 'Could not reach a device that has this file. Try again when the sender is online.';
+          a.failOnce = false;
+          changed();
           return;
         }
         if (a.name === 'dataset-2026.tar' && step === 2) {
           a.state = 'disk_full';
           a.needed = 19.6 * GB;
-          refreshFor(communityId, m);
+          changed();
           return;
         }
         if (step < 5) {
           a.progress = step / 5;
-          emitTo('dissent://attachment-progress', { message_id: messageId, attachment_id: attachmentId, progress: a.progress });
+          emit({ kind: 'attachment_progress', message_id: messageId, attachment_id: attachmentId, progress: a.progress });
           setTimeout(tick, 350);
           return;
         }
         a.state = 'downloaded';
         a.progress = null;
         a.local_path = localPathFor(a.name, a.mime);
-        refreshFor(communityId, m);
+        changed();
       };
       setTimeout(tick, 350);
       return null;
@@ -1060,14 +1132,14 @@ if (!window.__TAURI__) {
       const early = read();
       return pause().then(() => early);
     },
-    dm_reply: ({ peer, messageId, text }) => dmReplyIn((dms[peer] ??= []), 'd', messageId, text),
+    dm_reply: ({ peer, messageId, text, mentions }) => dmReplyIn((dms[peer] ??= []), 'd', messageId, text, mentions),
     dm_react: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, true),
     dm_unreact: ({ peer, messageId, emoji }) => dmReactIn(dms[peer] ?? [], messageId, emoji, false),
     dm_edit: ({ peer, messageId, text }) => dmEditIn(dms[peer] ?? [], messageId, text),
     dm_delete: ({ peer, messageId }) => dmDeleteIn(dms[peer] ?? [], messageId),
     retry_message: () => null,
-    send_dm: ({ peer, text }) => {
-      const item = { id: id(`d${++seq}`), from: ME, text, ms: Date.now(), pending: true };
+    send_dm: ({ peer, text, mentions }) => {
+      const item = { id: id(`d${++seq}`), from: ME, text, ms: Date.now(), pending: true, mentions: convMentions(mentions) };
       (dms[peer] ??= []).push(item);
       // Simulate the outbox delivering after a moment.
       setTimeout(() => {
@@ -1147,7 +1219,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'forward_calls', 'channel_order', 'dm_mentions'];
   const ignoredSet = new Set();
   // The DHT and relay latencies the title bar shows. The engine sends them with each probe, so the mock does too.
   const mockNetLatency = { dht_ms: 2529, relay_ms: 42 };
@@ -1232,7 +1304,7 @@ if (!window.__TAURI__) {
   const groupRow = (g) => ({
     kind: 'group', id: g.id, name: g.name, creator: g.creator,
     members: cpeers(g.members).map((m) => ({ ...m, online: ONLINE.has(m.root_id) })),
-    last_text: g.items.at(-1)?.text ?? '', last_ms: g.items.at(-1)?.ms ?? 0, live_call: new URLSearchParams(location.search).has('nolive') ? null : (g.live_call ?? null),
+    last_text: g.items.at(-1)?.text ?? '', last_ms: g.items.at(-1)?.ms ?? 0, mentions: unreadMentions(g.items, readMs(`group:${g.id}`)), live_call: new URLSearchParams(location.search).has('nolive') ? null : (g.live_call ?? null),
   });
   const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], avatar: pictures[r] ?? null, suffix: suffix(r) }));
   const findTransfer = (transferId) => transfers.find((x) => x.id === transferId);
@@ -1314,12 +1386,12 @@ if (!window.__TAURI__) {
       return groupRow(groups[gid]);
     },
     group_messages: ({ groupId, limit }) => groups[groupId].items.slice(-limit).map((m) => dmItem(m, groups[groupId].items)),
-    send_group_message: ({ groupId, text }) => {
-      const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false, reactions: [] };
+    send_group_message: ({ groupId, text, mentions }) => {
+      const item = { id: id(`g${++seq}`), from: ME, text, ms: Date.now(), pending: false, reactions: [], mentions: convMentions(mentions) };
       groups[groupId].items.push(item);
       return dmItem(item, groups[groupId].items);
     },
-    group_reply: ({ groupId, messageId, text }) => dmReplyIn(groups[groupId].items, 'g', messageId, text),
+    group_reply: ({ groupId, messageId, text, mentions }) => dmReplyIn(groups[groupId].items, 'g', messageId, text, mentions),
     group_react: ({ groupId, messageId, emoji }) => dmReactIn(groups[groupId].items, messageId, emoji, true),
     group_unreact: ({ groupId, messageId, emoji }) => dmReactIn(groups[groupId].items, messageId, emoji, false),
     group_edit: ({ groupId, messageId, text }) => dmEditIn(groups[groupId].items, messageId, text),
@@ -1375,14 +1447,20 @@ if (!window.__TAURI__) {
       const ch = c?.channels.find((x) => x.id === channelId && x.voice);
       need(ch, 'not a voice channel');
       // The workshop channel is the demo call, forwarded by Jonas. Other channels start with only this device.
+      // `window.__mockForwardedBy = 'Yusuf'` makes the demo call forwarded by a member who is not in it, as the engine's
+      // `forwarded_by` names one: nobody in the call forwards, and the route names no forwarder or backup.
       const demo = channelId === 'vc1';
+      const volunteer = demo ? window.__mockForwardedBy : undefined;
       calls.current = callView('channel', {
         channel_name: ch.name,
         community_name: c.name,
-        participants: demo ? CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p })) : [],
-        route: demo
-          ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
-          : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
+        participants: demo ? CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p, ...(volunteer ? { forwarder: false } : {}) })) : [],
+        route: volunteer
+          ? { kind: 'forwarded', title: 'Forwarded call', detail: `${volunteer}, who is not in this call, relays audio between the ${CALL_PEOPLE.length} people in it.` }
+          : demo
+            ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
+            : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
+        forwarded_by: volunteer ?? null,
       });
       return { ...calls.current };
     },
@@ -1425,6 +1503,15 @@ if (!window.__TAURI__) {
     join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
     join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
     get_server_prefs: ({ communityId }) => prefsNow(communityId),
+    // Help Forward Calls, per server. `window.__mockForwardCalls` lists the servers it is on for, so the driver can read it.
+    get_forward_calls: ({ communityId }) => (window.__mockForwardCalls ?? []).includes(communityId),
+    set_forward_calls: ({ communityId, on }) => {
+      const set = new Set(window.__mockForwardCalls ?? []);
+      if (on) set.add(communityId);
+      else set.delete(communityId);
+      window.__mockForwardCalls = [...set];
+      return null;
+    },
     // `window.__mockMuteMs` shortens a timed mute, so the driver can watch one run out.
     set_server_prefs: ({ communityId, prefs }) => {
       const timed = prefs.muted_until !== null && prefs.muted_until < 2 ** 63;
@@ -1619,8 +1706,8 @@ if (!window.__TAURI__) {
   };
   // The address a contact link carries for a person, so a driver check can open a link for them.
   window.__mockAddressOf = (id) => addressOf('user', id);
-  window.__mockDm = (peer, text) => {
-    (dms[peer] ??= []).push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false });
+  window.__mockDm = (peer, text, mentions = []) => {
+    (dms[peer] ??= []).push({ id: id(`d${++seq}`), from: peer, text, ms: Date.now(), pending: false, mentions });
     emit({ kind: 'dm', peer });
   };
 
@@ -1640,8 +1727,9 @@ if (!window.__TAURI__) {
     const ch = servers[communityId].channels.find((x) => x.id === channelId);
     if (ch) ch.visibility = visibility;
   };
-  window.__mockGroupPost = (groupId, from, text) => {
-    groups[groupId].items.push({ id: id(`g${++seq}`), from, text, ms: Date.now(), pending: false });
+  // `mentions` lists the root ids the message names, as a member's client would send them.
+  window.__mockGroupPost = (groupId, from, text, mentions = []) => {
+    groups[groupId].items.push({ id: id(`g${++seq}`), from, text, ms: Date.now(), pending: false, mentions });
     emit({ kind: 'group', group_id: groupId });
   };
 

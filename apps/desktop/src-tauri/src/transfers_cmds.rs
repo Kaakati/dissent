@@ -70,8 +70,16 @@ fn to_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
 
+// The sender's message shows its own files from where they were shared, so the webview may read them before the
+// message comes back.
+fn allow_shared(app: &AppHandle, engine: &dissent_core::Engine) {
+    crate::attachments::allow_saved(app, &engine.saved_files());
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // a Tauri command takes its arguments flat, as the UI sends them
 pub async fn send_files(
+    app: AppHandle,
     state: State<'_, AppState>,
     community_id: String,
     channel_id: String,
@@ -84,22 +92,28 @@ pub async fn send_files(
     let community: CommunityId = parse("community id", &community_id)?;
     let channel = parse("channel id", &channel_id)?;
     let mentions = mentions_of_arg(mentions)?;
-    engine(&state)
-        .await?
+    let engine = engine(&state).await?;
+    let item = engine
         .send_files_with(community, channel, to_paths(paths), text.unwrap_or_default(), seed.unwrap_or(true), mentions)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    allow_shared(&app, &engine);
+    Ok(item)
 }
 
 #[tauri::command]
 pub async fn send_dm_files(
+    app: AppHandle,
     state: State<'_, AppState>,
     peer: String,
     paths: Vec<String>,
     text: Option<String>,
 ) -> Result<DmItem, String> {
     let peer: RootId = parse("peer id", &peer)?;
-    engine(&state).await?.send_dm_files(peer, to_paths(paths), text.unwrap_or_default()).await.map_err(err)
+    let engine = engine(&state).await?;
+    let item = engine.send_dm_files(peer, to_paths(paths), text.unwrap_or_default()).await.map_err(err)?;
+    allow_shared(&app, &engine);
+    Ok(item)
 }
 
 // ---- transfers ----

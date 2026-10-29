@@ -36,7 +36,7 @@ pub use call::{Call, CallStats};
 pub use cascade::{assign_forwarders, load, plan, Cascade};
 pub use e2ee::MAX_SENDER_ID;
 pub use election::{
-    apply_centrality, capacity, centrality, elect, ranked, Candidate, Election, Mode, PeerId,
+    apply_centrality, capacity, centrality, compare, elect, ranked, Candidate, Election, Mode, PeerId,
     AUDIO_STREAM_KBPS, VIDEO_720P_KBPS,
 };
 pub use error::{MediaError, Result};
