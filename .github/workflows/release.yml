@@ -425,7 +425,6 @@ jobs:
           cp apps/seeder/README.md "$dir/SEEDER.md"
           cp apps/relay/README.md "$dir/RELAY.md"
           cp apps/probe/README.md "$dir/PROBE.md"
-          cp apps/probe/REAL_NETWORKS.md "$dir/PROBE-REAL-NETWORKS.md"
           cp apps/push-relay/README.md "$dir/PUSH-RELAY.md"
           cp -r packaging "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
