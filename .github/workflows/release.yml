@@ -233,7 +233,15 @@ jobs:
             gh release create "$TAG" --draft --target "$SHA" --title "Dissent $TAG" --notes-file RELEASE_NOTES.md
           fi
           gh release upload "$TAG" CHANGELOG.md --clobber
-          id=$(gh api "repos/${{ github.repository }}/releases" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+          # The list of releases can lag a draft that was just created, so look again for a while.
+          # Fail if it never shows: the desktop jobs skip every upload without an id.
+          id=
+          for _ in $(seq 20); do
+            id=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+            [ -n "$id" ] && break
+            sleep 3
+          done
+          [ -n "$id" ] || { echo "::error::no release id for $TAG"; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   desktop:
@@ -417,6 +425,7 @@ jobs:
           cp apps/seeder/README.md "$dir/SEEDER.md"
           cp apps/relay/README.md "$dir/RELAY.md"
           cp apps/probe/README.md "$dir/PROBE.md"
+          cp apps/probe/REAL_NETWORKS.md "$dir/PROBE-REAL-NETWORKS.md"
           cp apps/push-relay/README.md "$dir/PUSH-RELAY.md"
           cp -r packaging "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -437,6 +446,18 @@ jobs:
     needs: [version, desktop, tools]
     runs-on: ubuntu-latest
     steps:
+      # Never publish a release that is missing its installers or the updater manifest: an app
+      # that updates to it would fail with "could not fetch a valid release JSON".
+      - name: Check the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          names=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+          echo "$names"
+          for want in 'latest.json' '_x64-setup.exe' '_x64_en-US.msi' '_aarch64.dmg' '_x64.dmg' '_amd64.AppImage' '_amd64.deb'; do
+            echo "$names" | grep -qF -- "$want" || { echo "::error::$TAG has no asset matching $want"; exit 1; }
+          done
       - name: Undraft
         env:
           GH_TOKEN: ${{ github.token }}
