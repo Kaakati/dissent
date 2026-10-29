@@ -1181,10 +1181,13 @@ mod tests {
             payload: chunks[i].data.clone(),
         };
 
+        // The limiter reads the wall clock, so a slow machine could let a 66 ms interval pass between
+        // two calls. A long interval tests the same rule without depending on the machine's speed.
+        let long = std::time::Duration::from_secs(3600);
         let mut small = RemoteVideo::default();
-        let first = small.show(&frame(0), 160, PREVIEW_INTERVAL).expect("the keyframe shows");
+        let first = small.show(&frame(0), 160, long).expect("the keyframe shows");
         assert_eq!(first.width, 160, "a 160 px tile gets a 160 px preview");
-        assert!(small.show(&frame(1), 160, PREVIEW_INTERVAL).is_none(), "a second frame inside the interval makes no preview");
+        assert!(small.show(&frame(1), 160, long).is_none(), "a second frame inside the interval makes no preview");
 
         let mut large = RemoteVideo::default();
         let wide = large.show(&frame(0), 1_280, PREVIEW_INTERVAL).expect("the keyframe shows");
