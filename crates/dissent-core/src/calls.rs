@@ -155,6 +155,11 @@ pub(crate) enum CallMsg {
     /// link. A seeder is outside the MLS group, so it cannot read the leaves' ids itself. See
     /// `volunteers`.
     RelayLeaf { room: RoomId, gen: RoomId, sid: u64 },
+    /// The streams a forwarder is not sending the receiver now, because the receiver's budget cannot
+    /// fit them even on their lowest layer, as (sender id, screen). Sent by the forwarder to each
+    /// viewer when the set changes, so the viewer shows those streams as paused, not frozen. See
+    /// `call_layers`.
+    PausedVideo { room: RoomId, streams: Vec<(u64, bool)> },
 }
 
 /// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
@@ -167,8 +172,11 @@ pub(crate) const FEATURE_VOLUNTEERS: u64 = 4;
 /// `CallMsg::Features` bit: the sender takes a seeder as a volunteer forwarder, and tells it its
 /// sender id with `RelayLeaf`. A call uses a seeder only while every device in it sent this bit.
 pub(crate) const FEATURE_SEEDER_FORWARDERS: u64 = 8;
+/// `CallMsg::Features` bit: the sender takes `PausedVideo`.
+pub(crate) const FEATURE_PAUSED_VIDEO: u64 = 16;
 /// Every call feature this device supports.
-const FEATURES: u64 = FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS | FEATURE_VOLUNTEERS | FEATURE_SEEDER_FORWARDERS;
+const FEATURES: u64 =
+    FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS | FEATURE_VOLUNTEERS | FEATURE_SEEDER_FORWARDERS | FEATURE_PAUSED_VIDEO;
 
 /// A device's roster for the DM or group call it is in.
 #[derive(Debug, Serialize, Deserialize)]
@@ -753,6 +761,11 @@ pub struct ParticipantView {
     /// True when this device relays for others. Not used yet, so always false.
     pub forwarder: bool,
     pub path: PathView,
+    /// This person's camera is on, but the forwarder pauses it for this device to fit its bandwidth.
+    /// The window shows the last frame with a "paused" badge.
+    pub video_paused: bool,
+    /// The same for their shared screen.
+    pub screen_paused: bool,
 }
 
 /// Whether a participant's link goes straight, or through a relay.
@@ -2145,6 +2158,7 @@ impl Engine {
             CallMsg::ForwardOffer(offer) => self.on_forward_offer(from, *offer),
             CallMsg::ForwarderStalled { room, forwarder, spoke } => self.on_forwarder_stalled(from, room, forwarder, spoke),
             CallMsg::RelayLeaf { room, gen, sid } => self.on_relay_leaf(from, room, gen, sid).await,
+            CallMsg::PausedVideo { room, streams } => self.on_paused_video(from, room, streams),
         }
     }
 
@@ -2959,6 +2973,7 @@ impl Engine {
         let room = lock(&self.inner.calls.current).clone()?;
         // Read before the peer lock, so `live` is never taken under it.
         let forwarder = room.forwarder_device();
+        let paused = room.with_layers(|l| l.paused_here.clone());
         let reported = self.self_reported_deafen();
         let quality = lock(&room.quality);
         let now = Instant::now();
@@ -2977,6 +2992,8 @@ impl Engine {
                         .is_some_and(|t| now.duration_since(t) < SPEAKING_WINDOW),
                 forwarder: room.forwarding.as_ref().is_some_and(|f| f.forwarder == *sid || f.children.contains(sid)),
                 path: room.path_of(&p.device, forwarder.as_ref()),
+                video_paused: paused.contains(&(*sid, false)),
+                screen_paused: paused.contains(&(*sid, true)),
             })
             .collect();
         // Two devices in all make a direct link. Three or more make a mesh.

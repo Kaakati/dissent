@@ -3,7 +3,7 @@
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
+import { Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import { Composer } from '@/components/chat/composer';
 import { listKey, rowsFor } from '@/components/chat/message-list';
@@ -325,6 +325,8 @@ function Tile({ person }: { person: VoiceParticipant }) {
   const camera = useShell((s) => s.videoFrames[person.root_id]);
   const screen = useShell((s) => s.videoFrames[`${person.root_id}:screen`]);
   const preview = screen ?? camera;
+  // The forwarder pauses a stream for this device when its bandwidth cannot fit it. The last frame stays, marked as paused.
+  const paused = screen ? person.screen_paused : person.video_paused;
   const encoded = useEncodedVideoOn(person.root_id);
   // Stable callbacks, so a re-render does not detach the canvases: a canvas is released only when its tile goes.
   const cameraRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(person.root_id, el), [person.root_id]);
@@ -360,6 +362,12 @@ function Tile({ person }: { person: VoiceParticipant }) {
         {person.muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}
         <span>{person.display_name}</span>
       </span>
+      {paused && (preview || encoded) ? (
+        <span className="absolute top-2.5 left-2.5 inline-flex h-[26px] items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-meta text-text">
+          <Pause className="size-3.5" aria-hidden="true" />
+          Paused to save bandwidth
+        </span>
+      ) : null}
       {person.forwarder ? (
         <span className="absolute top-2.5 right-2.5 inline-flex h-[26px] items-center rounded-md bg-black/55 px-2.5 text-meta text-text">Forwarding</span>
       ) : null}

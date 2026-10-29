@@ -265,14 +265,15 @@ async fn a_volunteer_that_drops_everything_is_excluded_and_the_call_fails_over()
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    // Seven devices, a seeder and two failovers: a slow runner needs longer than `TEST_LIMIT`.
+    bounded_within(Duration::from_secs(480), async {
     let (everyone, community, channel) = boosted_call(7, 0, 5_000).await;
     let invite = everyone[0].engine.create_invite(community).await.expect("invite");
     let seeder = peer("seeder").await;
     seeder.engine.join_as_storage(&invite).await.expect("the seeder joins as storage");
     let seeder_root = root(&seeder);
     for p in &everyone {
-        eventually("every member sees the seeder", || {
+        eventually_within(Duration::from_secs(120), "every member sees the seeder", || {
             p.engine
                 .community_view(community)
                 .ok()
@@ -299,16 +300,16 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     assert!(everyone[1].engine.set_seeder_forwards_calls(community, true).await.is_err() || !everyone[1].engine.seeder_forwards_calls(community));
     everyone[0].engine.set_seeder_forwards_calls(community, true).await.expect("the owner allows it");
     for p in everyone.iter().chain(std::iter::once(&seeder)) {
-        eventually("the setting reaches every device", || p.engine.seeder_forwards_calls(community).then_some(())).await;
+        eventually_within(Duration::from_secs(120), "the setting reaches every device", || p.engine.seeder_forwards_calls(community).then_some(())).await;
     }
     let name = seeder.engine.me().display_name;
     for p in &everyone {
-        eventually_within(Duration::from_secs(90), "the seeder forwards the call", || {
+        eventually_within(Duration::from_secs(180), "the seeder forwards the call", || {
             p.engine.call_state().filter(|v| v.forwarded_by.as_deref() == Some(name.as_str()) && v.participants.len() == 6)
         })
         .await;
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while relay_downlinks(&seeder.engine).await != everyone.len() {
         assert!(Instant::now() < deadline, "the seeder's relay carries every participant");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -318,7 +319,7 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     only_senders_speak(&everyone, &[1]).await;
     everyone[1].engine.set_camera(true).expect("camera on");
     everyone[2].engine.set_video_tile(&root(&everyone[1]), false, 1920);
-    eventually_within(Duration::from_secs(60), "video through the seeder", || {
+    eventually_within(Duration::from_secs(120), "video through the seeder", || {
         layer_of(&everyone[2], &everyone[1]).is_some_and(|l| l > 0).then_some(())
     })
     .await;
@@ -330,7 +331,7 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     // The owner turns it off: the call fails over to a participant at once.
     everyone[0].engine.set_seeder_forwards_calls(community, false).await.expect("the owner stops it");
     for p in &everyone {
-        eventually_within(Duration::from_secs(60), "a participant forwards again", || {
+        eventually_within(Duration::from_secs(120), "a participant forwards again", || {
             p.engine.call_state().filter(|v| v.topology == Topology::Forwarded && v.forwarded_by.is_none())
         })
         .await;

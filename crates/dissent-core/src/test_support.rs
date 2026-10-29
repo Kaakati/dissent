@@ -175,6 +175,12 @@ pub fn received_layer(engine: &crate::Engine, sender_root: &str, screen: bool) -
     engine.received_layer_now(sender_root, screen)
 }
 
+/// On the forwarder `engine`: the layer it plans to send `viewer_root` of `sender_root`'s camera (or
+/// screen) now. `None` while that stream is paused for the viewer, or has no layer table.
+pub async fn planned_layer(engine: &crate::Engine, viewer_root: &str, sender_root: &str, screen: bool) -> Option<u8> {
+    engine.planned_layer_now(viewer_root, sender_root, screen).await
+}
+
 /// On the forwarder `engine`: the root id of the active speaker, whom a tight budget keeps sharp.
 pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
     engine.active_speaker_now().await

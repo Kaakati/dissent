@@ -37,6 +37,10 @@ use crate::video::{layer_key, stream_key, RawFrame, RawVideo, MAX_LAYERS};
 /// How recently a participant must have sent a frame to count as an active speaker.
 const ACTIVE_WINDOW: Duration = Duration::from_secs(1);
 
+/// How long a participant who spoke keeps the high layer of its camera. Longer than
+/// `ACTIVE_WINDOW`, so a pause between sentences does not drop the layer and cost a keyframe.
+const SPEAKER_HOLD: Duration = Duration::from_secs(5);
+
 /// The loudest a frame may be quiet and still count as speech. Frames at or above this level
 /// are silence or background, and are never forwarded as speakers. Without it, a forwarder that
 /// has just started could forward silence, because it has not yet heard any speakers.
@@ -92,6 +96,8 @@ pub struct Sfu<T: PacketTransport> {
     upstream: BTreeMap<PeerId, Call<T>>,
     active_up: Option<PeerId>,
     levels: BTreeMap<u64, (u8, Instant)>,
+    /// When each sender last sent speech, at or under `SPEECH_LEVEL_MAX`. Ranks its video for layers and pausing.
+    last_spoke: BTreeMap<u64, Instant>,
     /// Where the next poll starts, so no link is starved by a busy one.
     rotation: usize,
     /// Each downlink's bitrate budget in kbps, as set by `set_listener_budget`.
@@ -130,6 +136,7 @@ impl<T: PacketTransport> Sfu<T> {
             upstream: BTreeMap::new(),
             active_up: None,
             levels: BTreeMap::new(),
+            last_spoke: BTreeMap::new(),
             rotation: 0,
             budgets: BTreeMap::new(),
             estimated: BTreeMap::new(),
@@ -291,18 +298,52 @@ impl<T: PacketTransport> Sfu<T> {
         mask
     }
 
-    /// The layer `viewer` should get of each stream it receives: the smallest that covers its tile,
-    /// then lowered until the sum fits its budget. Streams other than the active speaker's are
-    /// lowered first, the one that saves most first, and the speaker's only after them.
+    /// Whether `sender`'s video counts as a speaker's: it gets the layer its tile needs, where any
+    /// other camera gets the lowest. In `Mode::Video720p` every sender does. Otherwise it is one of
+    /// the [`AUDIO_TOP_SPEAKERS`] senders that spoke most recently, within `SPEAKER_HOLD`.
+    fn is_video_speaker(&self, sender: u64) -> bool {
+        if self.mode == Mode::Video720p {
+            return true;
+        }
+        let now = Instant::now();
+        let mut recent: Vec<(Instant, u64)> = self
+            .last_spoke
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) <= SPEAKER_HOLD)
+            .map(|(sender, at)| (*at, *sender))
+            .collect();
+        // Most recent first. Ties go to the lower sender id, so the choice is stable.
+        recent.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        recent.iter().take(AUDIO_TOP_SPEAKERS as usize).any(|(_, s)| *s == sender)
+    }
+
+    /// The sender a tight budget keeps sharpest: the loudest speaker now, or else the one who
+    /// spoke last.
+    fn sharp_sender(&self) -> Option<u64> {
+        self.top_speakers().first().copied().or_else(|| {
+            self.last_spoke
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(sender, _)| *sender)
+        })
+    }
+
+    /// The layer `viewer` should get of each stream it receives. Every camera and screen that is
+    /// on is planned, whether or not its sender speaks: a speaker's stream gets the smallest layer
+    /// that covers its tile, and any other the lowest. The plan is then lowered until the sum fits
+    /// the viewer's budget: other streams first, the one that saves most first, and the sharpest
+    /// speaker's last. If even the lowest layers do not fit, streams are paused, which leaves them
+    /// out of the plan: cameras before screens, the sender who spoke least recently first, and
+    /// never the sharpest speaker's. See `paused_for`.
     fn plan_for(&self, viewer: PeerId) -> BTreeMap<u64, u8> {
         let mut plan: BTreeMap<u64, u8> = BTreeMap::new();
         let aware = self.layer_aware.contains(&viewer);
         for (stream, layers) in &self.layers {
-            // A viewer is never sent its own stream, nor one that is not forwarded now.
-            if *stream >> 1 == viewer || !self.is_active(*stream >> 1) {
+            // A viewer is never sent its own stream.
+            if *stream >> 1 == viewer {
                 continue;
             }
-            if !aware || layers.len() <= 1 {
+            if !aware || layers.len() <= 1 || !self.is_video_speaker(*stream >> 1) {
                 plan.insert(*stream, 0);
                 continue;
             }
@@ -316,7 +357,7 @@ impl<T: PacketTransport> Sfu<T> {
             (Some(budget), None) | (None, Some(budget)) => *budget,
             (None, None) => return plan,
         };
-        let speaker = self.top_speakers().first().copied();
+        let speaker = self.sharp_sender();
         let cost = |plan: &BTreeMap<u64, u8>| -> u64 {
             plan.iter()
                 .map(|(stream, layer)| {
@@ -347,7 +388,31 @@ impl<T: PacketTransport> Sfu<T> {
                 None => break,
             }
         }
+        // Every stream is on its lowest layer and the plan still does not fit: pause streams.
+        let mut pausable: Vec<u64> = plan.keys().copied().filter(|stream| Some(*stream >> 1) != speaker).collect();
+        // Cameras before screens, then the sender who spoke least recently (never counts as
+        // least recent), then the lower stream id, so the order is stable.
+        pausable.sort_by_key(|stream| (*stream & 1 == 1, self.last_spoke.get(&(*stream >> 1)).copied(), *stream));
+        for stream in pausable {
+            // Keep one stream, so a viewer whose budget fits nothing still sees someone.
+            if cost(&plan) <= u64::from(budget) || plan.len() <= 1 {
+                break;
+            }
+            plan.remove(&stream);
+        }
         plan
+    }
+
+    /// The streams of other senders that `viewer` is not sent now, because its budget cannot fit
+    /// them even on their lowest layer, as (sender, screen). The viewer shows their last frame as
+    /// paused. Only streams with announced layers can be paused, since only they have a known cost.
+    pub fn paused_for(&self, viewer: PeerId) -> Vec<(u64, bool)> {
+        let plan = self.plan_for(viewer);
+        self.layers
+            .keys()
+            .filter(|stream| **stream >> 1 != viewer && !plan.contains_key(*stream))
+            .map(|stream| (*stream >> 1, *stream & 1 == 1))
+            .collect()
     }
 
     /// The forwarder's counters.
@@ -508,6 +573,9 @@ impl<T: PacketTransport> Sfu<T> {
                     let level = audio_level(&wire).unwrap_or(127);
                     if let Some(sender) = sender {
                         self.levels.insert(sender, (level, Instant::now()));
+                        if level <= SPEECH_LEVEL_MAX {
+                            self.last_spoke.insert(sender, Instant::now());
+                        }
                     }
                 }
                 let Some(sender) = sender else {
@@ -544,14 +612,13 @@ impl<T: PacketTransport> Sfu<T> {
                 return;
             }
         }
-        if !self.is_active(raw.sender) {
-            self.stats.frames_dropped += 1;
-            return;
-        }
+        // Every camera and screen that is on is forwarded, whether or not its sender speaks. A
+        // viewer's budget can pause a stream for that viewer alone (see `plan_for`).
         let stream = stream_key(raw.sender, raw.screen);
         self.video_source.insert(stream, from);
         // A sender that never announced layers has one, and its frames are all layer 0.
         let multi = self.layers.get(&stream).is_some_and(|l| l.len() > 1);
+        let planned = self.layers.contains_key(&stream);
 
         let mut targets: Vec<Link> = self
             .links
@@ -570,6 +637,14 @@ impl<T: PacketTransport> Sfu<T> {
             // reach the decoder as two streams in one.
             if !multi && raw.layer != 0 && matches!(target, Link::Down(_)) {
                 continue;
+            }
+            // A stream paused for this viewer is not sent. It restarts at a keyframe, since the
+            // viewer missed the frames in between.
+            if let (true, Link::Down(viewer)) = (planned, target) {
+                if !self.plan_for(viewer).contains_key(&stream) {
+                    self.forget_sent(target, stream);
+                    continue;
+                }
             }
             // The layer this target should be sent. A parent forwarder takes every layer, so it
             // can choose for its own viewers.
@@ -632,6 +707,17 @@ impl<T: PacketTransport> Sfu<T> {
     }
 
     /// Asks the source of a stream for a keyframe, on the link the stream arrives on.
+    /// Forgets that `target` was sent `stream`, so the next frame it gets of it is a keyframe.
+    fn forget_sent(&mut self, target: Link, stream: u64) {
+        self.sending_layer.remove(&(target, stream));
+        for layer in 0..MAX_LAYERS {
+            self.video_started.remove(&(target, layer_key(stream, layer)));
+            self.video_wanted.remove(&(target, layer_key(stream, layer)));
+        }
+        self.video_started.remove(&(target, stream));
+        self.video_wanted.remove(&(target, stream));
+    }
+
     fn request_keyframe_from(&mut self, source: Link) {
         let call = match source {
             Link::Down(peer) => self.links.get_mut(&peer),
@@ -676,15 +762,10 @@ impl<T: PacketTransport> Sfu<T> {
             self.video_started.retain(|(target, _)| *target != link);
             self.video_wanted.retain(|(target, _)| *target != link);
             self.sending_layer.retain(|(target, _), _| *target != link);
-            let sources: Vec<(u64, Link)> = self
-                .video_source
-                .iter()
-                .map(|(sender, source)| (*sender, *source))
-                .collect();
-            for (sender, source) in sources {
-                if self.is_active(sender >> 1) {
-                    self.request_keyframe_from(source);
-                }
+            // Every stream that is on is forwarded, so every source is asked.
+            let sources: Vec<Link> = self.video_source.values().copied().collect();
+            for source in sources {
+                self.request_keyframe_from(source);
             }
         }
     }
@@ -748,7 +829,20 @@ mod layer_tests {
     }
 
     fn speaks(sfu: &mut Sfu<UdpTransport>, sender: u64) {
-        sfu.levels.insert(sender, (10, Instant::now()));
+        speaks_at(sfu, sender, Instant::now());
+    }
+
+    fn speaks_at(sfu: &mut Sfu<UdpTransport>, sender: u64, at: Instant) {
+        sfu.levels.insert(sender, (10, at));
+        sfu.last_spoke.insert(sender, at);
+    }
+
+    /// The same three senders on a production forwarder, where only recent speakers get their
+    /// tile's layer.
+    fn audio_forwarder(tile: u32) -> Sfu<UdpTransport> {
+        let mut sfu = forwarder(tile);
+        sfu.mode = Mode::AudioTop3;
+        sfu
     }
 
     #[test]
@@ -789,7 +883,13 @@ mod layer_tests {
         sfu.set_listener_budget(9, 1_000);
         assert_eq!(plan(&sfu), [0, 0, 1]);
         sfu.set_listener_budget(9, 100);
-        assert_eq!(plan(&sfu), [0, 0, 0], "the base layer is the floor");
+        // 450 fits all three at the base.
+        sfu.set_listener_budget(9, 450);
+        assert_eq!(plan(&sfu), [0, 0, 0], "every camera still flows at the base");
+        // Below that the others are paused, and the speaker is never.
+        sfu.set_listener_budget(9, 100);
+        assert_eq!([1, 2, 3].map(|s| sfu.planned_layer(9, s, false)), [None, None, Some(0)]);
+        assert_eq!(sfu.paused_for(9), vec![(1, false), (2, false)]);
         // With room for everything, each gets what its tile needs, and no more.
         sfu.set_listener_budget(9, 10_000);
         assert_eq!(plan(&sfu), [2, 2, 2]);
@@ -805,5 +905,54 @@ mod layer_tests {
         let plan = [1, 2, 3].map(|s| sfu.planned_layer(9, s, false).unwrap());
         assert_eq!(plan.iter().filter(|l| **l == 2).count(), 1, "one 720p stream stays: {plan:?}");
         assert_eq!(plan[0], 1, "the 360p tile keeps its layer: {plan:?}");
+    }
+
+    #[test]
+    fn a_quiet_camera_keeps_flowing_on_the_base_layer() {
+        let mut sfu = audio_forwarder(1280);
+        speaks(&mut sfu, 3);
+        // Senders 1 and 2 never spoke: they are planned, on the base, and nothing is paused.
+        assert_eq!([1, 2, 3].map(|s| sfu.planned_layer(9, s, false)), [Some(0), Some(0), Some(2)]);
+        assert!(sfu.paused_for(9).is_empty());
+        // A sender who spoke a while ago is back on the base too.
+        let long_ago = Instant::now() - SPEAKER_HOLD - Duration::from_secs(1);
+        speaks_at(&mut sfu, 1, long_ago);
+        assert_eq!(sfu.planned_layer(9, 1, false), Some(0));
+        // A pause shorter than the hold keeps the high layer.
+        speaks_at(&mut sfu, 2, Instant::now() - Duration::from_secs(2));
+        assert_eq!(sfu.planned_layer(9, 2, false), Some(2));
+    }
+
+    #[test]
+    fn a_budget_that_fits_no_base_pauses_the_least_recent_speaker_first() {
+        let mut sfu = audio_forwarder(1280);
+        let now = Instant::now();
+        speaks_at(&mut sfu, 1, now - Duration::from_secs(30));
+        speaks_at(&mut sfu, 2, now - Duration::from_secs(10));
+        speaks(&mut sfu, 3);
+        // Three bases cost 450. 350 fits two: sender 1 spoke least recently, so it is paused.
+        sfu.set_listener_budget(9, 350);
+        assert_eq!(sfu.paused_for(9), vec![(1, false)]);
+        // 200 fits one: the speaker's.
+        sfu.set_listener_budget(9, 200);
+        assert_eq!(sfu.paused_for(9), vec![(1, false), (2, false)]);
+        assert_eq!(sfu.planned_layer(9, 3, false), Some(0));
+        // Room again: everything comes back.
+        sfu.set_listener_budget(9, 10_000);
+        assert!(sfu.paused_for(9).is_empty());
+    }
+
+    #[test]
+    fn a_screen_is_paused_after_the_cameras() {
+        let mut sfu = audio_forwarder(1280);
+        sfu.set_sender_layers(1, true, three());
+        sfu.set_viewer_tile(9, 1, true, 1280);
+        speaks(&mut sfu, 3);
+        // Four bases cost 600. 450 pauses one stream: a camera of a sender who never spoke, not
+        // sender 1's screen.
+        sfu.set_listener_budget(9, 450);
+        let paused = sfu.paused_for(9);
+        assert_eq!(paused.len(), 1, "{paused:?}");
+        assert!(!paused[0].1, "a camera is paused before a screen: {paused:?}");
     }
 }

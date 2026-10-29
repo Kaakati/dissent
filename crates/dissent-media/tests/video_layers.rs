@@ -84,6 +84,9 @@ async fn collect(viewer: &mut Call<common::MemoryTransport>, for_how_long: Durat
 async fn a_narrow_tile_gets_the_small_layer_and_a_wide_one_the_large_layer() {
     let key = MediaKey::new([41; 32]);
     let mut sfu = Sfu::new(Mode::Video720p);
+    // Only the tiles set here decide the layers. A link estimate that dips on a loaded machine would
+    // lower the wide tile, and the test would read a layer it did not choose.
+    sfu.set_use_estimates(false);
     let sender = join(&mut sfu, 1, &key).await;
     let mut narrow = join(&mut sfu, 2, &key).await;
     let mut wide = join(&mut sfu, 3, &key).await;
@@ -149,6 +152,8 @@ async fn speak_and_send(mut sender: Participant<common::MemoryTransport>, level:
 async fn a_tight_budget_keeps_the_speaker_sharp_and_lowers_the_others() {
     let key = MediaKey::new([42; 32]);
     let mut sfu = Sfu::new(Mode::Video720p);
+    // Only the budget set here limits the viewer, not a link estimate that dips under load.
+    sfu.set_use_estimates(false);
     // The speaker has the higher id, so a tie between equal savings would lower it first: only the
     // speaker rule keeps it sharp.
     let mut quiet = Participant::new(key.clone(), 1, candidates(), 2, Mode::Video720p).unwrap();

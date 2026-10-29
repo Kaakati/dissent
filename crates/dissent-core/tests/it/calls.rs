@@ -1533,33 +1533,71 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
     );
     let speaker_peer = senders.iter().map(|s| &everyone[*s]).find(|p| root(p) == speaker).expect("the speaker sends");
     let quiet: Vec<&Peer> = senders.iter().map(|s| &everyone[*s]).filter(|p| root(p) != speaker).collect();
-    let layers_now = || -> (Option<u8>, Vec<Option<u8>>) {
-        (layer_of(constrained, speaker_peer), quiet.iter().map(|q| layer_of(constrained, q)).collect())
+    // The forwarder's plan, read from the forwarder: the speaker high, the quiet cameras on the base,
+    // none paused. This is what it decides, independent of which frames have reached a viewer yet.
+    let planned = |viewer: &Peer, sender: &Peer| {
+        let (viewer, sender) = (root(viewer), root(sender));
+        async move { dissent_core::test_support::planned_layer(fwd, &viewer, &sender, false).await }
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let (sharp, low) = layers_now();
-        if sharp.is_some_and(|l| l > 0) && low.iter().all(|l| *l == Some(0)) {
-            break;
+    for viewer in [constrained, free] {
+        loop {
+            let sharp = planned(viewer, speaker_peer).await;
+            let mut low = Vec::new();
+            for q in &quiet {
+                low.push(planned(viewer, q).await);
+            }
+            if sharp.is_some_and(|l| l > 0) && low.iter().all(|l| *l == Some(0)) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the plan keeps the speaker high and the quiet cameras on the base: speaker {sharp:?}, others {low:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the constrained viewer keeps the speaker high and gets the others low: speaker {sharp:?}, others {low:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Live frames: the quiet cameras keep flowing, so each viewer's last frame of them moves down to
+    // the base. Before, a camera whose sender stopped talking was not forwarded at all.
+    for viewer in [constrained, free] {
+        eventually_within(Duration::from_secs(30), "the quiet cameras keep arriving, on the base", || {
+            (layer_of(viewer, speaker_peer).is_some_and(|l| l > 0) && quiet.iter().all(|q| layer_of(viewer, q) == Some(0)))
+                .then_some(())
+        })
+        .await;
     }
     assert_eq!(
         dissent_core::test_support::active_speaker(fwd).await.as_deref(),
         Some(speaker.as_str()),
         "the speaker did not change"
     );
-    // The viewer with room still gets every camera high. Its own link estimate can dip under load and
-    // briefly lower a layer, so wait for it to settle rather than reading it once.
-    eventually_within(Duration::from_secs(30), "the unconstrained viewer keeps every camera high", || {
-        senders
-            .iter()
-            .all(|s| layer_of(free, &everyone[*s]).is_some_and(|l| l > 0))
-            .then_some(())
+    // The budget fits every base, so nothing is paused for either viewer.
+    for viewer in [constrained, free] {
+        let view = viewer.engine.call_state().expect("in the call");
+        assert!(
+            view.participants.iter().all(|p| !p.video_paused),
+            "nothing is paused: {:?}",
+            view.participants.iter().map(|p| (&p.display_name, p.video_paused)).collect::<Vec<_>>()
+        );
+    }
+    // A budget that fits only one base layer pauses the quiet cameras for that viewer, and its view
+    // says so; the speaker's camera keeps going. Room again brings them back.
+    let paused_roots = |viewer: &Peer| -> Vec<String> {
+        viewer.engine.call_state().map_or(Vec::new(), |v| v.participants.iter().filter(|p| p.video_paused).map(|p| p.root_id.clone()).collect())
+    };
+    let mut quiet_roots: Vec<String> = quiet.iter().map(|q| root(q)).collect();
+    quiet_roots.sort();
+    assert!(dissent_core::test_support::set_viewer_budget(fwd, &root(constrained), base + base / 2).await);
+    eventually_within(Duration::from_secs(30), "the quiet cameras show as paused", || {
+        let mut paused = paused_roots(constrained);
+        paused.sort();
+        (paused == quiet_roots).then_some(())
+    })
+    .await;
+    assert!(paused_roots(free).is_empty(), "another viewer's budget pauses nothing here");
+    assert!(dissent_core::test_support::set_viewer_budget(fwd, &root(constrained), 100_000).await);
+    eventually_within(Duration::from_secs(30), "the paused cameras come back", || {
+        (paused_roots(constrained).is_empty() && quiet.iter().all(|q| layer_of(constrained, q) == Some(0))).then_some(())
     })
     .await;
     for s in senders {

@@ -10,3 +10,11 @@ pub async fn bounded(body: impl Future<Output = ()>) {
         .await
         .unwrap_or_else(|_| panic!("test exceeded {TEST_LIMIT:?}"));
 }
+
+/// Like `bounded`, for one long test that needs more than `TEST_LIMIT`, such as a seven-device call
+/// set up on a slow runner.
+pub async fn bounded_within(limit: Duration, body: impl Future<Output = ()>) {
+    tokio::time::timeout(limit, body)
+        .await
+        .unwrap_or_else(|_| panic!("test exceeded {limit:?}"));
+}

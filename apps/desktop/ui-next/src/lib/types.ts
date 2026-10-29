@@ -42,6 +42,8 @@ export interface VoiceParticipant {
   deafened: boolean;
   speaking: boolean;
   forwarder?: boolean | string; // relays the call for the others (true from the engine; a name in older fixtures)
+  video_paused?: boolean; // their camera is on, but the forwarder pauses it for this device to fit its bandwidth
+  screen_paused?: boolean; // the same for their shared screen
 }
 
 export interface ChannelView {

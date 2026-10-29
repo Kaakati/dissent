@@ -185,10 +185,16 @@ Built in phase 2, except where it says otherwise.
   A released reader looks at bits 0 and 1 only, so to it every frame is layer 0. Like the keyframe
   bit, the layer bits are not authenticated: a forwarder could mislabel layers, which only spoils
   the picture, as dropping frames already could.
+- **Every camera that is on keeps flowing (decided).** The forwarder forwards every camera and screen,
+  whether or not its sender speaks. Before this, video went the same way as audio, only for the top
+  three speakers in the last second, so a camera froze for everyone about a second after its owner
+  stopped talking or muted. A recent speaker, one of the three who spoke most recently within
+  `SPEAKER_HOLD` (5 s, longer than a pause between sentences), gets the layer its tile needs. Every
+  other camera gets the base layer. Audio keeps its top-three rule.
 - **Per viewer.** A viewer tells its forwarder the width it draws each sender's camera and screen
-  at (`TileWidths`, from `Engine::set_video_tile`). The forwarder gives it the smallest layer at
-  least that wide, and the top layer for a tile wider than every layer. A stream it doesn't draw
-  gets the base layer. The budget is the smaller of `Sfu::set_listener_budget` and the downlink's
+  at (`TileWidths`, from `Engine::set_video_tile`). For a speaker's stream the forwarder gives it the
+  smallest layer at least that wide, and the top layer for a tile wider than every layer. A stream it
+  doesn't draw, and any stream of a sender who is not speaking, gets the base layer. The budget is the smaller of `Sfu::set_listener_budget` and the downlink's
   own bandwidth estimate less three speakers' audio. The estimate counts only once it falls below
   the 1000 kbps it starts at: nothing probes a link for headroom, so above that it means nothing
   (phase 1, "Capacity units"). "Pinned" and "thumbnail" preferences are not sent; the tile width
@@ -197,7 +203,17 @@ Built in phase 2, except where it says otherwise.
   wants, the forwarder lowers the other streams first, one layer at a time, the step that saves most
   first, and lowers the active speaker (the loudest recent sender) only once every other stream is on
   its base layer. This is Discord's choice. The speaker stays sharp, and the rest turn into
-  thumbnails. The base layer is the floor: a budget too small for every base layer still gets them.
+  thumbnails.
+- **Paused, not frozen (decided).** When even every base layer does not fit, the forwarder pauses
+  streams for that viewer only: cameras before screens, the sender who spoke least recently first,
+  and never the sharpest speaker's, so a viewer always sees at least one stream
+  (`Sfu::paused_for`). It tells the viewer which streams are paused with `PausedVideo`, sent when
+  the set changes, to a viewer that announced `FEATURE_PAUSED_VIDEO`. The viewer's call view marks
+  them (`ParticipantView::video_paused`, `screen_paused`) and the window keeps the last frame with a
+  "Paused to save bandwidth" badge. A paused stream restarts at a keyframe when the budget allows. A
+  released viewer is paused the same way, but it is not told, so it keeps the last frame without the
+  badge, as before. Only streams with a layer table can be paused, since only they have a known
+  cost.
 - **Switching.** A switch, up or down, waits for a keyframe of the new layer, and the forwarder asks
   the sender for one with PLI. Until then the viewer keeps getting its old layer, so the picture
   never stops and the decoder never sees two layers mixed.

@@ -1389,8 +1389,9 @@ async fn two_providers_each_deliver_part_of_the_file() {
     assert!(last[0].bytes > 0, "carol delivered bytes before she dropped: {last:?}");
     assert!(last[1].bytes > 0, "alice delivered the rest: {last:?}");
     let bytes: u64 = last.iter().map(|c| c.bytes).sum();
-    assert!(bytes >= fref.size, "the counts sum to {bytes}, the file is {}", fref.size);
-    assert_eq!(bytes, cipher);
+    // A chunk in flight when carol dropped is counted for her and fetched again from alice, so the sum can pass
+    // the ciphertext size by what was in flight.
+    assert!(bytes >= cipher, "the counts sum to {bytes}, the ciphertext is {cipher}");
     let pieces: u64 = last.iter().map(|c| c.pieces).sum();
     assert_eq!(pieces, dissent_files::pieces_of(cipher));
 }
