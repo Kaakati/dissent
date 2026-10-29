@@ -297,14 +297,14 @@ Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inp
 - **Limits per listing**: Forever, until ratio r, for n hours, until a date. States, worked out from the record, the
   settings and the time: Stopped (by hand, or limit reached), Paused, Scheduled (a metered network, battery, or an
   alternative schedule whose upload cap is 0), Queued (past max active, newest first), Seeding. Only Seeding blobs
-  are announced in holdings; a linked file is served only while Seeding. A stored copy that is not Seeding is still
-  served until the blob gate's `serves` hook lands (see "Downloads").
+  are announced in holdings and served: the blob gate asks `serves`, and a linked file is unlinked while not Seeding.
+  The unpin sweep keeps every blob a seed book holds; removed seeds release through `release_blobs`.
 - **Global** (`SeedingSettings`, `seeding.bin`): upload and download caps; an alternative pair on a weekly window
   in local time (the page reports its UTC offset); max active seeds; only on unmetered networks (on by default);
   pause on battery. The desktop app reads metered (Windows `GetNetworkConnectivityHint`, looked up at run time) and
   battery (Windows `GetSystemPowerStatus`, Linux `/sys/class/power_supply`, macOS `pmset`) every minute. The download
-  cap is a token bucket shared by swarm downloads. The upload cap and per-file upload counters need the blob gate's
-  `throttle` and `on_served` hooks, agreed with the attachments work, and are wired at the merge.
+  cap is a token bucket shared by swarm downloads. The upload cap and the per-file upload counters run through the
+  blob gate's `throttle` and `on_served` hooks, and, for linked files, through `FilesProtocol::with_served`.
 - **Not built**: queueing requests by the requester's level.
 
 ## Storage seeders
