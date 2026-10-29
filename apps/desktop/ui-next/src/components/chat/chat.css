@@ -74,6 +74,7 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; cursor: pointer;
 }
 .msg-head .author:hover { text-decoration: underline; }
+.msg-head .author-handle { display: inline-flex; align-items: center; gap: 3px; align-self: center; font: var(--fs-meta) / var(--lh-meta) var(--font); color: var(--muted-foreground); min-width: 0; }
 .msg-head time { font: var(--fs-meta) / var(--lh-meta) var(--font); color: var(--muted-foreground); flex: none; }
 .body { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .body a { color: var(--link); }

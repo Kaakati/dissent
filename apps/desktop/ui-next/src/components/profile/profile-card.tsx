@@ -8,6 +8,7 @@ import { Ban, MessageSquare, Radio, ShieldCheck, ShieldMinus, ShieldPlus, Undo2 
 import { openSafetyDialog } from '@/components/dialogs/safety-dialog';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
+import { HandleStatus } from '@/components/website-handle';
 import { addressOf, shortOf } from '@/lib/address';
 import { moderate } from '@/lib/actions';
 import { useShell } from '@/lib/store';
@@ -148,7 +149,10 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
           {`${view.display_name}·${shortOf('user', userId)}`}
         </div>
         {member?.handle && community ? (
-          <div className="mt-s-2 text-sm leading-5 font-medium break-words text-text">{`@${member.handle} in ${community.name}`}</div>
+          <div data-profile-handle className="mt-s-2 flex flex-wrap items-center gap-x-1.5 text-sm leading-5 font-medium break-words text-text">
+            <span className="min-w-0">{`@${member.handle} in ${community.name}`}</span>
+            <HandleStatus root={userId} handle={member.handle} />
+          </div>
         ) : null}
         {member && ROLE_LABEL[member.role] ? (
           <div className="mt-s-2 flex flex-wrap gap-1.5">

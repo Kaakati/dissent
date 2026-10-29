@@ -14,6 +14,7 @@ import type {
   ShellSettings,
   EngineEvent,
   GuardianList,
+  HandleCheck,
   Id,
   InvitePreview,
   MessageRef,
@@ -35,6 +36,7 @@ import type {
   UserProfileView,
   VaultStatus,
   VoiceSettings,
+  WebsiteHandleSetup,
 } from './types';
 import type { Unlisten } from './tauri';
 import type { ShareSource } from './types';
@@ -355,6 +357,13 @@ export const api = {
   setStatus: (status: StatusName, untilMs: number | null) => call<void>('set_status', { status, untilMs }),
   // Any user input, for auto-idle. The UI calls it at most once every 30 seconds.
   recordActivity: () => call<void>('record_activity'),
+
+  // ---- website handles: your own setup, and the state of anyone's domain handle as this app checked it ----
+  websiteHandleSetup: () => call<WebsiteHandleSetup>('website_handle_setup'),
+  setWebsiteHandle: (domain: string) => call<WebsiteHandleSetup>('set_website_handle', { domain }),
+  checkWebsiteHandle: () => call<HandleCheck>('check_website_handle'),
+  removeWebsiteHandle: () => call<WebsiteHandleSetup>('remove_website_handle'),
+  websiteHandleStatus: (items: { root_id: Id; handle: string }[]) => call<HandleCheck[]>('website_handle_status', { items }),
 };
 
 // Calls handler with each EngineEvent payload. Resolves to the unlisten function.

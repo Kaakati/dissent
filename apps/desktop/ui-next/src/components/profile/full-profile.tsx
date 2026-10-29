@@ -6,6 +6,7 @@ import { CircleCheck, Link, MessageSquare, Phone, Radio, ShieldCheck, TriangleAl
 import { AddressCard } from '@/components/address-card';
 import { openSafetyDialog } from '@/components/dialogs/safety-dialog';
 import { UserAvatar } from '@/components/user-avatar';
+import { HandleStatus } from '@/components/website-handle';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { addressOf, shortOf } from '@/lib/address';
@@ -132,7 +133,10 @@ function FullProfileBody({ peer, view, close }: { peer: string; view: UserProfil
         <ul className="flex flex-col gap-0.5">
           {handles.map((h) => (
             <li key={h.community_id} className="flex h-8 items-center justify-between gap-s-2 text-sm">
-              <span className="font-medium text-text">{`@${h.handle}`}</span>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-medium text-text">{`@${h.handle}`}</span>
+                <HandleStatus root={peer} handle={h.handle} />
+              </span>
               <span className="truncate text-muted-foreground">{h.community_name}</span>
             </li>
           ))}

@@ -3232,6 +3232,129 @@ check('accent and danger text differ under deuteranopia (CIE76 >= 20)', distance
 await s.close();
 }
 
+// ---- W. Website handles: Settings > My identity sets one up, shows the TXT record with copy buttons, Check now fails with
+// the reason and then passes, Remove clears it; another person's verified @domain handle shows the mark with "Checked by
+// your app" in the member list, on the card, in the full profile and in message headers, and a failing or unchecked one
+// never does ----
+async function section_websitehandles() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9811, profile: `${SCRATCH}/websitehandles-next-profile` });
+const { ev } = b;
+await sleep(1200);
+const RIGHT = 'aside[aria-label="Details"]';
+const CARD = '[role="dialog"][aria-label="User profile"]';
+const block = `[...document.querySelectorAll('[data-settings-page] section')].find(n => n.querySelector('h2')?.textContent === 'Website handle')`;
+const blockText = () => ev(`(${block})?.textContent ?? null`);
+const clickIn = (label) => ev(`(() => { const n = [...(${block})?.querySelectorAll('button') ?? []].find(x => x.textContent.trim() === ${JSON.stringify(label)}); if (!n) return false; n.click(); return true; })()`);
+const me = await ev('window.__mockMe');
+
+await b.press(',', 2);
+await sleep(500);
+check('W1 My identity has a Website handle section with a domain field', (await ev(`!!(${block})?.querySelector('input[aria-label="Your domain"]')`)) === true, String(await blockText()));
+await ev(`document.querySelector('input[aria-label="Your domain"]').scrollIntoView({ block: 'center' })`);
+await sleep(200);
+await b.click('input[aria-label="Your domain"]');
+await b.typeText('Sami.Example');
+await b.press('Enter');
+await sleep(400);
+const record = () => ev(`(() => { const s = ${block}; if (!s) return null; const v = (k) => s.querySelector('[data-record="' + k + '"]')?.textContent; return { type: v('type'), name: v('name'), value: v('value'), copies: s.querySelectorAll('button[aria-label^="Copy "]').length }; })()`);
+const shown = await record();
+check('W2 setting a domain shows the TXT record to publish: its type, name and value', !!shown && shown.type === 'TXT' && shown.name === '_dissent.sami.example' && shown.value === `dissent-root=${me}`, JSON.stringify(shown));
+check('W3 each line of the record has a copy button', shown?.copies === 3, JSON.stringify(shown));
+check('W4 before any check it says not checked yet, never verified', (await ev(`(${block})?.querySelector('[data-website-check]')?.dataset.websiteCheck`)) === 'unchecked');
+await ev(`(${block}).querySelector('button[aria-label="Copy value"]').click()`);
+await sleep(300);
+check('W5 a copy button says what it copied', (await ev('document.body.textContent.includes("Value copied")')) === true);
+
+await clickIn('Check now');
+const failed = await until(async () => {
+  const s = await ev(`(() => { const n = (${block})?.querySelector('[data-website-check]'); return n ? { state: n.dataset.websiteCheck, text: n.textContent } : null; })()`);
+  return s?.state === 'failed' ? s : null;
+}, 4000);
+check('W6 Check now with no record fails and names the record it looked for', !!failed && failed.text.includes('No TXT record was found at _dissent.sami.example'), JSON.stringify(failed));
+check('W7 a failed check shows no verified mark', (await ev(`!(${block})?.querySelector('[data-website-verified]')`)) === true);
+check('W8 a failed check offers no way to claim the handle in servers', (await ev(`![...(${block})?.querySelectorAll('button') ?? []].some(x => x.textContent.includes('Use as my handle'))`)) === true);
+
+await ev(`window.__mockDns('sami.example', ['dissent-root=${me}'])`);
+await clickIn('Check now');
+const passed = await until(async () => (await ev(`(${block})?.querySelector('[data-website-check]')?.dataset.websiteCheck`)) === 'verified', 4000);
+check('W9 Check now passes once the record holds the value', passed === true, String(await blockText()));
+await b.screenshot(`${SCRATCH}/shots/website-handle-settings.png`);
+check('W10 a pass shows the verified mark', (await ev(`!!(${block})?.querySelector('[data-website-verified]')`)) === true);
+check('W11 after a pass the handle can be used in every server', (await clickIn('Use as my handle in my servers')) === true);
+await sleep(600);
+check('W12 claiming it in the servers says how many took it', (await ev('document.body.textContent.includes("@sami.example is your handle in")')) === true);
+
+await clickIn('Remove');
+await sleep(300);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find(x => x.textContent.trim() === 'Remove')?.click()`);
+await sleep(400);
+check('W13 Remove goes back to the domain field', (await ev(`!!(${block})?.querySelector('input[aria-label="Your domain"]') && !(${block})?.querySelector('[data-record]')`)) === true, String(await blockText()));
+await b.press('Escape');
+await sleep(400);
+
+// Another person: Omar's handle is @omar.example, whose record holds his key. Jonas claims @jonas.example with no record.
+await ev(`window.__mockSetHandleByName('Omar', 'omar.example')`);
+await ev(`window.__mockSetHandleByName('Jonas', 'jonas.example')`);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(1200);
+const rowOf = (name) => `[...document.querySelectorAll('${RIGHT} button')].find(n => n.textContent.includes(${JSON.stringify(name)}))`;
+const omarMarked = await until(() => ev(`!!(${rowOf('Omar')})?.querySelector('[data-website-verified]')`), 4000);
+check('W14 the member list shows the verified mark after a handle this app verified', omarMarked === true, String(await ev(`(${rowOf('Omar')})?.textContent ?? null`)));
+check('W15 the member list shows no mark for a handle whose record is missing', (await ev(`!!(${rowOf('Jonas')}) && !(${rowOf('Jonas')}).querySelector('[data-website-verified]')`)) === true);
+check('W16 a handle that is not a domain is never marked or checked', (await ev(`!(${rowOf('Leila')})?.querySelector('[data-website-verified], [data-website-status]')`)) === true);
+
+const headMarked = await until(() => ev(`[...document.querySelectorAll('[data-author-handle]')].some(n => n.textContent.includes('@omar.example') && n.querySelector('[data-website-verified]'))`), 4000);
+check('W17 message headers show the verified handle with its mark', headMarked === true);
+check('W18 message headers show nothing for a handle that failed', (await ev(`![...document.querySelectorAll('[data-author-handle]')].some(n => n.textContent.includes('jonas.example'))`)) === true);
+
+await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Omar'))`));
+await sleep(600);
+const cardHandle = await ev(`(() => { const n = document.querySelector('${CARD} [data-profile-handle]'); return n ? { text: n.textContent, mark: !!n.querySelector('[data-website-verified]') } : null; })()`);
+check('W19 the profile card shows the website handle with the verified mark', !!cardHandle && cardHandle.text.includes('@omar.example') && cardHandle.mark, JSON.stringify(cardHandle));
+await b.hover(`${CARD} [data-website-verified]`);
+await sleep(300);
+await b.screenshot(`${SCRATCH}/shots/website-handle-card.png`);
+const tip = await until(() => ev(`[...document.querySelectorAll('[data-slot="tooltip-content"]')].map(n => n.textContent).join('|')`), 3000);
+check('W20 the mark\'s tooltip says "Checked by your app"', String(tip).includes('Checked by your app'), String(tip));
+await b.moveAway();
+await b.press('Escape');
+await sleep(300);
+
+await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Jonas'))`));
+await sleep(600);
+const jonasCard = await ev(`(() => { const n = document.querySelector('${CARD} [data-profile-handle]'); return n ? { text: n.textContent, mark: !!n.querySelector('[data-website-verified]'), status: n.querySelector('[data-website-status]')?.dataset.websiteStatus } : null; })()`);
+check('W21 a failing website handle is never shown as verified on the card, and says not verified', !!jonasCard && !jonasCard.mark && jonasCard.status === 'failed', JSON.stringify(jonasCard));
+await b.press('Escape');
+await sleep(300);
+
+// A check that has not answered yet: the card says "not checked yet", never verified.
+await ev('window.__mockDnsHold = true');
+await ev(`window.__mockSetHandleByName('Leila', 'leila.example')`);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(800);
+await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Leila'))`));
+await sleep(600);
+const leilaCard = await ev(`(() => { const n = document.querySelector('${CARD} [data-profile-handle]'); return n ? { text: n.textContent, mark: !!n.querySelector('[data-website-verified]'), status: n.querySelector('[data-website-status]')?.dataset.websiteStatus } : null; })()`);
+check('W22 a handle with no answer yet says not checked yet, never verified', !!leilaCard && !leilaCard.mark && leilaCard.status === 'unchecked' && leilaCard.text.includes('not checked yet'), JSON.stringify(leilaCard));
+await b.press('Escape');
+await sleep(300);
+await ev('window.__mockDnsHold = false');
+
+// The full profile, opened from Omar's DM panel, lists the handle with the mark.
+await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Omar'))`));
+await sleep(600);
+await ev(`[...document.querySelectorAll('${CARD} button')].find(x => x.textContent.trim() === 'Message')?.click()`);
+await sleep(900);
+await ev(`[...document.querySelectorAll('button')].find(x => x.textContent.trim() === 'View Full Profile')?.click()`);
+await sleep(800);
+const fullMarked = await until(() => ev(`[...document.querySelectorAll('[role="dialog"] li')].some(n => n.textContent.includes('@omar.example') && n.querySelector('[data-website-verified]'))`), 4000);
+check('W23 the full profile shows the verified handle with its mark', fullMarked === true);
+
+const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
+check('W24 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -3253,6 +3376,7 @@ const SECTIONS = [
   ['scrollback', section_scrollback],
   ['shell', section_shell],
   ['emoticons', section_emoticons],
+  ['websitehandles', section_websitehandles],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

@@ -67,6 +67,10 @@ A handle like `@example.com` lets people recognise you by a domain you own. It i
 
 **How checking works:** each person's app looks up the TXT record itself, using the system DNS and a public fallback. It accepts the handle only if the value matches your root key exactly. A handle is never trusted because a peer says it is verified. If a peer shows you a handle, your own app checks it again before you see the verified mark.
 
+**How others learn it:** the website handle is your server handle. After a pass, Settings › My identity offers to claim it in every server you are in, as an ordinary handle claim, so nothing new goes on the wire. Any server handle that is a domain is checked this way. The first claim in a server still wins, so someone else can hold `@example.com` in a server, but it never gets the mark.
+
+**When it is checked:** the desktop app checks a handle when it is shown, and keeps the result for this run only. A pass shows the mark for 6 hours and is checked again after 1 hour, so a removed record stops verifying within that window. A failure is retried after 10 minutes, and a lookup that could not finish after 2. Until a fresh check passes, the handle says "not checked yet", never verified.
+
 **Limits:** the check proves who controls the domain, not who the person is. Look-alike domains that mix scripts are refused. Losing control of the domain, or the TXT record being removed, makes the handle stop verifying.
 
 ## At-rest protection

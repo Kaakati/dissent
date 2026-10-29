@@ -28,6 +28,8 @@ rfd.workspace = true
 [dependencies]
 dissent-identity.workspace = true
 dissent-core.workspace = true
+dissent-discovery.workspace = true
+dissent-events.workspace = true
 dissent-audio = { workspace = true, features = ["sonora"] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 anyhow.workspace = true

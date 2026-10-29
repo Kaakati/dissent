@@ -5,6 +5,7 @@ import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNo
 import { AlertCircle, Clock, Ellipsis, Pencil, Reply, SmilePlus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
+import { VerifiedMark, isVerified } from '@/components/website-handle';
 import { useChat } from '@/lib/chat';
 import { convertEmoticons, convertWhileTyping, isInsertion } from '@/lib/emoticons';
 import { useShellPrefs } from '@/lib/shell-prefs';
@@ -14,6 +15,7 @@ import { has } from '@/lib/features';
 import { hueOf } from '@/lib/identity';
 import { clockLabel, headStampLabel, stampLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
+import { useWebsiteHandle } from '@/lib/website-handles';
 import type { ChatTarget, ReplyRef } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { AttachmentView } from './attachments';
@@ -60,6 +62,19 @@ function ReplyRefLine({ reply }: { reply: ReplyRef }) {
         </>
       )}
     </button>
+  );
+}
+
+// The author's website handle in a server, with its mark, only once this app has verified it. Nothing otherwise.
+function AuthorHandle({ author }: { author: string }) {
+  const handle = useShell((s) => (s.route.kind === 'server' ? s.community?.members.find((m) => m.root_id === author)?.handle : null));
+  const check = useWebsiteHandle(author, handle);
+  if (!handle || !isVerified(check)) return null;
+  return (
+    <span className="author-handle" data-author-handle>
+      {`@${handle}`}
+      <VerifiedMark />
+    </span>
   );
 }
 
@@ -316,6 +331,7 @@ export function MessageRow({
         {start ? (
           <div className="msg-head">
             <AuthorButton item={item} />
+            {item.author ? <AuthorHandle author={item.author} /> : null}
             <time title={stampLabel(item.ms)}>{headStampLabel(item.ms)}</time>
           </div>
         ) : null}

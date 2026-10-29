@@ -1663,6 +1663,84 @@ if (!window.__TAURI__) {
     if (!window.__mockNoUpdate) emitTo('dissent://update-available', { version: '0.2.0', current_version: '0.1.0', date: '2026-10-24', notes: '- Faster sync for large servers\n- Fixed relay settings on restart' });
   }, 1500);
 
+  // Website handles. The mock's DNS maps a domain to its TXT values at _dissent.<domain>; omar.example publishes Omar's
+  // key, so his handle verifies once it is @omar.example. window.__mockDns changes a record, window.__mockSetHandle
+  // anyone's server handle. A status answer is "not checked yet" at first, and the result follows as the event.
+  const mockDns = { 'omar.example': [`dissent-root=${KEN}`] };
+  const mockChecks = {};
+  let mockWebsite = null;
+  const webDomain = (text) => {
+    const d = String(text).trim().replace(/^@/, '').replace(/\.$/, '').toLowerCase();
+    return /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(d) ? d : null;
+  };
+  const webLookup = (root, domain) => {
+    const name = `_dissent.${domain}`;
+    const values = mockDns[domain] ?? [];
+    if (values.includes(`dissent-root=${root}`)) return { state: 'verified', reason: null };
+    if (!values.length) return { state: 'failed', reason: `No TXT record was found at ${name}. If you just added it, DNS can take a while to update.` };
+    if (values.some((v) => v.startsWith('dissent-root='))) return { state: 'failed', reason: `The TXT record at ${name} is for a different Dissent identity.` };
+    return { state: 'failed', reason: `${name} has TXT records, but none is exactly the value to publish.` };
+  };
+  const webView = (root, handle) => {
+    const domain = webDomain(handle);
+    if (!domain || !handle.includes('.')) return { root_id: root, handle, state: 'not_domain', checked_ms: null, reason: null, checking: false };
+    const last = mockChecks[`${root}|${domain}`];
+    return last
+      ? { root_id: root, handle, state: last.state, checked_ms: last.checked_ms, reason: last.reason, checking: false }
+      : { root_id: root, handle, state: 'unchecked', checked_ms: null, reason: null, checking: true };
+  };
+  const webCheck = (root, handle) => {
+    const domain = webDomain(handle);
+    mockChecks[`${root}|${domain}`] = { ...webLookup(root, domain), checked_ms: Date.now() };
+    const view = webView(root, handle);
+    emitTo('dissent://website-handle', view);
+    return view;
+  };
+  const webSetup = () => ({
+    domain: mockWebsite,
+    handle: mockWebsite,
+    record_type: 'TXT',
+    record_name: mockWebsite ? `_dissent.${mockWebsite}` : null,
+    record_value: `dissent-root=${ME}`,
+    check: mockWebsite ? webView(ME, mockWebsite) : null,
+  });
+  window.__mockDns = (domain, values) => {
+    mockDns[domain] = values;
+  };
+  window.__mockSetHandle = (root, handle) => {
+    handles[root] = handle;
+  };
+  window.__mockSetHandleByName = (name, handle) => {
+    const root = Object.keys(people).find((r) => people[r] === name);
+    if (root) handles[root] = handle;
+  };
+  window.__mockMe = ME;
+  Object.assign(handlers, {
+    website_handle_setup: () => webSetup(),
+    set_website_handle: ({ domain }) => {
+      const d = webDomain(domain);
+      if (!d) throw 'invalid domain: a domain needs at least two labels, such as example.com';
+      if (d.length > 32) throw `${d} cannot be a server handle: handle must be 2 to 32 characters, got ${d.length}. Website handles use the server handle rules.`;
+      mockWebsite = d;
+      return webSetup();
+    },
+    check_website_handle: async () => {
+      if (!mockWebsite) throw 'set a domain first';
+      await new Promise((r) => setTimeout(r, 300));
+      return webCheck(ME, mockWebsite);
+    },
+    remove_website_handle: () => {
+      if (mockWebsite) delete mockChecks[`${ME}|${mockWebsite}`];
+      mockWebsite = null;
+      return webSetup();
+    },
+    website_handle_status: ({ items }) => items.map(({ root_id, handle }) => {
+      const view = webView(root_id, handle);
+      if (view.checking && !window.__mockDnsHold) setTimeout(() => webCheck(root_id, handle), 200);
+      return view;
+    }),
+  });
+
   window.__TAURI__ = {
     core: {
       invoke: async (cmd, args = {}) => {

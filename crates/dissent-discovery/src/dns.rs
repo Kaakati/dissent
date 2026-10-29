@@ -90,14 +90,47 @@ fn invalid(msg: impl Into<String>) -> DiscoveryError {
 /// Uses the system resolver, falling back to Cloudflare if that fails to answer.
 /// The whole check gives up after 5 seconds with an error.
 pub async fn verify_dns_handle(domain: &str, root: &RootId) -> Result<bool> {
-    let domain = normalize_domain(domain)?;
-    let name = format!("{TXT_LABEL}.{domain}");
+    Ok(check_dns_handle(domain, root).await? == DnsHandleCheck::Verified)
+}
+
+/// What a DNS handle check found, so a person setting one up can be told why it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnsHandleCheck {
+    /// A TXT record at `_dissent.<domain>` is exactly [`dns_record_value`]`(root)`.
+    Verified,
+    /// There is no TXT record at `_dissent.<domain>`, or the name does not exist.
+    NoRecord,
+    /// There are TXT records, but none is the expected value. `other_root` is true when one of them
+    /// is a `dissent-root=` value for another key.
+    Mismatch { other_root: bool },
+}
+
+/// [`verify_dns_handle`], with the reason when the handle does not verify. Errors are the same:
+/// an invalid domain, or a lookup that failed or timed out.
+pub async fn check_dns_handle(domain: &str, root: &RootId) -> Result<DnsHandleCheck> {
+    let name = dns_record_name(domain)?;
     let strings = tokio::time::timeout(LOOKUP_TIMEOUT, txt_with_fallback(&name))
         .await
         .map_err(|_| DiscoveryError::Dns(format!("lookup of {name} timed out")))?
         .map_err(|e| DiscoveryError::Dns(e.to_string()))?;
+    Ok(classify(&strings, root))
+}
+
+/// The name the TXT record goes at: `_dissent.<normalized domain>`.
+pub fn dns_record_name(domain: &str) -> Result<String> {
+    Ok(format!("{TXT_LABEL}.{}", normalize_domain(domain)?))
+}
+
+fn classify(strings: &[String], root: &RootId) -> DnsHandleCheck {
     let expected = dns_record_value(root);
-    Ok(strings.contains(&expected))
+    if strings.contains(&expected) {
+        DnsHandleCheck::Verified
+    } else if strings.is_empty() {
+        DnsHandleCheck::NoRecord
+    } else {
+        let other_root = strings.iter().any(|s| s.starts_with(TXT_PREFIX));
+        DnsHandleCheck::Mismatch { other_root }
+    }
 }
 
 /// Looks up TXT records. Each record's character-strings are concatenated, as RFC 7208 does.
@@ -161,6 +194,37 @@ mod tests {
                 .unwrap(),
             root
         );
+    }
+
+    #[test]
+    fn classify_tells_why_a_handle_does_not_verify() {
+        let root = RootKey::generate().id();
+        let other = RootKey::generate().id();
+        let ours = dns_record_value(&root);
+        assert_eq!(classify(&[], &root), DnsHandleCheck::NoRecord);
+        assert_eq!(
+            classify(&["v=spf1 -all".into(), ours.clone()], &root),
+            DnsHandleCheck::Verified
+        );
+        assert_eq!(
+            classify(&[dns_record_value(&other)], &root),
+            DnsHandleCheck::Mismatch { other_root: true }
+        );
+        assert_eq!(
+            classify(&["v=spf1 -all".into()], &root),
+            DnsHandleCheck::Mismatch { other_root: false }
+        );
+        // Not exact: a quoted or padded value does not verify.
+        assert_eq!(
+            classify(&[format!("\"{ours}\""), format!(" {ours}")], &root),
+            DnsHandleCheck::Mismatch { other_root: false }
+        );
+    }
+
+    #[test]
+    fn record_name_is_under_the_normalized_domain() {
+        assert_eq!(dns_record_name("Example.COM.").unwrap(), "_dissent.example.com");
+        assert!(dns_record_name("localhost").is_err());
     }
 
     #[test]
@@ -258,5 +322,16 @@ mod tests {
         assert!(!verify_dns_handle("dissent-test.invalid", &root)
             .await
             .unwrap());
+    }
+
+    /// Needs the network. Run with `scripts/fwtest.sh dissent-discovery lib --ignored check_dns_handle_says_no_record`.
+    #[ignore]
+    #[tokio::test]
+    async fn check_dns_handle_says_no_record() {
+        let root = RootKey::generate().id();
+        assert_eq!(
+            check_dns_handle("dissent-test.invalid", &root).await.unwrap(),
+            DnsHandleCheck::NoRecord
+        );
     }
 }

@@ -155,6 +155,7 @@ The level shows beside the server name and on its invite cards, as "Level 2 · 3
 - **Several devices.** Link a laptop or a USB stick to the same identity, and cut off a lost one.
 - **Recovery with friends.** Choose guardians, and if you lose your recovery phrase, enough of them can vouch for your new identity.
 - **Safety numbers** to compare with a friend, with a warning if their key changes.
+- **Website-verified handles.** If you own a website, prove a handle like `@example.com` in Settings › My identity: add the TXT record it shows to your domain's DNS, press Check now, and use it as your handle in your servers. Every viewer's app checks the record for itself and shows a small mark, "Checked by your app", in the member list, message headers and profiles. A handle whose record is missing or wrong never gets the mark, and one not checked recently says "not checked yet".
 - **Quick switcher:** press Ctrl+K to jump anywhere. The app is fully usable from the keyboard.
 - **Relays.** Your app uses up to 30 relays, fastest first, measured by latency. They come from three places: relays you add, relays your servers offer, and the public defaults. Settings › Network shows each one's latency. **Pin** keeps a relay in the list when the list is cut down, and **Turn off** drops it on this device. Pins and turn-offs are never sent to anyone.
 - **Use relays offered by my servers.** A switch in Settings › Network. Off, your app neither measures nor uses the relays your servers offer, and it stops asking them for anything. Each relay you use can see your IP address, and the settings page says so next to the switch.
@@ -181,7 +182,6 @@ Whichever you choose:
 
 ## Built underneath, not in the app yet
 
-- **Website-verified handles:** if you own a website, prove a handle like `@example.com`. Every viewer's app checks it for itself.
 - **Push relay** for waking phones, as a prototype.
 
 ## Things anyone can run

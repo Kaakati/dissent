@@ -666,3 +666,27 @@ export interface Reminder {
   at_ms: number;
   message: MessageRef;
 }
+
+// A website handle's state as this app last checked it (website_handle_status, check_website_handle, the
+// dissent://website-handle event). `not_domain` is a handle with nothing to check; `unchecked` covers never checked,
+// stale, and a lookup that could not finish.
+export type HandleCheckState = 'verified' | 'failed' | 'unchecked' | 'not_domain';
+
+export interface HandleCheck {
+  root_id: Id;
+  handle: string;
+  state: HandleCheckState;
+  checked_ms: number | null;
+  reason: string | null;
+  checking: boolean;
+}
+
+// Settings > Account's website handle: the domain, the handle to claim, the TXT record to publish, and its last check.
+export interface WebsiteHandleSetup {
+  domain: string | null;
+  handle: string | null;
+  record_type: 'TXT';
+  record_name: string | null;
+  record_value: string;
+  check: HandleCheck | null;
+}

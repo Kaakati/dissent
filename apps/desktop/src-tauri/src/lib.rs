@@ -23,6 +23,8 @@ mod status_cmds;
 mod typing_cmds;
 mod profile;
 mod deep_link;
+mod website_handles;
+mod website_handle_cmds;
 
 use commands::AppState;
 use dissent_core::NodeConfig;
@@ -71,6 +73,7 @@ pub fn run() {
     }
     let app = builder
         .manage(deep_link::Queue::default())
+        .manage(website_handle_cmds::HandleChecks::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -306,6 +309,11 @@ pub fn run() {
             part6::link_device_code,
             part6::approve_device,
             part6::finish_device_link,
+            website_handle_cmds::website_handle_setup,
+            website_handle_cmds::set_website_handle,
+            website_handle_cmds::check_website_handle,
+            website_handle_cmds::remove_website_handle,
+            website_handle_cmds::website_handle_status,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| profile::fatal(&format!("The app could not be built: {e}")));
