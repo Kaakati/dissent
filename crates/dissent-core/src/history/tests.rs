@@ -338,3 +338,22 @@ fn a_newly_linked_device_declares_once_in_the_communities_it_syncs() {
         assert_eq!(declarations(&alice.engine, id, &bob), 1);
     });
 }
+
+#[test]
+fn a_send_right_after_the_epoch_moves_derives_its_key_rather_than_falling_back() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-epoch-key").await;
+        let id = alice.engine.create_community("Epoch".into()).await.expect("create").id.parse().unwrap();
+        // A commit has moved the group, and `note_epoch` has not recorded the new epoch's key yet. Modelled by
+        // dropping the recorded keys: the group still exports them.
+        let paths = alice.engine.read().paths.clone();
+        alice.engine.store_keys(&paths, id, |keys| keys.clear());
+        let epoch = alice.engine.mls_epoch(id).expect("in the group");
+        assert!(alice.engine.history_key(id, epoch).is_none(), "no key recorded for the epoch");
+        let (sealed_in, ciphertext) = alice.engine.history_seal(id, "right after the commit").expect("the history form");
+        assert_eq!(sealed_in, epoch);
+        assert!(alice.engine.open_history_text(id, epoch, &ciphertext).is_some(), "it opens with the derived key");
+        // An epoch the group is not in is never derived.
+        assert!(alice.engine.open_history_text(id, epoch + 1, &ciphertext).is_none());
+    });
+}

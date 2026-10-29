@@ -233,9 +233,24 @@ impl Engine {
         self.with_keys(&paths, community, |keys| keys.get(&epoch).copied()).ok().flatten()
     }
 
+    /// As `history_key`, but for the group's current epoch a missing key is derived now. A commit moves the group
+    /// to its new epoch before `note_epoch` records that epoch's keys, and saving and replaying in between take a
+    /// while on a slow machine. Without this, a message sent or received in that window would find no key: a send
+    /// would fall back to the older form, which later joiners cannot read.
+    fn history_key_now(&self, community: CommunityId, epoch: u64) -> Option<[u8; 32]> {
+        if let Some(key) = self.history_key(community, epoch) {
+            return Some(key);
+        }
+        if self.mls_epoch(community) != Some(epoch) {
+            return None;
+        }
+        self.record_history_key(community);
+        self.history_key(community, epoch)
+    }
+
     /// Opens a history message's ciphertext (without its manifest), as the plaintext encoding of the text.
     pub(crate) fn open_history_text(&self, community: CommunityId, epoch: u64, data: &[u8]) -> Option<Vec<u8>> {
-        let key = self.history_key(community, epoch)?;
+        let key = self.history_key_now(community, epoch)?;
         open_text(&key, &msg_aad(&community, epoch), data)
     }
 
@@ -244,7 +259,7 @@ impl Engine {
     /// It never waits on a member. The answer is read from a flag that the background check keeps.
     pub(crate) fn history_seal(&self, community: CommunityId, text: &str) -> Option<(u64, Vec<u8>)> {
         let epoch = self.mls_epoch(community)?;
-        let key = self.history_key(community, epoch)?;
+        let key = self.history_key_now(community, epoch)?;
         if !self.history_ready_now(community) {
             return None;
         }
