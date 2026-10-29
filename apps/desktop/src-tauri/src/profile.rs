@@ -612,6 +612,7 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     app.manage(shell_cmds::ShellState::new(&data_dir, mode()));
     let shell = app.state::<shell_cmds::ShellState>().get();
     let (status, _) = engine.status();
+    engine.set_keep_photo_metadata(shell.keep_photo_metadata);
     app.manage(AppState {
         data_dir,
         vault,
@@ -622,7 +623,6 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     events::forward_notification_clicks(app);
     app.manage(status_cmds::LastInput::new());
     status_cmds::start_idle_watch(app.clone());
-    shell_cmds::apply_photo_metadata(app, shell.keep_photo_metadata);
     tray::install(app, shell, status).map_err(|e| e.to_string())?;
     updates::start_background(app.clone());
     attachments::install(app);

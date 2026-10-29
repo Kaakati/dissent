@@ -131,7 +131,8 @@ fn apply(app: &AppHandle, state: &ShellState, input: ShellSettingsInput) -> Resu
 /// this runs on every start and on every change.
 pub fn apply_photo_metadata(app: &AppHandle, keep: bool) {
     let state = app.state::<crate::commands::AppState>();
-    let guard = tauri::async_runtime::block_on(state.engine.read());
+    // try_read, not block_on: this can run inside the async runtime, where blocking on it panics.
+    let Ok(guard) = state.engine.try_read() else { return };
     if let Some(engine) = guard.as_ref() {
         engine.set_keep_photo_metadata(keep);
     }
