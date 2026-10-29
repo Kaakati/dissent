@@ -50,6 +50,30 @@ pub fn fast_timings() -> crate::Timings {
     }
 }
 
+/// Asks `from` for the ciphertext of `hash` from `engine`'s node, as any device that learned the hash could, and keeps
+/// it. The error says why, `refused` when the provider's blob server refused this device.
+pub async fn fetch_raw_blob(engine: &crate::Engine, from: &dissent_net::PeerAddr, hash: [u8; 32], cipher_size: u64) -> Result<(), String> {
+    let addr = from.clone().to_iroh().map_err(|e| e.to_string())?;
+    let policy = dissent_files::MirrorPolicy { max_file_size: u64::MAX / 4, max_total: u64::MAX / 2 };
+    let node = engine.node();
+    match engine.inner.files.mirror(node.endpoint(), &[addr], hash, cipher_size, policy, |_, _| {}).await {
+        Ok(()) => Ok(()),
+        Err(dissent_files::FilesError::Refused(_)) => Err("refused".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The blobs `engine`'s store keeps pinned. A blob that is no longer pinned goes with the next garbage collection.
+pub async fn pinned_blobs(engine: &crate::Engine) -> Vec<[u8; 32]> {
+    engine.inner.files.pinned_hashes().await.unwrap_or_default()
+}
+
+/// Makes `engine`'s blob server treat `device` as a device it holds no certificate for, until the server asks the
+/// device for its record. Stands in for a member who joined while `engine` was away.
+pub fn gate_forget_device(engine: &crate::Engine, device: dissent_identity::DeviceId) {
+    engine.write().blob_scopes.forgotten.insert(device);
+}
+
 /// Makes `engine` behave as v0.1.6 did for direct profiles: it never starts a profile sync and
 /// cannot answer one, and takes a pushed `Profile` only.
 pub fn act_as_v016_profiles(engine: &crate::Engine) {
@@ -79,6 +103,28 @@ pub fn adopted_relays(engine: &crate::Engine) -> Vec<String> {
         .get()
         .map(|node| node.relays().iter().map(|url| url.to_string()).collect())
         .unwrap_or_default()
+}
+
+/// Makes `engine`'s history readiness check ask member devices, or not. Off, no device answers, so only the
+/// devices' own `HistorySupport` events count.
+pub fn set_history_probes(engine: &crate::Engine, on: bool) {
+    engine.inner.history_probes.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Turns `engine`'s support for history messages on or off, as an upgrade or a downgrade would. It declares
+/// the change in each community.
+pub fn set_history_support(engine: &crate::Engine, on: bool) {
+    engine.set_history_support(on);
+}
+
+/// Whether `engine`'s replay of `community` holds a `HistorySupport` from `device`, and its value.
+pub fn history_declaration(engine: &crate::Engine, community: dissent_identity::CommunityId, device: dissent_identity::DeviceId) -> Option<bool> {
+    engine.read().communities.get(&community)?.state().history_support.get(&device).map(|(_, yes)| *yes)
+}
+
+/// Whether `engine` would send a message in `community` in the history form now, from its readiness flag.
+pub fn history_ready_now(engine: &crate::Engine, community: dissent_identity::CommunityId) -> bool {
+    engine.history_ready_now(community)
 }
 
 /// Makes `engine` answer `DmDevicesSupport` with `on`. Off models a device from before multi-device direct

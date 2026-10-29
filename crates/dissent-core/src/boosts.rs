@@ -441,15 +441,17 @@ impl Engine {
     pub(crate) async fn answer_relay_check(&self, from: DeviceId, community: CommunityId, url: String) -> Response {
         let published: Vec<String> = {
             let w = self.read();
+            // An unknown community, an unknown device and a non-member get the same refusal.
+            let refused = || Response::Error(crate::request_gates::REFUSED.into());
             let Some(c) = w.communities.get(&community) else {
-                return Response::Error("unknown community".into());
+                return refused();
             };
             let Some(root) = w.directory.root_of(&from) else {
-                return Response::Error("not a member of this community".into());
+                return refused();
             };
             let member = c.is_member(&root) && !c.state().members.get(&root).is_some_and(|m| m.storage);
             if !member {
-                return Response::Error("not a member of this community".into());
+                return refused();
             }
             c.state()
                 .relay_hosts
@@ -460,12 +462,13 @@ impl Engine {
         if let Some(reason) = check_refusal(self.inner.community_relays, &published, &url) {
             return Response::Error(reason.into());
         }
+        // The limit comes before the busy answer, so asking again and again cannot track this device's calls.
+        if !self.inner.relay_asks.admit(from, Instant::now()) {
+            return Response::Error("too many relay checks from this device; try again later".into());
+        }
         // A call is busy: a probe now could cause an audio blip. The same rule holds for the tick.
         if self.in_call() {
             return Response::RelayCheck(Err(MEMBER_BUSY.into()));
-        }
-        if !self.inner.relay_asks.admit(from, Instant::now()) {
-            return Response::Error("too many relay checks from this device; try again later".into());
         }
         if let Err(reason) = public_address(&url).await {
             return Response::Error(reason);

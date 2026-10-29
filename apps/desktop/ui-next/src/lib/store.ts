@@ -6,10 +6,12 @@ import { api } from './api';
 import { has } from './features';
 import { markSeen, seenMs } from './unread';
 import { toast } from './toasts';
+import { flatten, toPayload } from './channel-layout';
 import type {
   CallState,
   CommunitySummary,
   CommunityView,
+  LayoutEntry,
   ContactsView,
   ConversationSummary,
   EngineEvent,
@@ -106,7 +108,7 @@ async function travel(direction: 'back' | 'forward'): Promise<void> {
   }
 }
 
-export type SettingsSection = 'account' | 'recovery' | 'devices' | 'profile' | 'appearance' | 'sounds' | 'voice' | 'network' | 'updates';
+export type SettingsSection = 'account' | 'recovery' | 'devices' | 'profile' | 'appearance' | 'sounds' | 'voice' | 'network' | 'updates' | 'about';
 
 export interface ShellState {
   me: Me | null;
@@ -143,8 +145,8 @@ export interface ShellState {
   loadStatus: () => Promise<void>;
   loadCommunities: () => Promise<void>;
   moveServer: (communityId: Id, index: number) => Promise<void>;
-  // Sets the open server's channel order for everyone: the text and the voice channel ids, top first.
-  reorderChannels: (text: Id[], voice: Id[]) => Promise<void>;
+  // Sets the open server's channel layout for everyone. `failure` starts the toast shown if it does not publish.
+  setLayout: (entries: LayoutEntry[], failure?: string) => Promise<void>;
   loadConversations: () => Promise<void>;
   loadCommunity: (communityId: Id) => Promise<void>;
   loadContacts: () => Promise<void>;
@@ -306,28 +308,26 @@ export const useShell = create<ShellState>()((set, get) => ({
     }
   },
 
-  // The channel order moves at once. It is published for the whole server, and a failed publish puts the old order
-  // back, with the error as a toast.
-  reorderChannels: async (text, voice) => {
+  // The layout moves at once: categories, and the channels in the order the layout gives. It is published for the
+  // whole server, and a failed publish puts the old layout back, with the error as a toast.
+  setLayout: async (entries, failure = 'Could not move the channel') => {
     const before = get().community;
     if (!before) return;
-    const rank = (ids: Id[]) => new Map(ids.map((id, i) => [id, i]));
-    const arrange = (view: CommunityView, order: Map<Id, number>) => {
-      const of = (voiceKind: boolean) => view.channels
-        .filter((c) => Boolean(c.voice) === voiceKind)
+    const arrange = (view: CommunityView, layout: LayoutEntry[] | null | undefined) => {
+      const order = new Map(flatten(layout ?? []).map((id, i) => [id, i]));
+      const channels = view.channels
         .map((c, i) => ({ c, i }))
         .sort((x, y) => (order.get(x.c.id) ?? order.size + x.i) - (order.get(y.c.id) ?? order.size + y.i))
         .map(({ c }) => c);
-      return { ...view, channels: [...of(false), ...of(true)] };
+      return { ...view, layout, channels: layout ? channels : before.channels };
     };
-    const old = rank(before.channels.map((c) => c.id));
-    set({ community: arrange(before, rank([...text, ...voice])) });
+    set({ community: arrange(before, entries) });
     try {
-      await api.reorderChannels(before.id, text, voice);
+      await api.setChannelLayout(before.id, toPayload(entries));
     } catch (err) {
       const now = get().community;
-      if (now?.id === before.id) set({ community: arrange(now, old) });
-      toast(`Could not move the channel: ${err instanceof Error ? err.message : String(err)}`);
+      if (now?.id === before.id) set({ community: { ...arrange(now, before.layout), channels: before.channels } });
+      toast(`${failure}: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 

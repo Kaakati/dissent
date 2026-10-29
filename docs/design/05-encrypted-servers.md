@@ -256,10 +256,32 @@ starts a new check at once. A presence beacon from a member of a community that 
 **Restarts and joins.** Each community's last answer is saved in `history_ready.bin`, with the member devices it
 covers, so a restart starts from that answer and not from "unknown". When an active member admits a joiner, it
 checks the member devices again before the welcome goes out, so the joiner's first message from the admitting
-member is in the new form. The check covers every member device, not only the joiner's. A member that was not
-the admitting one learns of the join from the replayed events, and its answer is refreshed then. Until that
-check answers, that member sends in the older form. Closing that gap needs the join itself to carry the
-joiner's support, which is a change to the join event and is not made here. A device that does not answer counts as unsupported. Old messages stay MLS-only, and a
+member is in the new form. The check covers every member device, not only the joiner's.
+
+**The join carries the joiner's support.** Right after its join, a joiner publishes `Payload::HistorySupport
+{ supported: true }` and pushes it with the join, and a founder does the same after its own join. It is a
+control event, carried (`carry_sealed`) and sealed like the others, so an older client shows it as locked. It
+speaks only for the device that signed it: replay keeps the latest per device (`CommunityState::declares_history`).
+Any member device may send it, a storage member included, on the control channel. Bans, departures and
+revocations apply as to any event. A device that does not support history messages sends none.
+
+A member that did not admit the joiner uses it two ways:
+
+- **Widening a yes.** A fresh yes still holds when the member devices change, as long as every device the answer
+  did not cover has declared support. The answer is widened to the new list and keeps its age. A departure only
+  shrinks the list. So the joiner's first message from that member is in the new form, with no wait.
+- **Silence.** In a check, a device's own answer decides. A device that does not answer, or answers with an error,
+  counts as supporting history messages only if it declared support. An explicit no wins over an older
+  declaration, so a device that went back to an older version is counted out at the next check.
+
+**Declaring once.** A device declares when its replay of a community does not already hold its current setting:
+no declaration while support is on, or a last declaration that differs. It checks at startup, after every batch
+of events it stores (which is how a newly linked device declares when it first syncs a community), and when its
+setting changes. Only an active, unbanned member declares. Its own declaration is replayed at once, and two
+triggers at the same moment send one event, so an unchanged setting sends nothing more. A member that joined
+before this version declares at its first start after the upgrade. A device without support that never declared
+sends nothing, since no declaration already counts as no. A device that does not answer and never declared
+counts as unsupported. Old messages stay MLS-only, and a
 joiner cannot read them. That cannot be fixed retroactively. A device on an older version that joins after the
 switch cannot read `HistoryMessage` text either. It shows as locked, and nothing crashes.
 

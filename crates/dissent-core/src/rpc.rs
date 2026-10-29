@@ -297,7 +297,14 @@ impl RpcHandler for Handler {
         let weak = self.0.clone();
         Box::pin(async move {
             let resp = match weak.upgrade() {
-                Some(inner) => crate::engine::Engine { inner }.handle_request(from, &req).await,
+                Some(inner) => {
+                    let engine = crate::engine::Engine { inner };
+                    // While invisible, a device that did not hear from us lately gets no reply at all.
+                    if engine.hidden_from(&from) {
+                        return Vec::new();
+                    }
+                    engine.handle_request(from, &req).await
+                }
                 None => Response::Error("node is shutting down".into()),
             };
             encode(&resp).unwrap_or_default()

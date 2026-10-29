@@ -72,6 +72,17 @@ pub fn make_thumbnail(data: &[u8]) -> Option<Thumbnail> {
     make_jpeg(data, THUMB_LONG_SIDE, THUMB_MAX_BYTES)
 }
 
+/// Makes a thumbnail of a decoded picture given as packed RGB, `width` x `height`: a video's first
+/// frame, for one. Returns `None` when the buffer does not match the size, when the picture is over
+/// the pixel limit, or when its thumbnail does not fit [`THUMB_MAX_BYTES`] at the lowest quality.
+pub fn make_thumbnail_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Option<Thumbnail> {
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return None;
+    }
+    let picture = RgbImage::from_raw(width, height, rgb)?;
+    small_jpeg(DynamicImage::ImageRgb8(picture), THUMB_LONG_SIDE, THUMB_MAX_BYTES)
+}
+
 /// Makes a link-preview picture: at most [`PREVIEW_IMAGE_SIDE`] on each side, and at most
 /// [`PREVIEW_IMAGE_MAX_BYTES`] of JPEG. Like [`make_thumbnail`], it carries no metadata.
 pub fn make_preview_image(data: &[u8]) -> Option<Thumbnail> {
@@ -100,6 +111,11 @@ fn make_jpeg(data: &[u8], side: u32, max_bytes: usize) -> Option<Thumbnail> {
         return None;
     }
     picture.apply_orientation(orientation);
+    small_jpeg(picture, side, max_bytes)
+}
+
+/// Shrinks a picture to at most `side` on each side and encodes it as a JPEG of at most `max_bytes`.
+fn small_jpeg(picture: DynamicImage, side: u32, max_bytes: usize) -> Option<Thumbnail> {
     // Only pictures larger than the target shrink. `thumbnail` would also enlarge a small one.
     let small = if picture.width().max(picture.height()) > side {
         picture.thumbnail(side, side)
@@ -220,5 +236,14 @@ mod tests {
     fn data_that_is_not_a_picture_has_no_thumbnail() {
         assert!(make_thumbnail(b"plain text, not a picture").is_none());
         assert!(make_thumbnail(&[]).is_none());
+    }
+
+    #[test]
+    fn a_decoded_frame_shrinks_to_a_thumbnail_and_a_wrong_buffer_has_none() {
+        let rgb = vec![200u8; 1280 * 720 * 3];
+        let t = make_thumbnail_rgb(1280, 720, rgb).expect("a thumbnail");
+        assert_eq!((t.width, t.height), (320, 180));
+        assert!(is_thumbnail(&t.jpeg));
+        assert!(make_thumbnail_rgb(10, 10, vec![0; 5]).is_none(), "the buffer must match the size");
     }
 }

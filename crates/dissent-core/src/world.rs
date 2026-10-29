@@ -68,6 +68,8 @@ pub(crate) struct World {
     pub thumb_fetching: std::collections::BTreeSet<String>,
     /// Per-provider counts of the downloads in this run. Not stored: a restart starts them again.
     pub source_counts: BTreeMap<String, crate::attachments::LiveSources>,
+    /// Which scopes each blob held here belongs to, for the members-only blob server. Built at start.
+    pub blob_scopes: crate::blob_gate::BlobScopes,
     /// Inbox service state: envelopes and key packages held for our root.
     pub inbox: crate::inbox::InboxBook,
     /// This device's own status, from `status.bin`.
@@ -195,6 +197,7 @@ impl World {
             attach,
             thumb_fetching,
             source_counts,
+            blob_scopes: Default::default(),
             own,
             auto_idle: false,
             presence: BTreeMap::new(),
@@ -371,11 +374,20 @@ impl World {
 
     pub fn community_view(&self, c: &Community) -> CommunityView {
         let suppress_everyone = crate::server_prefs::of(self, c.id()).suppress_everyone;
-        // Text channels, then voice channels, each in the server's order.
-        let (text, voice) = c.state().channel_order();
-        let channels = text
+        // With a layout, channels follow it top to bottom. Without one, text channels, then voice channels, each
+        // in the server's order.
+        let layout = c.state().channel_layout();
+        let order: Vec<ChannelId> = match &layout {
+            Some(entries) => crate::channel_layout::flatten(entries),
+            None => {
+                let (text, voice) = c.state().channel_order();
+                text.into_iter().chain(voice).collect()
+            }
+        };
+        let can_manage_channels = c.state().may_manage_channels(&self.me);
+        let layout = layout.map(|entries| crate::channel_layout::view_for(c.state(), &entries, self.me, can_manage_channels));
+        let channels = order
             .iter()
-            .chain(&voice)
             .filter_map(|id| c.state().channels.get(id).map(|name| (id, name)))
             // A private channel is listed only to the people who can read it.
             .filter(|(id, _)| c.state().can_read(**id, self.me))
@@ -440,6 +452,8 @@ impl World {
                 .any(|(_, why)| *why == dissent_events::Rejection::Locked),
             // The engine fills in the people in each voice channel, which it hears on the calls side.
             voice_channels: Vec::new(),
+            layout,
+            can_manage_channels,
         }
     }
 

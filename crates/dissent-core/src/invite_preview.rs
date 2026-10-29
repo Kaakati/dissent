@@ -599,9 +599,15 @@ impl Engine {
         Ok((signed, peer))
     }
 
-    /// Remembers the peers of an invite, so they can be dialled, and returns them.
+    /// Remembers the peers of an invite, so they can be dialled, and returns them. Only their public reachability is
+    /// kept (see `communities::shareable_addr`): anyone can mint a long invite, and a preview must not make this device
+    /// dial into a local network the invite names. Joining still uses every address the invite carries.
     fn learn_peers(&self, peers: &[String]) -> Vec<PeerAddr> {
-        let parsed: Vec<PeerAddr> = peers.iter().filter_map(|p| p.parse::<PeerAddr>().ok()).collect();
+        let parsed: Vec<PeerAddr> = peers
+            .iter()
+            .filter_map(|p| p.parse::<PeerAddr>().ok())
+            .map(|p| self.shareable(&p))
+            .collect();
         let mut guard = self.write();
         for peer in &parsed {
             self.learn_address(&mut guard, peer.clone());

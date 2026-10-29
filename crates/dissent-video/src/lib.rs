@@ -16,6 +16,7 @@ pub mod pattern;
 pub mod queue;
 pub mod screen;
 pub mod source;
+pub mod still;
 
 pub use codec::Codec;
 pub use decode::VideoDecoder;

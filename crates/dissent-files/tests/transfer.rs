@@ -556,6 +556,7 @@ fn timeouts(connect: Duration, stall: Duration, base: Duration) -> Timeouts {
         base,
         per_mib: Duration::ZERO,
         max: Duration::from_secs(60),
+        refused_retry: Duration::ZERO,
     }
 }
 
@@ -1392,4 +1393,61 @@ async fn two_providers_each_deliver_part_of_the_file() {
     assert_eq!(bytes, cipher);
     let pieces: u64 = last.iter().map(|c| c.pieces).sum();
     assert_eq!(pieces, dissent_files::pieces_of(cipher));
+}
+
+/// A provider whose blob server refuses the first `refuse` GET requests, then serves. `ConnectMode::Intercept`
+/// sees the connecting endpoint, as a member check would.
+async fn gated_provider(refuse: u64) -> (Files, Endpoint, Router, TestDir, Arc<AtomicU64>) {
+    use dissent_files::gate::{AbortReason, ConnectMode};
+    let dir = TestDir::new();
+    let files = Files::open(&dir.path().join("data")).await.unwrap();
+    let mask = EventMask {
+        connected: ConnectMode::Intercept,
+        get: RequestMode::Intercept,
+        ..EventMask::DEFAULT
+    };
+    let (events, mut rx) = EventSender::channel(16, mask);
+    let refused = Arc::new(AtomicU64::new(0));
+    let count = refused.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ProviderMessage::ClientConnected(msg) => {
+                    let ok = msg.endpoint_id.is_some();
+                    msg.tx.send(if ok { Ok(()) } else { Err(AbortReason::Permission) }).await.ok();
+                }
+                ProviderMessage::GetRequestReceived(msg) => {
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    let res = if n < refuse { Err(AbortReason::Permission) } else { Ok(()) };
+                    msg.tx.send(res).await.ok();
+                }
+                _ => {}
+            }
+        }
+    });
+    let endpoint = loopback_endpoint().await;
+    let router = Router::builder(endpoint.clone())
+        .accept(ALPN, files.protocol_handler_with(events))
+        .spawn();
+    (files, endpoint, router, dir, refused)
+}
+
+#[tokio::test]
+async fn a_provider_that_refuses_gives_a_refusal_not_a_fault() {
+    let (alice, alice_ep, _router, _dir, _) = gated_provider(u64::MAX).await;
+    let bob = Peer::new().await;
+    let fref = alice.add(Input::Bytes { name: "a.txt".into(), mime: "text/plain".into(), data: sample(1000) }).await.unwrap();
+    let err = bob.files.fetch(&bob.endpoint, &[alice_ep.addr()], &fref, &bob.downloads(), |_, _| {}).await.unwrap_err();
+    assert!(matches!(err, FilesError::Refused(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_provider_that_refuses_once_is_asked_again_and_serves() {
+    let (alice, alice_ep, _router, _dir, refused) = gated_provider(1).await;
+    let bob = Peer::new().await;
+    let plain = sample(3000);
+    let fref = alice.add(Input::Bytes { name: "a.txt".into(), mime: "text/plain".into(), data: plain.clone() }).await.unwrap();
+    let out = bob.files.fetch(&bob.endpoint, &[alice_ep.addr()], &fref, &bob.downloads(), |_, _| {}).await.unwrap();
+    assert_eq!(fs::read(out).unwrap(), plain);
+    assert_eq!(refused.load(Ordering::SeqCst), 2, "one refusal, then the second ask was served");
 }

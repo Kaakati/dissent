@@ -181,8 +181,10 @@ impl Engine {
         message: EventId,
     ) -> Result<()> {
         let payload = Payload::Delete { target: message };
+        let blobs = self.read().blobs_of_community_message(community, message);
         self.author_publish(community, channel, payload).await?;
         self.prune_thumbnails();
+        self.release_blobs(blobs);
         Ok(())
     }
 
@@ -292,6 +294,8 @@ impl Engine {
                     | Payload::ChannelOrder { .. }
                     | Payload::SeederForwardsCalls { .. }
                     | Payload::StorageGrant { .. }
+                    | Payload::HistorySupport { .. }
+                    | Payload::ChannelLayout { .. }
             );
             body.payload = match &member {
                 Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,

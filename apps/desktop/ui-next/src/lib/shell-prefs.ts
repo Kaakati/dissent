@@ -13,6 +13,7 @@ interface ShellPrefs {
   startAtLoginNote: string | null;
   notificationsMuted: boolean;
   convertEmoticons: boolean; // the composer turns :D and the like into emoji
+  stripPhotoMetadata: boolean; // photos and videos go out without their location and camera details
   apply: (s: ShellSettings) => void;
   load: () => Promise<void>;
 }
@@ -24,6 +25,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   startAtLoginNote: null,
   notificationsMuted: false,
   convertEmoticons: true,
+  stripPhotoMetadata: true,
   apply: (s) =>
     set({
       keepRunning: s.keep_running,
@@ -32,6 +34,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
       startAtLoginNote: s.start_at_login_note,
       notificationsMuted: s.notifications_muted,
       convertEmoticons: s.emoticons_as_text !== true,
+      stripPhotoMetadata: s.keep_photo_metadata !== true,
     }),
   load: async () => {
     try {
@@ -42,7 +45,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   },
 }));
 
-type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted' | 'emoticons_as_text'>>;
+type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted' | 'emoticons_as_text' | 'keep_photo_metadata'>>;
 
 // Saves one change with the rest of the settings. The backend answers with what it saved, which is what the page shows.
 export async function setShellPrefs(change: Change): Promise<void> {
@@ -52,6 +55,7 @@ export async function setShellPrefs(change: Change): Promise<void> {
     start_at_login: current.startAtLogin,
     notifications_muted: current.notificationsMuted,
     emoticons_as_text: !current.convertEmoticons,
+    keep_photo_metadata: !current.stripPhotoMetadata,
     ...change,
   };
   try {

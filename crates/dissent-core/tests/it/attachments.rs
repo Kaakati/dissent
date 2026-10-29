@@ -485,3 +485,160 @@ async fn a_download_that_fails_says_why() {
 
     finish(vec![bob]).await;
 }
+
+/// The hash of an attachment, from its id.
+fn hash_of(attachment_id: &str) -> [u8; 32] {
+    data_encoding::BASE32_NOPAD
+        .decode(attachment_id.to_uppercase().as_bytes())
+        .expect("base32 id")
+        .try_into()
+        .expect("32 bytes")
+}
+
+// Audit P-13: a deleted message's file was pinned, and served, for as long as the device ran. Now the sender and a
+// seeder that mirrored it both unpin it, and a file another live message names stays pinned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_message_unpins_its_file_and_a_live_one_keeps_its_own() {
+    use dissent_core::test_support::pinned_blobs;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let community = rustaceans(&alice, &bob).await;
+    let invite = alice.engine.create_invite(community).await.expect("invite");
+    let carol = peer("carol").await;
+    carol.engine.join_as_storage(&invite).await.expect("carol joins as storage");
+    carol
+        .engine
+        .set_mirror_policy(Some(dissent_files::MirrorPolicy { max_file_size: 1 << 20, max_total: 1 << 30 }))
+        .expect("carol mirrors");
+    let general = channel_id(&alice.engine, community, "general").expect("general channel");
+
+    let dir = scratch("unpin");
+    std::fs::write(dir.join("keep.txt"), b"still here").expect("keep");
+    std::fs::write(dir.join("gone.txt"), b"deleted soon").expect("gone");
+    let keep = alice
+        .engine
+        .send_files(community, general, vec![dir.join("keep.txt")], "keep".into(), true)
+        .await
+        .expect("alice posts keep");
+    let gone = alice
+        .engine
+        .send_files(community, general, vec![dir.join("gone.txt")], "gone".into(), true)
+        .await
+        .expect("alice posts gone");
+    let (keep_hash, gone_hash) = (hash_of(&keep.attachments[0].id), hash_of(&gone.attachments[0].id));
+    let gone_id = gone.attachments[0].id.clone();
+    let keep_id = keep.attachments[0].id.clone();
+    eventually("carol mirrors both files", || {
+        let m = carol.engine.mirrored_attachments();
+        (m.contains(&gone_id) && m.contains(&keep_id)).then_some(())
+    })
+    .await;
+    let pinned = pinned_blobs(&alice.engine).await;
+    assert!(pinned.contains(&keep_hash) && pinned.contains(&gone_hash), "the sender pins what it shares");
+
+    let message: dissent_core::EventId = gone.id.parse().expect("event id");
+    alice.engine.delete_message(community, general, message).await.expect("alice deletes gone");
+
+    for (who, engine) in [("alice", &alice.engine), ("carol", &carol.engine)] {
+        let mut unpinned = false;
+        for _ in 0..100 {
+            if !pinned_blobs(engine).await.contains(&gone_hash) {
+                unpinned = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(unpinned, "{who} unpins the deleted message's file");
+        assert!(pinned_blobs(engine).await.contains(&keep_hash), "{who} keeps the live message's file");
+    }
+    assert!(!carol.engine.mirrored_attachments().contains(&gone_id), "the seeder forgets the mirror");
+
+    finish(vec![alice, bob, carol]).await;
+}
+
+// The same for a direct message: deleting it unpins its file on the sender.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_direct_message_unpins_its_file() {
+    use dissent_core::test_support::pinned_blobs;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let dir = scratch("unpin-dm");
+    std::fs::write(dir.join("note.txt"), b"for bob only").expect("note");
+    let sent = alice
+        .engine
+        .send_dm_files(bob.identity.root_id(), vec![dir.join("note.txt")], String::new())
+        .await
+        .expect("alice sends bob a file");
+    let hash = hash_of(&sent.attachments[0].id);
+    assert!(pinned_blobs(&alice.engine).await.contains(&hash));
+    alice.engine.dm_delete(bob.identity.root_id(), &sent.id).await.expect("alice deletes it");
+    let mut unpinned = false;
+    for _ in 0..100 {
+        if !pinned_blobs(&alice.engine).await.contains(&hash) {
+            unpinned = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(unpinned, "the deleted direct message's file is unpinned");
+    finish(vec![alice, bob]).await;
+}
+
+/// SOI, a JFIF header, an Exif block with a location and a camera in it, then the scan.
+fn tagged_photo(path: &std::path::Path) -> Vec<u8> {
+    let mut j = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+    j.extend_from_slice(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+    let exif = b"Exif\0\0MM\0\x2A\0\0\0\x08\0\0GPS 37.3349 N 122.0090 W Make=PhoneCo";
+    j.extend_from_slice(&[0xFF, 0xE1]);
+    j.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    j.extend_from_slice(exif);
+    j.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9]);
+    std::fs::write(path, &j).expect("write the photo");
+    j
+}
+
+// A photo goes out without its location and camera, unless the sender keeps them. The file on disk never changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_goes_out_without_its_location_unless_the_sender_keeps_it() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let alice_root = alice.identity.root_id();
+    let bob_root = bob.identity.root_id();
+    let dir = scratch("photo-details");
+
+    let received = |sent: &str| {
+        let bob = &bob;
+        let sent = sent.to_string();
+        async move {
+            eventually("bob sees the photo", || {
+                bob.engine.dm_messages(alice_root, 10).iter().any(|m| m.id == sent && m.attachments.len() == 1).then_some(())
+            })
+            .await;
+            let theirs = own_view(bob, alice_root, &sent);
+            bob.engine.download_attachment(None, sent.clone(), theirs.id.clone()).await.expect("bob starts the download");
+            let local = eventually("bob has the photo", || own_view(bob, alice_root, &sent).local_path).await;
+            std::fs::read(&local).expect("read the download")
+        }
+    };
+    let has = |data: &[u8], needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
+
+    let path = dir.join("beach.jpg");
+    let original = tagged_photo(&path);
+    let sent = alice.engine.send_dm_files(bob_root, vec![path.clone()], String::new()).await.expect("send the photo");
+    let got = received(&sent.id).await;
+    assert!(!has(&got, b"37.3349") && !has(&got, b"PhoneCo"), "bob's copy has no location or camera");
+    assert!(got.starts_with(&[0xFF, 0xD8]) && got.ends_with(&[0xFF, 0xD9]), "it is still the picture");
+    assert_eq!(std::fs::read(&path).expect("read the original"), original, "alice's file is untouched");
+    assert_eq!(own_view(&alice, bob_root, &sent.id).local_path.as_deref(), Some(path.to_string_lossy().as_ref()), "alice's message shows her original");
+
+    // With the switch off, the photo goes as it is.
+    alice.engine.set_keep_photo_metadata(true);
+    let kept = dir.join("kept.jpg");
+    tagged_photo(&kept);
+    let sent = alice.engine.send_dm_files(bob_root, vec![kept.clone()], String::new()).await.expect("send the photo");
+    assert_eq!(received(&sent.id).await, original, "the photo arrives exactly as it was");
+
+    finish(vec![alice, bob]).await;
+}

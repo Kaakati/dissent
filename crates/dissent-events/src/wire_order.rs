@@ -56,7 +56,18 @@ const V0111_PAYLOAD: &[&str] = &[
     "ChannelOrder",
     "SeederForwardsCalls",
     "StorageGrant",
+    "HistorySupport",
+    "ChannelLayout",
 ];
+
+const LAYOUT_ENTRY: &[&str] = &["Channel", "Category"];
+
+#[test]
+fn layout_entry_order_is_pinned() {
+    let names = variant_names(include_str!("event.rs"), "LayoutEntry");
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(names[..LAYOUT_ENTRY.len()], *LAYOUT_ENTRY, "LayoutEntry order changed: see the note above");
+}
 
 /// The variant names of `enum_name` in declaration order, read from `source`. See the note above.
 fn variant_names(source: &str, enum_name: &str) -> Vec<String> {

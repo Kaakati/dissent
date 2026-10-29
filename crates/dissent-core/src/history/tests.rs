@@ -187,3 +187,154 @@ fn a_member_who_left_gets_no_history_keys() {
         );
     });
 }
+
+/// Whether `engine`'s replay of `id` holds a `HistorySupport` yes from `node`'s device.
+fn declared(engine: &crate::Engine, id: dissent_identity::CommunityId, node: &Node) -> bool {
+    let device = node.engine.inner.identity.device_id();
+    engine.read().communities.get(&id).is_some_and(|c| c.state().declares_history(&device))
+}
+
+/// Whether `engine` lists `node`'s device among the member devices of `id`.
+fn lists_device(engine: &crate::Engine, id: dissent_identity::CommunityId, node: &Node) -> bool {
+    let device = node.engine.inner.identity.device_id();
+    let w = engine.read();
+    w.communities.get(&id).is_some_and(|c| w.member_devices(c).contains(&device))
+}
+
+#[test]
+fn a_member_that_did_not_admit_a_joiner_counts_its_declared_support_without_asking() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-declared").await;
+        let id = alice.engine.create_community("Declared".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-declared").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+        assert!(bob.engine.refresh_history_ready(id).await, "alice supports history messages");
+
+        // From here bob asks nobody, so only the events can tell him about a newcomer.
+        bob.engine.inner.history_probes.store(false, Ordering::Relaxed);
+        let carol = Node::named("carol-declared").await;
+        carol.engine.join_community(&invite).await.expect("carol joins through alice");
+        eventually("bob replays carol's join and her history support", || {
+            lists_device(&bob.engine, id, &carol) && declared(&bob.engine, id, &carol)
+        })
+        .await;
+        assert!(bob.engine.history_seal(id, "for carol too").is_some(), "bob keeps the history form for carol");
+        // A check that reaches nobody still counts the devices that declared: the founder did too.
+        assert!(declared(&bob.engine, id, &alice));
+        assert!(bob.engine.refresh_history_ready(id).await);
+        assert!(bob.engine.history_seal(id, "after the check").is_some());
+    });
+}
+
+#[test]
+fn a_joiner_that_does_not_declare_support_still_needs_an_answer() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-undeclared").await;
+        let id = alice.engine.create_community("Undeclared".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-undeclared").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+        assert!(bob.engine.refresh_history_ready(id).await);
+
+        bob.engine.inner.history_probes.store(false, Ordering::Relaxed);
+        // Carol is on a version from before history messages, so her join says nothing about them.
+        let carol = Node::named("carol-undeclared").await;
+        carol.engine.inner.history_support.store(false, Ordering::Relaxed);
+        carol.engine.join_community(&invite).await.expect("carol joins");
+        eventually("bob lists carol's device", || lists_device(&bob.engine, id, &carol)).await;
+        assert!(!declared(&bob.engine, id, &carol));
+        assert!(bob.engine.history_seal(id, "older form").is_none(), "an undeclared joiner means the older form");
+    });
+}
+
+#[test]
+fn a_device_that_answers_no_overrides_its_earlier_declaration() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-override").await;
+        let id = alice.engine.create_community("Override".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-override").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("alice replays bob's declaration", || declared(&alice.engine, id, &bob)).await;
+        assert!(alice.engine.refresh_history_ready(id).await);
+        // Bob goes back to a version without history messages. His own answer now wins over the old event.
+        bob.engine.inner.history_support.store(false, Ordering::Relaxed);
+        assert!(!alice.engine.refresh_history_ready(id).await);
+        assert!(alice.engine.history_seal(id, "older form").is_none());
+    });
+}
+
+/// How many `HistorySupport` events from `node`'s device `engine` stores in `id`.
+fn declarations(engine: &crate::Engine, id: dissent_identity::CommunityId, node: &Node) -> usize {
+    let device = node.engine.inner.identity.device_id();
+    engine.read().communities.get(&id).map_or(0, |c| c.history_declarations_by(&device))
+}
+
+#[test]
+fn an_existing_member_declares_once_after_it_upgrades_and_again_only_when_its_setting_changes() {
+    on_own_thread(|| async {
+        // Alice founds the server on a version from before declarations: support off, so she says nothing.
+        let alice = Node::named("alice-upgrade").await;
+        alice.engine.inner.history_support.store(false, Ordering::Relaxed);
+        let id = alice.engine.create_community("Upgrade".into()).await.expect("create").id.parse().unwrap();
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        let bob = Node::named("bob-upgrade").await;
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+        assert_eq!(declarations(&alice.engine, id, &alice), 0, "the older version declares nothing");
+
+        // Alice upgrades: the restart declares her support once.
+        let (identity, dir, port) = alice.stop().await;
+        let alice = Node::boot(identity, dir, port).await;
+        eventually("alice declares after the upgrade", || declarations(&alice.engine, id, &alice) == 1).await;
+        eventually("bob replays alice's declaration", || declared(&bob.engine, id, &alice)).await;
+
+        // Another restart with the same setting sends nothing new, nor does fresh traffic.
+        let (identity, dir, port) = alice.stop().await;
+        let alice = Node::boot(identity, dir, port).await;
+        let channel = general(&bob.engine, id);
+        bob.engine.send_message(id, channel, "after the restart".into()).await.expect("send");
+        eventually("alice reads bob", || readable(&alice.engine, id, channel, "after the restart")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(declarations(&alice.engine, id, &alice), 1, "no repeat with an unchanged setting");
+
+        // Turning support off says so once, and turning it off again says nothing.
+        alice.engine.set_history_support(false);
+        eventually("alice declares the change", || declarations(&alice.engine, id, &alice) == 2).await;
+        eventually("bob replays the no", || !declared(&bob.engine, id, &alice)).await;
+        alice.engine.set_history_support(false);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(declarations(&alice.engine, id, &alice), 2);
+    });
+}
+
+#[test]
+fn a_newly_linked_device_declares_once_in_the_communities_it_syncs() {
+    on_own_thread(|| async {
+        let alice = Node::named("alice-linked").await;
+        let id = alice.engine.create_community("Linked".into()).await.expect("create").id.parse().unwrap();
+        let bob = Node::named("bob-linked").await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        bob.engine.join_community(&invite).await.expect("bob joins");
+        eventually("bob is in the community", || bob.engine.community_view(id).is_ok()).await;
+
+        // Bob links a tablet, which joins the server under his root.
+        let pending = crate::start_device_link("Tablet").expect("link request");
+        let grant = bob.engine.approve_device(&pending.link().expect("link")).expect("bob approves the tablet");
+        let identity = pending.finish(&grant).expect("tablet identity");
+        let tablet = Node::boot(identity, crate::membership::tests::scratch("bob-tablet"), crate::membership::tests::free_port()).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        tablet.engine.join_community(&invite).await.expect("the tablet joins");
+
+        eventually("alice replays the tablet's declaration", || declared(&alice.engine, id, &tablet)).await;
+        // The join, the first sync and the startup each could declare. One declaration goes out.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert_eq!(declarations(&tablet.engine, id, &tablet), 1, "the tablet declares once");
+        assert_eq!(declarations(&alice.engine, id, &tablet), 1);
+        // Bob's own device declared at its join, and is not counted twice either.
+        assert_eq!(declarations(&alice.engine, id, &bob), 1);
+    });
+}

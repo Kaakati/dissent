@@ -25,6 +25,8 @@ pub mod state;
 #[cfg(test)]
 mod channel_order_tests;
 #[cfg(test)]
+mod history_support_tests;
+#[cfg(test)]
 mod private_tests;
 #[cfg(test)]
 mod relay_host_tests;
@@ -44,7 +46,7 @@ pub use dag::{Dag, InsertOutcome};
 pub use dm::{DmBody, DmId, DmMessage, SignedDm};
 pub use emoji::{normalize_emoji, normalize_trait_emoji, EmojiError};
 pub use event::{
-    ChannelId, ChannelVisibility, Event, EventBody, EventId, HistorySetting, Payload, Role, Trait,
+    ChannelId, ChannelVisibility, Event, EventBody, EventId, HistorySetting, LayoutCategory, LayoutEntry, Payload, Role, Trait,
     SealedKind,
 };
 pub use hlc::{Hlc, HlcClock};

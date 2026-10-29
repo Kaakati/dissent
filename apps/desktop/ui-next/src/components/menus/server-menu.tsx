@@ -1,63 +1,27 @@
-// The server's menu, opened from the name at the top of the channel list. Ported from toggleMenu in
-// the old UI's views/sidebar.js. "Hide server details from seeders" comes with the member-only batch.
-import { useEffect, type ReactNode } from 'react';
-import { AtSign, Copy, Image as ImageIcon, LogOut, Plus, Settings, UserPlus } from 'lucide-react';
-import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
-import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
-import { openServerIconDialog } from '@/components/dialogs/server-icon-dialog';
-import { openClaimHandleDialog } from '@/components/dialogs/small-dialogs';
-import { openServerSettings } from '@/components/server-settings/server-settings';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { MENU_WIDTH, MenuItems } from '@/components/menus/menu-items';
-import { addressOf } from '@/lib/address';
-import { leaveCommunity } from '@/lib/actions';
-import { copyText } from '@/lib/clipboard';
-import { has } from '@/lib/features';
-import { confirm } from '@/lib/dialog';
-import type { MenuEntry } from '@/lib/menu';
-import { toast } from '@/lib/toasts';
-import { asksLabel, loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
+// The server's menu, opened from the name at the top of the channel list. It is the same menu as the server icon's on
+// the rail (server-rail-menu.tsx, openServerMenu), with the same items for the same people, opened below the name.
+// Enter, Space and ArrowDown open it from the keyboard, as they open any menu button.
+import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
+import { Slot } from 'radix-ui';
+import { openServerMenu } from '@/components/menus/server-rail-menu';
 import type { CommunityView } from '@/lib/types';
 
+const OPEN_KEYS = ['Enter', ' ', 'ArrowDown'];
+
 export function ServerMenu({ community, children }: { community: CommunityView; children: ReactNode }) {
-  const manage = community.my_role === 'owner' || community.my_role === 'admin';
-  const asks = useStorageAsks((s) => s.asks[community.id]?.length ?? 0);
-  useEffect(() => {
-    if (manage) void loadStorageAsks(community.id);
-  }, [manage, community.id]);
-  const entries: MenuEntry[] = [
-    community.my_role === 'owner'
-      ? { label: 'Server Settings', icon: Settings, sub: asksLabel(asks) || undefined, onPick: () => openServerSettings(community.id) }
-      : null,
-    { label: 'Create invite', icon: UserPlus, onPick: () => openInviteDialog(community.id) },
-    { label: 'Claim handle', icon: AtSign, onPick: () => openClaimHandleDialog(community.id) },
-    {
-      label: 'Copy server address',
-      icon: Copy,
-      onPick: async () => {
-        const address = addressOf('server', community.id);
-        if (address && (await copyText(address))) toast(`${community.name} address copied`, 'info');
-      },
-    },
-    manage ? { label: 'Create channel', icon: Plus, onPick: () => openCreateChannelDialog(community.id) } : null,
-    has('avatars') && manage ? { label: 'Server icon', icon: ImageIcon, onPick: () => openServerIconDialog(community) } : null,
-    {
-      label: 'Leave server',
-      icon: LogOut,
-      danger: true,
-      onPick: async () => {
-        if (await confirm({ message: `Leave ${community.name}? You can rejoin with an invite link.`, okLabel: 'Leave' })) {
-          await leaveCommunity(community.id);
-        }
-      },
-    },
-  ];
+  const open = (target: HTMLElement) => {
+    const r = target.getBoundingClientRect();
+    void openServerMenu(community.id, r.left, r.bottom + 4);
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (!OPEN_KEYS.includes(e.key)) return;
+    // The key opens the menu itself, so the button's own click (Enter, Space) does not open it a second time.
+    e.preventDefault();
+    open(e.currentTarget);
+  };
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align="start" sideOffset={4} className={MENU_WIDTH}>
-        <MenuItems entries={entries} />
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Slot.Root onClick={(e: MouseEvent<HTMLElement>) => open(e.currentTarget)} onKeyDown={onKeyDown}>
+      {children}
+    </Slot.Root>
   );
 }

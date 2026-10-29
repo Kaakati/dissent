@@ -147,6 +147,7 @@ impl Engine {
             let addr = w
                 .my_addr
                 .as_ref()
+                .map(|a| self.shareable(a))
                 .ok_or_else(|| CoreError::Invalid("this device has no address yet".into()))?
                 .to_string();
             (current_version(&w, &conv), addr)
@@ -215,7 +216,7 @@ impl Engine {
             .read()
             .my_addr
             .as_ref()
-            .map(|a| a.to_string())
+            .map(|a| self.shareable(a).to_string())
             .unwrap_or_default();
         let packet = crate::groups::ConvPacket::JoinRequest {
             conv: invite.conv,

@@ -19,6 +19,14 @@
 //! keychain nor a passphrase, the seeder exits with an error. It never writes the identity
 //! unencrypted.
 //!
+//! # Files
+//!
+//! A seeder keeps the encrypted files that senders allow it to keep ("Let the seeder keep an encrypted copy" in the
+//! Share dialog), so members can download them while the sender is offline. It finds them through each message's
+//! cleartext manifest and never holds a file's key. Files in private channels and direct messages are never offered
+//! to it. `--keep-files-up-to <MB>` (2048) and `--files-quota <GB>` (50) bound what it keeps, and `--no-files` keeps
+//! none.
+//!
 //! # Running as a background service
 //!
 //! `dissent-seeder service install --user -- --data-dir <abs dir> --join <invite>` records the
@@ -37,7 +45,7 @@ pub mod service;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use dissent_core::{ChannelId, CommunityId, Engine, NodeConfig, RelayChoice};
+use dissent_core::{ChannelId, CommunityId, Engine, MirrorPolicy, NodeConfig, RelayChoice};
 use dissent_identity::{IdentityError, Vault, keystore};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -112,6 +120,26 @@ pub struct RunArgs {
     /// Write rolling log files here, as well as to the console.
     #[arg(long, value_name = "DIR", env = "DISSENT_SEEDER_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
+    /// Keep an encrypted copy of each file a sender allowed, up to this many megabytes per file.
+    #[arg(long, value_name = "MB", default_value_t = 2048, value_parser = clap::value_parser!(u64).range(1..), env = "DISSENT_SEEDER_KEEP_FILES_UP_TO")]
+    pub keep_files_up_to: u64,
+    /// The most file data the seeder keeps in all, in gigabytes.
+    #[arg(long, value_name = "GB", default_value_t = 50, value_parser = clap::value_parser!(u64).range(1..), env = "DISSENT_SEEDER_FILES_QUOTA")]
+    pub files_quota: u64,
+    /// Keep no files, only messages.
+    #[arg(long, env = "DISSENT_SEEDER_NO_FILES")]
+    pub no_files: bool,
+}
+
+impl RunArgs {
+    /// What the seeder keeps of the files senders allow it to keep, or `None` with `--no-files`.
+    pub fn mirror_policy(&self) -> Option<MirrorPolicy> {
+        const MB: u64 = 1024 * 1024;
+        (!self.no_files).then(|| MirrorPolicy {
+            max_file_size: self.keep_files_up_to.saturating_mul(MB),
+            max_total: self.files_quota.saturating_mul(1024 * MB),
+        })
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -284,6 +312,13 @@ async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Resul
         .set_display_name(run.name.clone())
         .await
         .context("set display name")?;
+    // The policy is applied on every start, so the flags always win over what an earlier run saved.
+    let policy = run.mirror_policy();
+    match &policy {
+        Some(p) => info!(max_file_mb = p.max_file_size / (1024 * 1024), quota_gb = p.max_total / (1024 * 1024 * 1024), "keeping files senders allow"),
+        None => info!("keeping no files (--no-files)"),
+    }
+    engine.set_mirror_policy(policy).context("set the file policy")?;
 
     // A seeder joins as storage. It keeps and serves sealed history, but it is never added to a
     // community's encryption group, so it cannot read messages or attachments.

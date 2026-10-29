@@ -1,8 +1,10 @@
 //! Adding a contact by address, and the "Let people add me by address" switch.
 //!
 //! The first test runs on this machine: without the DHT, an address lookup says so. The rest use the
-//! real network and are ignored. Run them through the firewall-approved script:
-//!   scripts/fwtest.sh dissent-core user_address --ignored --nocapture
+//! real network and the public Mainline DHT, so they are ignored and named `internet_*`, which the
+//! release workflow skips (`--skip internet`) because the public network makes them flaky. Run them
+//! through the firewall-approved script:
+//!   scripts/fwtest.sh dissent-core it --ignored user_address::internet_ --nocapture
 
 use crate::common::*;
 use dissent_core::{Engine, Identity, NodeConfig};
@@ -64,7 +66,7 @@ async fn adding_by_address_without_the_dht_says_so() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn a_person_is_added_by_their_address_over_the_dht() {
+async fn internet_a_person_is_added_by_their_address_over_the_dht() {
     bounded(async {
         let alice = start_real("alice-addr-net").await;
         let bob = start_real("bob-addr-net").await;
@@ -93,7 +95,7 @@ async fn a_person_is_added_by_their_address_over_the_dht() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn switching_address_discovery_off_withdraws_the_address_and_links_still_work() {
+async fn internet_switching_address_discovery_off_withdraws_the_address_and_links_still_work() {
     bounded(async {
         let alice = start_real("alice-off-net").await;
         let bob = start_real("bob-off-net").await;

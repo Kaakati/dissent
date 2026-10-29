@@ -338,7 +338,7 @@ impl Engine {
             return CallReply::Refused("not in this call".into());
         };
         let Some(viewer) = room.live_sid(&from) else {
-            return CallReply::Refused("the sender is not in this call".into());
+            return CallReply::Refused("not in this call".into());
         };
         if self.apply_tiles(&room, viewer, &tiles).await {
             CallReply::Ack
@@ -353,7 +353,7 @@ impl Engine {
             return CallReply::Refused("not in this call".into());
         };
         let Some(sender) = room.live_sid(&from) else {
-            return CallReply::Refused("the sender is not in this call".into());
+            return CallReply::Refused("not in this call".into());
         };
         if self.apply_sender_layers(&room, sender, screen, &layers).await {
             CallReply::Ack

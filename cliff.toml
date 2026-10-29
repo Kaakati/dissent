@@ -17,6 +17,9 @@ body = """
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
 - {{ commit.message | split(pat="\n") | first | trim }}\
+{% for line in commit.message | split(pat="\n") | slice(start=1) %}{% if line is starting_with("- ") %}
+  {{ line | trim_end }}\
+{% endif %}{% endfor %}\
 {% endfor %}
 {% endfor %}\n
 """

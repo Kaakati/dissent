@@ -239,3 +239,42 @@ async fn group_members_see_the_typer_and_the_message_clears_it() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn private_channel_typing_reaches_its_readers_only() {
+    bounded(async {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let carol = peer("carol").await;
+    let id = rustaceans(&alice, &bob).await;
+    let invite = alice.engine.create_invite(id).await.expect("invite");
+    join_ready(&alice, &carol, &invite).await;
+
+    let vault = alice
+        .engine
+        .create_private_channel(id, "vault".into(), vec![], vec![bob.identity.root_id()])
+        .await
+        .expect("alice makes vault private for bob")
+        .id;
+    let vault: ChannelId = vault.parse().expect("channel id");
+    eventually("bob lists the private channel", || channel_id(&bob.engine, id, "vault").map(|_| ())).await;
+    let general = channel_id(&alice.engine, id, "general").expect("general");
+
+    // Bob reads vault, so Alice's typing reaches him, sent direct to his devices.
+    typing_until_seen(&alice, channel(id, vault), &bob, channel(id, vault), &["alice"]).await;
+    // Carol is a member but not a reader. Public typing still reaches her on the topic...
+    typing_until_seen(&alice, channel(id, general), &carol, channel(id, general), &["alice"]).await;
+    // ...but vault's never does.
+    for _ in 0..4 {
+        let _ = alice.engine.typing(channel(id, vault));
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    assert!(carol.engine.typing_in(channel(id, vault)).is_empty(), "a non-reader hears nothing from a private channel");
+    // And a non-reader cannot type into it.
+    assert!(carol.engine.typing(channel(id, vault)).is_err(), "a non-reader cannot signal typing in a private channel");
+
+    finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}

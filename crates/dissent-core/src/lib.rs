@@ -8,13 +8,19 @@ mod testutil;
 pub mod test_support;
 mod access;
 mod addr_record;
+mod blob_gate;
+mod blob_release;
 mod announce;
 mod storage_grants;
+mod request_gates;
+mod invisible;
 mod avatars;
 mod attachments;
+mod photo_metadata;
 mod call_layers;
 mod call_video;
 mod calls;
+mod channel_layout;
 mod channels;
 mod identity_flows;
 mod local;
@@ -70,6 +76,7 @@ mod store;
 mod sync;
 mod timings;
 mod typing;
+mod video_thumbs;
 mod views;
 mod warm;
 mod wire;
@@ -85,6 +92,8 @@ pub use calls::{
     ParticipantView, PathView, Topology,
 };
 pub use attachments::{AttachmentView, Mentions, StoreStats, TransferSettings, TransferView};
+/// The limits `Engine::set_mirror_policy` takes: the largest file and the most ciphertext a device keeps for others.
+pub use dissent_files::MirrorPolicy;
 pub use engine::Engine;
 pub use calls::{EncodedSink, EncodedVideo};
 pub use store::{sealed_data_present, SEALED_WITHOUT_IDENTITY};

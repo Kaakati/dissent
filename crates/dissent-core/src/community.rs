@@ -137,6 +137,17 @@ impl Community {
         dissent_events::control::open_event_keyed(ev, self.ring(), self.replayer.epoch_ring())
     }
 
+    /// How many stored `HistorySupport` events `device` signed. Tests check that a device declares once.
+    #[cfg(test)]
+    pub(crate) fn history_declarations_by(&self, device: &dissent_identity::DeviceId) -> usize {
+        self.dag
+            .causal_order()
+            .into_iter()
+            .filter(|e| e.body.device == *device)
+            .filter(|e| matches!(self.open(e), Ok(ev) if matches!(ev.body.payload, Payload::HistorySupport { .. })))
+            .count()
+    }
+
     /// The stored rename that set the current name, if a rename did. The invite preview hands it
     /// to a joiner as proof of the name.
     pub fn latest_rename(&self) -> Option<SignedEvent> {

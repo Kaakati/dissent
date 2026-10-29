@@ -45,6 +45,11 @@ impl Paths {
     pub fn avatars_dir(&self) -> PathBuf {
         self.root.join("avatars")
     }
+    /// Short-lived copies of files being sent, such as a photo with its metadata removed. Each sits in its own folder,
+    /// deleted once the file is encrypted.
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join("staging")
+    }
     /// Decrypted thumbnails of image attachments, one JPEG per attachment id.
     pub fn thumbnails_dir(&self) -> PathBuf {
         self.root.join("thumbnails")
@@ -169,6 +174,10 @@ impl Paths {
     /// Devices of our root, as signed certs with their names.
     pub fn attachments(&self) -> PathBuf {
         self.root.join("attachments.bin")
+    }
+    /// Blobs this device keeps because a member hinted them, with the hint's community. See `blob_gate`.
+    pub fn blob_hints(&self) -> PathBuf {
+        self.root.join("blob_hints.bin")
     }
     pub fn downloads(&self) -> PathBuf {
         self.root.join("downloads")

@@ -247,6 +247,12 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .att-preview-btn:disabled { cursor: progress; }
 .att-preview-btn img { display: block; width: 100%; height: 100%; object-fit: cover; filter: blur(6px); transform: scale(1.08); }
 .att-preview > .att-card { margin-top: 6px; }
+/* A video's first frame is shown as it is, with a play mark over its middle. */
+.att-preview[data-video] .att-preview-btn { position: relative; }
+.att-preview[data-video] .att-preview-btn img { filter: none; transform: none; }
+.att-play { position: absolute; top: 50%; left: 50%; display: grid; width: 48px; height: 48px; place-items: center; border-radius: 50%; background: rgb(0 0 0 / 0.6); color: #fff; transform: translate(-50%, -50%); pointer-events: none; }
+.att-play svg { width: 24px; height: 24px; margin-left: 3px; fill: currentColor; }
+.att-preview-btn:hover .att-play, .att-preview-btn:focus-visible .att-play { background: rgb(0 0 0 / 0.75); }
 .att-lock { display: inline-grid; place-items: center; color: var(--muted-foreground); }
 .att-lock svg { width: 12px; height: 12px; }
 .att-image .att-lock { position: absolute; right: var(--s-2); bottom: var(--s-2); width: 20px; height: 20px; border-radius: var(--r-1); background: rgb(17 18 20 / .7); color: var(--text); pointer-events: none; }

@@ -2,7 +2,8 @@
 // chat surface. Esc or the close button returns to the window, and focus goes back to whatever opened it. Ported from
 // views/settings.js.
 import { useEffect, useRef, useState } from 'react';
-import { Download, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon } from 'lucide-react';
+import { Download, Info, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon } from 'lucide-react';
+import { AboutPage } from '@/components/settings/about-page';
 import { AccountPage } from '@/components/settings/account-page';
 import { AppearancePage } from '@/components/settings/appearance-page';
 import { DevicesPage } from '@/components/settings/devices-page';
@@ -28,6 +29,7 @@ const NAV: { key: SettingsSection; label: string; icon: LucideIcon; feature?: Fe
   { key: 'voice', label: 'Voice', icon: Mic },
   { key: 'network', label: 'Network', icon: Wifi },
   { key: 'updates', label: 'Updates', icon: Download },
+  { key: 'about', label: 'About', icon: Info },
 ];
 
 const TITLES = Object.fromEntries(NAV.map((n) => [n.key, n.label])) as Record<SettingsSection, string>;
@@ -43,6 +45,7 @@ function Body({ section }: { section: SettingsSection }) {
     case 'voice': return <VoicePage />;
     case 'network': return <NetworkPage />;
     case 'updates': return <UpdatesPage />;
+    case 'about': return <AboutPage />;
   }
 }
 

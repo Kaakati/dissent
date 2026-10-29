@@ -169,6 +169,8 @@ struct Inner {
     lookup: MemoryLookup,
     gossip_max: usize,
     dials: Arc<DialLog>,
+    /// When this node last dialled each peer, for `contacted_within`.
+    contacted: Mutex<std::collections::HashMap<[u8; 32], Instant>>,
     /// Community keys the LAN handshake answers for. Set by `set_lan_keys`.
     lan_keys: Arc<Mutex<Vec<[u8; 32]>>>,
     serves_lookups: bool,
@@ -328,6 +330,7 @@ impl Node {
                 lookup,
                 gossip_max,
                 dials,
+                contacted: Mutex::new(std::collections::HashMap::new()),
                 lan_keys,
                 serves_lookups: cfg.serves_lookups,
                 lan_task: Mutex::new(lan_task),
@@ -478,6 +481,7 @@ impl Node {
     /// Sends `req` to `peer` and returns its reply. Dials by id, so addresses must be
     /// remembered or discoverable. Fails with `Timeout` after 15 s.
     pub async fn request(&self, peer: DeviceId, req: Vec<u8>) -> Result<Vec<u8>> {
+        self.note_contacted(peer);
         self.inner.dials.begin(peer.0);
         let started = Instant::now();
         let reply = run_request(&self.inner.endpoint, peer, req).await;
@@ -519,7 +523,32 @@ impl Node {
     /// Dials `peer` and opens an unreliable datagram link for call media. The peer sees it via
     /// `NodeConfig.media`.
     pub async fn open_media(&self, peer: DeviceId) -> Result<MediaLink> {
+        self.note_contacted(peer);
         dial_media(&self.inner.endpoint, peer).await
+    }
+
+    /// Most peers `contacted_within` remembers. The ones dialled longest ago are dropped first.
+    const MAX_CONTACTED: usize = 4096;
+
+    fn note_contacted(&self, peer: DeviceId) {
+        let mut contacted = self.inner.contacted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if contacted.len() >= Self::MAX_CONTACTED && !contacted.contains_key(&peer.0) {
+            if let Some(oldest) = contacted.iter().min_by_key(|(_, at)| **at).map(|(id, _)| *id) {
+                contacted.remove(&oldest);
+            }
+        }
+        contacted.insert(peer.0, Instant::now());
+    }
+
+    /// Whether this node dialled `peer`, for a request or a media link, within `window`. Such a peer
+    /// already knows this node is online.
+    pub fn contacted_within(&self, peer: DeviceId, window: Duration) -> bool {
+        self.inner
+            .contacted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer.0)
+            .is_some_and(|at| at.elapsed() < window)
     }
 
     /// Joins a gossip topic, dialling `bootstrap` peers. Peers must be known via `remember` or dialable.

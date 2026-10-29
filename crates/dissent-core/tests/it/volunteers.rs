@@ -158,9 +158,10 @@ async fn a_banned_or_outside_volunteer_is_refused() {
 
     let target = everyone[1].identity.device_id();
     let reply = offer_to_forward(&banned.engine, community, channel, target).await;
-    assert!(reply.contains("banned"), "a banned member's offer is refused: {reply}");
+    // Both hear what anyone hears for a call the device is not in, so neither learns it is in one.
+    assert_eq!(reply, "not in this call", "a banned member's offer is refused");
     let reply = offer_to_forward(&outsider.engine, community, channel, target).await;
-    assert!(reply.contains("member"), "an outsider's offer is refused: {reply}");
+    assert_eq!(reply, "not in this call", "an outsider's offer is refused");
 
     // Long past an offer interval and the re-election sustain, a participant still forwards.
     tokio::time::sleep(Duration::from_secs(8)).await;
@@ -288,7 +289,7 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     // Off by default: the seeder does not offer, and an offer it sends anyway is refused.
     assert!(!everyone[0].engine.seeder_forwards_calls(community));
     let reply = offer_to_forward(&seeder.engine, community, channel, everyone[1].identity.device_id()).await;
-    assert!(reply.contains("owner"), "a seeder's offer is refused until the owner allows it: {reply}");
+    assert_eq!(reply, "not in this call", "a seeder's offer is refused until the owner allows it");
     tokio::time::sleep(Duration::from_secs(6)).await;
     for p in &everyone {
         assert_eq!(p.engine.call_state().expect("in call").forwarded_by, None, "no seeder forwards yet");

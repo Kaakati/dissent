@@ -47,7 +47,7 @@ rules are requests each app keeps for its own member); no streaming playback; no
 | Reference | `FileRef { hash, size, cipher_size, name, mime, key, nonce_prefix }` inside an MLS-sealed message | `dissent-files/src/file_ref.rs` |
 | Fetch | `Files::fetch_tallied` tries providers in turn, resuming from what is stored; `tally::Observer` credits each 64 KiB ciphertext piece to the provider that completed it | `store.rs`, `tally.rs` |
 | Mirror | `Files::mirror(hash, cipher_size, MirrorPolicy)`, 2 GB per file, 50 GB total | `store.rs` |
-| Serving | `BlobsProtocol` on the node under `dissent_files::ALPN`, no access check | `dissent-core/src/engine.rs` |
+| Serving | `BlobsProtocol` on the node under `dissent_files::ALPN`, members only through `blob_gate` (see `08-files.md`, "Who may fetch a blob") | `dissent-core/src/blob_gate.rs` |
 | Attachments | send, download, transfers, source views (`Direct`/`Via relay`), piece counts, mirror opt-in, cleartext manifest, `MirrorHint` | `dissent-core/src/attachments.rs` |
 | Seeder | storage member: holds the community secret, no MLS key; mirrors from manifests and hints | `apps/seeder` |
 | Keys per generation | private-channel keys, `ChannelKeys` RPC to readers only | `dissent-core/src/private_keys.rs` |
@@ -246,9 +246,10 @@ Not events. A per-community tracker gossip topic, `blake3("dissent/tracker-topic
   per-provider credit for the receipt. Rarest first is a later scheduler on the availability map.
 - A provider that sends a bad piece fails bao verification, is dropped, and gets no credit.
 - Download rules (ratio after N GB, seed for N h) are kept by the member's own app.
-- **Members only** (decision 5): the blobs protocol takes `ConnectMode::Intercept` and serves a device only when
-  its root is an active person or granted storage member of a community this device is in, or a party to a direct
-  or group conversation with it. The tracker-get server applies the same rule.
+- **Members only** (decision 5): built, see `08-files.md`, "Who may fetch a blob". The blob server intercepts every
+  connection and request and asks `World::may_fetch(device, hash)`, which checks the scopes the blob belongs to.
+  Listings add `Scope::Category(c, cat)` through `Engine::add_blob_scope`, checked with `may_see_files` (storage
+  members only for a category everyone sees). The tracker-get server calls the same `may_fetch` per GET.
 
 ## Seeding
 

@@ -19,6 +19,7 @@ export default defineConfig({
     strictPort: true,
     host: '127.0.0.1',
     // The browser mock is src/mock/mock.js. The allow list keeps Vite's file access as it was when the mock lived in ../ui.
-    fs: { allow: [path.resolve(here, '..')] },
+    // DISCLAIMER.md at the repository root is bundled too (lib/disclaimer.ts).
+    fs: { allow: [path.resolve(here, '..'), path.resolve(here, '../../../DISCLAIMER.md')] },
   },
 })

@@ -201,3 +201,140 @@ fn a_carried_order_opens_for_members_and_is_locked_for_a_client_before_the_carri
     // A client from before the carrier tries the outer generation, which no secret has: locked, not failed.
     assert_eq!(crate::control::open(&[(0, SECRET)], &ev.body), Err(crate::OpenError::NoKey));
 }
+
+// ---- ChannelLayout: categories holding channels of either kind ----
+
+use crate::state::{MAX_CATEGORIES, MAX_CATEGORY_NAME_CHARS};
+use crate::{LayoutCategory, LayoutEntry};
+
+fn cat(id: u8, name: &str, channels: &[ChannelId]) -> LayoutEntry {
+    LayoutEntry::Category(LayoutCategory { id: [id; 16], name: name.into(), collapsed: false, channels: channels.to_vec() })
+}
+
+fn layout(entries: Vec<LayoutEntry>) -> Payload {
+    Payload::ChannelLayout { entries }
+}
+
+#[test]
+fn without_a_layout_there_is_none_and_the_order_still_answers() {
+    let mut f = Fixture::new();
+    let (a, b) = (f.text("a"), f.text("b"));
+    f.push_as(Who::Owner, order(&[b, a], &[]));
+    let st = f.state();
+    assert_eq!(st.channel_layout(), None);
+    assert_eq!(st.channel_order().0, vec![b, a]);
+}
+
+#[test]
+fn an_admins_layout_mixes_kinds_in_a_category() {
+    let mut f = Fixture::new();
+    let (a, b) = (f.text("a"), f.text("b"));
+    let v = f.voice("v");
+    let id = f.push_as(Who::Alice, layout(vec![LayoutEntry::Channel(b), cat(1, "Hangout", &[v, a])]));
+    assert_eq!(f.rejection_of(id), None);
+    assert_eq!(f.state().channel_layout(), Some(vec![LayoutEntry::Channel(b), cat(1, "Hangout", &[v, a])]));
+}
+
+#[test]
+fn the_latest_layout_wins_and_it_supersedes_a_newer_order() {
+    let mut f = Fixture::new();
+    let (a, b) = (f.text("a"), f.text("b"));
+    let early = f.next(Who::Owner, layout(vec![cat(1, "One", &[a, b])]));
+    let late = f.next(Who::Alice, layout(vec![cat(2, "Two", &[b, a])]));
+    for evs in [[early.clone(), late.clone()], [late.clone(), early.clone()]] {
+        let mut dag = f.dag.clone();
+        let mut replayer = Replayer::new(f.owner.id());
+        replayer.apply_all(&dag);
+        for ev in evs {
+            let id = ev.id;
+            dag.insert(ev).unwrap();
+            replayer.on_insert(&dag, &[id]);
+        }
+        let want = Some(vec![cat(2, "Two", &[b, a])]);
+        assert_eq!(replay_with(f.owner.id(), &dag, &[]).channel_layout(), want);
+        assert_eq!(replayer.state().channel_layout(), want, "the incremental replay agrees");
+    }
+    // A ChannelOrder after the layout, as an older admin would send, does not move anything here.
+    f.dag.insert(early).unwrap();
+    f.dag.insert(late.clone()).unwrap();
+    f.last = Some(late.id);
+    f.t += 2;
+    f.push_as(Who::Owner, order(&[a, b], &[]));
+    assert_eq!(f.state().channel_layout(), Some(vec![cat(2, "Two", &[b, a])]));
+}
+
+#[test]
+fn a_members_layout_is_rejected() {
+    let mut f = Fixture::new();
+    let a = f.text("a");
+    let id = f.push_as(Who::Bob, layout(vec![cat(1, "Mine", &[a])]));
+    assert_eq!(f.rejection_of(id), Some(Rejection::NoPermission));
+    assert_eq!(f.state().channel_layout(), None);
+}
+
+#[test]
+fn a_layout_over_a_cap_is_malformed() {
+    let mut f = Fixture::new();
+    let a = f.text("a");
+    let too_many: Vec<LayoutEntry> = (0..=MAX_CATEGORIES as u8).map(|i| cat(i, "c", &[])).collect();
+    let long = "x".repeat(MAX_CATEGORY_NAME_CHARS + 1);
+    let cases = vec![
+        too_many,
+        vec![cat(1, &long, &[])],
+        vec![cat(1, "", &[])],
+        vec![cat(1, " padded", &[])],
+        vec![cat(1, "a", &[]), cat(1, "b", &[])],
+        vec![cat(1, "lots", &vec![a; MAX_ORDERED_CHANNELS + 1])],
+    ];
+    for entries in cases {
+        let id = f.push_as(Who::Owner, layout(entries.clone()));
+        assert_eq!(f.rejection_of(id), Some(Rejection::Malformed), "{entries:?}");
+    }
+    let longest = "y".repeat(MAX_CATEGORY_NAME_CHARS);
+    let fine = f.push_as(Who::Owner, layout(vec![cat(1, &longest, &[a])]));
+    assert_eq!(f.rejection_of(fine), None, "a name at the cap is fine");
+}
+
+#[test]
+fn stale_ids_are_skipped_and_unplaced_channels_go_at_the_end_in_creation_order() {
+    let mut f = Fixture::new();
+    let (a, b, c) = (f.text("a"), f.text("b"), f.text("c"));
+    let v = f.voice("v");
+    f.push_as(Who::Owner, Payload::ChannelDelete { channel: b });
+    let unknown = ChannelId([9; 32]);
+    f.push_as(Who::Owner, layout(vec![cat(1, "Top", &[unknown, b, c]), LayoutEntry::Channel(c), cat(2, "Empty", &[])]));
+    // Made after the layout, and so left out of it.
+    let d = f.text("d");
+    let st = f.state();
+    assert_eq!(
+        st.channel_layout(),
+        Some(vec![
+            cat(1, "Top", &[c]),
+            cat(2, "Empty", &[]),
+            LayoutEntry::Channel(a),
+            LayoutEntry::Channel(v),
+            LayoutEntry::Channel(d),
+        ])
+    );
+}
+
+#[test]
+fn a_carried_layout_opens_for_members_and_is_locked_for_a_client_before_the_carrier() {
+    const SECRET: [u8; 32] = [4; 32];
+    let owner = User::new();
+    let body = EventBody {
+        community: CommunityId([0; 32]),
+        channel: ChannelId::CONTROL,
+        author: owner.id(),
+        device: owner.device.id(),
+        parents: vec![],
+        hlc: Hlc { wall_ms: 1, counter: 0 },
+        payload: layout(vec![cat(1, "Hidden name", &[ChannelId([1; 32])])]),
+    };
+    let sealed = crate::seal(&SECRET, 0, &body).unwrap();
+    let ev = Event::sign(EventBody { payload: crate::carry_sealed(&sealed).unwrap(), ..body.clone() }, &owner.device);
+    let bytes = postcard::to_allocvec(&ev).unwrap();
+    assert!(!bytes.windows(11).any(|w| w == b"Hidden name"), "the category name is sealed");
+    assert_eq!(crate::open_event(&ev, &[(0, SECRET)]).unwrap().body.payload, body.payload);
+    assert_eq!(crate::control::open(&[(0, SECRET)], &ev.body), Err(crate::OpenError::NoKey));
+}

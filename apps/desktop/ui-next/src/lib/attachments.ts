@@ -48,6 +48,11 @@ export function isImage(a: { mime?: string }): boolean {
   return typeof a.mime === 'string' && a.mime.startsWith('image/') && !a.mime.includes('svg');
 }
 
+// A video file. The engine sends its first frame as a thumbnail when it can decode it.
+export function isVideo(a: { mime?: string }): boolean {
+  return typeof a.mime === 'string' && a.mime.startsWith('video/');
+}
+
 export function iconFor(a: { mime?: string; name?: string }): FileIconName {
   const mime = String(a.mime ?? '');
   const ext = extOf(a.name);

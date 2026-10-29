@@ -63,6 +63,7 @@ pub struct ShellView {
     pub start_at_login_note: Option<&'static str>,
     pub notifications_muted: bool,
     pub emoticons_as_text: bool,
+    pub keep_photo_metadata: bool,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +74,9 @@ pub struct ShellSettingsInput {
     /// Absent from a window older than this setting, which leaves it as it was.
     #[serde(default)]
     pub emoticons_as_text: Option<bool>,
+    /// Absent from a window older than this setting, which leaves it as it was.
+    #[serde(default)]
+    pub keep_photo_metadata: Option<bool>,
 }
 
 fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
@@ -83,6 +87,7 @@ fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
         start_at_login_note: state.login_note,
         notifications_muted: settings.notifications_muted,
         emoticons_as_text: settings.emoticons_as_text,
+        keep_photo_metadata: settings.keep_photo_metadata,
     }
 }
 
@@ -109,13 +114,27 @@ fn apply(app: &AppHandle, state: &ShellState, input: ShellSettingsInput) -> Resu
         if let Some(as_text) = input.emoticons_as_text {
             s.emoticons_as_text = as_text;
         }
+        if let Some(keep) = input.keep_photo_metadata {
+            s.keep_photo_metadata = keep;
+        }
     })?;
+    apply_photo_metadata(app, saved.keep_photo_metadata);
     tray::sync_mute(app, saved.notifications_muted);
     let shown = view(state, saved);
     if let Err(e) = app.emit(EVENT, shown) {
         warn!(error = %e, "could not tell the window about the desktop settings");
     }
     Ok(shown)
+}
+
+/// Tells the engine whether photos keep their location and camera details. The engine keeps no copy of the choice, so
+/// this runs on every start and on every change.
+pub fn apply_photo_metadata(app: &AppHandle, keep: bool) {
+    let state = app.state::<crate::commands::AppState>();
+    let guard = tauri::async_runtime::block_on(state.engine.read());
+    if let Some(engine) = guard.as_ref() {
+        engine.set_keep_photo_metadata(keep);
+    }
 }
 
 /// Turns notification muting on or off from the tray. The change goes through the same path as the settings page.
@@ -130,6 +149,7 @@ pub fn set_muted(app: &AppHandle, muted: bool) -> Result<(), String> {
             start_at_login: current.start_at_login,
             notifications_muted: muted,
             emoticons_as_text: None,
+            keep_photo_metadata: None,
         },
     )
     .map(|_| ())

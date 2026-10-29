@@ -10,6 +10,7 @@ import type {
   CommunityView,
   ContactsView,
   ConversationSummary,
+  LayoutEntry,
   DeviceView,
   ShellSettings,
   EngineEvent,
@@ -142,6 +143,8 @@ export const api = {
   deleteChannel: (communityId: Id, channelId: Id) => call<void>('delete_channel', { communityId, channelId }),
   // The server's channel order, for everyone: text and voice channel ids, top first. Owners and admins only.
   reorderChannels: (communityId: Id, text: Id[], voice: Id[]) => call<void>('reorder_channels', { communityId, text, voice }),
+  // The server's whole channel layout, for everyone. A category without an id is new. Owners and admins only.
+  setChannelLayout: (communityId: Id, entries: LayoutEntry[]) => call<void>('set_channel_layout', { communityId, entries }),
   listInvites: (communityId: Id) => call<unknown>('list_invites', { communityId }),
   revokeInvite: (communityId: Id, inviteId: Id) => call<void>('revoke_invite', { communityId, inviteId }),
   // Paged reads: the `limit` messages before `beforeId` (the newest when it is null), oldest first.
@@ -351,6 +354,13 @@ export const api = {
   pinConversation: (key: string, pinned: boolean) => call<void>('pin_conversation', { key, pinned }),
   markRead: (key: string) => call<void>('mark_read', { key }),
   completeFirstRun: () => call<void>('complete_first_run'),
+  // The disclaimer: the "Last updated" date this profile accepted (null when none), saving a new one, and Quit.
+  disclaimerAccepted: () => call<string | null>('disclaimer_accepted'),
+  acceptDisclaimer: (updated: string) => call<void>('accept_disclaimer', { updated }),
+  quitApp: () => call<void>('quit_app'),
+  // The recovery phrase, copied natively out of clipboard history and cloud sync, and cleared if it is still there.
+  copySecret: (text: string) => call<void>('copy_secret', { text }),
+  clearSecret: (text: string) => call<boolean>('clear_secret', { text }),
   pinMessage: (communityId: Id, channelId: Id, messageId: Id, pinned: boolean) =>
     call<void>('pin_message', { communityId, channelId, messageId, pinned }),
   pinnedConversations: () => call<string[]>('pinned_conversations'),

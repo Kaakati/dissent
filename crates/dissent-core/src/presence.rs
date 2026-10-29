@@ -259,7 +259,14 @@ impl Engine {
             });
             let engine = self.clone();
             if after.0 != Status::Invisible {
-                self.spawn_task(async move { engine.announce_status().await });
+                let back = before.0 == Status::Invisible;
+                self.spawn_task(async move {
+                    engine.announce_status().await;
+                    // What invisible mode held back goes out now.
+                    if back {
+                        engine.come_back_visible().await;
+                    }
+                });
             } else if before.0 != Status::Invisible {
                 // Going invisible: one offline beacon, so peers drop us now, not when the window ends.
                 self.spawn_task(async move { engine.send_offline().await });
@@ -479,8 +486,11 @@ impl Engine {
         if community.is_some() {
             self.inner.member_seen.notify_waiters();
         } else {
-            // A contact's direct beacon: exchange profiles once this run. See `profile_sync`.
-            self.sync_profile_with(root, sp.cert.device);
+            // A contact's direct beacon: exchange profiles once this run. See `profile_sync`. Not while
+            // invisible, since the exchange would show we are online.
+            if !self.invisible() {
+                self.sync_profile_with(root, sp.cert.device);
+            }
         }
         if before != after {
             self.emit(EngineEvent::PresenceChanged {

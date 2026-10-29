@@ -6,6 +6,7 @@ mod common;
 
 mod addresses;
 mod attachments;
+mod blob_gate;
 mod thumbnails;
 mod avatars;
 mod boosts;
@@ -27,6 +28,7 @@ mod mutual_friends;
 mod user_address;
 mod invites;
 mod leave;
+mod link_privacy;
 mod mentions;
 mod member_sealed;
 mod private_channels;

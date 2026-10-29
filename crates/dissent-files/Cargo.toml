@@ -13,6 +13,7 @@ image.workspace = true
 futures-lite.workspace = true
 iroh.workspace = true
 iroh-blobs.workspace = true
+irpc.workspace = true
 postcard.workspace = true
 rand.workspace = true
 serde.workspace = true

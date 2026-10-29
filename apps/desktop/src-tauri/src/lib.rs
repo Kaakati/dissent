@@ -1,4 +1,6 @@
 mod commands;
+mod disclaimer;
+mod secret_clipboard;
 mod events;
 mod network;
 mod storage;
@@ -74,6 +76,7 @@ pub fn run() {
     let app = builder
         .manage(deep_link::Queue::default())
         .manage(website_handle_cmds::HandleChecks::default())
+        .manage(secret_clipboard::SecretClipboard::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
@@ -125,6 +128,7 @@ pub fn run() {
             part6::update_channel,
             part6::delete_channel,
             part6::reorder_channels,
+            part6::set_channel_layout,
             part6::list_invites,
             part6::revoke_invite,
             commands::moderate,
@@ -260,6 +264,11 @@ pub fn run() {
             commands::get_network_settings,
             shell_cmds::shell_settings,
             shell_cmds::set_shell_settings,
+            disclaimer::disclaimer_accepted,
+            disclaimer::accept_disclaimer,
+            disclaimer::quit_app,
+            secret_clipboard::copy_secret,
+            secret_clipboard::clear_secret,
             commands::safety_number,
             updates::check_update,
             updates::install_update,

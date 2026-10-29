@@ -2,6 +2,7 @@
 // the old UI's actions.js does. A failure becomes a toast and the action resolves to undefined (falsy), so a caller never
 // throws. Views that need a change to the shell go through useShell; these are the ones that talk to the engine.
 import { api } from './api';
+import { moveChannel } from './channel-layout';
 import { has } from './features';
 import { refreshProfiles } from './profiles';
 import { useShell } from './store';
@@ -57,20 +58,24 @@ export const loadInvites = (communityId: Id) => api.listInvites(communityId);
 export const createChannel = (
   communityId: Id,
   name: string,
-  { voice = false, access }: { voice?: boolean; access?: Pick<ChannelAccess, 'roles' | 'members'> } = {},
+  { voice = false, access, category }: { voice?: boolean; access?: Pick<ChannelAccess, 'roles' | 'members'>; category?: string } = {},
 ) =>
   guarded(async () => {
-    if (voice) {
-      await api.createVoiceChannel(communityId, name);
-      await shell().loadCommunity(communityId);
-      return true;
-    }
     // A private channel is made in one command, so it is never listed to everyone.
-    const channel = (access
-      ? await api.createPrivateChannel(communityId, name, access)
-      : await api.createChannel(communityId, name)) as { id: Id };
+    const channel = (voice
+      ? await api.createVoiceChannel(communityId, name)
+      : access
+        ? await api.createPrivateChannel(communityId, name, access)
+        : await api.createChannel(communityId, name)) as { id: Id };
     await shell().loadCommunity(communityId);
-    await shell().openChannel(channel.id);
+    // Made from a category's +, it goes at the end of that category.
+    const community = shell().community;
+    if (category && community?.id === communityId && community.layout) {
+      const entries = community.layout;
+      const target = entries.find((e) => e.kind === 'category' && e.id === category);
+      if (target?.kind === 'category') await shell().setLayout(moveChannel(entries, channel.id, category, target.channels.length), 'Could not place the channel');
+    }
+    if (!voice) await shell().openChannel(channel.id);
     return true;
   });
 

@@ -91,7 +91,7 @@ The `AmbientCapabilities` line appears only when the relay binds a port below 10
 
 ## Pointing a Dissent client at your relay
 
-The relay URL is the address you printed, for example `https://relay.example.org`. The Dissent engine takes it as `RelayChoice::Custom`, and that is the only way to set it today. The desktop app does not expose a relay setting yet, so it uses iroh's default relays unless it runs in loopback mode. Community records do not advertise relays yet either, so a relay helps only clients you configure to use it.
+The relay URL is the address you printed, for example `https://relay.example.org`. In the desktop app, add it under Settings › Network › "Add or turn off relays" (up to a few custom relays, alongside or instead of the public n0 relays). To offer it to a whole server, use "Host a relay for your servers" on the same page: the server then lists it, and members whose "Use relays offered by my servers" is on use it too.
 
 ## Local testing
 

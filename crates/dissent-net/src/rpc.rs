@@ -22,6 +22,8 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Answers one request. `from` is the remote device that opened the connection.
 pub trait RpcHandler: Send + Sync + 'static {
+    /// The reply to `req`. An empty reply sends nothing: the connection is closed, as when a device
+    /// goes away, so the requester cannot tell the device answered.
     fn handle(&self, from: DeviceId, req: Vec<u8>) -> Boxed<Vec<u8>>;
 }
 
@@ -41,6 +43,10 @@ impl ProtocolHandler for RpcProtocol {
         let (mut send, mut recv) = connection.accept_bi().await?;
         let req = read_frame(&mut recv, MAX_FRAME).await.map_err(AcceptError::from_err)?;
         let resp = self.0.handle(from, req).await;
+        if resp.is_empty() {
+            connection.close(0u32.into(), b"");
+            return Ok(());
+        }
         if let Err(e) = write_frame(&mut send, &resp, MAX_FRAME).await {
             // Close the whole connection so the requester fails fast instead of waiting.
             connection.close(1u32.into(), b"response rejected");

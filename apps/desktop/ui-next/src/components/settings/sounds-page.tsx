@@ -46,12 +46,13 @@ export function SoundsPage() {
               name="notification-content"
               value={value}
               checked={s.content === value}
-              onChange={() => setSoundSettings({ content: value })}
+              onChange={() => setSoundSettings({ content: value, contentChosen: true })}
               className="m-0 size-5 shrink-0 accent-accent border border-input-border bg-input"
             />
             <span>{label}</span>
           </CheckRow>
         ))}
+        <Hint>Notifications can show on the lock screen and stay in the system's notification history. Reminders follow this too.</Hint>
       </Choices>
 
       <Block title="Volume">

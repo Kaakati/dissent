@@ -179,8 +179,9 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// Shuts the engine down cleanly, then exits. The run-loop exit hook finds no engine left to stop.
-fn quit(app: &AppHandle) {
+/// Shuts the engine down cleanly, then exits. The run-loop exit hook finds no engine left to stop. The disclaimer's
+/// Quit uses it too.
+pub fn quit(app: &AppHandle) {
     let state = app.state::<AppState>();
     let engine = tauri::async_runtime::block_on(state.engine.write()).take();
     if let Some(engine) = engine {

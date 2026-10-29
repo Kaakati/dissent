@@ -28,6 +28,22 @@ export function truncate(text: string, max = BODY_MAX): string {
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('');
 }
 
+type Content = 'both' | 'sender' | 'none';
+
+// What a message notification says for the "Show in notifications" setting. Lock-screen safe below 'both': no text,
+// and with 'none' not even who.
+export function messageNotice(content: Content, who: string, text: string): { title: string; body: string } {
+  if (content === 'none') return { title: 'Dissent', body: 'New message' };
+  return { title: who, body: content === 'sender' ? 'New message' : truncate(markdownPlain(text)) };
+}
+
+// The same for a reminder: the message's text only with 'both', its author with 'sender', and just "Reminder" with 'none'.
+export function reminderNotice(content: Content, author: string, text: string): { title: string; body: string } {
+  if (content === 'none') return { title: 'Dissent', body: 'Reminder' };
+  if (content === 'sender') return { title: 'Reminder', body: `From ${author}` };
+  return { title: 'Reminder', body: `${author} — ${truncate(markdownPlain(text), 120)}` };
+}
+
 // `where` is the group name or #channel, empty for a DM.
 export async function showOsNotification({ key, sender, where, text }: { key: string; sender: string; where: string; text: string }): Promise<void> {
   if (useShellPrefs.getState().notificationsMuted) return;
@@ -35,11 +51,8 @@ export async function showOsNotification({ key, sender, where, text }: { key: st
   const now = Date.now();
   if (now - (lastShown.get(key) ?? 0) < GAP_MS) return;
   lastShown.set(key, now);
-  const { content } = useSoundSettings.getState();
   const who = where ? `${sender} · ${where}` : sender;
-  const options = content === 'none'
-    ? { title: 'Dissent', body: 'New message' }
-    : { title: who, body: content === 'sender' ? 'New message' : truncate(markdownPlain(text)) };
+  const options = messageNotice(useSoundSettings.getState().content, who, text);
   try {
     await window.__TAURI__?.core.invoke('plugin:notification|notify', { options: { ...options, extra: { conv: key } } });
   } catch {
@@ -47,11 +60,14 @@ export async function showOsNotification({ key, sender, where, text }: { key: st
   }
 }
 
-// A reminder's time came. It shows whatever the focus, since the viewer asked for it. A click arrives as `reminder:<id>`
-// (see lib/events.ts), and the reminder's message opens.
-export async function notifyReminder(id: string, title: string): Promise<void> {
+// A reminder's time came. It shows whatever the focus, since the viewer asked for it, but follows the desktop
+// notifications switch and "Show in notifications" like a message does. A click arrives as `reminder:<id>` (see
+// lib/events.ts), and the reminder's message opens.
+export async function notifyReminder(id: string, author: string, text: string): Promise<void> {
+  if (useShellPrefs.getState().notificationsMuted) return;
+  const options = reminderNotice(useSoundSettings.getState().content, author, text);
   try {
-    await window.__TAURI__?.core.invoke('plugin:notification|notify', { options: { title, body: '', extra: { conv: `reminder:${id}` } } });
+    await window.__TAURI__?.core.invoke('plugin:notification|notify', { options: { ...options, extra: { conv: `reminder:${id}` } } });
   } catch {
     // The OS may refuse. The toast still shows the reminder.
   }

@@ -1,9 +1,12 @@
 //! Typing indicators: who is typing in a channel, a DM or a group right now.
 //!
 //! A typing signal is ephemeral. It is signed by the typer's device, and it is never stored or put
-//! in the event DAG. A channel signal goes on the community topic, so only members get it. A DM or
-//! group signal goes direct to each device of the people in the conversation, as presence does. A
-//! typer drops out `typing_expiry` after their last signal, and a message from them clears them.
+//! in the event DAG. A public channel's signal goes on the community topic, so only members get it.
+//! A private channel's signal goes direct to each device of the channel's readers, so members who
+//! cannot read the channel never learn who types there; one for a private channel that arrives on
+//! the topic (an older client) or from a non-reader is ignored. A DM or group signal goes direct to
+//! each device of the people in the conversation, as presence does. A typer drops out
+//! `typing_expiry` after their last signal, and a message from them clears them.
 
 use crate::engine::{not_found, now_ms, Engine, Inner, MAX_CLOCK_SKEW_MS};
 use crate::error::{CoreError, Result};
@@ -237,7 +240,14 @@ pub(crate) fn conv_target(me: &RootId, conv: ConvId, author: RootId) -> TypingTa
     }
 }
 
-/// Devices that get a typing signal for a DM or a group: the other members', minus blocked people.
+/// Whether `channel` of `community` is private, so its typing goes direct to its readers.
+fn private_channel(w: &World, community: CommunityId, channel: ChannelId) -> bool {
+    w.communities.get(&community).is_some_and(|c| c.state().is_private(channel))
+}
+
+/// Devices that get a typing signal sent direct: the other members' of a DM or group, or the other
+/// readers' of a private channel, minus blocked people. A public channel's signal goes on the topic,
+/// so it has none.
 fn typing_devices(w: &World, target: TypingTarget) -> Vec<DeviceId> {
     let roots: Vec<RootId> = match target {
         TypingTarget::Dm(peer) => vec![peer],
@@ -247,7 +257,21 @@ fn typing_devices(w: &World, target: TypingTarget) -> Vec<DeviceId> {
             .get(&conv)
             .map(|m| m.members.clone())
             .unwrap_or_default(),
-        TypingTarget::Channel { .. } => return Vec::new(),
+        TypingTarget::Channel { community, channel } => {
+            let Some(c) = w.communities.get(&community) else {
+                return Vec::new();
+            };
+            let state = c.state();
+            if !state.is_private(channel) {
+                return Vec::new();
+            }
+            state
+                .members
+                .iter()
+                .filter(|(root, m)| !m.left && state.can_read(channel, **root))
+                .map(|(root, _)| *root)
+                .collect()
+        }
     };
     let mut devices: BTreeSet<DeviceId> = BTreeSet::new();
     for root in roots {
@@ -261,12 +285,33 @@ fn typing_devices(w: &World, target: TypingTarget) -> Vec<DeviceId> {
 }
 
 /// Checks that `root` may type in `scope` as it arrived: on `via`'s topic, or directly. Returns the
-/// target it names.
+/// target it names. A public channel's signal must come on its topic, and a private channel's direct,
+/// from a reader to a reader.
 fn authorize(w: &World, via: Option<CommunityId>, root: RootId, scope: Scope) -> Result<TypingTarget> {
     match (scope, via) {
         (Scope::Channel { community, channel }, Some(topic)) if community == topic => {
             if !w.communities.get(&community).is_some_and(|c| c.is_member(&root)) {
                 return Err(CoreError::Invalid("typer is not a member of this community".into()));
+            }
+            if private_channel(w, community, channel) {
+                return Err(CoreError::Invalid("typing for a private channel arrives direct, not on the topic".into()));
+            }
+            Ok(TypingTarget::Channel { community, channel })
+        }
+        (Scope::Channel { community, channel }, None) => {
+            let c = w
+                .communities
+                .get(&community)
+                .ok_or_else(|| CoreError::Invalid("typing for a community we are not in".into()))?;
+            let state = c.state();
+            if !state.is_private(channel) {
+                return Err(CoreError::Invalid("typing for a public channel arrives on the topic".into()));
+            }
+            if !c.is_member(&root) || !state.can_read(channel, root) {
+                return Err(CoreError::Invalid("typer cannot read this private channel".into()));
+            }
+            if !state.can_read(channel, w.me) {
+                return Err(CoreError::Invalid("typing for a private channel we cannot read".into()));
             }
             Ok(TypingTarget::Channel { community, channel })
         }
@@ -399,6 +444,9 @@ impl Engine {
                 if !c.is_member(&me) {
                     return Err(CoreError::Invalid("not a member of this community".into()));
                 }
+                if !c.state().can_read(channel, me) {
+                    return Err(CoreError::Invalid("cannot read this channel".into()));
+                }
                 Ok(Scope::Channel { community, channel })
             }
             TypingTarget::Dm(peer) => {
@@ -417,10 +465,15 @@ impl Engine {
         }
     }
 
-    /// Sends a signal on the community topic for a channel, or to each device for a DM or group.
+    /// Sends a signal on the community topic for a public channel, or to each device for a private
+    /// channel, a DM or a group.
     async fn send_typing(&self, target: TypingTarget, st: SignedTyping) {
+        let on_topic = match target {
+            TypingTarget::Channel { community, channel } => !private_channel(&self.read(), community, channel),
+            TypingTarget::Dm(_) | TypingTarget::Group(_) => false,
+        };
         match target {
-            TypingTarget::Channel { community, .. } => {
+            TypingTarget::Channel { community, .. } if on_topic => {
                 let sender = self
                     .read()
                     .communities
@@ -438,7 +491,7 @@ impl Engine {
                     Err(e) => debug!(error = %e, "could not encode typing"),
                 }
             }
-            TypingTarget::Dm(_) | TypingTarget::Group(_) => {
+            TypingTarget::Channel { .. } | TypingTarget::Dm(_) | TypingTarget::Group(_) => {
                 let devices = typing_devices(&self.read(), target);
                 let bytes = match self.request_bytes(&Request::Typing(Box::new(st))) {
                     Ok(bytes) => bytes,

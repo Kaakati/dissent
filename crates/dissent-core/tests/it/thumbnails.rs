@@ -104,3 +104,47 @@ async fn a_stale_thumbnail_is_removed_at_restart_and_a_live_one_stays() {
 
     finish(vec![alice, bob]).await;
 }
+
+/// A fixture video from `dissent-video`, copied into `dir` as `name`.
+fn a_video(dir: &std::path::Path, fixture: &str, name: &str) -> std::path::PathBuf {
+    let from = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dissent-video/tests/fixtures").join(fixture);
+    let to = dir.join(name);
+    std::fs::copy(&from, &to).expect("copy the video");
+    to
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_video_gets_its_first_frame_as_a_thumbnail_and_vp9_goes_without_one() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let alice_root = alice.identity.root_id();
+    let bob_root = bob.identity.root_id();
+
+    let dir = scratch("video-thumbs");
+    let mp4 = a_video(&dir, "h264.mp4", "clip.mp4");
+    let sent = alice
+        .engine
+        .send_dm_files(bob_root, vec![mp4], "a clip".into())
+        .await
+        .expect("alice sends the video");
+    assert_eq!(sent.attachments[0].mime, "video/mp4");
+    assert_eq!(sent.attachments[0].thumb.as_ref().map(|t| (t.width, t.height)), Some((160, 90)));
+    let thumb_path = thumbnail_of(&bob, alice_root, &sent.id).await;
+    let decoded = image::open(&thumb_path).expect("the thumbnail decodes").to_rgb8();
+    assert_eq!(decoded.dimensions(), (160, 90));
+    let top = decoded.get_pixel(80, 20).0;
+    assert!(top[2] > 200 && top[0] < 60, "the first frame is blue over red, got {top:?} at the top");
+
+    // A codec with no decoder here: the file is sent as it is, with no thumbnail.
+    let webm = a_video(&dir, "vp9.webm", "other.webm");
+    let plain = alice
+        .engine
+        .send_dm_files(bob_root, vec![webm], String::new())
+        .await
+        .expect("a VP9 video still sends");
+    assert_eq!(plain.attachments.len(), 1);
+    assert!(plain.attachments[0].thumb.is_none(), "no thumbnail for VP9");
+
+    finish(vec![alice, bob]).await;
+}

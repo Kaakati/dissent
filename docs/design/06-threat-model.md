@@ -24,7 +24,8 @@ middle can read or alter Dissent traffic. Findings marked **open** are being fix
 | Direct messages | Sent only device to device over the authenticated QUIC connection, never stored by third parties. Signed by the sender and bound to the recipient. |
 | Links from outside the app | A `dissent://` link (from a browser, chat or file) only chooses a confirm dialog. Joining a server, adding a contact and approving a device need the person's press in that dialog, and a link never does them on its own. Links over 4 KB and with control characters are dropped. A device link fills the code box and approves nothing. |
 | Community relays | Set by owners and admins in a signed control event. Carried in invites and the DHT record, and dialled only over https with publicly trusted certificates. At most 4 per community and 30 per device, shared with the relays the device adds. |
-| Presence privacy | Online status comes only from signed beacons, sent every 30 s to community members and direct contacts, never from traffic. Invisible sends none, but a peer may still show the last beacon for up to 60 s after you go invisible. Status is per device, not per account. |
+| Presence privacy | Online status is shown from signed beacons, sent every 30 s to community members and direct contacts. Invisible sends none, and going invisible sends one offline beacon so peers drop you at once. Invisible also holds back the other signs of being online (see "Invisible mode"). Status is per device, not per account. |
+| Typing privacy | Typing signals are signed by the device, kept in memory only and never stored. A public channel's go on the community topic, to members. A private channel's go direct to its readers' devices, and a receiver drops one that came on the topic or from a non-reader. A DM's or group's go direct to its members. Invisible sends none. |
 | Address lookup | A user record is signed by the root key that is the address, and every device cert in it is verified against that root. A forged record, a cert from another root, or a packet signed by anyone else is refused. |
 
 ## Address discovery: what publishing reveals
@@ -91,6 +92,19 @@ What the design does not change: direct IP addresses already reach community mem
 through the existing signed-address announcements, which predate peer exchange. Peer exchange keeps
 that audience. It adds the rule that a third device's record goes only to its co-members.
 
+Two holes in that audience are closed (`request_gates.rs`, `announce.rs`):
+
+- **Joining hands out no addresses.** `Genesis` and `Reconcile` answer with members' signed addresses
+  only when the requester is a current, unbanned member. Before, anyone holding the community secret
+  (a leaked or revoked invite link, a departed member within the grace period) got up to 64 members'
+  addresses with their direct IPs, without ever publishing a `Join`. A joiner now gets the genesis
+  and the events it needs, and fetches the addresses again once its `Join` is in. It then pushes its
+  `Join` to every member it can reach.
+- **Old DM peers stop getting our address.** Address announcements went to every root that ever sent
+  an accepted legacy direct message, for ever. They now go only to peers still in scope: a contact,
+  or a member of a community we are in.
+
+
 ### Local network discovery (opt-in, off by default)
 
 With "Find people on the same network" on, a device sends a multicast beacon on UDP port 47320.
@@ -134,6 +148,66 @@ holds no records. A relay that also acted as a lookup point would need the same 
 design, and it is not built.
 
 
+## Invisible mode: what still shows that you are online
+
+Invisible is meant to look like being offline. While it is on (`invisible.rs`):
+
+- **No beacons, no typing.** One offline beacon goes out when you turn it on.
+- **Receipts are held.** A message that reaches you is stored and shown, but its delivery receipt waits
+  until you are visible again, so the sender does not see it delivered at once. Held receipts are kept
+  in memory: a restart drops them, and those messages simply never show as delivered to the sender.
+- **No profile sync** with a contact whose beacon arrives.
+- **No address announcements.** A new address is signed and kept, but not announced on community
+  topics, not sent to contacts and not pushed as a peer-exchange record. The user record is not
+  republished. All of it goes out when you are visible again.
+- **No answers to others.** A request from a device yours has not dialled in the last 10 minutes
+  gets no reply: the connection is closed, as when a device goes away. Your own other devices are
+  always answered. A device you contacted recently is answered too, since it already saw you online:
+  the members of a call you joined, the peer of a sync you started, the recipient of a message you
+  sent. A request that is not answered is retried by its sender as for an offline device: a direct
+  message goes to your inbox, which your device collects as usual.
+
+What still shows you are online, by design or because the app cannot hide it:
+
+- **What you send.** A message you send, a reaction, a call you join, a server you open: whoever
+  receives it knows you were online when you sent it. Requests your device makes also reach their
+  recipients, which is why those devices are then answered.
+- **Gossip.** Your device stays on its communities' gossip topics, so its gossip neighbours keep a live
+  connection to it, and community messages keep arriving.
+- **The network.** A device that dials yours by id still completes a connection with it, and so learns
+  it is reachable and its address (`P-05` in the privacy audit), even though no request is answered.
+- **Community records.** A server's DHT record is republished by its members as before.
+
+## Who learns what from a device's answers
+
+A device answers requests from any device that dials it. These rules keep the answer from telling a
+stranger more than the request already did (`request_gates.rs`):
+
+- **One refusal.** A stranger asking about a community gets the same refusal, `access denied`,
+  whether this device is in that community or not, and whether the token was wrong or missing. The
+  relay check and peer exchange refuse the same way for an unknown device and one out of scope. A
+  call refuses a join, a tier message or a forwarder offer from someone out of scope with the same
+  `not in this call` a device not in that call sends, and keeps no address for them.
+- **Key packages.** A key package carries the device's certificate, so it ties a device id to its
+  person. `KeyPackages` (for the member that adds a joiner to a community's group) is answered only to
+  a current, unbanned member of that community. `DmKeyPackage` is answered only to a device whose
+  person this device already knows from a certificate it was shown (a contact, a co-member, someone
+  who asked to be a contact or to join a group), and who is not blocked. That person knows whose
+  device this is already; whether they may then message this person is still the DM policy's call
+  when the message arrives. A stranger who only knows a device id gets nothing. Under the `Everyone`
+  policy a device this one does not know may ask too, since anyone may then message this person. Each
+  requester gets at most 12 an hour, so a pool cannot be drained.
+  An inbox's `TakeKeyPackage` already names the person it asks for, and the inbox does not know whom
+  its owner accepts, so it serves anyone, within the same per-requester limit and 60 an hour in all.
+- **Version probes.** `DmDevicesSupport`, `HistorySupport` and `RotationSupport` are answered only to
+  a device in scope (a contact, or a member of a community we are in). A stranger gets the refusal,
+  which reads like an old client, so it cannot tell the version.
+- **Relay checks** are counted against the requester's limit before the "busy in a call" answer, so
+  asking again and again cannot track this device's calls.
+
+What a stranger can still learn: that the device is online, since it answers at all, and its address,
+since it dialled it (`P-05` in the privacy audit).
+
 ## Invite links and previews: what they reveal
 
 A short invite, `dissent://invite/<dss1 address>.<secret>.<generation>[.<invite id>]`, carries the
@@ -167,6 +241,28 @@ Who learns what:
 The online count comes from presence beacons. It is a count, not a list, is shown to invite holders
 only, and can be stale by up to the presence window.
 
+**Addresses in links that leave the members (privacy audit P-03).** A long invite, a contact link (the
+form used when adding by address is off), the card in a contact request or accept, a contact link
+re-shared from someone's card, a group invite and a group join request all go to people who may share
+no server with the sender, and can be forwarded or posted in public. Each one carries the device id,
+the relay URL and the device's public addresses only (`communities::shareable_addr`). LAN (RFC 1918),
+VPN and carrier-grade NAT (100.64/10), link-local, IPv6 unique-local, loopback and other local
+addresses are left out, so a posted link does not map the sender's network. A public address does
+still go in, so whoever holds the link learns the sender's public IP, as they would by dialling the
+relay-reachable device. Direct local addresses reach co-members only through the signed-address
+announcements and peer exchange above. A node that runs on loopback alone (tests and local
+multi-instance checks) keeps its loopback addresses, its only ones. Links from older versions still
+parse and join with whatever they carry.
+
+**Invite cards in chat (privacy audit P-04).** A preview dials the devices and relay that an invite
+names, and anyone can mint a long invite naming their own. So an invite link in a message shows a
+neutral card, "Invite to a server", and nothing is fetched or dialled until the viewer clicks Show
+preview. A preview already shown in this session shows again without a click. A preview dials only
+the public reachability of a long invite's peers, never a local address the invite names, so a forged
+invite cannot make a viewer probe a local network. Joining still uses every address the invite
+carries. Opening a `dissent://invite/` link from outside the app shows its preview at once, since
+opening it is the click.
+
 A server's **name, banner, description and traits** (Server Settings) reveal no more than the
 genesis name and icon already do, and they reach the same people. They are sealed control events, so
 DHT nodes and outsiders see none of them. Members see all of them. Storage members see the rename,
@@ -186,6 +282,35 @@ outsiders see neither the banner nor that it changed. A picture banner is fetche
 devices, so they learn who fetched it, as for an avatar. Only the person's own devices can set it,
 since replay keys it by author and the direct form is device-signed.
 
+## Photo and video metadata: what a sent file carries
+
+Audit finding P-28. A photo went out with its EXIF block, the GPS position where it was taken included, and a phone
+video with its recorded location, so anyone who could read the message could learn where it was taken and with what
+camera.
+
+**Now removed by default.** Before a file is encrypted, Dissent removes its location and camera details into a copy
+in the data folder's `staging` folder, sends the copy, and deletes it (`dissent-core/src/photo_metadata.rs`, called
+from `add_files`). The file on disk is never changed, and the sender's own message shows it. Every change is
+lossless, and no pixel or sample is re-encoded:
+
+- **JPEG:** the Exif (GPS, camera, times), XMP, IPTC, MPF and comment segments go, along with any other
+  application segment except JFIF, an ICC colour profile and Adobe's colour transform. A rotation the Exif block
+  asked for stays, in a new Exif block that holds the Orientation tag alone.
+- **PNG:** the text chunks, `eXIf` and `tIME` go.
+- **WebP:** the `EXIF` and `XMP ` chunks go, and their flags in `VP8X` are cleared.
+- **MP4 and MOV:** the `©xyz` location, `©mak` and `©mod`, and Apple's `com.apple.quicktime` location, make and model
+  keys are overwritten in place as `free` boxes of the same size, so no offset in the file moves. The copy is a full
+  copy of the video with those bytes changed, so a large video needs its size again free on disk while it is sent.
+
+It applies to every way a file is attached: the picker, drag and drop, and paste. Settings › Contacts & privacy ›
+"Remove location and camera details from photos" turns it off; the choice is kept in the desktop app's `shell.json`
+and is on unless the user turns it off. A copy that cannot be made fails the send, rather than sending the details.
+
+**Still carried.** HEIC, AVIF, TIFF and GIF files, and Matroska and WebM videos, are sent as they are. So is a
+picture over 64 MB, which is not read whole. An MP4's other metadata (creation and modification times in `mvhd`,
+the encoder name, a title) stays, and so does an XMP packet in a `uuid` box. The file name is sent as it is, and the
+exact size stays visible to anyone who can read the message.
+
 ## Image thumbnails: what a preview reveals
 
 A sender may attach a thumbnail to an image: a JPEG of at most 320 pixels on its long side, under
@@ -196,6 +321,11 @@ see, and the size tells roughly how detailed the picture is. A recipient fetches
 from the sender's devices, so the sender's devices learn that the recipient opened the message, as
 they already do for a file that is fetched. Seeders hold the ciphertext of the main file only, and
 do not mirror thumbnails. The sealed text, not the blob, is what the keys protect.
+
+A video gets the same kind of thumbnail, made from its first decoded frame: the same caps, the same blob and the
+same sealed reference. The frame is decoded and re-encoded as a JPEG, so the video's container metadata (creation
+time, device, location) is not carried. Anyone who can read the message sees that frame without downloading the
+video, as they see a picture's preview. A sender who does not want the opening frame shown has no switch yet.
 
 ## Mentions: what a mention reveals
 
@@ -414,6 +544,60 @@ connection needs a valid TLS certificate for the name. A rebound address on the 
 handshake, so all such a check can learn is that a TCP connection was attempted. A member that is in a call
 refuses, so a check never causes an audio gap.
 
+## Typing in private channels: who learns who types
+
+Audit finding P-14. Channel typing went on the community topic, so every member, storage members included, learned
+who was typing in a private channel and when, even without being able to read it.
+
+**Now readers only.** A private channel's typing signal goes direct to each device of the channel's readers, the same
+way DM and group typing does (`dissent-core/src/typing.rs`). A receiver accepts it only when it came direct, the typer
+is a member who can read the channel, and so can the receiver. One that arrives on the topic is dropped. A device that
+cannot read the channel refuses to send one. Who may read comes from the receiver's own replay of the channel's
+latest access change, not from the signal.
+
+**Still visible.** Readers see who types, as in any channel. The direct connection itself shows that two devices are
+talking, as any direct message does. An older client still broadcasts its private-channel typing on the topic.
+Upgraded receivers ignore it, but non-readers on older clients still show it.
+
+## Blob fetch: who gets a file's ciphertext
+
+Audit finding P-13. A blob is a file's ciphertext under its BLAKE3 hash. The blob server used to serve any device
+that named a hash, and nothing ever unpinned what a device shared or mirrored, so a deleted message's file stayed
+fetchable for as long as a device that held it ran.
+
+**Now members only.** Each device's blob server checks every connection and every `get`, `get_many` and `observe`
+against the scopes the blob belongs to (`dissent-core/src/blob_gate.rs`, and `08-files.md`, "Who may fetch a
+blob"). A public channel's blobs go to the server's members, a private channel's to its readers, a conversation's
+to its members. The check runs per request, so a ban takes effect on an open connection. A device we hold no
+certificate for is refused, and asked for its signed record so its retry can pass. The record proves only which
+root the device belongs to; membership comes from our own state.
+
+**Unpinned once nothing refers to it.** A deleted message's blobs are unpinned on the sender, on every member, and
+on seeders that mirrored them, unless another live message, manifest or picture still names them. So are the blobs
+of a left server or group, and the pictures of a removed contact we share nothing else with. A sweep at start
+catches what changed while the device was off (`dissent-core/src/blob_release.rs`). The store's garbage collection
+then removes the bytes on its next hourly run.
+
+**What remains:**
+- *Public server art.* A server's icon and banner (still, animated and poster) are served to anyone, because invite
+  cards show them before the reader joins. Their keys travel in the invite link and in control events. A stranger
+  who learns such a hash gets ciphertext only, but can tell the blob exists and its size.
+- *Shared pictures.* People's avatars and profile banners are served to contacts and to anyone who shares a server
+  or a conversation with us, so a member of one of our servers can fetch the avatar we use in another, if it
+  learns the hash. Each picture's key travels with the event or the signed profile that names it, so the blob alone
+  shows nothing.
+- *Ciphertext size and holders.* Every member who may fetch a blob learns its size (the plaintext to within one
+  64 KiB chunk), and the providers it asked learn who fetched it and when. A seeder sees the hash, size and fetchers
+  of what it mirrors, as before.
+- *Deleted files are gone only where the delete arrived.* Unpinning follows the `Delete` each device receives. A
+  device that is offline keeps the blob until its next start, a device that copied the plaintext keeps the
+  plaintext, and a hint a seeder accepted is never released, because a hint names no message. A device that runs an
+  older version still serves and keeps everything it pinned. Bytes stay on disk until the next garbage collection,
+  within an hour.
+- *Fresh uploads at start.* The start-up sweep keeps any file this device shared in the last day, so a message still
+  on its way out keeps its file. A message deleted in that window has its file unpinned by the delete itself, or by
+  the sweep a day later.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
@@ -507,10 +691,18 @@ refuses, so a check never causes an audio gap.
    bytes, and any other file that doesn't open is refused and left as it is. A wrong key refuses to start the engine
    rather than overwrite the state. A portable copy re-seals all of these under its own passphrase, so the USB copy
    doesn't depend on this machine's keychain. Malware running as the user is out of scope.
+8. **Fixed, with what remains documented: blob fetch and retention (P-13).** Blobs are served to members only, per
+   scope and per request, and a deleted message's blobs are unpinned wherever the delete arrives. What remains is
+   listed in "Blob fetch: who gets a file's ciphertext": public server art, shared pictures, ciphertext sizes visible
+   to members, and devices the delete has not reached.
 
 ## How the fixes are verified
 
 Each fix lands with an adversarial test:
+- A device outside a blob's scope, a banned member and a non-reader of a private channel are refused the blob; a
+  fresh joiner is served on its retry (`tests/it/blob_gate.rs`).
+- A deleted message's file is unpinned on the sender and on a seeder that mirrored it, and a live message's file
+  stays pinned (`tests/it/attachments.rs`).
 - A malicious member commits an outsider's device, and every honest peer rejects it.
 - A welcome into a group with a non-member is refused.
 - A peer without the invite secret can't sync or read control events.

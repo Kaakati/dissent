@@ -541,7 +541,6 @@ fn elect_forwarder(sids: &[u64], participants: usize, capacities: &BTreeMap<u64,
 struct Peer {
     device: DeviceId,
     root: RootId,
-    direct: bool,
     muted: bool,
     last_frame: Option<Instant>,
     last_arrival: Option<Instant>,
@@ -616,6 +615,9 @@ pub(crate) struct Room {
     sending: AtomicBool,
     /// Media links this room has established. Counts links, not presence entries.
     links: AtomicUsize,
+    /// The media link to each device this room has one with, read live for the path a participant
+    /// shows. A path can change after the link opens, as a relayed start goes direct.
+    media_links: Mutex<BTreeMap<DeviceId, MediaLink>>,
     /// True once this room has a presence clock, so that it has only one.
     clocked: AtomicBool,
     /// This device's camera while it is on. Dropping it stops the capture thread.
@@ -978,6 +980,7 @@ impl Room {
             layered: Mutex::new(std::collections::BTreeSet::new()),
             sending: AtomicBool::new(true),
             links: AtomicUsize::new(0),
+            media_links: Mutex::new(BTreeMap::new()),
             clocked: AtomicBool::new(false),
             camera: Mutex::new(None),
             screen: Mutex::new(None),
@@ -986,13 +989,37 @@ impl Room {
         }
     }
 
-    fn add_peer(&self, sid: u64, device: DeviceId, root: RootId, direct: bool) {
+    /// Keeps `link` as this room's link to `device`, replacing an older one.
+    fn note_link(&self, device: DeviceId, link: &MediaLink) {
+        lock(&self.media_links).insert(device, link.clone());
+    }
+
+    /// The device this device links to for media in a forwarded call: its forwarder, or its parent in
+    /// a cascade. `None` for a mesh, or on the root forwarder itself.
+    fn forwarder_device(&self) -> Option<DeviceId> {
+        let forwarding = self.forwarding.as_ref()?;
+        (forwarding.forwarder != self.my_sid).then(|| self.signal_device(forwarding.forwarder))?
+    }
+
+    /// The path a participant's media takes to this device, read from the live link now: their own
+    /// link if this room has one, else the link to `forwarder` (see `forwarder_device`), which
+    /// carries their media in a forwarded call. With neither, nothing reaches this device straight
+    /// from them, so it is relayed.
+    fn path_of(&self, device: &DeviceId, forwarder: Option<&DeviceId>) -> PathView {
+        let links = lock(&self.media_links);
+        let via = links.get(device).or_else(|| links.get(forwarder?));
+        match via {
+            Some(link) if path_is_direct(link) => PathView::Direct,
+            _ => PathView::Relayed,
+        }
+    }
+
+    fn add_peer(&self, sid: u64, device: DeviceId, root: RootId) {
         lock(&self.peers).insert(
             sid,
             Peer {
                 device,
                 root,
-                direct,
                 muted: false,
                 last_frame: None,
                 last_arrival: None,
@@ -1493,7 +1520,7 @@ impl Engine {
             .sid_of(&device)
             .ok_or_else(|| call_err("this device is not a parent in this call"))?;
         let link = self.node().open_media(device).await?;
-        let direct = path_is_direct(&link);
+        room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
             let mut sfu = forwarding.sfu.lock().await;
@@ -1524,7 +1551,7 @@ impl Engine {
                         relay.apply_upstream(root, answer).map_err(call_err)?;
                     }
                 }
-                room.add_peer(root, device, self.root_of_device(&device), direct);
+                room.add_peer(root, device, self.root_of_device(&device));
                 room.links.fetch_add(1, Ordering::SeqCst);
                 self.emit(EngineEvent::CallUpdated);
                 Ok(())
@@ -1582,7 +1609,7 @@ impl Engine {
             self.tell_relay_leaf(&room, device).await?;
         }
         let link = self.node().open_media(device).await?;
-        let direct = path_is_direct(&link);
+        room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
             let mut leaf = forwarding.leaf.lock().await;
@@ -1615,7 +1642,7 @@ impl Engine {
                 }
                 // A volunteer forwarder is not in the call, so it is not listed as a participant.
                 if forwarding.volunteer.is_none() {
-                    room.add_peer(sid, device, self.root_of_device(&device), direct);
+                    room.add_peer(sid, device, self.root_of_device(&device));
                 }
                 room.links.fetch_add(1, Ordering::SeqCst);
                 self.emit(EngineEvent::CallUpdated);
@@ -1919,7 +1946,7 @@ impl Engine {
                     }
                     // A forwarded call shows everyone who is in it, even without a direct link.
                     if let (Some(_), Some(sid)) = (&room.forwarding, room.sid_of(device)) {
-                        room.add_peer(sid, *device, cert.root, true);
+                        room.add_peer(sid, *device, cert.root);
                     }
                     if room.offers_to(device) {
                         if let Err(e) = self.connect(room.clone(), *device).await {
@@ -1946,7 +1973,7 @@ impl Engine {
             .sid_of(&device)
             .ok_or_else(|| call_err("device is not in this call"))?;
         let link = self.node().open_media(device).await?;
-        let direct = path_is_direct(&link);
+        room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
             let mut mesh = room.mesh.lock().await;
@@ -1966,7 +1993,7 @@ impl Engine {
             CallReply::Answer(bytes) => {
                 let answer = Signal::from_bytes(&bytes).map_err(call_err)?;
                 room.mesh.lock().await.apply(sid, answer).map_err(call_err)?;
-                room.add_peer(sid, device, self.root_of_device(&device), direct);
+                room.add_peer(sid, device, self.root_of_device(&device));
                 room.links.fetch_add(1, Ordering::SeqCst);
                 if matches!(room.scope, Scope::Dm) {
                     self.cancel_other_targets(&room, device);
@@ -2416,10 +2443,13 @@ impl Engine {
         if cert.device != from || cert.verify().is_err() {
             return CallReply::Refused("certificate does not match the sender".into());
         }
-        self.learn_peer(from, addr);
+        // Someone who may not join hears what anyone hears for a call this device is not in, and
+        // this device keeps nothing of theirs, not even the address.
         if let Err(why) = self.may_join(&scope, cert.root) {
-            return CallReply::Refused(why);
+            debug!(device = %from, why, "call join refused");
+            return CallReply::Refused("not in this call".into());
         }
+        self.learn_peer(from, addr);
         let existing = self.room_for(&id, None);
         match existing {
             Some(room) if room.id == id => {
@@ -2460,7 +2490,7 @@ impl Engine {
         self.share_call(room);
         if room.forwarding.is_some() {
             if let Some(sid) = room.sid_of(&from) {
-                room.add_peer(sid, from, root, true);
+                room.add_peer(sid, from, root);
             }
         }
         if room.offers_to(&from) {
@@ -2666,7 +2696,7 @@ impl Engine {
         };
         let outcome: Result<Vec<u8>> = async {
             let link = self.wait_incoming(from).await?;
-            let direct = path_is_direct(&link);
+            room.note_link(from, &link);
             let offer = Signal::from_bytes(&signal).map_err(call_err)?;
             let sid = room
                 .sid_of(&from)
@@ -2691,7 +2721,7 @@ impl Engine {
                     mesh.accept(sid, transport, offer).await.map_err(call_err)?
                 }
             };
-            room.add_peer(sid, from, self.root_of_device(&from), direct);
+            room.add_peer(sid, from, self.root_of_device(&from));
             room.links.fetch_add(1, Ordering::SeqCst);
             if matches!(room.scope, Scope::Dm) {
                 self.cancel_other_targets(&room, from);
@@ -2927,6 +2957,8 @@ impl Engine {
 
     pub fn call_state(&self) -> Option<CallView> {
         let room = lock(&self.inner.calls.current).clone()?;
+        // Read before the peer lock, so `live` is never taken under it.
+        let forwarder = room.forwarder_device();
         let reported = self.self_reported_deafen();
         let quality = lock(&room.quality);
         let now = Instant::now();
@@ -2944,11 +2976,7 @@ impl Engine {
                     && p.last_frame
                         .is_some_and(|t| now.duration_since(t) < SPEAKING_WINDOW),
                 forwarder: room.forwarding.as_ref().is_some_and(|f| f.forwarder == *sid || f.children.contains(sid)),
-                path: if p.direct {
-                    PathView::Direct
-                } else {
-                    PathView::Relayed
-                },
+                path: room.path_of(&p.device, forwarder.as_ref()),
             })
             .collect();
         // Two devices in all make a direct link. Three or more make a mesh.
@@ -3512,7 +3540,7 @@ impl Engine {
         *lock(&room.live) = live.clone();
         // Everyone live is listed as a participant now, linked or not.
         for (sid, device) in live.iter().filter(|(sid, _)| **sid != my_sid) {
-            room.add_peer(*sid, *device, self.root_of_device(device), true);
+            room.add_peer(*sid, *device, self.root_of_device(device));
         }
         lock(&room.leaves).extend(indexed.iter().map(|(s, d, _)| (*d, *s)));
         lock(&room.leaves).extend(self.volunteer_leaves(old));
@@ -3642,11 +3670,12 @@ pub(crate) fn tier_change_applies(
     current: Tier,
     current_forwarder: Option<u64>,
 ) -> std::result::Result<Tier, &'static str> {
+    // A device outside the call hears the same as for a call this device is not in.
+    if !live.values().any(|device| device == from) {
+        return Err("not in this call");
+    }
     if msg.verify(from).is_err() {
         return Err("bad tier signature");
-    }
-    if !live.values().any(|device| device == from) {
-        return Err("the sender is not in this call");
     }
     let sids: Vec<u64> = live.keys().copied().collect();
     if roster_hash(&sids) != msg.roster {
@@ -3708,7 +3737,7 @@ mod tier_change_tests {
         let forged = TierMsg::sign(&outsider, [1u8; 32], Tier::Forwarded, None, roster_hash(&sids));
         assert_eq!(
             tier_change_applies(&forged, &outsider.id(), &live, Tier::Mesh, None),
-            Err("the sender is not in this call")
+            Err("not in this call")
         );
     }
 }
@@ -3833,7 +3862,7 @@ impl Engine {
             return CallReply::Refused("bad capacity signature".into());
         }
         if !lock(&room.live).values().any(|d| *d == from) {
-            return CallReply::Refused("the sender is not in this call".into());
+            return CallReply::Refused("not in this call".into());
         }
         lock(&room.capacities).insert(sender_id_of(&room, &from), (kbps, Instant::now()));
         CallReply::Ack
@@ -4338,7 +4367,7 @@ impl Engine {
             return CallReply::Refused("not in this call".into());
         };
         if !lock(&room.live).values().any(|d| *d == from) {
-            return CallReply::Refused("the sender is not in this call".into());
+            return CallReply::Refused("not in this call".into());
         }
         lock(&room.features).insert(sender_id_of(&room, &from), (bits, Instant::now()));
         CallReply::Ack

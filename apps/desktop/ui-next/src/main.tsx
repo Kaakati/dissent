@@ -10,6 +10,7 @@ import { api } from './lib/api';
 import { applyAppearance } from './lib/appearance';
 import { setCapabilities } from './lib/features';
 import { startShellEvents } from './lib/events';
+import { requireDisclaimer } from './lib/disclaimer';
 import { loadMockBackend } from './lib/mock';
 import { useShell, type SettingsSection } from './lib/store';
 import { toast } from './lib/toasts';
@@ -45,6 +46,9 @@ async function start(): Promise<void> {
   startShellEvents();
   const shell = useShell.getState();
   try {
+    // The disclaimer comes first: at first launch, and again once after the notice changes. The window behind it stays
+    // empty, and onboarding waits for it.
+    await requireDisclaimer();
     await shell.boot();
     await shell.loadStatus();
     shell.startFirstRun();

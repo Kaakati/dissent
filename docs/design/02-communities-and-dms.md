@@ -126,6 +126,65 @@ its own kind.
   applies at once. If publishing fails, it goes back and a toast says so. People who can't manage channels get no
   drag, no keys and no menu items. A muted channel hidden by Hide Muted Channels keeps its place among the others.
 
+## Channel categories
+
+Owners and admins group channels into categories and arrange them as they like. A category can hold text and
+voice channels together, and channels can also sit outside any category. This builds on the channel order above.
+
+- **Payload.** `Payload::ChannelLayout { entries: Vec<LayoutEntry> }`, appended after `HistorySupport`, holds the
+  whole layout, top first. `LayoutEntry` is `Channel(ChannelId)` (outside any category) or `Category(LayoutCategory
+  { id: [u8; 16], name, collapsed, channels })`, where `channels` is top first and may mix kinds. `collapsed` is how
+  the category starts for someone who never opened or closed it. The latest layout by HLC wins, and it replaces
+  the one before it as a whole. `LayoutEntry` is a new enum, so its variant order is pinned in the wire-order test.
+- **Category ids.** A category id is 16 random bytes, made by the engine the first time the category is placed.
+  The layout is one event that replaces the last, so there is no event that "creates" a category whose id could
+  be borrowed. A random id stays the same across layouts, so a rename or a move keeps the category, and each
+  person's open or closed state follows it. Collisions are negligible at 128 bits, and a layout with two
+  categories of the same id is rejected anyway.
+- **Rules** (`check`). The event must be on the control channel, from someone `CommunityState::may_manage_channels`
+  allows: the owner and admins today. That function is the hook for a custom role with a "manage channels"
+  permission later. `state::valid_layout` caps it at 50 categories with distinct ids, each named with a trimmed,
+  non-empty name of at most 64 characters, and 500 channel ids in all. A layout over a cap is rejected as
+  `Malformed` as a whole, and from anyone else as `NoPermission`.
+- **Resolving it** (`CommunityState::channel_layout`). Each channel shows once, at its first place. An id that is
+  not a live channel, or that comes again, is skipped without rejecting the layout. Categories keep their place
+  even when empty. Live channels the layout leaves out, such as one made after it, follow at the end, outside any
+  category, in creation order. Without a layout the function returns `None`, and `ChannelOrder` decides as before.
+  While a layout exists it supersedes `ChannelOrder`, so an order sent later by a client from before layouts
+  changes nothing on current clients.
+- **Older clients.** The payload is carried (`carry_sealed`), so a client from before the carrier shows it as
+  locked, and one that knows the carrier but not this kind rejects it as `Forged`. Sync does not stall. With each
+  layout, the engine also publishes the `ChannelOrder` it amounts to: its channels top to bottom, text and voice
+  apart. So a client that knows `ChannelOrder` keeps roughly the same order, without the categories.
+- **Engine.** `Engine::set_channel_layout(community, entries)` checks the role, that every channel is live and
+  placed once, and the caps. It gives a new category its id, then publishes the layout and the derived order.
+  `community_view` carries `layout` (or `None`) and `can_manage_channels`, and lists `channels` in layout order.
+  The layout in the view is the viewer's own: channels they cannot read are left out, and so is a category whose
+  channels are all hidden from them. An empty category shows only to people who may arrange channels, so they
+  can fill it. The desktop command is `set_channel_layout { communityId, entries }`, where an entry is
+  `{ kind: "channel", id }` or `{ kind: "category", id?, name, collapsed, channels }`. It is behind the
+  `channel_categories` capability.
+- **UI** (`lib/channel-layout.ts` for the moves, `components/shell/channel-tree.tsx` for the sidebar).
+  - **Without a layout.** The sidebar shows the two groups it always had, Text channels and Voice channels. The
+    first arrangement turns them into real categories with those names.
+  - **Headers.** A header opens and closes its category. Each person's state is kept on their device
+    (`localStorage`, per server and category). A closed category still shows the channel that is open.
+  - **Dragging.** People who may arrange channels drag a channel within a category, into one (drop on its
+    header, which highlights), out of one, or between channels outside categories. The upper part of a header
+    drops above the category instead. A category drags by its header. A line shows where an entry will land.
+  - **Keyboard.** Alt+Shift+Up and Down move the focused channel one step through every place it can be: within
+    its category, out of it at either end, and into the category next to it. On a header, they move the
+    category. Each move is announced.
+  - **Menus.** The channel menu has Move Up, Move Down and Move to Category (each category, or No Category). The
+    header menu has Create Channel, Create Category, Rename Category, Move Up, Move Down and Delete Category.
+    Deleting asks first, and leaves the channels outside any category, where the category was. The server menu
+    has Create category.
+  - **Creating inside a category.** A category's + makes the new channel at the end of that category.
+  - **Applying.** Each change applies at once and is published as a whole layout. If the publish fails, the old
+    layout comes back with a toast.
+  - **Others.** People who cannot arrange channels get no drag, no keys and no menus, and can still open and
+    close categories.
+
 ## Animated banners
 
 A GIF with more than one frame stays animated, as a server banner or a personal one. Avatars and

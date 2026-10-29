@@ -517,7 +517,7 @@ impl Engine {
 
     /// Our own card, built the same way as `contact_link`.
     fn my_card(&self, w: &World) -> Result<ContactCard> {
-        let peers: Vec<String> = w.my_addr.iter().map(|a| a.to_string()).collect();
+        let peers: Vec<String> = w.my_addr.iter().map(|a| self.shareable(a).to_string()).collect();
         let cert = self.inner.identity.cert.clone();
         ContactCard::new(cert.clone(), &w.my_name(), peers.clone())
             .or_else(|_| ContactCard::new(cert, &w.anon_name(), peers))
@@ -854,11 +854,14 @@ impl Engine {
     pub fn remove_contact(&self, user: RootId) -> Result<()> {
         let mut guard = self.write();
         let w = &mut *guard;
+        let pictures = w.pictures_of(&user);
         w.contacts.retain(|c| c.cert.root != user);
         w.contact_times.stopped_contact(&user);
         w.contact_times.save(&w.paths)?;
         w.save_contacts()?;
         drop(guard);
+        // Their pictures go unless we still share a server or a conversation with them.
+        self.release_blobs(pictures);
         self.emit(EngineEvent::ContactsChanged);
         Ok(())
     }
@@ -876,13 +879,23 @@ impl Engine {
         Ok(())
     }
 
-    /// A `dissent://contact/...` link for one of our contacts.
+    /// A `dissent://contact/...` link for one of our contacts. It carries only their public reachability, as our own
+    /// link does: whatever local addresses their card held stay on this device.
     pub fn peer_contact_link(&self, user: RootId) -> Result<String> {
         self.read()
             .contacts
             .iter()
             .find(|c| c.cert.root == user)
-            .map(|c| c.to_url().to_string())
+            .map(|c| {
+                let mut card = c.clone();
+                card.peers = card
+                    .peers
+                    .iter()
+                    .filter_map(|p| p.parse::<PeerAddr>().ok())
+                    .map(|a| self.shareable(&a).to_string())
+                    .collect();
+                card.to_url().to_string()
+            })
             .ok_or_else(|| CoreError::NotFound(format!("contact {user}")))
     }
 }

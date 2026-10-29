@@ -29,6 +29,8 @@ declare global {
   interface Window {
     __TAURI__?: TauriGlobal;
     __DISSENT_MOCK__?: boolean;
+    // Mock only: the driver shortens copySecret's clear delay (lib/clipboard.ts).
+    __mockSecretClearMs?: number;
   }
 }
 

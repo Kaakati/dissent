@@ -6,6 +6,7 @@ import { ProfileCardBody } from '@/components/profile/profile-card';
 import { useUserProfile } from '@/components/profile/use-user-profile';
 import { Block, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
 import { api } from '@/lib/api';
+import { setShellPrefs, useShellPrefs } from '@/lib/shell-prefs';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 
@@ -105,6 +106,29 @@ function LinkPreviewsBlock() {
   );
 }
 
+// Location and camera details in photos and videos. Saved with the desktop settings; on by default.
+function PhotoDetailsBlock() {
+  const strip = useShellPrefs((s) => s.stripPhotoMetadata);
+  return (
+    <Block title="Photos and videos">
+      <CheckRow>
+        <input
+          type="checkbox"
+          aria-label="Remove location and camera details from photos"
+          checked={strip}
+          onChange={(e) => void setShellPrefs({ keep_photo_metadata: !e.target.checked })}
+          className={CHECK_CLASS}
+          data-strip-photo-metadata
+        />
+        <span>Remove location and camera details from photos</span>
+      </CheckRow>
+      <Hint>
+        Phones and cameras write where and with what a photo or video was taken into the file. Dissent removes it from the copy it sends, without touching the picture. The file on your computer stays as it is. Applies to JPEG, PNG and WebP pictures and MP4 and MOV videos.
+      </Hint>
+    </Block>
+  );
+}
+
 export function PrivacyPage() {
   // Unknown until the engine answers; the box stays unticked until then, as before.
   const [on, setOn] = useState(false);
@@ -144,6 +168,7 @@ export function PrivacyPage() {
           Your address is published on the Mainline DHT with your device ids, so people who have it can add you. Turning this off removes it. Contact links work either way.
         </Hint>
       </Block>
+      <PhotoDetailsBlock />
       <LinkPreviewsBlock />
       <FriendsBlock />
       <Block>

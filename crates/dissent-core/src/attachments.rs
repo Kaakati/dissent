@@ -377,6 +377,7 @@ fn failure_reason(e: &FilesError) -> String {
     match e {
         FilesError::NoProviders => "No device that has this file is known yet. Try again when the sender is online.".into(),
         FilesError::Fetch(_) => "Could not reach a device that has this file. Try again when the sender is online.".into(),
+        FilesError::Refused(_) => "The devices that have this file did not share it with this device. They share files only with members of the server or conversation.".into(),
         FilesError::Decrypt => "The file that arrived did not match the one shared, so it was not saved.".into(),
         FilesError::Io(e) => format!("Could not save the file: {e}"),
         other => other.to_string(),
@@ -499,6 +500,122 @@ pub(crate) struct AttachBook {
     /// Running download tasks, by attachment id.
     #[serde(skip)]
     pub tasks: BTreeMap<String, tokio::task::JoinHandle<()>>,
+    /// Photos and videos go out with their location and camera details. Off by default, so they are removed. Set by
+    /// the app from its own settings on each start (`set_keep_photo_metadata`), so it is not stored here.
+    #[serde(skip)]
+    pub keep_photo_metadata: bool,
+}
+
+/// A copy of a file with its metadata removed, in its own folder under the staging folder. Dropping it deletes both.
+struct StagedCopy {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Drop for StagedCopy {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.dir) {
+            debug!(error = %e, "could not remove a staged copy");
+        }
+    }
+}
+
+/// Largest picture whose metadata is removed. It is read whole; a larger one is sent as it is.
+const STRIP_IMAGE_MAX: u64 = 64 * 1024 * 1024;
+
+/// The path to a copy of `path` without location and camera details, under the same file name, or `None` when it
+/// has none to remove, is not a format `photo_metadata` handles, or cannot be read. The original is never changed.
+fn stage_without_metadata(staging: &Path, path: &Path, mime: &str) -> std::io::Result<Option<StagedCopy>> {
+    let name = path.file_name().map(|n| n.to_owned()).unwrap_or_else(|| "file".into());
+    let new_dir = || -> std::io::Result<PathBuf> {
+        let dir = staging.join(format!("{:016x}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    };
+    if mime.starts_with("image/") {
+        if std::fs::metadata(path)?.len() > STRIP_IMAGE_MAX {
+            return Ok(None);
+        }
+        let data = std::fs::read(path)?;
+        let Some(stripped) = crate::photo_metadata::strip_image(mime, &data) else {
+            return Ok(None);
+        };
+        let dir = new_dir()?;
+        let staged = StagedCopy { path: dir.join(&name), dir };
+        std::fs::write(&staged.path, stripped)?;
+        return Ok(Some(staged));
+    }
+    if crate::photo_metadata::is_mp4_family(mime) {
+        let patches = crate::photo_metadata::mp4_patches(&mut std::fs::File::open(path)?)?;
+        if patches.is_empty() {
+            return Ok(None);
+        }
+        // The overwrites keep every box's size, so the copy is the original with a few bytes changed.
+        let dir = new_dir()?;
+        let staged = StagedCopy { path: dir.join(&name), dir };
+        std::fs::copy(path, &staged.path)?;
+        let mut copy = std::fs::OpenOptions::new().write(true).open(&staged.path)?;
+        for patch in patches {
+            use std::io::{Seek, Write};
+            copy.seek(std::io::SeekFrom::Start(patch.offset))?;
+            copy.write_all(&patch.bytes)?;
+        }
+        copy.sync_all()?;
+        return Ok(Some(staged));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dissent-staging-{tag}-{}-{:x}", std::process::id(), rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// SOI, a JFIF header, an Exif block with a location in it, then the scan.
+    fn tagged_jpeg() -> Vec<u8> {
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        j.extend_from_slice(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+        let exif = b"Exif\0\0MM\0\x2A\0\0\0\x08\0\0GPS 37.3349 N";
+        j.extend_from_slice(&[0xFF, 0xE1]);
+        j.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        j.extend_from_slice(exif);
+        j.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9]);
+        j
+    }
+
+    #[test]
+    fn a_photo_is_sent_from_a_stripped_copy_and_the_original_is_never_changed() {
+        let dir = scratch("photo");
+        let original = dir.join("beach.jpg");
+        std::fs::write(&original, tagged_jpeg()).unwrap();
+        let staging = dir.join("staging");
+        let staged = stage_without_metadata(&staging, &original, "image/jpeg").unwrap().expect("a stripped copy");
+        assert_eq!(staged.path.file_name().unwrap(), "beach.jpg", "the copy keeps the file name");
+        let copy = std::fs::read(&staged.path).unwrap();
+        assert!(!copy.windows(7).any(|w| w == b"37.3349"), "the copy has no location");
+        assert_eq!(std::fs::read(&original).unwrap(), tagged_jpeg(), "the original is untouched");
+        let staged_dir = staged.dir.clone();
+        drop(staged);
+        assert!(!staged_dir.exists(), "the copy is deleted once it is no longer needed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_with_nothing_to_remove_is_sent_as_it_is() {
+        let dir = scratch("plain");
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "GPS 37.3349").unwrap();
+        assert!(stage_without_metadata(&dir.join("staging"), &notes, "text/plain").unwrap().is_none());
+        let clean = dir.join("clean.jpg");
+        std::fs::write(&clean, [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9]).unwrap();
+        assert!(stage_without_metadata(&dir.join("staging"), &clean, "image/jpeg").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 impl AttachBook {
@@ -640,17 +757,34 @@ impl Engine {
     pub(crate) async fn add_files(&self, paths: &[PathBuf], seed: bool) -> Result<(Vec<Attached>, Vec<Thumb>)> {
         let mut out = Vec::new();
         let mut thumbs = Vec::new();
+        let (keep_metadata, staging) = {
+            let w = self.read();
+            (w.attach.keep_photo_metadata, w.paths.staging_dir())
+        };
         for path in paths {
             let mime = mime_of(path);
+            // Location and camera details are removed into a staged copy; the file on disk stays as it is. A copy that
+            // cannot be made fails the send rather than sending the details the user asked to remove.
+            let staged = if keep_metadata {
+                None
+            } else {
+                let (staging, source, kind) = (staging.clone(), path.clone(), mime.clone());
+                tokio::task::spawn_blocking(move || stage_without_metadata(&staging, &source, &kind))
+                    .await
+                    .map_err(|e| CoreError::Invalid(format!("could not prepare {}: {e}", path.display())))?
+                    .map_err(|e| CoreError::Invalid(format!("could not remove the photo details from {}: {e}", path.display())))?
+            };
             let file = self
                 .inner
                 .files
                 .add(Input::Path {
-                    path: path.clone(),
+                    path: staged.as_ref().map_or_else(|| path.clone(), |s| s.path.clone()),
                     mime,
                 })
                 .await
                 .map_err(files_err)?;
+            drop(staged);
+            // The sender's own message shows the original, which the staged copy was made from.
             self.record_upload(&file, path);
             if let Some(thumb) = self.thumbnail_of(path, &file).await {
                 thumbs.push(thumb);
@@ -669,20 +803,21 @@ impl Engine {
         Ok((out, thumbs))
     }
 
-    /// Makes and stores the thumbnail of an image file. Other files have none, and neither does an
-    /// image that cannot be decoded or is too large to preview.
+    /// Makes and stores the thumbnail of an image or video file. Other files have none, and neither does
+    /// an image that cannot be decoded or is too large to preview, or a video this build cannot read.
     async fn thumbnail_of(&self, path: &Path, file: &FileRef) -> Option<Thumb> {
-        if !file.mime.starts_with("image/") {
+        let Thumbnail { jpeg, width, height } = if crate::video_thumbs::is_video(&file.mime) {
+            crate::video_thumbs::video_thumbnail(path).await?
+        } else if file.mime.starts_with("image/") {
+            let len = tokio::fs::metadata(path).await.ok()?.len();
+            if len > THUMB_SOURCE_MAX as u64 {
+                return None;
+            }
+            let data = tokio::fs::read(path).await.ok()?;
+            tokio::task::spawn_blocking(move || make_thumbnail(&data)).await.ok()??
+        } else {
             return None;
-        }
-        let len = tokio::fs::metadata(path).await.ok()?.len();
-        if len > THUMB_SOURCE_MAX as u64 {
-            return None;
-        }
-        let data = tokio::fs::read(path).await.ok()?;
-        let Thumbnail { jpeg, width, height } = tokio::task::spawn_blocking(move || make_thumbnail(&data))
-            .await
-            .ok()??;
+        };
         // The sender's own preview is kept where a fetched one would go, so its message never waits for a fetch.
         if let Err(e) = keep_picture(&self.read().paths, file, &jpeg) {
             debug!(error = %e, "could not keep our own thumbnail");
@@ -2021,6 +2156,12 @@ impl Engine {
             .filter(|t| t.direction == "upload")
             .filter_map(|t| t.local_path.clone());
         w.attach.downloads.values().cloned().chain(shared).collect()
+    }
+
+    /// Whether photos and videos keep their location and camera details when sent. Off (they are removed) unless the
+    /// app turns it on; the app keeps the choice and sets it on every start.
+    pub fn set_keep_photo_metadata(&self, keep: bool) {
+        self.write().attach.keep_photo_metadata = keep;
     }
 
     /// Sets the folder finished downloads are written to, or resets it to the default with `None`.

@@ -27,6 +27,8 @@ pub struct ShellSettings {
     pub tray_notice_shown: bool,
     /// Emoticons such as `:D` are sent as typed, not converted to emoji. Off by default, so they convert.
     pub emoticons_as_text: bool,
+    /// Photos and videos are sent with their location and camera details. Off by default, so they are removed.
+    pub keep_photo_metadata: bool,
 }
 
 /// Why "start at login" is not offered in `mode`, for the settings page. `None` when it is offered. A portable build
@@ -78,7 +80,17 @@ mod tests {
     fn everything_is_off_until_the_user_turns_it_on() {
         let dir = scratch("defaults");
         assert_eq!(load(&dir), ShellSettings::default());
+        assert!(!load(&dir).keep_photo_metadata, "photo details are removed unless the user keeps them");
         assert!(!load(&dir).keep_running && !load(&dir).start_at_login && !load(&dir).notifications_muted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_from_before_the_photo_setting_removes_photo_details() {
+        let dir = scratch("older");
+        std::fs::write(dir.join(FILE), br#"{"keep_running":true,"emoticons_as_text":true}"#).unwrap();
+        let loaded = load(&dir);
+        assert!(loaded.keep_running && loaded.emoticons_as_text && !loaded.keep_photo_metadata);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -91,6 +103,7 @@ mod tests {
             notifications_muted: true,
             tray_notice_shown: true,
             emoticons_as_text: true,
+            keep_photo_metadata: true,
         };
         save(&dir, &saved).unwrap();
         assert_eq!(load(&dir), saved);

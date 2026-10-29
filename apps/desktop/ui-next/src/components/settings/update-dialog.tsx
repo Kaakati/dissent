@@ -14,7 +14,9 @@ import type { UpdateInfo } from '@/lib/types';
 const PROGRESS = 'dissent://update-progress';
 const mb = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MB`;
 
-// Release notes are plain text. Lines starting with "- " or "* " become a bullet list. Nothing is parsed as HTML.
+// Release notes are the release's Markdown changelog, shown as plain text: "## 0.1.19 - date" is dropped (the dialog
+// already names the version), "### Added" becomes a small heading, and lines starting with "- " or "* " become a bullet
+// list. Nothing is parsed as HTML.
 function ReleaseNotes({ text }: { text?: string }) {
   if (!text || !text.trim()) return <p className="text-muted-foreground">No release notes.</p>;
   const blocks: ReactNode[] = [];
@@ -31,6 +33,11 @@ function ReleaseNotes({ text }: { text?: string }) {
       continue;
     }
     flush();
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      if (heading[1].length >= 3) blocks.push(<p key={`h-${blocks.length}`} className="m-0 font-semibold text-text-strong">{heading[2]}</p>);
+      continue;
+    }
     if (line) blocks.push(<p key={`line-${blocks.length}`} className="whitespace-pre-wrap">{line}</p>);
   }
   flush();

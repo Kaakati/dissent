@@ -359,6 +359,7 @@ impl Engine {
         {
             let mut guard = self.write();
             append_record(&guard.paths.conv_log(&conv), &stored)?;
+            guard.index_conv_message(conv, &stored.text);
             guard.conv_msgs.entry(conv).or_default().push(stored);
         }
         if let Some(target) = reply_to {
@@ -388,12 +389,16 @@ impl Engine {
         }
         let act = ConvAct { id, from, hlc, action };
         append_record(&w.paths.conv_acts(&conv), &act)?;
+        let mut released = Vec::new();
         if let Action::Delete { target } = act.action {
             if author == Some(from) {
+                released = w.blobs_of_conv_message(conv, target);
                 clear_text(w, conv, target)?;
             }
         }
         w.conv_acts.entry(conv).or_default().push(act);
+        drop(guard);
+        self.release_blobs(released);
         Ok(())
     }
 

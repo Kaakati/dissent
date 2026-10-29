@@ -25,7 +25,7 @@
 use crate::emoji::{normalize_emoji, normalize_trait_emoji};
 use crate::names::{normalize_handle, skeleton};
 use crate::control::{open_event_keyed, EpochKey, OpenError, SealKey};
-use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, HistorySetting, Hlc, Payload, Role, SealedKind};
+use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, HistorySetting, Hlc, LayoutEntry, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,6 +114,11 @@ pub struct CommunityState {
     /// Each root's latest accepted `StorageGrant`: whether an admin granted it storage, with the HLC.
     /// Read it through [`CommunityState::storage_granted`]. Phase 1 only records it.
     pub storage_grants: BTreeMap<RootId, (Hlc, bool)>,
+    /// The latest accepted `ChannelLayout`, with its HLC. Read it through [`CommunityState::channel_layout`].
+    pub channel_layout: Option<(Hlc, Vec<LayoutEntry>)>,
+    /// Each device's latest accepted `HistorySupport`: whether it says it reads history messages, with the HLC.
+    /// Read it through [`CommunityState::declares_history`].
+    pub history_support: BTreeMap<DeviceId, (Hlc, bool)>,
     /// Settings from the accepted `ChannelUpdate`s. A channel not listed here has the defaults.
     pub channel_settings: BTreeMap<ChannelId, ChannelSettings>,
     /// Invites by id, from `InviteCreate`.
@@ -134,6 +139,31 @@ pub struct CommunityState {
 pub struct ChannelOrderSpec {
     pub text: Vec<ChannelId>,
     pub voice: Vec<ChannelId>,
+}
+
+/// Most categories one `ChannelLayout` may hold.
+pub const MAX_CATEGORIES: usize = 50;
+/// Longest category name, in characters.
+pub const MAX_CATEGORY_NAME_CHARS: usize = 64;
+
+/// Whether a layout is within its caps: at most `MAX_CATEGORIES` categories with distinct ids, each named with a
+/// trimmed, non-empty name of at most `MAX_CATEGORY_NAME_CHARS` characters, and at most `MAX_ORDERED_CHANNELS`
+/// channel ids in all. Replay rejects a layout over a cap as a whole, so every peer shows the same one.
+pub fn valid_layout(entries: &[LayoutEntry]) -> bool {
+    let mut ids = BTreeSet::new();
+    let mut channels = 0usize;
+    for entry in entries {
+        match entry {
+            LayoutEntry::Channel(_) => channels += 1,
+            LayoutEntry::Category(c) => {
+                if !ids.insert(c.id) || c.name.trim() != c.name || c.name.is_empty() || c.name.chars().count() > MAX_CATEGORY_NAME_CHARS {
+                    return false;
+                }
+                channels += c.channels.len();
+            }
+        }
+    }
+    ids.len() <= MAX_CATEGORIES && channels <= MAX_ORDERED_CHANNELS
 }
 
 /// Most channel ids one `ChannelOrder` may list, text and voice together. Replay rejects a longer one as
@@ -445,6 +475,8 @@ impl CommunityState {
             profile_banners: BTreeMap::new(),
             relay_hosts: BTreeMap::new(),
             storage_grants: BTreeMap::new(),
+            history_support: BTreeMap::new(),
+            channel_layout: None,
             channel_settings: BTreeMap::new(),
             invites: BTreeMap::new(),
             last_post: BTreeMap::new(),
@@ -453,15 +485,60 @@ impl CommunityState {
         }
     }
 
-    /// The text channels and the voice channels, each in the order the server lists them, top first. The
-    /// latest accepted `ChannelOrder` comes first, without the ids in it that are not live channels of that
-    /// kind, or that it repeats. The channels it leaves out follow in creation order, so a channel made
-    /// after the order goes at the end. With no order, both lists are in creation order.
     /// Whether an admin's latest `StorageGrant` for `root` grants it storage.
     pub fn storage_granted(&self, root: &RootId) -> bool {
         self.storage_grants.get(root).is_some_and(|(_, granted)| *granted)
     }
 
+    /// Whether `user` may arrange the server's channels: create categories and publish a layout or an order. The
+    /// owner and admins today. Custom roles with a "manage channels" permission plug in here.
+    pub fn may_manage_channels(&self, user: &RootId) -> bool {
+        self.rank(&self.canonical(user)) >= Rank::Admin
+    }
+
+    /// The server's channel layout as it shows now, or `None` when no `ChannelLayout` was accepted (the order
+    /// is then `channel_order`'s). Each channel appears once, at its first place: an id that is not a live
+    /// channel, or that comes again, is skipped. Categories keep their place even when empty. The live channels
+    /// the layout leaves out follow at the end, outside any category, in creation order.
+    pub fn channel_layout(&self) -> Option<Vec<LayoutEntry>> {
+        let (_, entries) = self.channel_layout.as_ref()?;
+        let mut seen = BTreeSet::new();
+        let mut keep = |id: &ChannelId| self.channels.contains_key(id) && seen.insert(*id);
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry {
+                LayoutEntry::Channel(id) => {
+                    if keep(id) {
+                        out.push(LayoutEntry::Channel(*id));
+                    }
+                }
+                LayoutEntry::Category(c) => {
+                    let channels = c.channels.iter().filter(|id| keep(id)).copied().collect();
+                    out.push(LayoutEntry::Category(crate::LayoutCategory { channels, ..c.clone() }));
+                }
+            }
+        }
+        let mut created: Vec<(Hlc, ChannelId)> = self
+            .channels
+            .keys()
+            .filter(|id| !seen.contains(*id))
+            .map(|id| (self.channel_created.get(id).copied().unwrap_or_default(), *id))
+            .collect();
+        created.sort_unstable();
+        out.extend(created.into_iter().map(|(_, id)| LayoutEntry::Channel(id)));
+        Some(out)
+    }
+
+    /// Whether `device`'s latest `HistorySupport` says it reads history messages. A device that sent none
+    /// has not said, which counts as no.
+    pub fn declares_history(&self, device: &DeviceId) -> bool {
+        self.history_support.get(device).is_some_and(|(_, supported)| *supported)
+    }
+
+    /// The text channels and the voice channels, each in the order the server lists them, top first. The
+    /// latest accepted `ChannelOrder` comes first, without the ids in it that are not live channels of that
+    /// kind, or that it repeats. The channels it leaves out follow in creation order, so a channel made
+    /// after the order goes at the end. With no order, both lists are in creation order.
     pub fn channel_order(&self) -> (Vec<ChannelId>, Vec<ChannelId>) {
         let mut created: Vec<(Hlc, ChannelId)> = self
             .channels
@@ -620,7 +697,11 @@ impl CommunityState {
         // A storage member may only join, or leave. Anything else is for people.
         let storage_only = matches!(
             ev.body.payload,
-            Payload::Join { .. } | Payload::JoinAsStorage { .. } | Payload::Leave | Payload::InviteCreate { .. }
+            Payload::Join { .. }
+                | Payload::JoinAsStorage { .. }
+                | Payload::Leave
+                | Payload::InviteCreate { .. }
+                | Payload::HistorySupport { .. }
         );
         if !storage_only && self.members.get(&actor).is_some_and(|m| m.storage) {
             return Err(Rejection::NoPermission);
@@ -1011,6 +1092,19 @@ impl CommunityState {
                 require_control(chan)?;
                 if rank < Rank::Admin {
                     return Err(Rejection::NoPermission);
+                }
+            }
+            // A device speaks only for itself, as the map is keyed by the event's device. Bans, departures and
+            // revocations are refused above.
+            Payload::HistorySupport { .. } => require_control(chan)?,
+            // Ids that are not live channels are skipped when the layout is read, not refused, as for `ChannelOrder`.
+            Payload::ChannelLayout { entries } => {
+                require_control(chan)?;
+                if !self.may_manage_channels(&actor) {
+                    return Err(Rejection::NoPermission);
+                }
+                if !valid_layout(entries) {
+                    return Err(Rejection::Malformed);
                 }
             }
             // Ids that are not live channels are not refused, since a channel may be deleted while an order is in
@@ -1434,6 +1528,17 @@ impl CommunityState {
             Payload::StorageGrant { root, granted } => {
                 if self.storage_grants.get(root).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.storage_grants.insert(*root, (ev.body.hlc, *granted));
+                }
+            }
+            Payload::ChannelLayout { entries } => {
+                if self.channel_layout.as_ref().is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.channel_layout = Some((ev.body.hlc, entries.clone()));
+                }
+            }
+            Payload::HistorySupport { supported } => {
+                let device = ev.body.device;
+                if self.history_support.get(&device).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.history_support.insert(device, (ev.body.hlc, *supported));
                 }
             }
             Payload::ChannelOrder { text, voice } => {

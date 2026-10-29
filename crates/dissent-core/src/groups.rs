@@ -878,10 +878,12 @@ impl Engine {
         }
         self.post(conv, Action::Leave).await?;
         let mut guard = self.write();
+        let blobs = guard.blobs_of_conv(conv);
         let mut updated = meta;
         updated.left = true;
         self.set_meta(&mut guard, updated.clone())?;
         drop(guard);
+        self.release_blobs(blobs);
         self.notify_conv(&updated);
         Ok(())
     }
@@ -1432,6 +1434,10 @@ impl Engine {
 
     /// Queues a signed receipt for the device that sent message `id`.
     pub(crate) fn queue_receipt(&self, conv: ConvId, id: [u8; 32], device: DeviceId, root: RootId) -> Result<()> {
+        // While invisible the receipt waits, so the sender does not see us online. See `invisible`.
+        if self.hold_receipt(conv, id, device, root) {
+            return Ok(());
+        }
         let sig = self
             .inner
             .identity

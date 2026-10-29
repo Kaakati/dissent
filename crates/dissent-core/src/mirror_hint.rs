@@ -105,6 +105,9 @@ impl Engine {
             return Response::Refused("too many hints; try again in a minute".into());
         }
         let providers: Vec<_> = self.providers_for(&roots).iter().filter_map(|p| p.to_iroh().ok()).collect();
+        let kept: Vec<[u8; 32]> = blobs.iter().take(MAX_BLOBS_PER_HINT).map(|(hash, _)| *hash).collect();
+        // A seeder cannot read the message that names these, so the hint is what tells it who may fetch them.
+        self.add_hinted_blobs(community, &kept);
         for (hash, size) in blobs.into_iter().take(MAX_BLOBS_PER_HINT) {
             if size == 0 || size > max_file_size {
                 continue;

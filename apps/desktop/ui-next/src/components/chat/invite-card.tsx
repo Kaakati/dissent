@@ -1,6 +1,7 @@
 // Invite links in a message: a card with the server's banner, icon, name and counts, and a Join button. The preview comes
-// from the backend, which asks a member, so the client never fetches a link itself. Ported from the invite card in
-// the old UI's views/chat.js.
+// from the backend, which asks a member, so the client never fetches a link itself. Asking a member reaches the
+// devices and relay the link names, and whoever posted the link may run them, so nothing is asked until the viewer
+// clicks Show preview (privacy audit P-04). Ported from the invite card in the old UI's views/chat.js.
 import { useEffect, useState } from 'react';
 import { ServerCard } from '@/components/server-card';
 import { Button } from '@/components/ui/button';
@@ -58,10 +59,13 @@ export function InviteCards({ text }: { text: string }) {
 type Loaded = { preview: InvitePreview } | { error: string } | null;
 
 function InviteCard({ link }: { link: string }) {
+  // A preview already asked for this session shows at once; any other waits for the click.
+  const [requested, setRequested] = useState(() => previews.has(link));
   const [loaded, setLoaded] = useState<Loaded>(null);
   const [joining, setJoining] = useState(false);
 
   useEffect(() => {
+    if (!requested) return;
     let live = true;
     previewOf(link).then(
       (preview) => live && setLoaded({ preview }),
@@ -70,8 +74,19 @@ function InviteCard({ link }: { link: string }) {
     return () => {
       live = false;
     };
-  }, [link]);
+  }, [link, requested]);
 
+  if (!requested) {
+    return (
+      <article data-invite-card="closed" className="mt-1 w-full max-w-[400px] rounded-[var(--r-1)] bg-sidebar p-4 shadow-[inset_0_0_0_1px_var(--border)]">
+        <div className="font-semibold text-text-strong">Invite to a server</div>
+        <p className="m-0 mt-1 text-sm text-muted-foreground">Showing the preview contacts the devices this link names, so whoever runs them can see your IP address.</p>
+        <Button variant="secondary" className="mt-3" data-invite-show onClick={() => setRequested(true)}>
+          Show preview
+        </Button>
+      </article>
+    );
+  }
   if (!loaded) {
     return (
       <article className="mt-1 w-full max-w-[400px] rounded-[var(--r-1)] bg-sidebar p-4 shadow-[inset_0_0_0_1px_var(--border)]">

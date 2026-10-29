@@ -62,6 +62,9 @@ pub struct Timeouts {
     pub per_mib: Duration,
     /// Ceiling for the whole download budget. The default is 24 hours.
     pub max: Duration,
+    /// Wait before asking a provider that refused this device once more. A provider that did not know this device
+    /// yet learns it from the refusal, so the second ask usually succeeds.
+    pub refused_retry: Duration,
 }
 
 impl Default for Timeouts {
@@ -72,6 +75,7 @@ impl Default for Timeouts {
             base: Duration::from_secs(60),
             per_mib: Duration::from_secs(10),
             max: Duration::from_secs(24 * 60 * 60),
+            refused_retry: Duration::from_secs(1),
         }
     }
 }
@@ -247,6 +251,12 @@ impl Files {
     /// Protocol handler that serves blobs to peers. Mount it on a `Router` under [`crate::ALPN`].
     pub fn protocol_handler(&self) -> BlobsProtocol {
         BlobsProtocol::new(self.store(), None)
+    }
+
+    /// Protocol handler that serves blobs only as `events` allows. The events' owner answers each connection and
+    /// request it intercepts, and can refuse it with [`crate::gate::AbortReason::Permission`].
+    pub fn protocol_handler_with(&self, events: crate::gate::EventSender) -> BlobsProtocol {
+        BlobsProtocol::new(self.store(), Some(events))
     }
 
     /// Stops the blob store. Shutting down a `Router` that serves this handler also stops it.
@@ -458,6 +468,21 @@ impl Files {
             .map_err(store_err)
     }
 
+    /// The hashes of every blob this node keeps pinned, complete or not.
+    pub async fn pinned_hashes(&self) -> Result<Vec<[u8; 32]>> {
+        let mut tags = self
+            .store
+            .tags()
+            .list_prefix(PIN_PREFIX)
+            .await
+            .map_err(store_err)?;
+        let mut hashes = Vec::new();
+        while let Some(tag) = tags.next().await {
+            hashes.push(*tag.map_err(store_err)?.hash.as_bytes());
+        }
+        Ok(hashes)
+    }
+
     /// Ciphertext bytes and file count of the blobs this node keeps pinned. Blobs still downloading
     /// count as nothing.
     pub async fn pinned_stats(&self) -> Result<(u64, u64)> {
@@ -596,24 +621,40 @@ impl Files {
             return Err(FilesError::NoProviders);
         }
         let mut last_error = String::from("no provider had the blob");
+        let mut refusals = 0;
         for (index, addr) in from.iter().enumerate() {
-            // Earlier providers may have stored bytes, so this attempt starts from what is held now.
-            let base = self.local_bytes(hf).await?;
-            observer.begin(index, base);
-            let mut report = |held: u64, total: u64| {
-                observer.observe(held);
-                progress(held, total);
-            };
-            match self
-                .download_from(endpoint, addr.clone(), hf, cipher_size, base, &mut report)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => last_error = e.to_string(),
+            // A provider that refused is asked once more after a pause: it may only not have known this device yet.
+            for attempt in 0..2 {
+                // Earlier providers may have stored bytes, so this attempt starts from what is held now.
+                let base = self.local_bytes(hf).await?;
+                observer.begin(index, base);
+                let mut report = |held: u64, total: u64| {
+                    observer.observe(held);
+                    progress(held, total);
+                };
+                match self
+                    .download_from(endpoint, addr.clone(), hf, cipher_size, base, &mut report)
+                    .await
+                {
+                    Ok(()) => return Ok(()),
+                    Err(FilesError::Refused(e)) => {
+                        last_error = e;
+                        if attempt == 0 {
+                            tokio::time::sleep(self.timeouts.refused_retry).await;
+                            continue;
+                        }
+                        refusals += 1;
+                    }
+                    Err(e) => last_error = e.to_string(),
+                }
+                break;
             }
             if self.is_complete(hf).await? {
                 return Ok(());
             }
+        }
+        if refusals == from.len() {
+            return Err(FilesError::Refused(last_error));
         }
         Err(FilesError::Fetch(last_error))
     }
@@ -633,7 +674,7 @@ impl Files {
         let conn = tokio::time::timeout(timeouts.connect, endpoint.connect(addr, iroh_blobs::ALPN))
             .await
             .map_err(|_| FilesError::Fetch("connect timed out".to_owned()))?
-            .map_err(|e| FilesError::Fetch(e.to_string()))?;
+            .map_err(|e| fetch_error(e.to_string()))?;
         let closer = conn.clone();
         let stream = self.store.remote().fetch(conn, hf).stream();
         let mut stream = std::pin::pin!(stream);
@@ -654,7 +695,7 @@ impl Files {
                 }
                 Ok(Some(GetProgressItem::Progress(done))) => progress(base + done, total),
                 Ok(Some(GetProgressItem::Done(_))) => break Ok(()),
-                Ok(Some(GetProgressItem::Error(e))) => break Err(FilesError::Fetch(e.to_string())),
+                Ok(Some(GetProgressItem::Error(e))) => break Err(fetch_error(e.to_string())),
             }
         };
         closer.close(0u32.into(), b"done");
@@ -908,6 +949,18 @@ where
 
 fn store_err(e: impl std::fmt::Display) -> FilesError {
     FilesError::Store(e.to_string())
+}
+
+/// A failed fetch from one provider. A provider that refuses this device resets the request's stream with iroh-blobs'
+/// permission code, which reads "stream reset by peer: error 1", or closes the connection with the reason
+/// "permission". That is a refusal, not a fault.
+fn fetch_error(message: String) -> FilesError {
+    let refused = message.ends_with("by peer: error 1") || message.contains("permission");
+    if refused {
+        FilesError::Refused(message)
+    } else {
+        FilesError::Fetch(message)
+    }
 }
 
 #[cfg(test)]

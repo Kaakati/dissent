@@ -1,16 +1,13 @@
-// The second column. Home: a find box, quick links and direct messages. A server: its name, quick links, text
-// channels and voice channels with the people in them. Controls whose views are not ported yet are shown disabled.
+// The second column. Home: a find box, quick links and direct messages. A server: its name, quick links, and its
+// channels and categories (channel-tree.tsx), with the people in each voice channel. Controls whose views are not ported yet are shown disabled.
 // Ported from the old UI's views/sidebar.js.
-import { Fragment, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { ArrowDown, ArrowUp, ArrowUpDown, Bookmark, BellOff, ChevronDown, Hash, Radio, Headphones, Link as LinkIcon, Lock, MicOff, Pin, Plus, Settings, UserPlus, Users, Volume2 } from 'lucide-react';
-import { ChannelDropLine, moveChannel, useChannelReorder } from '@/components/shell/channel-reorder';
-import { openChannelSettings } from '@/components/channel-settings/channel-settings';
-import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
+import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Radio, Link as LinkIcon, Pin, Plus, UserPlus, Users } from 'lucide-react';
+import { ChannelTree } from '@/components/shell/channel-tree';
+import { rowClass, SectionHead, UnreadDot } from '@/components/shell/sidebar-rows';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
 import { setSwitcherOpen } from '@/components/dialogs/quick-switcher';
-import { openContextMenu } from '@/lib/menu';
 import { openAddContactDialog } from '@/components/dialogs/small-dialogs';
-import { openVoiceChannel } from '@/lib/calls';
 import { NewConversationMenu, openConversationMenu } from '@/components/menus/conversation-menu';
 import { ServerMenu } from '@/components/menus/server-menu';
 import { Button } from '@/components/ui/button';
@@ -23,9 +20,8 @@ import { has } from '@/lib/features';
 import { markdownPlain } from '@/lib/markdown';
 import { plural } from '@/lib/identity';
 import { useMutes } from '@/lib/mutes';
-import { DEFAULT_PREFS, useServerPrefs } from '@/lib/server-prefs';
-import { channelKey, convKey, useShell } from '@/lib/store';
-import type { CommunityView, ConversationSummary, GroupSummary, Id, Presence, VoiceParticipant } from '@/lib/types';
+import { convKey, useShell } from '@/lib/store';
+import type { CommunityView, ConversationSummary, GroupSummary, Presence } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const NOT_PORTED = 'Not ported yet';
@@ -33,38 +29,11 @@ const NOT_PORTED = 'Not ported yet';
 // Second line of a direct row for the presence states that have one worth saying.
 const PRESENCE_TEXT: Partial<Record<Presence, string>> = { idle: 'Idle', dnd: 'Do Not Disturb' };
 
-const rowClass = (active: boolean, unread: boolean) =>
-  cn(
-    'relative flex h-9 w-full min-w-0 shrink-0 items-center gap-s-2 rounded-lg px-s-2 text-left text-ui font-medium text-muted-foreground hover:bg-hover hover:text-text disabled:pointer-events-none disabled:opacity-50',
-    active && 'bg-selected text-text-strong',
-    unread && 'font-semibold text-text-strong',
-  );
-
-function UnreadDot() {
-  return <span aria-label="unread" className="absolute top-3.5 -left-2 h-2 w-1 rounded-r bg-text-strong" />;
-}
-
 function Count({ value, label }: { value: number; label: string }) {
   return (
     <span aria-label={label} className="ml-auto grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-tiny font-bold text-white tabular-nums">
       {value}
     </span>
-  );
-}
-
-// A section's heading. The channel sections are small caps; the direct messages heading is title case, as the reference shows it.
-function SectionHead({ title, action, spaced = false, plain = false }: { title: string; action?: ReactNode; spaced?: boolean; plain?: boolean }) {
-  return (
-    <div
-      className={cn(
-        'flex h-8 shrink-0 items-center justify-between pl-s-2 text-muted-foreground',
-        plain ? 'text-[13px] font-normal' : 'text-meta font-semibold tracking-[.02em] uppercase',
-        spaced && 'mt-s-2',
-      )}
-    >
-      <span className="truncate">{title}</span>
-      {action}
-    </div>
   );
 }
 
@@ -335,67 +304,12 @@ function HomeList() {
 
 // ---- server: channels and voice ----
 
-// Moving a channel one place from its menu: the place it has among the shown rows of its kind, how many there are, and
-// the move. Absent when the server's channel order cannot be changed here.
-interface MenuMove {
-  index: number;
-  count: number;
-  place: (to: number) => void;
-}
-
-// The owner's actions on a channel row, as a menu: right click, or Shift+F10 on the focused row. The same two actions
-// are the hover and focus buttons of ChannelActions, so a pointer-less user reaches them too. Move Up and Move Down
-// are the menu's form of Alt+Shift+Up and Down.
-function openChannelMenu(e: { preventDefault: () => void; clientX: number; clientY: number; currentTarget: HTMLElement }, communityId: Id, channelId: Id, move?: MenuMove): void {
-  e.preventDefault();
-  // A keyboard menu key sends no pointer position, so the menu opens by the row.
-  const r = e.currentTarget.getBoundingClientRect();
-  openContextMenu(e.clientX || r.left + 20, e.clientY || r.bottom, [
-    { label: 'Create invite', icon: UserPlus, onPick: () => openInviteDialog(communityId) },
-    { label: 'Edit Channel', icon: Settings, onPick: () => openChannelSettings(communityId, channelId) },
-    move ? 'sep' : null,
-    move ? { label: 'Move Up', icon: ArrowUp, disabled: move.index === 0, onPick: () => move.place(move.index - 1) } : null,
-    move ? { label: 'Move Down', icon: ArrowDown, disabled: move.index >= move.count - 1, onPick: () => move.place(move.index + 1) } : null,
-  ]);
-}
-
-// The owner's hover actions on a channel row: Create invite and Edit Channel. They show on hover and focus.
-function ChannelActions({ communityId, channelId }: { communityId: Id; channelId: Id }) {
-  const button = 'grid size-6 place-items-center rounded-sm bg-elevated text-muted-foreground hover:bg-elevated-hover hover:text-text-strong';
-  return (
-    <span className="absolute top-1/2 right-1 hidden -translate-y-1/2 items-center gap-0.5 group-focus-within:flex group-hover:flex">
-      <Tip label="Create Invite">
-        <button type="button" aria-label="Create invite" onClick={() => openInviteDialog(communityId)} className={button}>
-          <UserPlus className="size-3.5" />
-        </button>
-      </Tip>
-      <Tip label="Edit Channel">
-        <button type="button" aria-label="Edit Channel" onClick={() => openChannelSettings(communityId, channelId)} className={button}>
-          <Settings className="size-3.5" />
-        </button>
-      </Tip>
-    </span>
-  );
-}
-
 function ServerList({ community }: { community: CommunityView }) {
-  const channelId = useShell((s) => s.channelId);
   const page = useShell((s) => s.page);
-  const voiceChannelId = useShell((s) => s.voiceChannelId);
-  const unread = useShell((s) => s.unread);
   const transfers = useShell((s) => s.transfers);
-  const openChannel = useShell((s) => s.openChannel);
   const openPage = useShell((s) => s.openPage);
   const activeTransfers = transfers.filter((t) => ['active', 'paused', 'waiting'].includes(t.state)).length;
   const canManage = community.my_role === 'owner' || community.my_role === 'admin';
-  const canReorder = canManage && has('channel_order');
-  const prefs = useServerPrefs((s) => s.prefs[community.id]) ?? DEFAULT_PREFS;
-  const mutes = useMutes((s) => s.mutes);
-  // Hide Muted Channels hides a muted text channel, except the one open now, so the user keeps their place. As the DM
-  // rows do, a timed mute that has run out is still listed until a check removes it.
-  const text = community.channels.filter((c) => !c.voice && !(prefs.hide_muted_channels && channelKey(community.id, c.id) in mutes && c.id !== channelId));
-  const shown = text.map((c) => c.id);
-  const reorder = useChannelReorder(canReorder, text, (id, to) => moveChannel(community, shown, id, to));
   return (
     <>
       <QuickLink icon={<UserPlus />} label="Invite people" onClick={() => openInviteDialog(community.id)} />
@@ -403,159 +317,8 @@ function ServerList({ community }: { community: CommunityView }) {
         <QuickLink icon={<ArrowUpDown />} label="Transfers" onClick={() => void openPage('transfers')} active={page === 'transfers'} extra={activeTransfers ? <ActiveBadge count={activeTransfers} /> : null} />
       ) : null}
       <Separator className="my-s-2" />
-      <SectionHead
-        title="Text channels"
-        action={
-          canManage ? (
-            <Tip label="Create Channel">
-              <Button variant="ghost" size="icon" aria-label="Create channel" onClick={() => openCreateChannelDialog(community.id)}>
-                <Plus className="size-4" />
-              </Button>
-            </Tip>
-          ) : null
-        }
-      />
-      {text.length ? (
-        text.map((ch, index) => {
-          const active = ch.id === channelId && !voiceChannelId && !page;
-          const isUnread = unread.has(`ch:${community.id}:${ch.id}`) && !active;
-          const move = canReorder ? { index, count: text.length, place: (to: number) => reorder.place(ch.id, to) } : undefined;
-          return (
-            <Fragment key={ch.id}>
-            {reorder.lineAt(index) ? <ChannelDropLine /> : null}
-            <div
-              ref={reorder.rowRef(ch.id)}
-              style={reorder.rowStyle(ch.id)}
-              className={cn('group relative flex shrink-0 flex-col', reorder.dragging(ch.id) && 'z-[3] opacity-80')}
-            >
-            <button
-              type="button"
-              className={cn(rowClass(active, isUnread), canReorder && 'touch-none')}
-              aria-current={active ? 'true' : undefined}
-              aria-keyshortcuts={canReorder ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
-              onClick={() => {
-                if (reorder.clickOpens()) void openChannel(ch.id);
-              }}
-              onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id, move) : undefined}
-              {...reorder.handlers(ch.id, index)}
-            >
-              {isUnread ? <UnreadDot /> : null}
-              {ch.private ? (
-                <Lock className="size-5 shrink-0 text-muted-foreground" aria-label="Private channel" role="img" />
-              ) : (
-                <Hash className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              )}
-              <span className="min-w-0 flex-1 truncate" title={`#${ch.name}`}>{ch.name}</span>
-              {has('mentions') && ch.mentions ? (
-                <span aria-label={`${ch.mentions} mentions`} className="ml-auto grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-danger px-1 text-[10px] leading-none font-bold text-white">{ch.mentions}</span>
-              ) : null}
-            </button>
-            {canManage ? <ChannelActions communityId={community.id} channelId={ch.id} /> : null}
-            </div>
-            </Fragment>
-          );
-        })
-      ) : (
-        <p className="p-s-2 text-sm text-muted-foreground">No channels yet.</p>
-      )}
-      {reorder.lineAt(text.length) ? <ChannelDropLine /> : null}
-      <div role="status" aria-live="polite" className="sr-only" data-channel-order-status="text">
-        {reorder.announcement}
-      </div>
-      {has('calls') ? <VoiceSection community={community} canManage={canManage} canReorder={canReorder} /> : null}
+      <ChannelTree community={community} canManage={canManage} />
     </>
-  );
-}
-
-function VoiceSection({ community, canManage, canReorder }: { community: CommunityView; canManage: boolean; canReorder: boolean }) {
-  const voiceChannelId = useShell((s) => s.voiceChannelId);
-  const connection = useShell((s) => s.voiceConnection);
-  const me = useShell((s) => s.me);
-  const call = useShell((s) => s.call);
-  const remote = community.voice_channels ?? [];
-  const channels = community.channels.filter((c) => c.voice);
-  const shown = channels.map((c) => c.id);
-  const reorder = useChannelReorder(canReorder, channels, (id, to) => moveChannel(community, shown, id, to));
-  return (
-    <>
-      <SectionHead
-        spaced
-        title="Voice channels"
-        action={
-          canManage ? (
-            <Tip label="Create Voice Channel">
-              <Button variant="ghost" size="icon" aria-label="Create voice channel" onClick={() => openCreateChannelDialog(community.id, 'voice')}>
-                <Plus className="size-4" />
-              </Button>
-            </Tip>
-          ) : null
-        }
-      />
-      {channels.map((ch, index) => {
-        const active = voiceChannelId === ch.id;
-        const connected = connection?.channelId === ch.id;
-        const others: VoiceParticipant[] = remote.find((v) => v.id === ch.id)?.participants ?? [];
-        // The engine lists everyone but this device; the channel you are connected to lists you first.
-        const participants: VoiceParticipant[] = connected && me && call
-          ? [{ root_id: me.root_id, display_name: me.display_name, muted: call.muted, deafened: call.deafened, speaking: false }, ...others]
-          : others;
-        const move = canReorder ? { index, count: channels.length, place: (to: number) => reorder.place(ch.id, to) } : undefined;
-        return (
-          <Fragment key={ch.id}>
-          {reorder.lineAt(index) ? <ChannelDropLine /> : null}
-          <div
-            ref={reorder.rowRef(ch.id)}
-            style={reorder.rowStyle(ch.id)}
-            className={cn('group relative flex flex-col gap-0.5', reorder.dragging(ch.id) && 'z-[3] opacity-80')}
-          >
-            <button
-              type="button"
-              className={cn(rowClass(active, false), 'font-medium', canReorder && 'touch-none')}
-              aria-current={active ? 'true' : undefined}
-              aria-keyshortcuts={canReorder ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
-              title={connected ? `Connected to ${ch.name}` : `Join ${ch.name}`}
-              onClick={() => {
-                if (reorder.clickOpens()) void openVoiceChannel(ch.id);
-              }}
-              onContextMenu={canManage ? (e) => openChannelMenu(e, community.id, ch.id, move) : undefined}
-              {...reorder.handlers(ch.id, index)}
-            >
-              <Volume2 className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate" title={ch.name}>{ch.name}</span>
-            </button>
-            {canManage ? <ChannelActions communityId={community.id} channelId={ch.id} /> : null}
-            {participants.length ? (
-              <div role="list" aria-label={`In ${ch.name}`}>
-                {participants.map((p) => (
-                  <VoiceMember key={p.root_id} person={p} />
-                ))}
-              </div>
-            ) : null}
-          </div>
-          </Fragment>
-        );
-      })}
-      {reorder.lineAt(channels.length) ? <ChannelDropLine /> : null}
-      <div role="status" aria-live="polite" className="sr-only" data-channel-order-status="voice">
-        {reorder.announcement}
-      </div>
-    </>
-  );
-}
-
-// One person in a voice channel: avatar, name, and mute and deafen flags.
-function VoiceMember({ person }: { person: VoiceParticipant }) {
-  return (
-    <div role="listitem" className="flex h-[30px] shrink-0 items-center gap-s-2 pr-s-2 pl-9 text-sm font-medium text-muted-foreground">
-      <UserAvatar name={person.display_name} seed={person.root_id} size="xs" className="size-[22px] text-[8px]" speaking={person.speaking} />
-      <span className="min-w-0 flex-1 truncate" title={person.display_name}>{person.display_name}</span>
-      {person.muted ? (
-        <span className="inline-flex shrink-0 text-faint" title="Muted"><MicOff className="size-3.5" /><span className="sr-only">Muted</span></span>
-      ) : null}
-      {person.deafened ? (
-        <span className="inline-flex shrink-0 text-danger-text" title="Deafened"><Headphones className="size-3.5" /><span className="sr-only">Deafened</span></span>
-      ) : null}
-    </div>
   );
 }
 

@@ -60,7 +60,7 @@ export function reminderFired(reminder: Reminder): void {
   const author = message.author_name || 'unknown';
   const text = `Reminder: ${author} — ${truncate(message.text, 120)}`;
   toast(text, 'info', { label: 'Jump', run: () => void openReminderMessage(reminder.id) });
-  void notifyReminder(reminder.id, text);
+  void notifyReminder(reminder.id, author, message.text);
 }
 
 export async function openReminderMessage(id: string): Promise<void> {

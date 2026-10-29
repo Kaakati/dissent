@@ -5,10 +5,12 @@ import type { ChannelAccess, Member } from '@/lib/types';
 
 export type AccessValue = Pick<ChannelAccess, 'roles' | 'members'>;
 
+// Roles a channel can list. Admins are shown too, ticked and fixed, because they always read a private channel.
 const ROLES: [ChannelAccess['roles'][number], string][] = [
   ['admin', 'Admins'],
   ['moderator', 'Moderators'],
 ];
+const ALWAYS: ChannelAccess['roles'][number][] = ['admin'];
 
 const toggled = <T,>(list: T[], item: T): T[] => (list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
 
@@ -55,17 +57,23 @@ export function AccessPicker({
     <div className="flex flex-col gap-s-4">
       <fieldset className="flex flex-col gap-s-2">
         <legend className="mb-s-2 text-sm leading-[19px] font-semibold text-text-strong">Roles</legend>
-        {ROLES.map(([role, label]) => (
-          <label key={role} className="flex cursor-pointer items-center gap-s-2 text-ui text-text">
-            <input
-              type="checkbox"
-              className={box}
-              checked={value.roles.includes(role)}
-              onChange={() => onChange({ ...value, roles: toggled(value.roles, role) })}
-            />
-            {label}
-          </label>
-        ))}
+        {ROLES.map(([role, label]) => {
+          const always = ALWAYS.includes(role);
+          return (
+            <label key={role} className={cn('flex items-center gap-s-2 text-ui text-text', always ? 'cursor-default' : 'cursor-pointer')}>
+              <input
+                type="checkbox"
+                className={cn(box, always && 'cursor-default opacity-60')}
+                checked={always || value.roles.includes(role)}
+                disabled={always}
+                data-access-role={role}
+                onChange={() => onChange({ ...value, roles: toggled(value.roles, role) })}
+              />
+              {label}
+            </label>
+          );
+        })}
+        <p className="text-sm text-muted-foreground" data-access-admins-hint>The owner and admins can always read a private channel.</p>
       </fieldset>
       <fieldset className="flex flex-col gap-s-2">
         <legend className="mb-s-2 text-sm leading-[19px] font-semibold text-text-strong">Members</legend>

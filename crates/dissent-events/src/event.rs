@@ -307,6 +307,38 @@ pub enum Payload {
     /// channel. Phase 1 records and shows grants; a storage join does not need one yet. Carried: see
     /// `control::carry_sealed`. Appended. See `docs/design/05-encrypted-servers.md`, "Storage joins".
     StorageGrant { root: RootId, granted: bool },
+    /// Whether the authoring device reads history messages (`SealedKind::HistoryMessage`), as its answer to the
+    /// `HistorySupport` probe would say. A joiner sends it right after its join, so members that did not admit
+    /// it can count it without asking. Any member device may send it, for itself only: it is keyed by the
+    /// event's device. The latest by HLC per device wins. Carried: see `control::carry_sealed`. Appended. See
+    /// `docs/design/05-encrypted-servers.md`, "Restarts and joins".
+    HistorySupport { supported: bool },
+    /// The server's whole channel layout, top first: channels outside any category, and categories holding
+    /// channels of either kind. It replaces the layout before it, and the latest by HLC wins. While one is
+    /// accepted it decides the order, and `ChannelOrder` is only for clients from before layouts. Owner and
+    /// admin only, on the control channel. See `state::CommunityState::channel_layout` for how ids that are not
+    /// live channels and channels left out are handled, and `state::valid_layout` for the caps. Carried: see
+    /// `control::carry_sealed`. Appended. See `docs/design/02-communities-and-dms.md`, "Channel categories".
+    ChannelLayout { entries: Vec<LayoutEntry> },
+}
+
+/// One entry of a channel layout: a channel outside any category, or a category. Appended only: the variant
+/// order is the wire tag, as for `Payload`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayoutEntry {
+    Channel(ChannelId),
+    Category(LayoutCategory),
+}
+
+/// A category in a channel layout. `id` is random, made when the category is first placed, and stays the same
+/// across layouts, so a rename or a move keeps it. `collapsed` is how it starts for someone who never opened
+/// or closed it. `channels` are top first, of either kind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutCategory {
+    pub id: [u8; 16],
+    pub name: String,
+    pub collapsed: bool,
+    pub channels: Vec<ChannelId>,
 }
 
 /// One of a community's traits: an optional emoji (empty when there is none) and a short label. See

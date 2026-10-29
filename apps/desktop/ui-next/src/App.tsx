@@ -26,6 +26,7 @@ import { KeyboardShortcuts } from '@/components/keyboard-shortcuts';
 import { ContextMenuHost } from '@/components/menus/context-menu-host';
 import { useRightColumn } from '@/components/right/right-column';
 import { Onboarding } from '@/components/startup/onboarding';
+import { DisclaimerHost } from '@/components/startup/disclaimer';
 import { SettingsPage } from '@/components/settings/settings-page';
 import { Toaster } from '@/components/toaster';
 import { TipProvider } from '@/components/ui/tip';
@@ -66,6 +67,7 @@ export default function App() {
         <ServerSettingsHost />
         <EmojiPickerHost />
         <Onboarding />
+        <DisclaimerHost />
         <DialogHost />
         <CallHost />
         <ContextMenuHost />

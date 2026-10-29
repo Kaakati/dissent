@@ -281,11 +281,102 @@ impl Engine {
                 }
                 ready && at.elapsed() < ttl
             }
+            // A fresh yes still holds when every device it did not cover has said, in its own `HistorySupport`
+            // event, that it reads history messages: a joiner sends one with its join. A device that left only
+            // shrinks the list. The answer is widened to the new list and keeps its age.
+            Some((at, seen, true)) if at.elapsed() < READY_FOR && self.declared_beyond(community, &seen, &devices) => {
+                self.inner
+                    .history_ready
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(community, (at, devices, true));
+                self.save_ready();
+                true
+            }
             _ => {
                 self.start_history_check(community);
                 false
             }
         }
+    }
+
+    /// Whether every device in `devices` that `seen` does not hold has declared history support in the
+    /// community's replay.
+    fn declared_beyond(&self, community: CommunityId, seen: &[DeviceId], devices: &[DeviceId]) -> bool {
+        let w = self.read();
+        let Some(c) = w.communities.get(&community) else {
+            return false;
+        };
+        devices.iter().filter(|d| !seen.contains(d)).all(|d| c.state().declares_history(d))
+    }
+
+    /// Publishes this device's `HistorySupport` in `community` when its replay does not already say what this
+    /// device's setting says: no declaration yet while support is on, or a last declaration that differs. Only an
+    /// active, unbanned member declares. Each declaration is replayed here at once, so a second call finds it and
+    /// sends nothing. Returns the event, so a joiner can push it with its join.
+    pub(crate) async fn declare_history_support(&self, community: CommunityId) -> Option<dissent_events::SignedEvent> {
+        let supported = self.history_declaration_due(community)?;
+        if !self.inner.history_declaring.lock().unwrap_or_else(PoisonError::into_inner).insert(community) {
+            return None;
+        }
+        let published = self
+            .author_publish(community, ChannelId::CONTROL, dissent_events::Payload::HistorySupport { supported })
+            .await;
+        self.inner.history_declaring.lock().unwrap_or_else(PoisonError::into_inner).remove(&community);
+        match published {
+            Ok(se) => Some(se),
+            Err(e) => {
+                debug!(community = %community, error = %e, "could not declare history support");
+                None
+            }
+        }
+    }
+
+    /// The value this device should declare in `community` now, or `None` when its replay already holds it, or
+    /// when this device is not an active, unbanned member there. A device without support that never declared
+    /// has nothing to say: no declaration already counts as no.
+    pub(crate) fn history_declaration_due(&self, community: CommunityId) -> Option<bool> {
+        let supported = self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed);
+        let w = self.read();
+        let state = w.communities.get(&community)?.state();
+        let me = self.inner.me;
+        let active = state.members.get(&me).is_some_and(|m| !m.left) && !state.banned.contains(&me);
+        if !active {
+            return None;
+        }
+        let declared = state.history_support.get(&self.inner.identity.device_id()).map(|(_, yes)| *yes);
+        match declared {
+            None if !supported => None,
+            Some(yes) if yes == supported => None,
+            _ => Some(supported),
+        }
+    }
+
+    /// Declares this device's history support, in the background, in every community where it is due.
+    pub(crate) fn declare_history_everywhere(&self) {
+        let ids: Vec<CommunityId> = self.read().communities.keys().copied().collect();
+        for id in ids {
+            self.declare_history_soon(id);
+        }
+    }
+
+    /// Declares this device's history support in `community`, in the background, if it is due. Cheap when it is
+    /// not, so it can run after every batch of events.
+    pub(crate) fn declare_history_soon(&self, community: CommunityId) {
+        if self.history_declaration_due(community).is_none() {
+            return;
+        }
+        let engine = self.clone();
+        self.spawn_task(async move {
+            engine.declare_history_support(community).await;
+        });
+    }
+
+    /// Turns this device's support for history messages on or off. It answers probes with the new value, and
+    /// declares it in each community whose replay says otherwise.
+    pub(crate) fn set_history_support(&self, on: bool) {
+        self.inner.history_support.store(on, std::sync::atomic::Ordering::Relaxed);
+        self.declare_history_everywhere();
     }
 
     /// Starts a background check of `community`, unless one is already running.
@@ -334,7 +425,8 @@ impl Engine {
     }
 
     /// Asks every other member device whether it supports history messages, and keeps the answer. A device that
-    /// does not answer, or answers with an error, counts as not supporting it.
+    /// does not answer, or answers with an error, counts as not supporting it, unless its `HistorySupport` event
+    /// says it does.
     pub(crate) async fn refresh_history_ready(&self, community: CommunityId) -> bool {
         let devices = {
             let w = self.read();
@@ -346,10 +438,21 @@ impl Engine {
                 }
             }
         };
+        let probes = self.inner.history_probes.load(std::sync::atomic::Ordering::Relaxed);
         let mut ready = true;
         for device in devices.clone() {
-            let reply = tokio::time::timeout(ASK_WAIT, self.call(device, &Request::HistorySupport)).await;
-            if !matches!(reply, Ok(Ok(Response::HistorySupport(true)))) {
+            let reply = if probes {
+                tokio::time::timeout(ASK_WAIT, self.call(device, &Request::HistorySupport)).await.ok()
+            } else {
+                None
+            };
+            // A device's own answer decides. One that does not answer counts as supporting history messages only
+            // if it said so in a `HistorySupport` event, as a joiner does with its join.
+            let supports = match reply {
+                Some(Ok(Response::HistorySupport(yes))) => yes,
+                _ => self.declared_beyond(community, &[], &[device]),
+            };
+            if !supports {
                 ready = false;
                 break;
             }

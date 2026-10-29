@@ -308,6 +308,8 @@ impl Engine {
             })
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
+        // Pictures are for everyone who shares a community or a conversation with us.
+        self.add_blob_scope(fref.hash, crate::blob_gate::Scope::Shared);
         let picture = Picture {
             hash: fref.hash,
             key: fref.key,
@@ -443,6 +445,7 @@ impl Engine {
             .fetch(node.endpoint(), &from, &fref, &dir, |_, _| {})
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
+        self.add_blob_scope(picture.hash, crate::blob_gate::Scope::Shared);
         // The plaintext's type decides its extension, which the asset protocol uses as the MIME type.
         // Replay already held the size the event names to its kind's cap, so a file larger than that
         // size, or than the largest kind, is refused.

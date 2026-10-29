@@ -222,6 +222,13 @@ async fn members_decrypt_and_an_outsider_sees_only_locked_messages() {
             .state()
             .clone()
     };
+    // Each device's own events (dave's join and its history support) reach the others a moment apart, so wait
+    // for the replays to settle before comparing them.
+    eventually("the four replays settle on one state", || {
+        let a = state(&alice);
+        a == state(&bob) && a == state(&carol) && a == state(&dave)
+    })
+    .await;
     let (a, b, c) = (state(&alice), state(&bob), state(&carol));
     assert_eq!(a, b, "alice and bob agree on state");
     assert_eq!(a, c, "alice and carol agree on state");

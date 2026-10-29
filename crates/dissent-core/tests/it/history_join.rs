@@ -174,3 +174,46 @@ async fn a_joiner_reads_a_message_sent_right_after_the_join_within_three_seconds
     })
     .await;
 }
+
+/// A member that did not admit the joiner (bob) keeps the history form for the joiner's first message without
+/// asking anyone: carol's join carries her `HistorySupport`. Bob's checks reach nobody here, so only that event
+/// can count her. Carol reads the message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_that_did_not_admit_the_joiner_sends_it_the_history_form_at_once() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        alice
+            .engine
+            .set_history_visibility(id, HistorySetting::All)
+            .await
+            .expect("owner shares past messages");
+        let channel = channel_id(&bob.engine, id, "general").expect("general channel");
+        let link = alice.engine.create_invite(id).await.expect("invite");
+        eventually("bob is ready for the history form", || {
+            dissent_core::test_support::history_ready_now(&bob.engine, id).then_some(())
+        })
+        .await;
+
+        dissent_core::test_support::set_history_probes(&bob.engine, false);
+        let carol = peer("carol").await;
+        join_ready(&alice, &carol, &link).await;
+        let carol_root = carol.identity.root_id().to_string();
+        eventually("bob lists carol", || {
+            bob.engine
+                .community_view(id)
+                .ok()
+                .filter(|v| v.members.iter().any(|m| m.root_id == carol_root))
+        })
+        .await;
+        eventually("bob counts carol without asking", || {
+            dissent_core::test_support::history_ready_now(&bob.engine, id).then_some(())
+        })
+        .await;
+        bob.engine.send_message(id, channel, "hello carol".into()).await.expect("send");
+        wait_seen(&carol, id, channel, "hello carol").await;
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}

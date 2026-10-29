@@ -213,7 +213,8 @@ export function TransfersAside() {
   return (
     <aside aria-label="Storage" className="flex min-h-0 flex-col gap-s-4 overflow-y-auto p-s-4">
       <h3 className="text-[17px] leading-6 font-bold text-text-strong">Storage</h3>
-      <p className="text-sm text-muted-foreground">Partial and cancelled files are cleared within the hour.</p>
+      {/* dissent-files keeps a partial download 24 h (DEFAULT_PARTIAL_TTL), and the hourly sweep then removes it. */}
+      <p className="text-sm text-muted-foreground" data-partial-note>Partial and cancelled downloads are kept for 24 hours so they can resume, then cleared.</p>
       <StoreMeter />
       <div className="rounded-lg bg-sidebar p-s-4 text-center">
         <div className="text-ui font-semibold text-text-strong">Largest file you’ll accept</div>

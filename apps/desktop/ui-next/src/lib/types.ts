@@ -110,7 +110,22 @@ export interface CommunityView extends CommunitySummary {
   description?: string;
   traits?: Trait[];
   created_ms?: number;
+  // The server's channel layout, top first, as this person sees it; null or absent while the server has none.
+  layout?: LayoutEntry[] | null;
+  can_manage_channels?: boolean; // this person may arrange the channels: create categories and move channels
 }
+
+// A category in a server's channel layout. `id` is 32 hex digits from the engine; the sidebar gives a category the
+// engine has not named yet a local key. `collapsed` is how it starts for someone who never opened or closed it.
+export interface LayoutCategory {
+  id?: string | null;
+  name: string;
+  collapsed?: boolean;
+  channels: Id[];
+}
+
+// One entry of a channel layout: a channel outside any category, or a category of channels of either kind.
+export type LayoutEntry = { kind: 'channel'; id: Id } | ({ kind: 'category' } & LayoutCategory);
 
 // A server's boost: the level its verified relay hosts earn, the hosts, and the ceilings the level gives calls.
 export interface BoostView {
@@ -423,6 +438,7 @@ export interface ShellSettings {
   start_at_login_note: string | null; // why start at login is not offered, when it is not
   notifications_muted: boolean; // desktop notifications for new messages are off
   emoticons_as_text?: boolean; // emoticons are sent as typed, not as emoji; absent from an older desktop app
+  keep_photo_metadata?: boolean; // photos keep their location and camera details; absent from an older desktop app
 }
 
 export interface NetworkSettings {

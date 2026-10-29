@@ -105,7 +105,22 @@ A recipient fetches a thumbnail of 64 KB or less when the message arrives, and s
 attachment id in the profile's `thumbnails` folder. The full file still waits for a click, unless
 the automatic-download setting covers it. See `06-threat-model.md` for what a thumbnail reveals.
 
-Video thumbnails are not made yet. That needs a decoder for the video's first frame.
+### Video thumbnails
+
+A video gets a thumbnail of its first frame, made and sent the same way as an image's: a JPEG of at most 320 px on
+the long side and 64 KB, in the same trailer, fetched on arrival. The UI shows it unblurred, with a play mark. A
+click downloads the video, and once it is here, the same click opens it.
+
+- **Reading.** `dissent_video::still::first_frame` reads MP4 and MOV with `re_mp4`, and WebM and MKV with
+  `matroska-demuxer`. Both are pure Rust. Only the track headers and the first frames are read, so a large file costs
+  little. An MP4's track matrix is applied, so a phone video filmed upright stays upright.
+- **Decoding.** H.264 goes through OpenH264 and AV1 through rav1d, the decoders calls use. Frames from the first
+  keyframe on are fed until one gives a picture, at most 120.
+- **Limits and failures.** VP9, HEVC and other codecs have no decoder here. Neither do 10-bit AV1, encoded Matroska
+  tracks or pictures over 8192 by 4608. A video like that, or one that does not parse, is sent with
+  no thumbnail, as a plain file card. Nothing fails the send.
+- **Code.** `crates/dissent-video/src/still.rs` (with fixtures in `tests/fixtures`),
+  `crates/dissent-core/src/video_thumbs.rs`, and `make_thumbnail_rgb` in `dissent-files`.
 
 ## Next steps
 
@@ -172,7 +187,8 @@ Tests: `two_providers_each_deliver_part_of_the_file` in `crates/dissent-files/te
 A seeder is a storage member. It holds ciphertext and no read keys, and it serves what it can hold without one.
 
 - **Attachments.** Ciphertext of files the sender marked `seed`, mirrored within the seeder's `MirrorPolicy`
-  and found by the cleartext manifest. Unchanged. A seeder mirrors only if its owner turned mirroring on.
+  and found by the cleartext manifest. The seeder app keeps them by default, within `--keep-files-up-to` and
+  `--files-quota`; `--no-files` turns it off.
 - **Pictures.** The server icon, the server banner (still and animated, with its poster), each member's avatar,
   and each member's profile banner. These come from community events, which a storage member can open with the
   community secret, so a seeder fetches them like any member does and keeps the blobs it holds. Their fetch
@@ -187,3 +203,41 @@ A seeder is a storage member. It holds ciphertext and no read keys, and it serve
 - **History keys and epoch keys. Never.** Storage members are outside the group, and `EpochHistory` and
   `HistoryKeys` answer only active members (`05`). A seeder never serves a read key, so joiners' history comes from
   active members.
+
+## Who may fetch a blob (members only)
+
+The blob server used to answer anyone who named a hash. It now serves a device only when the device's root
+may see something the blob belongs to (`dissent-core/src/blob_gate.rs`). The node mounts
+`Files::protocol_handler_with` with an iroh-blobs `EventSender` that intercepts every connection and every `get`,
+`get_many` and `observe`. Push stays disabled. A refusal is iroh-blobs' `AbortReason::Permission`.
+
+| Scope | Blobs | Served to |
+| --- | --- | --- |
+| Community | Files, thumbnails and preview pictures of a public channel's messages; files named by a manifest; hinted blobs | Active persons and storage members of the server, not banned, not left |
+| Channel | The same, for a private channel | Its readers (`can_read`); storage members are left out |
+| Conv | The same, for a direct or group conversation | Its members, while the conversation is not left |
+| Shared | People's avatars and profile banners | Contacts, and anyone who shares a server or a conversation with us |
+| Public | A server's icon and banner (still, animated and poster) | Anyone: an invite card shows them before the reader joins |
+
+- Our own devices are always served. A revoked device is never served. A hash with no scope is refused.
+- Membership is checked on every request, so a ban takes effect on a connection that is already open.
+- Storage members pass as replay admits them. Once storage grants are required (phase 2 of `storage_grants`), an
+  ungranted seeder is no longer a member and is refused with no change here.
+- The index of scopes is built at start from the content, manifests and pictures this device keeps, and grows as
+  messages are stored. Hints a seeder accepted are kept in `blob_hints.bin`, since a seeder cannot read the message
+  they came from. A refusal rebuilds the index once, at most every 2 s, so a blob that arrived by a path that
+  records no scope is still served.
+- **A device we have not met.** A fresh joiner may ask before its certificate reaches us. The gate refuses, and at
+  once asks the device for its signed address record (`Request::AddrLookup` for itself), which carries its
+  certificate, at most once every 10 s per device. On the fetching side `Files::fetch_tallied` asks a provider that
+  refused once more after `Timeouts::refused_retry` (1 s), and that ask is served. Membership still comes only from
+  our own state; the record only proves which root the device belongs to.
+- A fetch that every provider refused ends in `FilesError::Refused`, which the attachment card shows as its own
+  reason.
+- **Unpinning.** A blob nothing live refers to any more is unpinned, and the store's hourly garbage collection
+  removes it: a deleted message's files, thumbnails and preview pictures (ours, or arriving from their author, on
+  members and seeders alike), a left server's or group's blobs, and a removed contact's pictures. A sweep at start
+  catches what changed while the device was off, and keeps files shared in the last day. See `blob_release.rs`.
+- Covered by `crates/dissent-core/tests/it/blob_gate.rs` (members, strangers, bans, conversations, private
+  channels, a fresh joiner) and `crates/dissent-files/tests/transfer.rs` (a refusal, and a refusal followed by a
+  served retry).

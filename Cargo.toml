@@ -59,6 +59,8 @@ rcgen = "0.14"
 noq-proto = { version = "1.4", default-features = false, features = ["rustls", "aws-lc-rs"] }
 iroh-gossip = "0.101"
 iroh-blobs = "0.103"
+# The channel type of iroh-blobs' provider events. The version and features iroh-blobs already uses.
+irpc = { version = "0.17", default-features = false, features = ["spans", "stream"] }
 iroh-mainline-address-lookup = "0.6"
 pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
 url = { version = "2", features = ["serde"] }
@@ -68,6 +70,8 @@ tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+# The recovery phrase is copied natively so it can be kept out of clipboard history and cloud sync (desktop secret_clipboard.rs).
+arboard = { version = "3.7.0", default-features = false }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-deep-link = "2"
@@ -119,6 +123,9 @@ shiguredo_cmake = "4.4"
 # H.264 fallback. The crate bundles OpenH264 source and compiles it with cc.
 openh264 = "0.9"
 rav1d = { version = "1", default-features = false, features = ["bitdepth_8"] }
+# Pure-Rust demuxers for video thumbnails: the first frame of an MP4 or MOV, and of a WebM or MKV.
+re_mp4 = "0.5"
+matroska-demuxer = "0.8"
 nokhwa = { version = "0.10", features = ["input-native", "output-threaded"] }
 xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }

@@ -1,15 +1,22 @@
-// The server rail's menu, opened by right click or Shift+F10 on a server icon. Each item is one Dissent can back. Mark As
-// Read clears every text channel's unread dot and mention count. Invite to Server, Create Channel and the Server
-// Settings sections go to the dialogs and the Server Settings page, for owners and admins. Leave Server asks first and is
-// for members who are not the owner. Help Forward Calls lets this device relay the server's voice calls while it is in
-// none (off by default). Ported from the server context menu of the Discord reference, adapted to what the engine has: no
-// categories, boosts, emoji, stickers or events.
+// The server menu: one definition for both places it opens, a right click (or Shift+F10) on a server icon in the rail,
+// and the server's name at the top of the channel list (server-menu.tsx). Both show the same items to the same people.
+// Each item is one Dissent can back. Mark As Read clears every text channel's unread dot and mention count. Invite to
+// Server, Claim Handle and Copy Server Address are for everyone. Server Settings (with each section of the page),
+// Create Channel and Server Icon are for owners and admins. Leave Server asks first and is for everyone but the owner,
+// who must hand the server over or delete it instead. Help Forward Calls lets this device relay the server's voice
+// calls while it is in none (off by default). Ported from the server context menu of the Discord reference, adapted
+// to what the engine has: no emoji, stickers or events.
 import type { MouseEvent } from 'react';
-import { Bell, BellOff, LogOut, Plus, Settings, UserPlus } from 'lucide-react';
+import { AtSign, Bell, BellOff, Copy, FolderPlus, Image as ImageIcon, LogOut, Plus, Settings, UserPlus } from 'lucide-react';
+import { openCreateCategoryDialog } from '@/components/dialogs/category-dialogs';
 import { openCreateChannelDialog } from '@/components/dialogs/create-channel-dialog';
 import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
+import { openServerIconDialog } from '@/components/dialogs/server-icon-dialog';
+import { openClaimHandleDialog } from '@/components/dialogs/small-dialogs';
 import { openServerSettings, type Section } from '@/components/server-settings/server-settings';
+import { addressOf } from '@/lib/address';
 import { leaveCommunity, markRead } from '@/lib/actions';
+import { copyText } from '@/lib/clipboard';
 import { asksLabel, loadStorageAsks } from '@/lib/storage-asks';
 import { api } from '@/lib/api';
 import { has } from '@/lib/features';
@@ -100,13 +107,16 @@ function notifyEntries(communityId: Id, prefs: ServerPrefs): MenuEntry[] {
   ];
 }
 
-// Opens the menu at the pointer, or beside the icon when a key opened it. The role comes from the server's view, read
-// when the menu opens, so the items match what the user may do there now.
+// Opens the rail's menu at the pointer, or beside the icon when a key opened it.
 export async function openServerRailMenu(e: MouseEvent<HTMLElement>, communityId: Id): Promise<void> {
   e.preventDefault();
   const r = e.currentTarget.getBoundingClientRect();
-  const x = e.clientX || r.right + 8;
-  const y = e.clientY || r.top;
+  await openServerMenu(communityId, e.clientX || r.right + 8, e.clientY || r.top);
+}
+
+// Opens the server menu at a point. The role comes from the server's view, read when the menu opens, so the items match
+// what the user may do there now.
+export async function openServerMenu(communityId: Id, x: number, y: number): Promise<void> {
   let view: CommunityView;
   try {
     view = await viewOf(communityId);
@@ -157,7 +167,9 @@ export async function openServerRailMenu(e: MouseEvent<HTMLElement>, communityId
           icon: Settings,
           sub: asks || undefined,
           submenu: [
+            // Every section of the page, in the page's order.
             { label: 'Server Profile', onPick: () => void openSettingsAt(view.id, 'profile') },
+            { label: 'Boosts', onPick: () => void openSettingsAt(view.id, 'boosts') },
             { label: 'Members', sub: asks || undefined, onPick: () => void openSettingsAt(view.id, 'members') },
             { label: 'Invites', onPick: () => void openSettingsAt(view.id, 'invites') },
             { label: 'Bans', onPick: () => void openSettingsAt(view.id, 'bans') },
@@ -165,6 +177,17 @@ export async function openServerRailMenu(e: MouseEvent<HTMLElement>, communityId
         }
       : null,
     manage ? { label: 'Create Channel', icon: Plus, onPick: () => openCreateChannelDialog(view.id) } : null,
+    manage && has('channel_categories') ? { label: 'Create category', icon: FolderPlus, onPick: () => openCreateCategoryDialog() } : null,
+    manage && has('avatars') ? { label: 'Server Icon', icon: ImageIcon, onPick: () => openServerIconDialog(view) } : null,
+    { label: 'Claim Handle', icon: AtSign, onPick: () => openClaimHandleDialog(view.id) },
+    {
+      label: 'Copy Server Address',
+      icon: Copy,
+      onPick: async () => {
+        const address = addressOf('server', view.id);
+        if (address && (await copyText(address))) toast(`${view.name} address copied`, 'info');
+      },
+    },
     view.my_role !== 'owner' ? { label: 'Leave Server', icon: LogOut, danger: true, onPick: () => void leave(view) } : null,
   ];
   openContextMenu(x, y, entries);

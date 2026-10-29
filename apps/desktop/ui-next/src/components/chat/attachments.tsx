@@ -2,11 +2,11 @@
 // Nothing here renders user-supplied markup. Names are text, and the only image source is the backend's local path
 // converted by Tauri's asset protocol, never a URL taken from a message. Ported from the old UI's views/attachments.js.
 import { useState, type ComponentType } from 'react';
-import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, RotateCcw, X } from 'lucide-react';
+import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, Play, RotateCcw, X } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ProgressBar } from '@/components/transfers/progress';
-import { MAX_FILE_LABEL, extOf, formatSize, iconFor, isExecutable, isImage, isOverLimit, transferText, type FileIconName } from '@/lib/attachments';
+import { MAX_FILE_LABEL, extOf, formatSize, iconFor, isExecutable, isImage, isOverLimit, isVideo, transferText, type FileIconName } from '@/lib/attachments';
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
@@ -162,25 +162,32 @@ function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachmen
 
 // A picture's preview before the picture is downloaded: the sender's thumbnail, softly blurred and sized like a Discord
 // embed (at most 400 by 300, aspect kept), over the picture's card with its Download button. Clicking the preview
-// downloads too. Shown only once the thumbnail is on this device, so the box is never empty.
-function ThumbPreview({ a, thumb, src, onBroken, communityId, messageId }: { a: Attachment; thumb: ThumbView; src: string; onBroken: () => void; communityId: Id | null; messageId: Id }) {
+// downloads too. Shown only once the thumbnail is on this device, so the box is never empty. A video's preview is its
+// first frame, unblurred, under a play mark: before the download a click downloads it, after it a click opens it.
+function ThumbPreview({ a, thumb, src, onBroken, communityId, messageId, video = false }: { a: Attachment; thumb: ThumbView; src: string; onBroken: () => void; communityId: Id | null; messageId: Id; video?: boolean }) {
   const name = String(a.name ?? 'file');
+  const here = video && a.state === 'downloaded';
   const width = Math.max(1, Number(thumb.width) || 1);
   const height = Math.max(1, Number(thumb.height) || 1);
   const size = { width: Math.min(400, 300 * (width / height)), aspectRatio: `${width} / ${height}` };
   const downloading = a.state === 'downloading';
   return (
-    <figure className="att-preview">
+    <figure className="att-preview" data-video={video ? '' : undefined}>
       <button
         type="button"
         className="att-preview-btn"
         style={size}
-        aria-label={downloading ? `Downloading ${name}` : `Download ${name}`}
+        aria-label={here ? `Play ${name}` : downloading ? `Downloading ${name}` : `Download ${name}`}
         title={`${name} · ${formatSize(a.size)} · End-to-end encrypted`}
-        disabled={downloading || a.state === 'too_large'}
-        onClick={() => void downloadAttachment(communityId, messageId, a)}
+        disabled={!here && (downloading || a.state === 'too_large')}
+        onClick={() => void (here ? openAttachment(a) : downloadAttachment(communityId, messageId, a))}
       >
         <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onError={onBroken} />
+        {video ? (
+          <span className="att-play" aria-hidden="true" data-att-play>
+            <Play />
+          </span>
+        ) : null}
       </button>
       <FileCard a={a} communityId={communityId} messageId={messageId} />
     </figure>
@@ -213,6 +220,11 @@ export function AttachmentView({ a, communityId, messageId }: { a: Attachment; c
   const thumbSrc = isImage(a) && a.state !== 'downloaded' && a.thumb?.state === 'downloaded' ? imageSrc(a.thumb.path) : null;
   if (thumbSrc && a.thumb && !broken.has(thumbSrc)) {
     return <ThumbPreview a={a} thumb={a.thumb} src={thumbSrc} onBroken={() => markBroken(thumbSrc)} communityId={communityId} messageId={messageId} />;
+  }
+  // A video keeps its first frame as its picture, downloaded or not. Without a thumbnail it is a plain file card.
+  const videoSrc = isVideo(a) && a.thumb?.state === 'downloaded' ? imageSrc(a.thumb.path) : null;
+  if (videoSrc && a.thumb && !broken.has(videoSrc)) {
+    return <ThumbPreview video a={a} thumb={a.thumb} src={videoSrc} onBroken={() => markBroken(videoSrc)} communityId={communityId} messageId={messageId} />;
   }
   return <FileCard a={a} communityId={communityId} messageId={messageId} unshown={src !== null} />;
 }

@@ -168,6 +168,10 @@ impl Engine {
 
     /// Sends our record to every scoped device, one request each. Delivery is best effort.
     pub(crate) async fn push_own_record(&self) {
+        // While invisible nothing is pushed: a fresh record shows we are online.
+        if self.invisible() {
+            return;
+        }
         let (record, targets) = {
             let w = self.read();
             (w.own_record.clone(), scoped_devices(&w))
@@ -275,7 +279,7 @@ impl Engine {
     pub(crate) fn serve_addr_sync(&self, from: DeviceId, digest: Vec<(DeviceId, u64)>) -> Response {
         let w = self.read();
         let Some(root) = w.directory.root_of(&from) else {
-            return Response::Refused("unknown device".into());
+            return Response::Refused("not in scope".into());
         };
         if !in_scope(&w, &root) {
             return Response::Refused("not in scope".into());
@@ -293,7 +297,7 @@ impl Engine {
         {
             let mut guard = self.write();
             let Some(root) = guard.directory.root_of(&from) else {
-                return Response::Refused("unknown device".into());
+                return Response::Refused("not in scope".into());
             };
             if !in_scope(&guard, &root) {
                 return Response::Refused("not in scope".into());
@@ -319,7 +323,7 @@ impl Engine {
         let now = now_ms();
         let mut w = self.write();
         let Some(root) = w.directory.root_of(&from) else {
-            return Response::Refused("unknown device".into());
+            return Response::Refused("not in scope".into());
         };
         if !in_scope(&w, &root) {
             return Response::Refused("not in scope".into());

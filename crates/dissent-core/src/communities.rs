@@ -63,6 +63,8 @@ impl Engine {
         let display_name = self.read().my_name();
         self.author_publish(id, ChannelId::CONTROL, Payload::Join { display_name })
             .await?;
+        // As a joiner does, the founder says whether it reads history messages, so members count it unasked.
+        self.declare_history_support(id).await;
         self.author_publish(
             id,
             ChannelId::CONTROL,
@@ -203,7 +205,7 @@ impl Engine {
         } else {
             Invite {
                 genesis,
-                peers: vec![addr.to_string()],
+                peers: vec![self.shareable(&addr).to_string()],
                 secret: keys.secret,
                 secret_generation: keys.generation,
                 relays: self.community_relays(community),
@@ -377,10 +379,16 @@ impl Engine {
             .await
         {
             Ok(join) => {
+                // The join carries this device's history support, so a member that did not admit us can count
+                // it at once rather than ask first. It goes out with the Join.
+                let mut batch = vec![join];
+                if let Some(support) = self.declare_history_support(id).await {
+                    batch.push(support);
+                }
                 // Hand the Join straight to the peers that served the invite. Gossip may reach
                 // them later, and until it does they cannot address us.
                 for peer in served {
-                    if let Err(e) = self.push(id, *peer, vec![join.clone()]).await {
+                    if let Err(e) = self.push(id, *peer, batch.clone()).await {
                         debug!(community = %id, peer = %peer, error = %e, "join not pushed to invite peer");
                     }
                 }
@@ -388,6 +396,21 @@ impl Engine {
                 // events are sealed too, which is why we ask them rather than the members we cannot
                 // see yet.
                 self.fetch_history_from(id, served).await;
+                // Before the Join a peer hands out no member addresses. Now it does, so this device
+                // can reach the other members directly, and hands them the Join too.
+                self.fetch_member_addrs(id, served).await;
+                let others: Vec<DeviceId> = {
+                    let w = self.read();
+                    w.communities.get(&id).map(|c| w.member_devices(c)).unwrap_or_default()
+                };
+                for peer in others.into_iter().filter(|d| !served.contains(d)) {
+                    let (engine, batch) = (self.clone(), batch.clone());
+                    self.spawn_task(async move {
+                        if let Err(e) = engine.push(id, peer, batch).await {
+                            debug!(community = %id, peer = %peer, error = %e, "join not pushed to a member");
+                        }
+                    });
+                }
             }
             Err(e) => warn!(community = %id, error = %e, "could not announce join"),
         }
@@ -444,6 +467,7 @@ impl Engine {
             Err(CoreError::Rejected(_)) => {}
             Err(e) => return Err(e),
         }
+        let blobs = self.read().blobs_of_community(community);
         let removed = self.write().communities.remove(&community);
         if let Some(c) = removed {
             self.stop_topic(c).await;
@@ -463,6 +487,7 @@ impl Engine {
             std::fs::remove_dir_all(&dir)?;
         }
         self.prune_thumbnails();
+        self.release_blobs(blobs);
         self.emit(EngineEvent::CommunitiesChanged);
         Ok(())
     }
@@ -645,6 +670,21 @@ impl Engine {
         ))
     }
 
+    /// Asks `peers` for `community`'s member addresses and keeps the valid ones. A peer answers with
+    /// them only once it counts this device as a member (`request_gates`).
+    async fn fetch_member_addrs(&self, community: CommunityId, peers: &[DeviceId]) {
+        for peer in peers {
+            match self.call(*peer, &Request::Genesis { community }).await {
+                Ok(Response::Genesis { addrs, .. }) if !addrs.is_empty() => {
+                    self.learn_member_addrs(community, addrs);
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => debug!(community = %community, peer = %peer, error = %e, "member addresses not fetched"),
+            }
+        }
+    }
+
     async fn fetch_community_from(
         &self,
         genesis: &Genesis,
@@ -691,6 +731,29 @@ pub(crate) fn public_addr(addr: &PeerAddr) -> PeerAddr {
     }
 }
 
+/// `addr` as a link or card that leaves the members may carry it: the device id, the relay URL and the public
+/// addresses. LAN, VPN, link-local, unique-local and carrier-grade NAT addresses are left out, so a posted invite or a
+/// contact link does not map the sender's network (privacy audit P-03). Direct addresses reach co-members only through
+/// peer exchange. `keep_loopback` keeps loopback addresses for a node that runs on loopback alone (tests and local
+/// multi-instance checks): it has no other address, and a loopback address names no network.
+pub(crate) fn shareable_addr(addr: &PeerAddr, keep_loopback: bool) -> PeerAddr {
+    let keep = |ip: std::net::IpAddr| {
+        dissent_events::relay::is_public_address(ip) || (keep_loopback && ip.to_canonical().is_loopback())
+    };
+    PeerAddr {
+        id: addr.id,
+        relay: addr.relay.clone(),
+        direct: addr.direct.iter().copied().filter(|s| keep(s.ip())).collect(),
+    }
+}
+
+impl Engine {
+    /// `addr` as `shareable_addr` makes it for this node.
+    pub(crate) fn shareable(&self, addr: &PeerAddr) -> PeerAddr {
+        shareable_addr(addr, self.inner.loopback_relays)
+    }
+}
+
 /// Leaves a topic with its sender and receiver. Whatever cannot be paired is dropped, which
 /// also leaves the topic once the last half is gone.
 fn leave_topic(sender: Option<Arc<TopicSender>>, rx: Option<TopicReceiver>) {
@@ -698,5 +761,47 @@ fn leave_topic(sender: Option<Arc<TopicSender>>, rx: Option<TopicReceiver>) {
     match (tx, rx) {
         (Some(tx), Some(rx)) => tx.leave(rx),
         _ => debug!("topic halves were still shared; dropping them"),
+    }
+}
+
+#[cfg(test)]
+mod shareable_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn addr(direct: &[&str]) -> PeerAddr {
+        PeerAddr {
+            id: DeviceId([7; 32]),
+            relay: Some("https://relay.example.org/".parse().unwrap()),
+            direct: direct.iter().map(|s| s.parse::<SocketAddr>().unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_shared_address_keeps_the_relay_and_public_addresses_only() {
+        let full = addr(&[
+            "203.0.114.9:4000",       // public
+            "192.168.1.20:4000",      // LAN
+            "10.8.0.3:4000",          // VPN
+            "100.101.102.103:4000",   // carrier-grade NAT, also Tailscale
+            "169.254.3.4:4000",       // link-local
+            "127.0.0.1:4000",         // loopback
+            "[2a01:4f8::1]:4000",     // public IPv6
+            "[fd12:3456::1]:4000",    // unique-local IPv6
+            "[fe80::1]:4000",         // link-local IPv6
+            "[::ffff:192.168.1.20]:4000", // IPv4-mapped LAN
+        ]);
+        let shared = shareable_addr(&full, false);
+        assert_eq!(shared.id, full.id);
+        assert_eq!(shared.relay, full.relay);
+        let kept: Vec<String> = shared.direct.iter().map(|s| s.to_string()).collect();
+        assert_eq!(kept, vec!["203.0.114.9:4000", "[2a01:4f8::1]:4000"]);
+    }
+
+    #[test]
+    fn a_loopback_only_node_keeps_its_loopback_addresses() {
+        let shared = shareable_addr(&addr(&["127.0.0.1:4000", "192.168.1.20:4000", "[::1]:4000"]), true);
+        let kept: Vec<String> = shared.direct.iter().map(|s| s.to_string()).collect();
+        assert_eq!(kept, vec!["127.0.0.1:4000", "[::1]:4000"]);
     }
 }

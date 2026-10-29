@@ -83,6 +83,31 @@ pub struct CommunityView {
     pub voice_channels: Vec<VoiceChannelView>,
     /// Whether this device's user may mention everyone here: the owner and admins.
     pub can_mention_everyone: bool,
+    /// The server's channel layout, top first, as this user sees it: only channels they can read, and no
+    /// category whose channels are all hidden from them. `None` when the server has no layout yet; the UI then
+    /// shows its text and voice channels in two groups, in `channels` order. See `channel_categories`.
+    pub layout: Option<Vec<LayoutEntryView>>,
+    /// Whether this user may arrange the channels: create categories and move channels.
+    pub can_manage_channels: bool,
+}
+
+/// One entry of a channel layout across the Tauri boundary: a channel outside any category, or a category. A
+/// category's `id` is 32 hex digits. In a layout sent to `set_channel_layout`, a category without an id is new
+/// and gets one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutEntryView {
+    Channel {
+        id: String,
+    },
+    Category {
+        #[serde(default)]
+        id: Option<String>,
+        name: String,
+        #[serde(default)]
+        collapsed: bool,
+        channels: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]

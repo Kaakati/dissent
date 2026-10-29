@@ -197,6 +197,7 @@ impl Engine {
             return;
         }
         c.content.insert(key, (hlc, text.clone()));
+        w.index_community_message(community, key, &text);
         let record = ContentRecord { key, hlc, text };
         let key = content_vault(&self.inner.vault, &community);
         if let Err(e) = append_sealed_records(&paths.content_log(&community), &key, &[record]) {
@@ -255,6 +256,9 @@ impl Engine {
             };
             let (manifest, mls_ciphertext) = crate::attachments::split_manifest(ciphertext);
             if !manifest.is_empty() {
+                for entry in &manifest {
+                    self.add_blob_scope(entry.hash, crate::blob_gate::Scope::Community(community));
+                }
                 self.mirror_manifest(se.event.body.device, &manifest);
             }
             let history = matches!(kind, SealedKind::HistoryMessage);

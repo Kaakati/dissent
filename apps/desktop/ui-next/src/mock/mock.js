@@ -2,6 +2,10 @@
 // Does nothing inside the desktop app, where window.__TAURI__ is injected before this module runs.
 import { addressOf, base32Encode, parseAddressInput } from './address.js';
 import { toast } from '../lib/toasts';
+import disclaimerText from '../../../../../DISCLAIMER.md?raw';
+
+// The bundled notice's date, which the mock counts as accepted unless a page asks otherwise (?disclaimer=).
+const DISCLAIMER_UPDATED = /^Last updated:\s*(.+)$/m.exec(disclaimerText)?.[1].trim() ?? '';
 
 if (!window.__TAURI__) {
   window.__DISSENT_MOCK__ = true;
@@ -220,7 +224,7 @@ if (!window.__TAURI__) {
   generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
   // The desktop shell settings, as the desktop app would keep them. Start at login is offered in the mock.
-  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false, emoticons_as_text: false };
+  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false, emoticons_as_text: false, keep_photo_metadata: false };
   const shellView = () => ({ ...mockShell, start_at_login_available: true, start_at_login_note: null });
   // The folder the user picked in the mock. Null is the default, which follows the OS Downloads folder.
   let pickedDownloadDir = null;
@@ -240,6 +244,12 @@ if (!window.__TAURI__) {
   generalMessages.push({ ...msg(0, 2, ME, 'Counting me in. I will bring the soldering kits.'), queued: true });
   // A picture with the sender's thumbnail already here, so its preview shows before the full file is downloaded.
   generalMessages[15].attachments = [att('enclosure.png', 1.1 * MB, 'image/png', 'available', { thumb: { state: 'downloaded', path: mockImage(320, 200, 210, 'enclosure'), width: 320, height: 200 } })];
+  // Two videos in #announcements: one with its first frame as a thumbnail (a play mark over it), and a VP9 one the
+  // engine cannot decode, which stays a plain card.
+  servers.c1.msgs.ch3.unshift({ ...msg(6, 0, LINUS, 'The laser cutter repair, filmed.'), attachments: [
+    att('cutter-fix.mp4', 18.2 * MB, 'video/mp4', 'available', { thumb: { state: 'downloaded', path: mockImage(320, 180, 20, 'cutter'), width: 320, height: 180 } }),
+    att('cutter-raw.webm', 6.4 * MB, 'video/webm'),
+  ] });
 
   const dms = {
     [GRACE]: [
@@ -287,7 +297,7 @@ if (!window.__TAURI__) {
   // Named events, like Tauri's. Engine events use the 'dissent://event' name.
   const emitTo = (name, payload) => listeners.filter((l) => l.name === name).forEach((l) => l.cb({ payload }));
   const emit = (payload) => emitTo('dissent://event', payload);
-  const UPDATE = { version: '0.2.0', current_version: '0.1.0', date: '2026-10-24', notes: '- Faster sync for large servers\n- Fixed relay settings on restart\n- Message search keeps focus while typing' };
+  const UPDATE = { version: '0.2.0', current_version: '0.1.0', date: '2026-10-24', notes: '## 0.2.0 - 2026-10-24\n\n### Added\n\n- Faster sync for large servers\n\n### Fixed\n\n- Fixed relay settings on restart\n- Message search keeps focus while typing' };
   const roleOf = (c, user) => c.roles[user] ?? null;
   const myRole = (c) => roleOf(c, ME);
   const canMod = (c) => ['owner', 'admin', 'moderator'].includes(myRole(c));
@@ -359,6 +369,30 @@ if (!window.__TAURI__) {
         return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100), mentions: unreadMentions(items, since) };
       })
       .sort((a, b) => b.last_ms - a.last_ms);
+  // A server's channel layout, resolved as the engine does it: ids that are not live channels or come again are skipped,
+  // and live channels the layout leaves out follow at the end, outside any category, in the order they were made.
+  const layoutView = (c) => {
+    if (!c.layout) return null;
+    const live = new Set(c.channels.map((ch) => ch.id));
+    const seen = new Set();
+    const keep = (id) => live.has(id) && !seen.has(id) && (seen.add(id), true);
+    const out = [];
+    for (const e of c.layout) {
+      if (e.kind === 'channel') {
+        if (keep(e.id)) out.push({ kind: 'channel', id: e.id });
+      } else out.push({ kind: 'category', id: e.id, name: e.name, collapsed: Boolean(e.collapsed), channels: e.channels.filter(keep) });
+    }
+    for (const ch of c.channels) if (!seen.has(ch.id)) out.push({ kind: 'channel', id: ch.id });
+    return out;
+  };
+  // The channels in the order the sidebar shows them: the layout's, or text before voice.
+  const orderedChannels = (c) => {
+    const layout = layoutView(c);
+    if (!layout) return [...c.channels.filter((ch) => !ch.voice), ...c.channels.filter((ch) => ch.voice)];
+    const ids = layout.flatMap((e) => (e.kind === 'channel' ? [e.id] : e.channels));
+    return ids.map((id) => c.channels.find((ch) => ch.id === id)).filter(Boolean);
+  };
+  let categorySeq = 0;
   const view = (c) => ({
     id: c.id,
     name: c.name,
@@ -377,7 +411,10 @@ if (!window.__TAURI__) {
     my_role: myRole(c),
     // The mention-everyone permission: owners and admins hold it by default.
     can_mention_everyone: ['owner', 'admin'].includes(myRole(c)),
-    channels: c.channels.map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', mentions: mentionsIn(c, ch.id), ...ch })),
+    // The layout as the engine resolves it: each live channel once, the ones left out at the end, outside categories.
+    layout: layoutView(c),
+    can_manage_channels: ['owner', 'admin'].includes(myRole(c)),
+    channels: orderedChannels(c).map((ch) => ({ slowmode_s: 0, visibility: 'default', bitrate_kbps: 64, user_limit: 0, relay: 'automatic', mentions: mentionsIn(c, ch.id), ...ch })),
     members: Object.keys(c.roles).map((r) => ({
       root_id: r,
       suffix: suffix(r),
@@ -586,7 +623,40 @@ if (!window.__TAURI__) {
     if (before != null && end < 0) return [];
     return list.slice(Math.max(0, end - limit), end);
   };
+  // The disclaimer's acceptance, kept in localStorage like the real app's disclaimer.json. Without a saved one the mock
+  // counts the bundled notice as accepted, so pages open straight to the app. ?disclaimer=none clears it (a first
+  // launch) and ?disclaimer=old saves an older date (a changed notice); either applies once, at this load.
+  const DISCLAIMER_KEY = 'dissent.mock.disclaimer';
+  const disclaimerParam = params.get('disclaimer');
+  try {
+    if (disclaimerParam === 'none') localStorage.setItem(DISCLAIMER_KEY, '');
+    if (disclaimerParam === 'old') localStorage.setItem(DISCLAIMER_KEY, 'January 1, 2026');
+  } catch { /* storage blocked: the default applies */ }
+  const disclaimerSaved = () => {
+    try {
+      const v = localStorage.getItem(DISCLAIMER_KEY);
+      return v === null ? DISCLAIMER_UPDATED : v || null;
+    } catch {
+      return DISCLAIMER_UPDATED;
+    }
+  };
   const handlers = {
+    disclaimer_accepted: () => disclaimerSaved(),
+    accept_disclaimer: ({ updated }) => {
+      need(typeof updated === 'string' && updated.trim() !== '', "the disclaimer's date is missing");
+      localStorage.setItem(DISCLAIMER_KEY, updated);
+      return null;
+    },
+    // The real app shuts down here. The mock records it for the driver.
+    quit_app: () => { window.__mockQuit = true; return null; },
+    // The native secret copy, through the browser clipboard. The calls are recorded so the driver sees which path ran.
+    copy_secret: async ({ text }) => { (window.__mockSecretCalls ??= []).push('copy'); await navigator.clipboard.writeText(text); return null; },
+    clear_secret: async ({ text }) => {
+      (window.__mockSecretCalls ??= []).push('clear');
+      if ((await navigator.clipboard.readText()) !== text) return false;
+      await navigator.clipboard.writeText('');
+      return true;
+    },
     complete_first_run: () => { firstRunPending = false; return null; },
     vault_status: () => ({ chooser, locked: locked && !chooser, new_profile: unlockParam === 'new' || choice === 'link' || choice === 'copy', choice, installed_profile: installedProfile }),
     choose_profile: ({ choice: picked }) => {
@@ -843,6 +913,7 @@ if (!window.__TAURI__) {
       return null;
     },
     invite_preview: async ({ link }) => {
+      (window.__mockInvitePreviews ??= []).push(link); // the driver checks nothing is asked before a click
       if (link.includes('broken')) throw 'Invite not found. It may have been deleted.';
       if (link.includes('slow')) await new Promise((r) => setTimeout(r, 1500));
       return invitePreview(link);
@@ -898,6 +969,31 @@ if (!window.__TAURI__) {
       return null;
     },
     // `window.__mockReorderFails = true` makes the publish fail, so the driver sees the order roll back.
+    // `window.__mockLayoutFails = true` makes the publish fail, so the driver sees the layout roll back. Each layout sent
+    // is kept in `window.__mockLayouts`.
+    set_channel_layout: async ({ communityId, entries }) => {
+      await pause();
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'Only the owner and admins can arrange channels');
+      if (window.__mockLayoutFails) throw 'The layout was not sent: no peers reachable';
+      (window.__mockLayouts ??= []).push({ communityId, entries: JSON.parse(JSON.stringify(entries)) });
+      const live = new Set(c.channels.map((ch) => ch.id));
+      const placed = new Set();
+      for (const id of entries.flatMap((e) => (e.kind === 'channel' ? [e.id] : e.channels))) {
+        need(live.has(id), `No channel ${id}`);
+        need(!placed.has(id), `Channel ${id} is placed twice`);
+        placed.add(id);
+      }
+      need(entries.filter((e) => e.kind === 'category').length <= 50, 'A server has at most 50 categories');
+      c.layout = entries.map((e) => {
+        if (e.kind === 'channel') return { kind: 'channel', id: e.id };
+        const name = String(e.name ?? '').trim();
+        need(name.length > 0 && name.length <= 64, 'A category name is 1 to 64 characters');
+        return { kind: 'category', id: e.id ?? (++categorySeq).toString(16).padStart(32, '0'), name, collapsed: Boolean(e.collapsed), channels: [...e.channels] };
+      });
+      emit({ kind: 'community_updated', community_id: communityId });
+      return null;
+    },
     reorder_channels: async ({ communityId, text, voice }) => {
       await pause();
       const c = servers[communityId];
@@ -1159,6 +1255,7 @@ if (!window.__TAURI__) {
         start_at_login: settings.start_at_login,
         notifications_muted: settings.notifications_muted,
         emoticons_as_text: settings.emoticons_as_text ?? mockShell.emoticons_as_text,
+        keep_photo_metadata: settings.keep_photo_metadata ?? mockShell.keep_photo_metadata,
       };
       return shellView();
     },
@@ -1219,7 +1316,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'forward_calls', 'channel_order', 'dm_mentions'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'forward_calls', 'channel_order', 'channel_categories', 'dm_mentions'];
   const ignoredSet = new Set();
   // The DHT and relay latencies the title bar shows. The engine sends them with each probe, so the mock does too.
   const mockNetLatency = { dht_ms: 2529, relay_ms: 42 };
@@ -1325,6 +1422,11 @@ if (!window.__TAURI__) {
   const setTypers = (n) => { typers = n; announceTyping(); };
   window.__mockTypers = (n) => { typingManual = true; setTypers(n); };
   // The driver fires a reminder by hand: the core does it when the reminder's time comes.
+  // The driver gives this person another role in a server (an admin's view of the menus and Server Settings).
+  window.__mockSetMyRole = (communityId, role) => {
+    servers[communityId].roles[ME] = role;
+    emit({ kind: 'community_updated', community_id: communityId });
+  };
   window.__mockFireReminder = (id) => {
     const reminder = mockReminders.find((r) => r.id === id);
     if (!reminder) return false;

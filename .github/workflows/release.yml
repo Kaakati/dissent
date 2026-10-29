@@ -458,6 +458,19 @@ jobs:
           for want in 'latest.json' '_x64-setup.exe' '_x64_en-US.msi' '_aarch64.dmg' '_x64.dmg' '_amd64.AppImage' '_amd64.deb'; do
             echo "$names" | grep -qF -- "$want" || { echo "::error::$TAG has no asset matching $want"; exit 1; }
           done
+      # The app's update dialog shows latest.json's notes. tauri-action leaves them empty when it
+      # uploads to an existing release, so copy in this release's notes. The per-platform signatures
+      # sign the installers, not this file, so editing it is safe.
+      - name: Put the release notes in the updater manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern latest.json --clobber
+          gh release view "$TAG" --repo "${{ github.repository }}" --json body --jq .body > notes.md
+          jq --rawfile notes notes.md '.notes = $notes' latest.json > latest.new.json
+          mv latest.new.json latest.json
+          gh release upload "$TAG" --repo "${{ github.repository }}" latest.json --clobber
       - name: Undraft
         env:
           GH_TOKEN: ${{ github.token }}

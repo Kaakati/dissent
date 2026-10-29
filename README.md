@@ -16,7 +16,7 @@ Have the app? Open **Join server** and paste this link: `dissent://invite/dss1pw
 
 Dissent is a free, open-source chat app in the spirit of Discord. You can create servers, organise them into channels, invite friends, chat in real time and send private direct messages. The difference is underneath. Dissent has no central company server holding everyone's conversations. Your servers live on the computers of the people who use them, and the app connects those people to each other directly.
 
-> **Status: early but usable (v0.1.12).** Servers, encrypted chat, direct messages, voice and video calls and screen sharing all work today between people who have Dissent installed. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
+> **Status: early but usable (v0.1.19).** Servers, encrypted chat, direct messages, voice and video calls and screen sharing all work today between people who have Dissent installed. Dissent has not had a security review, so please don't rely on it yet for anything sensitive. See [Honest limits](#honest-limits).
 
 ---
 
@@ -96,10 +96,11 @@ Dissent doesn't have everything Discord sells: there are no custom emoji, sticke
 - **Create and join servers** from invite links, and switch between them from the side rail. Drag servers to reorder them; the order is yours alone.
 - **Invite cards.** An invite link pasted in chat shows a card with the server's banner, icon, name, member and online counts, and a Join button. Short invite links fit in a message, and a full link is offered for older versions.
 - **Server Profile.** Owners set the name, an icon (a picture, or a looping GIF cropped to a square), a banner (a preset colour, an image or a looping GIF), up to five traits and a description, with a live preview. Admins can change everything except the name. The banner shows at the top of the channel list for every member.
-- **Text and voice channels**, with slow mode and per-channel settings. Unread channels are marked, and a "New messages" line shows where you left off.
+- **Text and voice channels**, with slow mode and per-channel settings. Unread channels are marked, and a "New messages" line shows where you left off. Owners and admins drag channels into order, or move the selected one with Alt+Shift+Up and Down, and everyone sees the same order.
 - **Encrypted servers.** Server messages are sealed so that only members can read them. A banned or removed member can't read anything new, and someone who has left can't post until they rejoin. Owners can switch on member-only mode, which also hides settings and moderation from people who have left.
-- **Private channels**, seen only by the members and roles you choose. Their messages, replies, edits, reactions and files are sealed with the channel's own key. Removing someone cuts them off from new messages, and a reader added "since joining" can't read older ones. Seeders never see or keep a private channel's files.
-- **Message history for new members**, following the server's history setting: new members either see only what was sent after they joined (the default for new servers) or the whole history.
+- **Private channels**, seen only by the members and roles you choose. Their messages, replies, edits, reactions and files are sealed with the channel's own key. Removing someone cuts them off from new messages, and a reader added "since joining" can't read older ones. Seeders never see or keep a private channel's files. Who is typing in a private channel is shown only to the people who can read it.
+- **Message history for new members**, following the server's history setting: new members either see only what was sent after they joined (the default for new servers) or the whole history. A newcomer can read new messages right away, from every member, not just the one who let them in.
+- **Seeders, kept apart.** Server Settings › Members lists seeders separately from people. A seeder asks for a storage grant when it joins, the owner and admins are told, and they can grant or withdraw it.
 - **Moderation:** owner, admin and moderator roles, banning and unbanning, and an audit trail every member's app checks for itself.
 - **Right-click a server** to mark it read, invite people, mute it for a while or for good, choose its notification level (all messages, mentions only or nothing), hide muted channels, open its settings, create a channel or leave.
 
@@ -120,21 +121,23 @@ The level shows beside the server name and on its invite cards, as "Level 2 · 3
 
 ### Messages
 
-- **Mentions.** Type `@` to pick a member, filtered as you type. Owners and admins can use `@everyone`. A message that mentions you is highlighted, and channels and servers show red mention counts until you read them.
+- **Mentions.** Type `@` to pick a member, filtered as you type, in channels, direct messages and group messages. Owners and admins can use `@everyone` in a server. A message that mentions you is highlighted, and channels, servers and conversations show red mention counts until you read them.
 - **Formatting.** Discord-style markdown: bold, italic, underline, strikethrough, headers, lists, quotes, spoilers, links with your own text, and code blocks with syntax highlighting. Ctrl+B, Ctrl+I and Ctrl+U format the selected text.
 - **Right-click a message** to react, reply, edit, forward, copy, pin, bookmark it to Saved Messages, set a reminder, mark it unread, copy a link to it, have it read aloud, or delete it.
 - **Replies and reactions**, with quick reactions from your most-used emoji.
-- **Files of up to 10 GB**, encrypted, downloaded from several members at once, and resumed after a restart. Pictures get a small preview. Downloads go to your Downloads folder unless you choose another.
+- **Files of up to 10 GB**, encrypted, downloaded from several members at once, and resumed after a restart. Pictures get a small preview, and videos show their first frame. Paste a picture into the message box to attach it. A file you send shows for you at once; the people you send it to get a Download card with progress, and if a download fails it says why and offers a Retry. Downloads go to your Downloads folder unless you choose another.
+- **Photos go without their location.** Before a photo or video is sent, Dissent removes where it was taken and the camera that took it, without touching the picture, and the file on your computer stays as it is. You can turn this off in Settings › Contacts & privacy.
+- **Files go only to the people who can read them.** A file's encrypted data is handed out only to the server's members, a private channel's readers or a conversation's members. Once a message is deleted and nothing else refers to its files, members' apps stop sharing them.
 - **Link previews** with the page's title, description and picture. They're fetched by the sender, after asking once, so the people reading never contact the website.
 - **Saved Messages** shows each bookmarked message as it looks in the chat, with its formatting, link previews, invite cards and files, and a Jump back to it. A message from a spoiler channel stays blurred until you click it.
 - **Scroll back** through a conversation's whole history. Older messages load a page at a time as you reach the top, and the message you were reading stays where it was.
-- **Notifications** for channels, private channels, direct and group messages, once per message. An edit, a reaction, or the same message arriving again doesn't alert a second time.
+- **Notifications** for channels, private channels, direct and group messages, once per message. An edit, a reaction, or the same message arriving again doesn't alert a second time. By default a notification names the sender but not what they wrote, since it can show on your lock screen; Settings › Notifications & sounds lets you show the text too, or nothing at all. Reminders follow the same setting.
 
 ### People and direct messages
 
 - **Friends.** Add people by their address (`dsu1…`) or a contact link, accept or decline requests, and block people. Friends who are in a call or online show in Active Now.
 - **Profiles** with your avatar, a banner and a status (online, idle, do not disturb or invisible). Profile cards show mutual servers and, if you allow it, mutual friends.
-- **Direct and group messages**, encrypted, and delivered to every device of both people. Messages to someone offline are held, or left at their inbox, and sent when they're back. A message an inbox refuses shows as failed, with a Retry.
+- **Direct and group messages**, encrypted, and delivered to every device of both people. A group needs you and two other people. Messages to someone offline are held, or left at their inbox, and sent when they're back. A message an inbox refuses shows as failed, with a Retry.
 - **Unread conversations** appear on the side rail with a count, like Discord.
 - **Close DM** takes a conversation out of the list. It comes back when you open it again or a new message arrives; old history syncing in doesn't bring it back.
 - **`dissent://` links open the app.** An invite or a contact link opens a dialog that shows what it would do, and nothing happens until you confirm. A message link jumps to the message, and a device link opens Settings › Devices with its code filled in.
@@ -147,19 +150,20 @@ The level shows beside the server name and on its invite cards, as "Level 2 · 3
 - **Video at the size you see it.** Each person's video is drawn at the size of their tile on your screen, so a large tile stays sharp and a small one costs little.
 - **Call chat** works like any other chat: formatting, mentions, link previews, invite cards, files, replies and reactions. Its messages go to the call's conversation, so everyone who can read that DM, group or channel can read them, and the call chat says so.
 - **Clean audio:** noise suppression, echo cancellation, automatic gain, push-to-talk, and a mic test.
+- **A seeder can forward a server's calls.** The owner turns on "Seeder may forward calls", and the server's always-on seeder can then carry a call that's too big to connect directly. A forwarder that stops passing audio is reported and dropped for the rest of the call.
 - Calls are encrypted end to end, and forwarders can't open what they pass along.
 
 ### You and your devices
 
-- **Your identity** is backed up with a 24-word recovery phrase, and its keys are kept in your system's keychain.
+- **Your identity** is backed up with a 24-word recovery phrase, and its keys are kept in your system's keychain. If you copy the phrase, it's kept out of Windows clipboard history and cloud clipboard, marked as private for clipboard managers on macOS and Linux, and cleared from the clipboard after 60 seconds.
 - **Several devices.** Link a laptop or a USB stick to the same identity, and cut off a lost one.
 - **Recovery with friends.** Choose guardians, and if you lose your recovery phrase, enough of them can vouch for your new identity.
 - **Safety numbers** to compare with a friend, with a warning if their key changes.
 - **Website-verified handles.** If you own a website, prove a handle like `@example.com` in Settings › My identity: add the TXT record it shows to your domain's DNS, press Check now, and use it as your handle in your servers. Every viewer's app checks the record for itself and shows a small mark, "Checked by your app", in the member list, message headers and profiles. A handle whose record is missing or wrong never gets the mark, and one not checked recently says "not checked yet".
-- **Quick switcher:** press Ctrl+K to jump anywhere. The app is fully usable from the keyboard.
+- **Quick switcher:** press Ctrl+K to jump anywhere. The app is fully usable from the keyboard, and every icon button has a tooltip that names it and shows its shortcut.
 - **Relays.** Your app uses up to 30 relays, fastest first, measured by latency. They come from three places: relays you add, relays your servers offer, and the public defaults. Settings › Network shows each one's latency. **Pin** keeps a relay in the list when the list is cut down, and **Turn off** drops it on this device. Pins and turn-offs are never sent to anyone.
 - **Use relays offered by my servers.** A switch in Settings › Network. Off, your app neither measures nor uses the relays your servers offer, and it stops asking them for anything. Each relay you use can see your IP address, and the settings page says so next to the switch.
-- **Network health.** Live status for your connections, and the probe in [Things anyone can run](#things-anyone-can-run) to see how two people connect.
+- **Network health.** The title bar shows your connection at a glance: the size of the public phone book, how long a lookup takes, whether others can reach you, your peers, and your relay with its round trip. When the window is narrow it leaves out the least important parts rather than cutting words off, and hovering shows every number. The probe in [Things anyone can run](#things-anyone-can-run) shows how two people connect.
 - **Updates** are offered in the app and installed with one click. Every update is checked against Dissent's signing key.
 
 ## Portable version
@@ -188,7 +192,7 @@ Whichever you choose:
 
 Dissent works with no servers at all, but these optional helpers make it better, and anyone can run them:
 
-- **Seeder.** An always-on member that keeps a server's history available, even when everyone else is offline. To run one as a service on a home server, NAS or VPS, see [`packaging/README.md`](packaging/README.md).
+- **Seeder.** An always-on member that keeps a server's history available, even when everyone else is offline. If the owner allows it, it can also forward the server's calls. To run one as a service on a home server, NAS or VPS, see [`packaging/README.md`](packaging/README.md).
 - **Relay.** A helper that passes sealed traffic between people who can't connect directly. Running one near your community, for example in your country, makes relayed connections faster. A guide is in [`apps/relay/README.md`](apps/relay/README.md), and the service install is in [`packaging/README.md`](packaging/README.md).
 - **Relay for your own servers.** Run `dissent-relay --join <invite> --data-dir <folder>` to host a relay for a server you're in. It joins the server as storage and admits only its members. Your relay counts toward the server's boost level once members' apps can reach it, which needs a domain name with a valid TLS certificate. Members can see the relay's address.
 - **Probe.** A small tool that two people on different networks can run to see whether they connect directly or through a relay, and how fast. See [`apps/probe/README.md`](apps/probe/README.md).
@@ -207,10 +211,15 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 - **Bigger direct calls need everyone on this version.** A level's limit of 8 or 10 people for a direct call applies only while everyone in the call runs Dissent 0.1.12 or newer and has the upload for it. Otherwise the call is forwarded from 7 people, as at level 0. Upload is judged by what each computer sends now, not by what it could send.
 - **Relay hosts see member devices connect.** A host's relay learns when each member's device connects to it, and its address is visible to the server's members. Non-members see nothing.
 - **When both people talk at once, your voice comes through about 6 dB quieter.** The echo canceller can't yet tell your voice from the other person's speaker. Headphones avoid the problem, since there is no speaker to echo.
-- **Someone who leaves a server keeps some access for a while.** They can't post. They stop being able to read new messages once their devices are removed from the server's encryption group, which happens when another member's app is online. In this version, leaving doesn't change the server's shared secret, so its settings, roles and member changes stay readable to them. Member-only mode avoids that, and the next version changes the secret on leave too. The details are in [Leaving and the secret](docs/design/05-encrypted-servers.md#leaving-and-the-secret).
-- **Until the secret changes, someone who left or was banned can come back under a new identity**, as a member or as a storage helper like a seeder. Dissent refuses a storage join from anyone who has been a person in the server, but not from a new identity. Admin-signed storage grants will close this in two steps, and changing the secret on every ban, and soon on every leave, ends the window.
+- **Someone who leaves a server keeps some access for a while.** They can't post. They stop being able to read new messages once their devices are removed from the server's encryption group, which happens when another member's app is online. The server's shared secret changes when someone leaves, but only once every staying member's devices run Dissent 0.1.16 or newer. Until then, its settings, roles and member changes stay readable to them. Member-only mode avoids that. The details are in [Leaving and the secret](docs/design/05-encrypted-servers.md#leaving-and-the-secret).
+- **Until the secret changes, someone who left or was banned can come back under a new identity**, as a member or as a storage helper like a seeder. Dissent refuses a storage join from anyone who has been a person in the server, but not from a new identity. Storage grants now show admins every seeder and let them grant or withdraw it, but a seeder without a grant is not refused yet. Changing the secret on every ban and leave ends the window.
 - **A sudden power cut can lose your last quarter-second of sent messages.** Other members usually already have them, so they come back when you sync.
 - **Mutual friends shares your whole friends list with your friends**, not just the people you have in common. You can turn this off in Settings › Privacy.
+- **Members see who else is there and when.** Everyone in a server sees its member list, roles and handles, who is online, and who is typing in the channels they can read. An invite link works much like a key here: someone who holds it can see the same without ever showing up in the member list, so share invite links with care.
+- **People you connect to directly see your IP address.** That's how direct connections work. Long invite links and contact links carry your public address, so anyone you share one with learns your public IP. Addresses on your home network or VPN stay out of them. A relay sees the IP of everyone who uses it. There is no "hide my IP" switch yet.
+- **Invisible hides most, not all, of your activity.** While you're invisible, your app sends no online status or typing, holds back "delivered" receipts until you're visible again, stops announcing its address, and doesn't answer other devices unless it contacted them in the last 10 minutes. What still shows that you're online: anything you do yourself, such as sending a message, reacting, joining a call or opening a server; the devices your app is linked with for each server's live updates; and the fact that your device accepts a connection at all, which someone who knows its id can still test. Receipts held while you're invisible are lost if you restart the app before going visible, so those messages never show as delivered to their senders, although you still have them.
+- **Some things are stored unencrypted on your computer.** Your identity, server messages and encryption state are sealed on disk, but direct and group messages, saved messages and reminders, each server's shared secret, contacts, notes and downloaded previews are not yet. Anyone who can read your files can read those. Portable mode keeps them in its folder unprotected too.
+- **Some photos and videos keep their details.** Dissent removes the location and camera details from JPEG, PNG and WebP photos and MP4 and MOV videos before sending them (Settings › Contacts & privacy). HEIC, AVIF, TIFF and GIF pictures, Matroska and WebM videos, and pictures over 64 MB are sent as they are, and a video's creation time and a file's name always go with it.
 - **Linux builds need Ubuntu 24.04 or newer**, or another distribution of the same age (glibc 2.39 and PipeWire 1.0). That covers the desktop app, the seeder and the relay. Older systems such as Ubuntu 22.04 and Debian 12 can't run them.
 - **No mobile app yet.**
 - **Most testing has happened on one machine and over the internet between a few copies of the app.** Real-world measurements across many networks and mobile carriers are still to come.
@@ -218,9 +227,10 @@ Dissent is young, and we would rather tell you what it doesn't do yet than have 
 ## What's next
 
 1. Retire older apps from servers. The server's secret now changes when someone leaves, not only on a ban, but only once every member's devices run an app that accepts it. A server with one older app keeps the old behaviour until that app updates.
-2. Measure direct connections across real home and mobile networks, and run relays where they help most.
-3. Phone notifications through push relays, and a mobile app.
-4. A security review.
+2. Close the privacy gaps listed above: seal direct messages and saved messages on disk, keep your public IP out of invite and contact links, hide an invisible device from connection tests, and add a "hide my IP" mode that uses relays only. Refuse seeders without an admin's grant.
+3. Measure direct connections across real home and mobile networks, and run relays where they help most.
+4. Phone notifications through push relays, and a mobile app.
+5. A security review.
 
 ## Questions people ask
 
@@ -279,7 +289,7 @@ Ideas, bug reports and code are all welcome. Please open an issue to talk about 
 
 ## Disclaimer
 
-Dissent is open-source, peer-to-peer software. Nobody owns, runs or moderates the network it forms, and the developers and contributors have no access to, or control over, what people share on it. Each person is responsible for their own content and conduct. Read the full [Disclaimer and Limitation of Liability](DISCLAIMER.md) before using Dissent.
+Dissent is open-source, peer-to-peer software. Nobody owns, runs or moderates the network it forms, and the developers and contributors have no access to, or control over, what people share on it. Each person is responsible for their own content and conduct. Read the full [Disclaimer and Limitation of Liability](DISCLAIMER.md) before using Dissent. The app shows it when you first start it, and again whenever it changes, and you can reread it in Settings › About.
 
 ## License
 

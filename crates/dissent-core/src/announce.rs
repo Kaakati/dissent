@@ -49,6 +49,10 @@ impl Engine {
             }
             signed
         };
+        // While invisible the new address is kept, and announced once visible again.
+        if self.invisible() {
+            return;
+        }
         self.announce(&signed).await;
         self.refresh_own_record(record_addr).await;
         self.spawn_publish_records();
@@ -95,6 +99,9 @@ impl Engine {
 
     /// Sends our signed address on one community's topic, so its members learn it.
     pub(crate) async fn broadcast_own_addr(&self, community: CommunityId) {
+        if self.invisible() {
+            return;
+        }
         let (sender, signed) = {
             let w = self.read();
             (
@@ -123,10 +130,17 @@ impl Engine {
         }
     }
 
-    /// Devices of our contacts and of everyone we have exchanged direct messages with.
-    fn announce_targets(&self) -> Vec<DeviceId> {
+    /// Devices of our contacts and of the people we have exchanged direct messages with who are still
+    /// in scope: a contact, or a member of a community we are in. A legacy DM peer who is neither, such
+    /// as a stranger under the `Everyone` policy or a co-member who left, no longer gets our address.
+    pub(crate) fn announce_targets(&self) -> Vec<DeviceId> {
         let w = self.read();
-        let mut roots: BTreeSet<RootId> = w.dms.keys().copied().collect();
+        let mut roots: BTreeSet<RootId> = w
+            .dms
+            .keys()
+            .copied()
+            .filter(|root| crate::peer_exchange::in_scope(&w, root))
+            .collect();
         roots.extend(w.contacts.iter().map(|c| c.cert.root));
         roots.remove(&w.me);
         let mut devices: BTreeSet<DeviceId> = BTreeSet::new();

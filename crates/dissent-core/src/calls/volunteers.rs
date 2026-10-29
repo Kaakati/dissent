@@ -554,6 +554,15 @@ impl Engine {
         let Some(room) = self.current_room(&offer.room) else {
             return CallReply::Refused("not in this call".into());
         };
+        // Someone who may not forward hears the same as for a call this device is not in, so an offer
+        // cannot be used to learn whether this device is in a call.
+        let root = match self.check_volunteer(&room, &from) {
+            Ok(root) => root,
+            Err(why) => {
+                debug!(device = %from, why, "forward offer refused");
+                return CallReply::Refused("not in this call".into());
+            }
+        };
         if offer.verify(&from).is_err() {
             return CallReply::Refused("bad forward offer signature".into());
         }
@@ -563,10 +572,6 @@ impl Engine {
         if room.live_sid(&from).is_some() {
             return CallReply::Refused("a participant does not volunteer".into());
         }
-        let root = match self.check_volunteer(&room, &from) {
-            Ok(root) => root,
-            Err(why) => return CallReply::Refused(why),
-        };
         let storage = self.is_storage(&room, &root);
         let sid = if storage {
             // A seeder has no leaf index. Its id must not be one the group already uses.
@@ -846,7 +851,7 @@ impl Engine {
             return CallReply::Refused("not in this call".into());
         };
         let Some(sid) = room.live_sid(&from) else {
-            return CallReply::Refused("the sender is not in this call".into());
+            return CallReply::Refused("not in this call".into());
         };
         // A report about a participant is not about a volunteer. One about a volunteer this device
         // has already failed over from still counts, so every device ends up excluding it.
@@ -897,7 +902,8 @@ impl Engine {
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         if let Err(why) = self.check_volunteer(&room, &from) {
-            return CallReply::Refused(why);
+            debug!(device = %from, why, "relay request refused");
+            return CallReply::Refused("not in this call".into());
         }
         let mut leaves = lock(&room.leaves);
         match leaves.get(&from) {
@@ -974,7 +980,8 @@ impl Engine {
         };
         // The sender must be a member. A seeder learns its sender id only when it links (`RelayLeaf`).
         if let Err(why) = self.check_volunteer(&room, &from) {
-            return CallReply::Refused(why);
+            debug!(device = %from, why, "relay request refused");
+            return CallReply::Refused("not in this call".into());
         }
         {
             let mut relays = lock(&self.inner.calls.volunteering.relays);

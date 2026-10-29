@@ -9,7 +9,7 @@ import { Callout } from '@/components/startup/gate';
 import { OwlMark } from '@/components/owl-mark';
 import { UserAvatar } from '@/components/user-avatar';
 import { openDialog } from '@/lib/dialog';
-import { copyText } from '@/lib/clipboard';
+import { copySecret } from '@/lib/clipboard';
 import { api } from '@/lib/api';
 import { shortOf } from '@/lib/address';
 import { toast } from '@/lib/toasts';
@@ -106,7 +106,7 @@ function FirstRun() {
   }, []);
 
   const copy = async () => {
-    if (await copyText(words.join(' '))) toast('Recovery phrase copied', 'info');
+    if (await copySecret(words.join(' '))) toast('Recovery phrase copied. The clipboard is cleared in 60 seconds.', 'info');
   };
   const cont = async () => {
     setBusy(true);

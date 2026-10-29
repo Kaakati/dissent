@@ -5,7 +5,7 @@
 //! through it, independent of what the call view reports.
 
 use crate::common::*;
-use dissent_core::{Engine, Identity, NodeConfig, PathView, RelayChoice};
+use dissent_core::{Engine, Identity, NodeConfig, PathView, RelayChoice, Topology};
 use iroh::tls::CaTlsConfig;
 use iroh_relay::server::{CertConfig, RelayConfig as RelayServerConfig, Server, ServerConfig, TlsConfig};
 use noq_proto::rustls::pki_types::CertificateDer;
@@ -87,13 +87,7 @@ struct Sample {
 /// Makes `a` and `b` contacts. A relay-only engine has no address until it reaches the relay, so
 /// its first contact links carry nothing to dial. Each try takes a fresh link.
 async fn contacts_once_online(a: &Peer, b: &Peer) {
-    for p in [a, b] {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while p.engine.net_status().await.relay.is_none() {
-            assert!(Instant::now() < deadline, "no home relay within 30 s");
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    }
+    wait_online(&[a, b]).await;
     for (from, to) in [(a, b), (b, a)] {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -114,6 +108,115 @@ async fn contacts_once_online(a: &Peer, b: &Peer) {
         })
         .await;
     }
+}
+
+/// Waits until every engine has a home relay, so the addresses it hands out can be dialled.
+async fn wait_online(peers: &[&Peer]) {
+    for p in peers {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while p.engine.net_status().await.relay.is_none() {
+            assert!(Instant::now() < deadline, "no home relay within 30 s");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+}
+
+/// Every path each engine shows for the others in its call, by engine name.
+fn paths_shown(everyone: &[(&str, &Peer)]) -> Vec<(String, Vec<PathView>)> {
+    everyone
+        .iter()
+        .map(|(name, p)| {
+            let paths = p.engine.call_state().map(|v| v.participants.iter().map(|x| x.path).collect()).unwrap_or_default();
+            (name.to_string(), paths)
+        })
+        .collect()
+}
+
+/// Seven engines in a voice channel make a forwarded call. Joins the channel on all of them and
+/// waits until each sees six others in a forwarded call and hears audio.
+async fn forwarded_call(owner: &Peer, others: &[Peer]) {
+    let refs: Vec<&Peer> = others.iter().collect();
+    let (community, channel) = crate::calls::voice_community(owner, &refs).await;
+    let everyone: Vec<&Peer> = std::iter::once(owner).chain(others.iter()).collect();
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join the voice channel");
+    }
+    for p in &everyone {
+        eventually_within(Duration::from_secs(90), "a forwarded call with six others that is heard", || {
+            p.engine
+                .call_state()
+                .filter(|v| v.participants.len() == 6 && v.topology == Topology::Forwarded && v.frames_received > 0)
+        })
+        .await;
+    }
+}
+
+/// The path each participant shows comes from the live link, also in a forwarded call, where most
+/// participants reach this device through the forwarder. With every engine relay-only, no path can
+/// be direct, so every participant on every engine must show relayed. Before the fix, a forwarded
+/// call listed participants as direct whatever their link was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_forwarded_call_through_a_relay_shows_every_participant_relayed() {
+    let _serial = heavy_test_lock().await;
+    bounded(async {
+        let relay = spawn_relay().await;
+        let owner = start_on_relay(&relay, "owner-relayed").await;
+        let mut others = Vec::new();
+        for n in 1..7 {
+            others.push(start_on_relay(&relay, &format!("member-relayed-{n}")).await);
+        }
+        let mut all: Vec<&Peer> = vec![&owner];
+        all.extend(others.iter());
+        wait_online(&all).await;
+        forwarded_call(&owner, &others).await;
+
+        let names: Vec<String> = (0..all.len()).map(|i| format!("engine {i}")).collect();
+        let everyone: Vec<(&str, &Peer)> = names.iter().map(String::as_str).zip(all.iter().copied()).collect();
+        for _ in 0..5 {
+            let shown = paths_shown(&everyone);
+            assert!(
+                shown.iter().all(|(_, paths)| paths.len() == 6 && paths.iter().all(|p| *p == PathView::Relayed)),
+                "every participant must show relayed: {shown:?}"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut peers = vec![owner];
+        peers.extend(others);
+        finish(peers).await;
+    })
+    .await;
+}
+
+/// The same forwarded call on loopback with relays off, where every link is direct. A participant
+/// reached through the forwarder shows the forwarder link's path, so all six show direct.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_forwarded_call_on_direct_links_shows_every_participant_direct() {
+    let _serial = heavy_test_lock().await;
+    bounded(async {
+        let owner = peer("owner-direct").await;
+        let mut others = Vec::new();
+        for n in 1..7 {
+            others.push(peer(&format!("member-direct-{n}")).await);
+        }
+        forwarded_call(&owner, &others).await;
+
+        let all: Vec<&Peer> = std::iter::once(&owner).chain(others.iter()).collect();
+        let names: Vec<String> = (0..all.len()).map(|i| format!("engine {i}")).collect();
+        let everyone: Vec<(&str, &Peer)> = names.iter().map(String::as_str).zip(all.iter().copied()).collect();
+        let shown = paths_shown(&everyone);
+        assert!(
+            shown.iter().all(|(_, paths)| paths.len() == 6 && paths.iter().all(|p| *p == PathView::Direct)),
+            "every participant must show direct: {shown:?}"
+        );
+
+        let mut peers = vec![owner];
+        peers.extend(others);
+        finish(peers).await;
+    })
+    .await;
 }
 
 fn path_seen(engine: &Engine) -> Option<PathView> {

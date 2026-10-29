@@ -29,6 +29,10 @@ const until = async (test, ms = 15000) => {
   return value;
 };
 
+// Invite cards wait for a click before they ask for their preview (privacy audit P-04). Clicks every Show preview button
+// under `scope`, so a check can read the loaded card.
+const SHOW_INVITES = (scope = 'body') => `[...document.querySelectorAll('${scope} button[data-invite-show]')].forEach((b) => b.click())`;
+
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok: Boolean(ok), detail });
@@ -198,7 +202,7 @@ await sleep(600);
 await pointerClick(`document.querySelector('button[aria-label="Riverside Makers menu"]')`);
 await sleep(250);
 const serverMenu = await menuItems();
-check('the server menu offers Create invite, Claim handle, Copy server address and Leave server', ['Create invite', 'Claim handle', 'Copy server address', 'Leave server'].every((t) => serverMenu.some((l) => l.startsWith(t))), JSON.stringify(serverMenu));
+check('the server menu offers Invite to Server, Claim Handle, Copy Server Address and Leave Server', ['Invite to Server', 'Claim Handle', 'Copy Server Address', 'Leave Server'].every((t) => serverMenu.some((l) => l.startsWith(t))), JSON.stringify(serverMenu));
 await press('Escape');
 await sleep(250);
 check('Esc closes the server menu', (await ev(`!document.querySelector('[role="menu"]')`)) === true);
@@ -424,8 +428,8 @@ check('SS0 with no banner the plain header shows the server name', (await ev(`do
 
 await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
 await sleep(250);
-check('SS1 the owner\'s server menu offers Server Settings first', (await menuItems())[0]?.startsWith('Server Settings'), JSON.stringify(await menuItems()));
-await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+check('SS1 the owner\'s server menu offers Server Settings', (await menuItems()).some((l) => l.startsWith('Server Settings')), JSON.stringify(await menuItems()));
+await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
 await sleep(400);
 check('SS2 Server Settings opens on Server Profile', (await ev(`document.querySelector('${SS} h1')?.textContent`)) === 'Server Profile');
 check('SS3 the nav lists Server Profile and Boosts, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Boosts', 'Members', 'Invites', 'Bans']));
@@ -564,7 +568,7 @@ await b.screenshot(`${SCRATCH}/shots/sidebar-banner.png`);
 
 await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
 await sleep(250);
-await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
 await sleep(400);
 await ev(`${ssButton('Remove Banner')}.click()`);
 await saveChanges();
@@ -593,7 +597,9 @@ await sleep(500);
 await ev(`document.querySelector('textarea[aria-label="Message"]').focus()`);
 await typeText('Join us: dissent://invite/mock-rustaceans');
 await press('Enter');
-await sleep(1500);
+await sleep(500);
+await ev(SHOW_INVITES('main'));
+await sleep(1000);
 check('SS27a the invite card shows the server\'s banner, description and traits', (await ev(`(() => { const c = [...document.querySelectorAll('main [data-server-card]')].at(-1); if (!c) return 'no card'; return [c.querySelector('[data-card-banner]').dataset.cardBanner, c.querySelector('[data-card-description]')?.textContent, [...c.querySelectorAll('[data-card-traits] li')].map((n) => n.textContent).join('|')].join(' / '); })()`)) === 'preset / Systems programmers sharing crates, questions and the occasional crab. / 🦀Rust|🛠️Tooling', String(await ev(`[...document.querySelectorAll('main [data-server-card]')].length`)));
 // The invite card states the answering member's boost.
 check('BS0 the invite card shows the boost level and hosts', (await ev(`[...document.querySelectorAll('main [data-server-card]')].at(-1)?.querySelector('[data-card-boost]')?.textContent`)) === 'Level 1 · 1 relay host');
@@ -602,7 +608,7 @@ check('BS0 the invite card shows the boost level and hosts', (await ev(`[...docu
 check('BS1 a server with no relay host shows no level by its name', (await ev(`!document.querySelector('${SIDEBAR} [data-boost-level]')`)) === true);
 await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
 await sleep(250);
-await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
 await sleep(400);
 await ev(`${ssButton('Boosts')}.click()`);
 await sleep(300);
@@ -660,7 +666,7 @@ await press('Enter');
 check('F4 auto-accept option takes focus and Enter', acceptFocusedF === true);
 
 // Network line: hovering shows the tooltip with the DHT numbers, and Escape dismisses it.
-const netCentre = await ev(`(() => { const r = document.querySelector('span.truncate[data-tauri-drag-region]')?.getBoundingClientRect(); return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`);
+const netCentre = await ev(`(() => { const r = document.querySelector('[data-net-text]')?.getBoundingClientRect(); return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`);
 if (netCentre) {
   await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: netCentre.x, y: netCentre.y });
   await sleep(800); // tooltips wait 300 ms
@@ -1658,7 +1664,9 @@ await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea').focus()`);
 await b.send('Input.insertText', { text: '**Loud** news: dissent://invite/mock-rustaceans' });
 await sleep(250);
 await b.press('Enter');
-await sleep(1500);
+await sleep(500);
+await b.ev(SHOW_INVITES(CALL_CHAT));
+await sleep(1000);
 check('C11 bold text in the call chat is strong', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body strong')].some((n) => n.textContent === 'Loud')`)) === true, String(await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body')].map((n) => n.innerHTML).at(-1)`)));
 check('C11 an invite link in the call chat shows the invite card', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} [data-server-card]')].at(-1)?.textContent.includes('Rustaceans')`)) === true);
 check('C11 the call chat message has the hover actions and the message menu', (await b.ev(`(() => { const m = [...document.querySelectorAll('${CALL_CHAT} article.msg')].at(-1); return !!m?.querySelector('button[aria-label="More message actions"]'); })()`)) === true);
@@ -1951,6 +1959,12 @@ await sleep(300);
 await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent.includes('Check for updates')).click()`);
 await sleep(600);
 check('E23 Check for updates reports the release in the mock', (await b.ev(`[...document.querySelectorAll('[data-settings-page] [role="status"]')].some(n => n.textContent.startsWith('Update available: v'))`)) === true);
+await b.ev(`[...document.querySelectorAll('[data-settings-page] button')].find(n => n.textContent === 'View update').click()`);
+await sleep(400);
+const notes23 = await b.ev(`(() => { const d = [...document.querySelectorAll('[role="dialog"]')].pop(); return d ? d.innerText : ''; })()`);
+check('E23b the update dialog shows the changelog: section headings and items, no Markdown marks', notes23.includes('Added') && notes23.includes('Fixed') && notes23.includes('Faster sync for large servers') && !notes23.includes('#'), notes23.slice(0, 200));
+await pressEsc(b);
+await sleep(200);
 await b.ev(`[...document.querySelectorAll('[data-settings-page] nav button')].find(n => n.textContent === 'Notifications & sounds').click()`);
 await sleep(300);
 await b.ev(`document.querySelector('[data-settings-page] input[type="checkbox"]').click()`);
@@ -2393,6 +2407,8 @@ await sleep(500);
 await clickSidebar('Saved Messages');
 await sleep(800);
 const SAVED = 'ul[aria-label="Saved messages"]';
+await ev(SHOW_INVITES(SAVED));
+await sleep(600);
 check('a saved message shows its bold text as bold', (await ev(`[...document.querySelectorAll('${SAVED} .msg .body strong')].some((n) => n.textContent === 'Saved')`)) === true, String(await ev(`document.querySelector('${SAVED}')?.innerHTML.slice(0, 200)`)));
 check('a saved message with an invite link shows the invite card', (await ev(`!!document.querySelector('${SAVED} [data-server-card]')`)) === true);
 check('a saved message with a link shows its preview card', (await ev(`!!document.querySelector('${SAVED} article.embed .embed-title')`)) === true);
@@ -2849,20 +2865,20 @@ const { ev } = b;
 await sleep(1200);
 const line = () => ev(`document.querySelector('[data-net-line]')?.textContent ?? ''`);
 const segments = () => ev(`[...document.querySelectorAll('[data-net-line] [data-net-tone]')].map((n) => ({ text: n.textContent, tone: n.dataset.netTone }))`);
-const latencySegment = async () => (await segments()).find((s) => /ms( lookup)?$/.test(s.text) || s.text === '—');
+const latencySegment = async () => (await segments()).find((s) => /(ms|s) lookup$/.test(s.text) || s.text === '—');
 
-check('the title bar shows the DHT lookup time as a lookup in ms', (await line()).includes('2529 ms lookup'), await line());
+check('the title bar shows the DHT lookup time in seconds, short', (await line()).includes('2.5 s lookup'), await line());
 check('the title bar shows the relay round trip in ms', (await line()).includes('42 ms'), await line());
 check('a normal lookup takes no warning colour', (await latencySegment())?.tone === 'normal', JSON.stringify(await latencySegment()));
 
 await ev(`window.__mockNetLatency(3500, 48)`);
 await sleep(500);
-check('a new probe reading updates the bar without polling', (await line()).includes('3500 ms lookup') && !(await line()).includes('2529 ms lookup'), await line());
-check('a lookup from 3 to 5 s is a warning', (await segments()).some((s) => s.text === '3500 ms lookup' && s.tone === 'warn'), JSON.stringify(await segments()));
+check('a new probe reading updates the bar without polling', (await line()).includes('3.5 s lookup') && !(await line()).includes('2.5 s lookup'), await line());
+check('a lookup from 3 to 5 s is a warning', (await segments()).some((s) => s.text === '3.5 s lookup' && s.tone === 'warn'), JSON.stringify(await segments()));
 
 await ev(`window.__mockNetLatency(6000, 48)`);
 await sleep(500);
-check('a lookup over 5 s is slow', (await segments()).some((s) => s.text === '6000 ms lookup' && s.tone === 'slow'), JSON.stringify(await segments()));
+check('a lookup over 5 s is slow', (await segments()).some((s) => s.text === '6.0 s lookup' && s.tone === 'slow'), JSON.stringify(await segments()));
 
 await ev(`window.__mockNetLatency(null, 48)`);
 await sleep(500);
@@ -2876,6 +2892,44 @@ const titlebarFits = () => ev(`(() => {
   const controls = end.lastElementChild.getBoundingClientRect();
   return { gap: Math.round(first.left - title.right), offCentre: Math.abs((title.left + title.right) / 2 - window.innerWidth / 2), controlsIn: controls.right <= window.innerWidth + 0.5 && controls.width === 138 };
 })()`);
+// The network line is never cut: at each width it shows whole pieces only, gives them up in the defined order (the node
+// count first, then reachability, the lookup, the peers, the relay ping and the relay host last), keeps "DHT", the
+// peers and the relay at the common widths, and the tooltip keeps the full relay host.
+await ev(`window.__mockNetLatency(2529, 42)`);
+await sleep(400);
+const ORDER = ['dht-short', 'reach', 'lookup', 'peers', 'ping', 'relay'];
+const readout = () => ev(`(() => {
+  const room = document.querySelector('[data-net-room]');
+  const line = document.querySelector('[data-net-line]');
+  const text = line.querySelector('[data-net-text]').textContent;
+  const keys = [...line.querySelectorAll('[data-net-key]')].map((n) => n.dataset.netKey);
+  const dht = line.querySelector('[data-net-key="dht"]')?.textContent ?? null;
+  const r = room.getBoundingClientRect();
+  const l = line.getBoundingClientRect();
+  return { text, keys, dht, steps: Number(line.dataset.netSteps), inside: l.left >= r.left - 0.5 && l.right <= r.right + 0.5, clipped: room.scrollWidth > room.clientWidth + 1 };
+})()`);
+for (const w of [2089, 1600, 1440, 1280, 1100]) {
+  await b.resize(w, 800);
+  await sleep(300);
+  const r = await readout();
+  const fit = await titlebarFits();
+  const whole = !r.text.includes('…') && r.inside && !r.clipped;
+  // Each piece missing must be one of the first `steps` in the drop order, and no later piece may be gone.
+  const gone = ['reach', 'lookup', 'peers', 'ping', 'relay'].filter((k) => !r.keys.includes(k));
+  const inOrder = gone.every((k) => ORDER.indexOf(k) < r.steps) && (r.steps === 0 || r.dht === 'DHT');
+  const kept = w >= 1100 ? ['dht', 'peers', 'relay'].every((k) => r.keys.includes(k)) : true;
+  check(`at ${w} px the network line shows whole pieces, dropped in order, and the title stays centred`, whole && inOrder && kept && fit.offCentre <= 1 && fit.gap >= 32, JSON.stringify({ ...r, offCentre: fit.offCentre, gap: fit.gap }));
+}
+await b.resize(1600, 800);
+await sleep(300);
+const full = await readout();
+check('at 1600 px every piece fits: the node count, the lookup, reachability, peers, the relay short name and its ping', full.steps === 0 && full.text === 'DHT 9.2M nodes · 2.5 s lookup · reachable · 3 peers · relay use1-1 · 42 ms', full.text);
+await b.hover('[data-net-line]');
+await sleep(700);
+const netTip = await ev(`[...document.querySelectorAll('[data-slot="tooltip-content"]')].map((n) => n.textContent).join('|')`);
+check('the tooltip keeps the full relay host and the exact lookup time', netTip.includes('relay use1-1.relay.n0.iroh.network') && netTip.includes('2529 ms'), netTip.slice(0, 200));
+await b.moveAway();
+
 for (const w of [1600, 1440, 1100]) {
   await b.resize(w, 800);
   const fit = await titlebarFits();
@@ -3011,7 +3065,9 @@ async function invitePostedAndShown(b) {
   await b.ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
   await sleep(700);
   await b.ev(`[...document.querySelectorAll('button')].find((n) => n.textContent.trim().startsWith('general'))?.click()`);
-  await sleep(1200);
+  await sleep(700);
+  await b.ev(SHOW_INVITES());
+  await sleep(800);
 }
 const focused = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9785, profile: `${SCRATCH}/animatedicon-focus-profile` });
 await sleep(800);
@@ -3496,11 +3552,13 @@ check('V6 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '
 await b.close();
 }
 
-// ---- O. The server's channel order: an owner drags a text channel and a voice channel, each within its kind, with a
-// drop line; Alt+Shift+Up and Down and the Move Up and Move Down menu items move the focused one; a failed publish puts
-// the order back with a toast; a member's rows do not drag. ----
+// ---- O. Channel categories and order: a server without a layout shows Text channels and Voice channels, and the first
+// move makes them real categories; channels drag within, into and out of categories with a drop line or a highlighted
+// header, and categories drag by their header; Alt+Shift+Up and Down and the menus do the same; categories are made,
+// renamed, deleted, opened and closed, and a channel is made inside one; a failed publish rolls back with a toast; a
+// member's rows and headers do not move. ----
 async function section_channelorder() {
-const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9815, profile: `${SCRATCH}/channelorder-next-profile` });
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1100, port: 9815, profile: `${SCRATCH}/channelorder-next-profile` });
 const { send, ev } = b;
 await sleep(1500);
 const SIDE = 'aside[aria-label="Channels and conversations"]';
@@ -3509,28 +3567,49 @@ const pressKey = async (key, vk, modifiers) => {
   const base = { key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
   await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
-  await sleep(300);
+  await sleep(350);
 };
-const textNames = () => ev(`[...document.querySelectorAll('${SIDE} span[title^="#"]')].map((n) => n.textContent)`);
-const voiceNames = () => ev(`[...document.querySelectorAll('${SIDE} button[title^="Join "], ${SIDE} button[title^="Connected to "]')].map((n) => n.querySelector('span[title]').textContent)`);
-// The button of the text row named `name`, or of the voice row with `voice`.
-const rowExpr = (name, voice = false) => voice
-  ? `[...document.querySelectorAll('${SIDE} button[title^="Join "]')].find((n) => n.title === 'Join ' + ${JSON.stringify(name)})`
-  : `document.querySelector('${SIDE} span[title=' + JSON.stringify('#' + ${JSON.stringify(name)}) + ']')?.closest('button')`;
-const point = (expr) => ev(`(() => { const n = ${expr}; if (!n) return null; const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, h: r.height }; })()`);
+// The sidebar as text, top first: a category is `Name[ch, ch]`, a channel outside any is `#name`.
+const tree = () => ev(`(() => {
+  const nameOf = (row) => row.querySelector('span[title^="#"]')?.textContent ?? row.querySelector('button[title] span[title]')?.textContent ?? '?';
+  return [...document.querySelectorAll('${SIDE} [data-category], ${SIDE} [data-top-channel]')].map((n) => {
+    if (n.hasAttribute('data-top-channel')) return '#' + nameOf(n);
+    const rows = [...n.querySelectorAll(':scope > div.group')].map(nameOf);
+    return n.querySelector('[data-category-key] span').textContent + '[' + rows.join(',') + ']';
+  });
+})()`);
+const header = (name) => `[...document.querySelectorAll('${SIDE} [data-category-key]')].find((n) => n.textContent === ${JSON.stringify(name)})`;
+const rowBtn = (name) => `([...document.querySelectorAll('${SIDE} span[title=' + JSON.stringify('#' + ${JSON.stringify(name)}) + ']')][0]?.closest('button') ?? [...document.querySelectorAll('${SIDE} button[title]')].find((n) => n.title === 'Join ' + ${JSON.stringify(name)}))`;
+const point = (expr) => ev(`(() => { const n = ${expr}; if (!n) return null; n.scrollIntoView({ block: 'nearest' }); const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, top: r.top, h: r.height }; })()`);
 const mouse = (type, x, y, buttons) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1, buttons });
-// Presses the row `from`, moves below the middle of the row `below`, checks the drop line, and releases there.
-const dragBelow = async (from, below, voice = false) => {
-  const p0 = await point(rowExpr(from, voice));
-  const p1 = await point(rowExpr(below, voice));
-  if (!p0 || !p1) return { line: false, missing: true };
+// Drags `from` to the point `to` gives, checks what shows on the way, and releases there.
+const dragTo = async (from, to, during) => {
+  const p0 = await point(from);
+  if (!p0) return { missing: true };
   await mouse('mousePressed', p0.x, p0.y, 1);
-  for (const y of [p0.y + 8, p1.y + p1.h / 2 - 2, p1.y + p1.h / 2 + 4]) await mouse('mouseMoved', p0.x, y, 1);
+  await mouse('mouseMoved', p0.x, p0.y + 8, 1);
+  const p1 = await to();
+  if (!p1) {
+    await mouse('mouseReleased', p0.x, p0.y + 8, 0);
+    return { missing: true };
+  }
+  await mouse('mouseMoved', p0.x, p1.y - 3, 1);
+  await mouse('mouseMoved', p0.x, p1.y, 1);
   await sleep(150);
-  const line = await ev(`document.querySelectorAll('${SIDE} [data-channel-drop-line]').length === 1`);
-  await mouse('mouseReleased', p0.x, p1.y + p1.h / 2 + 4, 0);
-  await sleep(500);
-  return { line };
+  const seen = during ? await ev(during) : null;
+  await mouse('mouseReleased', p0.x, p1.y, 0);
+  await sleep(600);
+  return { seen };
+};
+const lastLayout = () => ev(`JSON.stringify(window.__mockLayouts?.at(-1)?.entries ?? null)`);
+const status = () => ev(`document.querySelector('${SIDE} [data-channel-order-status]')?.textContent ?? ''`);
+const openMenuOn = (expr) => ev(`(() => { const n = ${expr}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + r.height / 2 })); })()`);
+const menuItem = (label) => `[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})`;
+const typeInto = async (selector, text) => {
+  const found = await ev(`(() => { const n = document.querySelector(${JSON.stringify(selector)}); if (!n) return false; n.focus(); n.select?.(); return true; })()`);
+  if (!found) throw new Error(`no field ${selector}`);
+  await send('Input.insertText', { text });
+  await sleep(200);
 };
 
 // The owner's server, with a third text channel and two voice channels.
@@ -3543,68 +3622,154 @@ await ev(`(async () => {
   await invoke('create_voice_channel', { communityId: 'c2', name: 'studio' });
   window.__mockEngineEvent({ kind: 'community_updated', community_id: 'c2' });
 })()`);
-await until(async () => (await textNames()).length === 3 && (await voiceNames()).length === 2);
-check('O0 the owner\'s server lists three text and two voice channels', JSON.stringify(await textNames()) === '["general","reading-list","events"]' && JSON.stringify(await voiceNames()) === '["hangout","studio"]', JSON.stringify([await textNames(), await voiceNames()]));
-check('O0 the owner\'s rows say how to move them by key', (await ev(`${rowExpr('general')}?.getAttribute('aria-keyshortcuts')`)) === 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown');
+await until(async () => (await tree()).join('|') === 'Text channels[general,reading-list,events]|Voice channels[hangout,studio]');
+check('O0 a server without a layout shows its text and voice channels in two groups', (await tree()).join('|') === 'Text channels[general,reading-list,events]|Voice channels[hangout,studio]', JSON.stringify(await tree()));
+check('O0 the owner\'s rows and headers say how to move them by key', (await ev(`${rowBtn('general')}?.getAttribute('aria-keyshortcuts') === 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' && ${header('Text channels')}?.getAttribute('aria-keyshortcuts') === 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown'`)) === true);
 
-// A drag moves general below reading-list, shows the drop line on the way, and publishes the order.
+// A drag within a group: general below reading-list. The first move makes the two groups real categories.
 const openBefore = await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`);
-const dragged = await dragBelow('general', 'reading-list');
-check('O1 a drag shows one drop line where the channel will land', dragged.line === true, JSON.stringify(dragged));
-check('O1 the drag moves general below reading-list', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
-const published = await ev(`JSON.stringify(window.__mockReorders?.at(-1) ?? null)`);
-const shownIds = await ev(`JSON.stringify({ communityId: 'c2', text: [...document.querySelectorAll('${SIDE} span[title^="#"]')].map((n) => n.closest('button').dataset.channelId), voice: [...document.querySelectorAll('${SIDE} button[title^="Join "]')].map((n) => n.dataset.channelId) })`);
-check('O1 the order is published for the server, text and voice apart', published === shownIds && published.startsWith('{"communityId":"c2","text":["ch6","ch5"'), `${published} vs ${shownIds}`);
-check('O1 the drop line is gone after the drop', (await ev(`document.querySelectorAll('${SIDE} [data-channel-drop-line]').length`)) === 0);
-check('O1 a drag does not open the channel it moved', (await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`)) === openBefore, openBefore);
+const within = await dragTo(rowBtn('general'), async () => {
+  const r = await point(rowBtn('reading-list'));
+  return r && { y: r.top + r.h - 4 };
+}, `document.querySelectorAll('${SIDE} [data-channel-drop-line]').length`);
+check('O1 a drag shows one drop line where the channel will land', within.seen === 1, JSON.stringify(within));
+check('O1 the drag moves general below reading-list', (await tree()).join('|') === 'Text channels[reading-list,general,events]|Voice channels[hangout,studio]', JSON.stringify(await tree()));
+const first = JSON.parse((await lastLayout()) ?? 'null');
+check('O1 the first move publishes a layout whose two groups are new categories', first?.length === 2 && first.every((e) => e.kind === 'category' && !e.id) && first[0].name === 'Text channels' && first[1].name === 'Voice channels', JSON.stringify(first));
+check('O1 the drop line is gone and the drag did not open the channel', (await ev(`document.querySelectorAll('${SIDE} [data-channel-drop-line]').length`)) === 0 && (await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`)) === openBefore);
 
-// A voice channel moves among the voice channels only.
-const voiceDrag = await dragBelow('hangout', 'studio', true);
-check('O2 a voice channel drags within the voice channels, with the line', voiceDrag.line === true && JSON.stringify(await voiceNames()) === '["studio","hangout"]', JSON.stringify([voiceDrag, await voiceNames()]));
-check('O2 the text order is left as it was', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
+// A voice channel dropped on the Text channels header goes into that category, at its top: a category mixes kinds.
+const into = await dragTo(rowBtn('studio'), async () => {
+  const h = await point(header('Text channels'));
+  return h && { y: h.top + h.h * 0.7 };
+}, `!!document.querySelector('${SIDE} [data-drop-into]')`);
+check('O2 dropping on a header highlights it', into.seen === true, JSON.stringify(into));
+check('O2 a voice channel lands in a text category: a category mixes kinds', (await tree()).join('|') === 'Text channels[studio,reading-list,general,events]|Voice channels[hangout]', JSON.stringify(await tree()));
 
-// Alt+Shift+Down on the focused channel moves it one place, announces it, keeps focus, and does not jump to an unread channel.
-await ev(`${rowExpr('general')}.focus()`);
-const activeBefore = await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`);
-await pressKey('ArrowDown', 40, 9);
-await sleep(300);
-check('O3 Alt+Shift+Down moves the focused channel one place down', JSON.stringify(await textNames()) === '["reading-list","events","general"]', JSON.stringify(await textNames()));
-check('O3 the keyboard move is announced with its new position', (await ev(`document.querySelector('${SIDE} [data-channel-order-status="text"]')?.textContent`)) === 'Moved general to position 3 of 3');
-check('O3 focus stays on the moved channel', (await ev(`document.activeElement === ${rowExpr('general')}`)) === true);
-check('O3 the key moves the channel rather than opening another one', (await ev(`document.querySelector('${SIDE} button[aria-current="true"]')?.textContent ?? ''`)) === activeBefore);
-await pressKey('ArrowDown', 40, 9);
-check('O3 Alt+Shift+Down on the last channel leaves the order', JSON.stringify(await textNames()) === '["reading-list","events","general"]', JSON.stringify(await textNames()));
-await pressKey('ArrowUp', 38, 9);
-check('O3 Alt+Shift+Up moves it back up', JSON.stringify(await textNames()) === '["reading-list","general","events"]', JSON.stringify(await textNames()));
-
-// The channel menu has Move Up and Move Down; the first channel's Move Up is disabled.
-const openMenu = (expr) => ev(`(() => { const n = ${expr}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + r.height / 2 })); })()`);
-const menuItem = (label) => `[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})`;
-await openMenu(rowExpr('reading-list'));
+// Create Category from the server menu.
+await ev(`document.querySelector('${SIDE} button[aria-label="Open Source Arabic menu"]').focus()`);
+await pressKey('Enter', 13, 0);
 await sleep(400);
-check('O4 the channel menu offers Move Up and Move Down', (await ev(`!!(${menuItem('Move Up')}) && !!(${menuItem('Move Down')})`)) === true);
-check('O4 Move Up is disabled on the first channel', (await ev(`${menuItem('Move Up')}?.getAttribute('aria-disabled') === 'true' || ${menuItem('Move Up')}?.hasAttribute('data-disabled')`)) === true);
-await ev(`${menuItem('Move Down')}.click()`);
+const serverItems = await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+check('O3 the server menu offers Create category to an owner', serverItems.includes('Create category'), JSON.stringify(serverItems));
+await ev(`${menuItem('Create category')}.click()`);
+await sleep(400);
+await typeInto('[role="dialog"] input[aria-label="Category name"]', 'Projects');
+await pressKey('Enter', 13, 0);
 await sleep(500);
-check('O4 Move Down moves the channel one place down', JSON.stringify(await textNames()) === '["general","reading-list","events"]', JSON.stringify(await textNames()));
+check('O3 Create category adds an empty category at the end', (await tree()).at(-1) === 'Projects[]', JSON.stringify(await tree()));
+check('O3 the new category is sent without an id, for the engine to make one', JSON.parse(await lastLayout()).at(-1).id === undefined);
 
-// A failed publish shows the new order at once, then puts the old one back with a toast.
-await ev(`window.__mockReorderFails = true; window.__mockDelay = 700`);
-await ev(`${rowExpr('events')}.focus()`);
+// Drag events onto the empty Projects header.
+const onEmpty = await dragTo(rowBtn('events'), async () => {
+  const h = await point(header('Projects'));
+  return h && { y: h.top + h.h * 0.7 };
+}, `JSON.stringify({ into: document.querySelector('${SIDE} [data-drop-into]')?.closest('[data-category]')?.dataset.category ?? null, keys: [...document.querySelectorAll('${SIDE} [data-category]')].map((n) => n.dataset.category) })`);
+check('O4 a channel dropped on an empty category goes into it', (await tree()).at(-1) === 'Projects[events]', JSON.stringify([await tree(), onEmpty]));
+
+// Alt+Shift+Up on events, first in Projects, takes it out of the category, above it; Down puts it back.
+await ev(`${rowBtn('events')}.focus()`);
 await pressKey('ArrowUp', 38, 9);
-check('O5 the order moves at once, before the publish answers', JSON.stringify(await textNames()) === '["general","events","reading-list"]', JSON.stringify(await textNames()));
-await sleep(1000);
-check('O5 a failed publish puts the old order back', JSON.stringify(await textNames()) === '["general","reading-list","events"]', JSON.stringify(await textNames()));
-check('O5 the failure shows as a toast', (await ev(`[...document.querySelectorAll('[role="status"]')].some((n) => n.textContent.includes('Could not move the channel'))`)) === true);
-await ev(`window.__mockReorderFails = false; window.__mockDelay = 0`);
+check('O5 Alt+Shift+Up at the top of a category takes the channel out, above it', (await tree()).slice(-2).join('|') === '#events|Projects[]', JSON.stringify(await tree()));
+check('O5 the keyboard move is announced', (await status()) === 'Moved events outside categories', await status());
+check('O5 focus stays on the moved channel', (await ev(`document.activeElement === ${rowBtn('events')}`)) === true);
+await pressKey('ArrowDown', 40, 9);
+check('O5 Alt+Shift+Down puts it back at the top of the category below', (await tree()).at(-1) === 'Projects[events]', JSON.stringify(await tree()));
+check('O5 and says where', (await status()) === 'Moved events to position 1 in Projects', await status());
 
-// A member's rows do not drag, and they have no order menu or key hint.
+// Alt+Shift+Up on the Projects header moves the category above Voice channels.
+await ev(`${header('Projects')}.focus()`);
+await pressKey('ArrowUp', 38, 9);
+check('O6 Alt+Shift+Up on a header moves the category up', (await tree()).join('|') === 'Text channels[studio,reading-list,general]|Projects[events]|Voice channels[hangout]', JSON.stringify(await tree()));
+check('O6 the category move is announced', (await status()) === 'Moved Projects to position 2 of 3', await status());
+
+// Drag the Voice channels header above Text channels.
+await dragTo(header('Voice channels'), async () => {
+  const h = await point(header('Text channels'));
+  return h && { y: h.top + 2 };
+});
+check('O7 a category drags by its header', (await tree())[0] === 'Voice channels[hangout]', JSON.stringify(await tree()));
+
+// Closing a category hides its channels, except the open one, and stays closed after a reload.
+await ev(`${header('Text channels')}.click()`);
+await sleep(300);
+check('O8 a click on the header closes the category', (await ev(`${header('Text channels')}.getAttribute('aria-expanded')`)) === 'false');
+const closedRows = (await tree()).find((t) => t.startsWith('Text channels'));
+check('O8 a closed category keeps only the open channel showing', closedRows === 'Text channels[general]' || closedRows === 'Text channels[]', closedRows);
+check('O8 the closed state is kept on this device, by category', (await ev(`(() => { try { return Object.values(JSON.parse(localStorage.getItem('dissent-category-collapsed:c2') ?? '{}')).includes(true); } catch { return false; } })()`)) === true);
+await ev(`${header('Text channels')}.click()`);
+await sleep(300);
+check('O8 a second click opens it again', (await ev(`${header('Text channels')}.getAttribute('aria-expanded')`)) === 'true');
+
+// Move to Category from the channel menu: reading-list to No Category, then into Projects.
+await openMenuOn(rowBtn('reading-list'));
+await sleep(400);
+await ev(`${menuItem('Move to Category')}.focus()`);
+await pressKey('ArrowRight', 39, 0);
+await sleep(300);
+const submenu = await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitemradio"]')].map((n) => n.textContent.trim())`);
+check('O9 the channel menu lists the categories and No Category', JSON.stringify(submenu) === JSON.stringify(['Voice channels', 'Text channels', 'Projects', 'No Category']), JSON.stringify(submenu));
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitemradio"]')].find((n) => n.textContent.trim() === 'Projects').click()`);
+await sleep(500);
+check('O9 Move to Category puts the channel at the end of that category', (await tree()).find((t) => t.startsWith('Projects')) === 'Projects[events,reading-list]', JSON.stringify(await tree()));
+
+// Rename and delete from the header menu. Deleting keeps the channels, outside any category, where it was.
+await openMenuOn(header('Projects'));
+await sleep(400);
+await ev(`${menuItem('Rename Category')}.click()`);
+await sleep(400);
+await ev(`(() => { const n = document.querySelector('[role="dialog"] input[aria-label="Category name"]'); n.focus(); n.select(); })()`);
+await send('Input.insertText', { text: 'Builds' });
+await pressKey('Enter', 13, 0);
+await sleep(500);
+check('O10 Rename Category renames it in place', (await tree()).some((t) => t === 'Builds[events,reading-list]'), JSON.stringify(await tree()));
+await openMenuOn(header('Builds'));
+await sleep(400);
+await ev(`${menuItem('Delete Category')}.click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button, [role="dialog"] button')].find((n) => n.textContent.trim() === 'Delete Category').click()`);
+await sleep(600);
+const afterDelete = await tree();
+check('O10 Delete Category keeps its channels, outside any category, where it was', afterDelete.join('|') === 'Voice channels[hangout]|Text channels[studio,general]|#events|#reading-list', JSON.stringify(afterDelete));
+
+// The + of a category makes the channel inside it.
+await ev(`document.querySelector('${SIDE} button[aria-label="Create channel in Text channels"]').click()`);
+await sleep(400);
+await typeInto('[role="dialog"] input[aria-label="Channel name"]', 'notes');
+await pressKey('Enter', 13, 0);
+await sleep(900);
+check('O11 a channel made from a category\'s + goes at the end of that category', (await tree()).find((t) => t.startsWith('Text channels')) === 'Text channels[studio,general,notes]', JSON.stringify(await tree()));
+
+// A failed publish shows the move at once, then puts the old layout back with a toast.
+const beforeFail = (await tree()).join('|');
+await ev(`window.__mockLayoutFails = true; window.__mockDelay = 700`);
+await ev(`${rowBtn('reading-list')}.focus()`);
+await pressKey('ArrowUp', 38, 9);
+check('O12 the move shows at once, before the publish answers', (await tree()).join('|') !== beforeFail, JSON.stringify(await tree()));
+await sleep(1100);
+check('O12 a failed publish puts the old layout back', (await tree()).join('|') === beforeFail, JSON.stringify(await tree()));
+check('O12 the failure shows as a toast', (await ev(`[...document.querySelectorAll('[role="status"]')].some((n) => n.textContent.includes('Could not move the channel'))`)) === true);
+await ev(`window.__mockLayoutFails = false; window.__mockDelay = 0`);
+
+// A member's server: the groups show, a header still opens and closes, but nothing drags or moves by key, and there are
+// no menus to arrange with.
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
 await sleep(900);
-const memberBefore = await textNames();
-check('O6 a member\'s channel rows carry no drag handle or key hint', (await ev(`document.querySelectorAll('${SIDE} [data-channel-id], ${SIDE} [aria-keyshortcuts^="Alt+Shift"]').length`)) === 0);
-const memberDrag = await dragBelow(memberBefore[0], memberBefore[1]);
-check('O6 a member cannot drag a channel: no line, and the order stays', memberDrag.line === false && JSON.stringify(await textNames()) === JSON.stringify(memberBefore), JSON.stringify([memberDrag, await textNames()]));
+const memberTree = await tree();
+check('O13 a member sees the two groups', memberTree.length === 2 && memberTree[0].startsWith('Text channels[') && memberTree[1].startsWith('Voice channels['), JSON.stringify(memberTree));
+check('O13 a member\'s rows and headers carry no drag handle or key hint', (await ev(`document.querySelectorAll('${SIDE} [data-channel-id], ${SIDE} [aria-keyshortcuts^="Alt+Shift"]').length`)) === 0);
+const firstRows = memberTree[0].slice('Text channels['.length, -1).split(',');
+await dragTo(rowBtn(firstRows[0]), async () => {
+  const r = await point(rowBtn(firstRows[1]));
+  return r && { y: r.top + r.h - 3 };
+});
+check('O13 a member cannot drag a channel', JSON.stringify(await tree()) === JSON.stringify(memberTree), JSON.stringify(await tree()));
+await openMenuOn(header('Text channels'));
+await sleep(300);
+check('O13 a member gets no category menu', (await ev(`!document.querySelector('[role="menu"]')`)) === true);
+await ev(`${header('Text channels')}.click()`);
+await sleep(300);
+check('O13 a member can still close a category for themself', (await ev(`${header('Text channels')}.getAttribute('aria-expanded')`)) === 'false');
 
 await b.close();
 }
@@ -3870,9 +4035,11 @@ const RAIL = 'nav[aria-label="Servers and direct messages"]';
 await b.moveAway();
 
 // The server rail: the server's name, to the right of its icon, after the delay and not at once.
+// The hover's time is taken in the page, so a slow round trip on a loaded machine cannot make it look instant.
+await ev(`window.__hoverAt = performance.now()`);
 await b.hover(`${RAIL} button[aria-label="Riverside Makers"]`);
-await sleep(80);
-check('T1 a tooltip waits for the delay before it shows', (await shownTips()).length === 0, JSON.stringify(await tips()));
+const early = await ev(`(() => ({ shown: [...document.querySelectorAll('[data-slot="tooltip-content"]')].some((n) => getComputedStyle(n).display !== 'none'), after: performance.now() - window.__hoverAt }))()`);
+check('T1 a tooltip waits for the delay before it shows', !early.shown || early.after >= 300, JSON.stringify(early));
 await sleep(500);
 const railTip = await shownTips();
 check('T2 hovering a server icon shows its name to the right', railTip.length === 1 && railTip[0].text === 'Riverside Makers' && railTip[0].side === 'right', JSON.stringify(railTip));
@@ -3942,7 +4109,7 @@ const headerTip = await hoverTip('aside[aria-label="Channels and conversations"]
 check('T17 the server header shows "Server options" below it, with no native title inside', headerTip[0]?.text === 'Server options' && headerTip[0]?.side === 'bottom' && (await ev(`!document.querySelector('aside[aria-label="Channels and conversations"] button[aria-label="Open Source Arabic menu"] [title]')`)) === true, JSON.stringify(headerTip));
 await b.click('aside[aria-label="Channels and conversations"] button[aria-label="Open Source Arabic menu"]');
 await sleep(400);
-check('T18 the server header still opens its menu', (await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].some((n) => n.textContent.includes('Create invite'))`)) === true);
+check('T18 the server header still opens its menu', (await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].some((n) => n.textContent.includes('Invite to Server'))`)) === true);
 await b.press('Escape');
 await sleep(300);
 const createTip = await hoverTip('aside[aria-label="Channels and conversations"] button[aria-label="Create channel"]');
@@ -4068,6 +4235,407 @@ noConsoleErrors('dmmentions', b.consoleErrors);
 await b.close();
 }
 
+// ---- disclaimer: shown at first launch and after the notice changes, accepted once, and reread from Settings › About ----
+async function section_disclaimer() {
+const b = await launch({ url: `${BASE}/?disclaimer=none`, width: 1440, height: 900, port: 9871, profile: `${SCRATCH}/disclaimer-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const GATE = '[role="dialog"][data-disclaimer="gate"]';
+const continueBtn = `[...document.querySelectorAll('${GATE} button')].find((n) => n.textContent.trim() === 'Continue')`;
+const gateShown = () => ev(`!!document.querySelector('${GATE}')`);
+
+check('D1 a first launch shows the disclaimer before the app', (await gateShown()) === true && (await ev(`document.querySelector('${GATE} h2')?.textContent`)) === 'Disclaimer and Limitation of Liability');
+const parts = await ev(`(() => { const g = document.querySelector('${GATE}'); return { date: /Last updated: \\w+ \\d{1,2}, \\d{4}/.test(g.textContent), summary: g.querySelectorAll('[data-disclaimer-summary] li').length, headings: g.querySelectorAll('[data-disclaimer-text] h3').length, scrolls: (() => { const t = g.querySelector('[data-disclaimer-text]'); return t.scrollHeight > t.clientHeight; })(), noWarranty: g.querySelector('[data-disclaimer-text]').textContent.includes('AS IS') }; })()`);
+check('D2 it shows the date, the plain summary and the full text in a scrolling box', parts.date && parts.summary >= 6 && parts.headings >= 8 && parts.scrolls && parts.noWarranty, JSON.stringify(parts));
+const shownDate = await ev(`document.querySelector('${GATE} p')?.textContent.replace('Last updated: ', '')`);
+check('D3 the app is not loaded behind it yet', (await ev(`document.querySelectorAll('aside[aria-label="Channels and conversations"] button[aria-current]').length`)) === 0);
+check('D4 Continue is disabled until the box is checked', (await ev(`${continueBtn}.disabled`)) === true);
+await b.press('Escape');
+await sleep(300);
+check('D5 Esc does not dismiss it', (await gateShown()) === true);
+await b.click(`${GATE} [data-disclaimer-accept]`);
+await sleep(200);
+check('D6 checking the box enables Continue', (await ev(`${continueBtn}.disabled`)) === false);
+await ev(`${continueBtn}.click()`);
+await sleep(1500);
+check('D7 Continue closes it and the app loads', (await gateShown()) === false && (await ev(`!!document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Direct messages"]')`)) === true);
+check('D8 the date of the notice shown is the one saved', (await ev(`localStorage.getItem('dissent.mock.disclaimer')`)) === shownDate, `${shownDate} / ${await ev(`localStorage.getItem('dissent.mock.disclaimer')`)}`);
+
+// A new launch with the same acceptance goes straight to the app.
+await b.send('Page.navigate', { url: `${BASE}/` });
+await sleep(2000);
+check('D9 the acceptance persists: the next launch does not ask again', (await gateShown()) === false);
+
+// Settings › About opens the same notice, read-only.
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'About').click()`);
+await sleep(400);
+await ev(`document.querySelector('[data-open-disclaimer]').click()`);
+await sleep(400);
+const viewer = await ev(`(() => { const v = document.querySelector('[role="dialog"][data-disclaimer="view"]'); return v ? { text: !!v.querySelector('[data-disclaimer-text]'), box: !!v.querySelector('[data-disclaimer-accept]'), close: [...v.querySelectorAll('button')].some((n) => n.textContent.trim() === 'Close') } : null; })()`);
+check('D10 Settings › About opens the full notice read-only, with Close', !!viewer && viewer.text && !viewer.box && viewer.close, JSON.stringify(viewer));
+await b.press('Escape');
+await sleep(300);
+check('D11 Esc closes the viewer and leaves Settings open', (await ev(`!document.querySelector('[data-disclaimer]') && !!document.querySelector('[data-settings-page]')`)) === true);
+
+// A changed notice (an older accepted date) asks again; Quit asks the app to quit.
+await b.send('Page.navigate', { url: `${BASE}/?disclaimer=old` });
+await sleep(2000);
+check('D12 an older accepted date shows the disclaimer again', (await gateShown()) === true);
+await ev(`[...document.querySelectorAll('${GATE} button')].find((n) => n.textContent.trim() === 'Quit').click()`);
+await sleep(300);
+check('D13 Quit asks the app to quit', (await ev(`window.__mockQuit === true`)) === true);
+
+noConsoleErrors('disclaimer', b.consoleErrors);
+await b.close();
+}
+
+// ---- T. Video thumbnails: a video with a first-frame thumbnail shows it unblurred under a centred play mark, sized like
+// an image preview; a click downloads it, and once it is here the same button plays it. A video without a thumbnail
+// (VP9, which the engine cannot decode) stays a plain file card. ----
+async function section_videothumbs() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9819, profile: `${SCRATCH}/videothumbs-next-profile` });
+const { ev } = b;
+await sleep(1500);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('announcements'))?.click()`);
+await until(async () => (await ev(`!!document.querySelector('.att-preview[data-video] img')`)) === true, 8000);
+await sleep(400);
+const preview = await ev(`(() => {
+  const fig = document.querySelector('.att-preview[data-video]');
+  if (!fig) return null;
+  const btn = fig.querySelector('.att-preview-btn');
+  const img = btn.querySelector('img');
+  const play = btn.querySelector('[data-att-play]');
+  const r = btn.getBoundingClientRect();
+  const p = play?.getBoundingClientRect();
+  return {
+    label: btn.getAttribute('aria-label'),
+    w: Math.round(r.width), h: Math.round(r.height),
+    loaded: img.complete && img.naturalWidth > 0,
+    filter: getComputedStyle(img).filter,
+    play: !!p,
+    centred: !!p && Math.abs(p.left + p.width / 2 - (r.left + r.width / 2)) < 2 && Math.abs(p.top + p.height / 2 - (r.top + r.height / 2)) < 2,
+    card: fig.querySelector('.att-card')?.textContent.includes('cutter-fix.mp4') ?? false,
+  };
+})()`);
+check('T1 a video with a thumbnail shows its first frame, labelled to download', preview?.label === 'Download cutter-fix.mp4' && preview.loaded, JSON.stringify(preview));
+check('T1 the first frame is sized like an image preview, 16:9 within 400 by 300', !!preview && preview.w <= 400 && preview.h <= 300 && Math.abs(preview.w / preview.h - 16 / 9) < 0.05, JSON.stringify(preview));
+check('T1 the frame is shown sharp, not blurred like a picture preview', preview?.filter === 'none', preview?.filter);
+check('T1 a play mark sits over the middle of the frame', preview?.play === true && preview.centred === true, JSON.stringify(preview));
+check('T1 the file card stays under the frame', preview?.card === true);
+check('T2 a video without a thumbnail is a plain file card', (await ev(`(() => { const card = [...document.querySelectorAll('[data-att]')].find((n) => n.textContent.includes('cutter-raw.webm')); return !!card && !card.closest('.att-preview'); })()`)) === true);
+
+await ev(`document.querySelector('.att-preview[data-video] .att-preview-btn').click()`);
+await sleep(300);
+check('T3 a click on the frame starts the download', (await ev(`!!document.querySelector('button[aria-label="Downloading cutter-fix.mp4"]')`)) === true);
+const played = await until(async () => (await ev(`!!document.querySelector('button[aria-label="Play cutter-fix.mp4"]')`)) === true, 15000);
+check('T3 once downloaded, the same frame plays the video, with the mark still on it', played === true && (await ev(`!!document.querySelector('button[aria-label="Play cutter-fix.mp4"] [data-att-play]') && !document.querySelector('button[aria-label="Play cutter-fix.mp4"]').disabled`)) === true);
+await b.close();
+}
+
+// ---- Invite cards: nothing is asked for until the viewer clicks Show preview (privacy audit P-04) ----
+async function section_invitecards() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9865, profile: `${SCRATCH}/invitecards-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const asked = () => ev(`JSON.stringify(window.__mockInvitePreviews ?? [])`);
+const lastCard = `[...document.querySelectorAll('.messages article.msg')].pop()`;
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(800);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('general'))?.click()`);
+await sleep(800);
+await ev(`window.__mockInvitePreviews = []`);
+await ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'Come along: dissent://invite/mock-rustaceans')`);
+await ev(`window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch1' })`);
+await sleep(1200);
+const closed = await ev(`(() => { const c = ${lastCard}?.querySelector('[data-invite-card="closed"]'); return c ? c.textContent : null; })()`);
+check('IC1 a posted invite shows a neutral card', typeof closed === 'string' && closed.startsWith('Invite to a server') && closed.includes('Show preview') && !closed.includes('Rustaceans'), String(closed));
+check('IC2 nothing is asked about the invite before the click', (await asked()) === '[]', await asked());
+check('IC3 the neutral card shows no server card', (await ev(`!${lastCard}?.querySelector('[data-server-card]')`)) === true);
+await ev(`${lastCard}?.querySelector('button[data-invite-show]')?.click()`);
+const loaded = await until(() => ev(`${lastCard}?.querySelector('[data-server-card]')?.textContent.includes('Rustaceans') ?? false`), 3000);
+check('IC4 Show preview loads the server card', loaded === true);
+check('IC5 the click asks for that preview once', (await asked()) === JSON.stringify(['dissent://invite/mock-rustaceans']), await asked());
+// Another channel and back: the preview asked for this session shows at once, with no new request.
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('hardware'))?.click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('general'))?.click()`);
+await sleep(900);
+check('IC6 a preview already shown this session shows again without a click', (await ev(`${lastCard}?.querySelector('[data-server-card]')?.textContent.includes('Rustaceans') ?? false`)) === true);
+check('IC7 showing it again asks nothing new', (await asked()) === JSON.stringify(['dissent://invite/mock-rustaceans']), await asked());
+// A broken invite reports its error only after the click.
+await ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'dissent://invite/mock-broken')`);
+await ev(`window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch1' })`);
+await sleep(1000);
+check('IC8 a second invite waits for its own click', (await ev(`!!${lastCard}?.querySelector('[data-invite-card="closed"]')`)) === true && (await asked()) === JSON.stringify(['dissent://invite/mock-rustaceans']), await asked());
+await ev(`${lastCard}?.querySelector('button[data-invite-show]')?.click()`);
+const failed = await until(() => ev(`${lastCard}?.textContent.includes('Could not load this invite') ?? false`), 3000);
+check('IC9 a broken invite shows its error after the click', failed === true);
+noConsoleErrors('invitecards', b.consoleErrors);
+await b.close();
+}
+
+// ---- privacy: notifications hide the message text unless chosen, reminders follow the setting, the phrase clears ----
+async function section_privacy() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9881, profile: `${SCRATCH}/privacy-next-profile` });
+const { ev } = b;
+await sleep(1200);
+const SOUNDS = 'dissent.sounds.v1';
+// The checked "Show in notifications" choice, read from Settings › Notifications & sounds.
+const shownChoice = async () => {
+  await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+  await sleep(400);
+  await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Notifications & sounds').click()`);
+  await sleep(300);
+  const v = await ev(`document.querySelector('input[name="notification-content"]:checked')?.value ?? null`);
+  await b.press('Escape');
+  await sleep(300);
+  return v;
+};
+check('P1 a new profile shows the sender but not the message text', (await shownChoice()) === 'sender');
+
+// A saved 'both' from before the default changed reads as the new default; one the user picked, and a saved 'none', stay.
+const reloadWith = async (saved) => {
+  await ev(`localStorage.setItem('${SOUNDS}', ${JSON.stringify(JSON.stringify(saved))})`);
+  await b.send('Page.navigate', { url: `${BASE}/` });
+  await sleep(1800);
+  return shownChoice();
+};
+check('P2 an old saved "Sender and message" that was never picked becomes "Sender only"', (await reloadWith({ enabled: true, content: 'both' })) === 'sender');
+check('P3 "Sender and message" picked by the user stays', (await reloadWith({ enabled: true, content: 'both', contentChosen: true })) === 'both');
+check('P4 a saved "Nothing" stays', (await reloadWith({ enabled: true, content: 'none' })) === 'none');
+
+// The notifications themselves, for each choice: a mention in the background, and a reminder.
+await ev(`localStorage.removeItem('${SOUNDS}')`);
+await b.send('Page.navigate', { url: `${BASE}/` });
+await sleep(1800);
+const notify = async () => {
+  await ev(`(() => { window.__mockNotified = []; document.hasFocus = () => false; window.__mockPostMention('c1', 'ch2'); window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch2' }); })()`);
+  await sleep(500);
+  return ev(`window.__mockNotified.at(-1) ?? null`);
+};
+const remind = async () => {
+  await ev(`(async () => {
+    window.__mockNotified = [];
+    const r = await window.__TAURI__.core.invoke('add_reminder', { message: { community_id: 'c1', channel_id: 'ch2', message_id: 'm-secret', author_name: 'Maya', text: 'the safe code is 4321' }, atMs: Date.now() });
+    window.__mockFireReminder(r.id);
+  })()`);
+  await sleep(500);
+  return ev(`window.__mockNotified.at(-1) ?? null`);
+};
+const pick = (content) => ev(`localStorage.setItem('${SOUNDS}', JSON.stringify({ content: '${content}', contentChosen: true }))`).then(() => b.send('Page.navigate', { url: `${BASE}/` })).then(() => sleep(1800));
+
+const defMessage = await notify();
+check('P5 by default a message notification names the sender and hides the text', !!defMessage && defMessage.body === 'New message' && defMessage.title.length > 0 && defMessage.title !== 'Dissent', JSON.stringify(defMessage));
+const defReminder = await remind();
+check('P6 by default a reminder names the author and hides the text', !!defReminder && defReminder.title === 'Reminder' && defReminder.body === 'From Maya', JSON.stringify(defReminder));
+
+await pick('none');
+const noneMessage = await notify();
+const noneReminder = await remind();
+check('P7 with "Nothing" a message says only "New message"', noneMessage?.title === 'Dissent' && noneMessage?.body === 'New message', JSON.stringify(noneMessage));
+check('P8 with "Nothing" a reminder says only "Reminder"', noneReminder?.title === 'Dissent' && noneReminder?.body === 'Reminder', JSON.stringify(noneReminder));
+
+await pick('both');
+const bothReminder = await remind();
+check('P9 with "Sender and message" a reminder shows its text', bothReminder?.body === 'Maya — the safe code is 4321', JSON.stringify(bothReminder));
+
+// Desktop notifications off: a reminder still toasts in the window but sends no OS notification.
+const desktopToggle = `[...document.querySelectorAll('[data-settings-page] label')].find((n) => n.textContent.includes('Desktop notifications')).querySelector('input')`;
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Notifications & sounds').click()`);
+await sleep(300);
+await ev(`${desktopToggle}.click()`);
+await sleep(400);
+check('P10a the desktop notifications switch is off', (await ev(`${desktopToggle}.checked`)) === false);
+await b.press('Escape');
+await sleep(300);
+const mutedReminder = await remind();
+check('P10 with desktop notifications off a reminder sends no notification', mutedReminder === null, JSON.stringify(mutedReminder));
+// Photos and videos: location and camera details are removed by default, and the switch is saved with the desktop settings.
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Contacts & privacy').click()`);
+await sleep(400);
+const photoBox = `document.querySelector('[data-strip-photo-metadata]')`;
+check('P14 "Remove location and camera details from photos" is on by default', (await ev(`${photoBox}?.checked`)) === true && (await ev(`window.__TAURI__.core.invoke('shell_settings')`)).keep_photo_metadata === false);
+await ev(`${photoBox}.click()`);
+await sleep(400);
+check('P15 turning it off keeps photo details, saved in the desktop settings', (await ev(`${photoBox}.checked`)) === false && (await ev(`window.__TAURI__.core.invoke('shell_settings')`)).keep_photo_metadata === true);
+await ev(`${photoBox}.click()`);
+await sleep(400);
+check('P16 turning it back on removes them again', (await ev(`window.__TAURI__.core.invoke('shell_settings')`)).keep_photo_metadata === false);
+await b.press('Escape');
+noConsoleErrors('privacy', b.consoleErrors);
+await b.close();
+
+// The recovery phrase: copying it says the clipboard is cleared, and it is, unless something else was copied since.
+const o = await launch({ url: `${BASE}/?view=onboarding`, width: 1600, height: 1000, port: 9882, profile: `${SCRATCH}/privacy-phrase-profile` });
+await sleep(1500);
+await o.send('Browser.grantPermissions', { permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'], origin: BASE });
+await o.ev(`window.__mockSecretClearMs = 800`);
+const copyBtn = `[...document.querySelectorAll('[role="dialog"][aria-label="Welcome to Dissent"] button')].find((n) => /copy/i.test(n.textContent))`;
+await o.ev(`${copyBtn}.click()`);
+await sleep(300);
+const toastText = await o.ev(`document.body.textContent.includes('Recovery phrase copied. The clipboard is cleared in 60 seconds.')`);
+const copied = await o.ev(`navigator.clipboard.readText()`);
+check('P11 copying the phrase goes through the native copy_secret and says the clipboard is cleared in 60 seconds', toastText === true && copied.split(' ').length === 24 && (await o.ev(`(window.__mockSecretCalls ?? [])[0]`)) === 'copy', String(copied).slice(0, 20));
+await sleep(1200);
+check('P12 the clipboard no longer holds the phrase after the delay, cleared by the native command', (await o.ev(`navigator.clipboard.readText()`)) === '' && (await o.ev(`(window.__mockSecretCalls ?? []).join()`)) === 'copy,clear', String(await o.ev(`(window.__mockSecretCalls ?? []).join()`)));
+await o.ev(`${copyBtn}.click()`);
+await sleep(200);
+await o.ev(`navigator.clipboard.writeText('something else')`);
+await sleep(1200);
+check('P13 something copied since is left alone', (await o.ev(`navigator.clipboard.readText()`)) === 'something else');
+noConsoleErrors('privacy phrase', o.consoleErrors);
+await o.close();
+}
+
+// ---- consistency: the two server menus agree, Bans has Unban, admins are fixed readers, the Transfers note is true ----
+async function section_consistency() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9891, profile: `${SCRATCH}/consistency-next-profile` });
+const { ev, press } = b;
+await sleep(1200);
+const RAIL = 'nav[aria-label="Servers and direct messages"]';
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const items = () => ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+const lastMenu = () => ev(`(() => { const s = [...document.querySelectorAll('[role="menu"]')].at(-1); return s ? [...s.querySelectorAll('[role^="menuitem"]')].map((n) => n.textContent.trim()) : []; })()`);
+const railMenu = async (name) => {
+  await ev(`(() => { const n = document.querySelector('${RAIL} button[aria-label=${JSON.stringify(name)}]'); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 20 })); })()`);
+  await sleep(500);
+};
+const nameMenu = async (name) => {
+  await b.click(`${SIDE} button[aria-label=${JSON.stringify(`${name} menu`)}]`);
+  await sleep(400);
+};
+
+const SECTIONS = ['Server Profile', 'Boosts', 'Members', 'Invites', 'Bans'];
+const railSections = async (name) => {
+  await railMenu(name);
+  await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((n) => n.textContent.startsWith('Server Settings'))?.focus()`);
+  await press('ArrowRight');
+  await sleep(300);
+  const sub = await lastMenu();
+  await press('Escape');
+  await press('Escape');
+  await sleep(250);
+  return sub;
+};
+
+const same = async (who) => {
+  await nameMenu('Open Source Arabic');
+  const fromName = await items();
+  await press('Escape');
+  await sleep(250);
+  await railMenu('Open Source Arabic');
+  const fromRail = await items();
+  await press('Escape');
+  await sleep(250);
+  return { fromName, fromRail, who };
+};
+// (a) Owner, then admin: both menus offer Server Settings, and the rail's lists every section of the page, Boosts included.
+await ev(`document.querySelector('${RAIL} button[aria-label="Open Source Arabic"]').click()`);
+await sleep(900);
+check('K1 the owner\'s rail submenu lists every Server Settings section, Boosts included', JSON.stringify((await railSections('Open Source Arabic')).map((l) => l.replace(/\d+ asks?.*$/, '').trim())) === JSON.stringify(SECTIONS), JSON.stringify(await railSections('Open Source Arabic')));
+await ev(`window.__mockSetMyRole('c2', 'admin')`);
+await sleep(800);
+await nameMenu('Open Source Arabic');
+const adminName = await items();
+await press('Escape');
+await sleep(250);
+check('K2 an admin\'s server-name menu offers Server Settings, as the rail menu does', adminName.some((l) => l.startsWith('Server Settings')), JSON.stringify(adminName));
+await railMenu('Open Source Arabic');
+const adminRail = await items();
+await press('Escape');
+await sleep(250);
+check('K3 an admin\'s rail menu offers Server Settings too', adminRail.some((l) => l.startsWith('Server Settings')), JSON.stringify(adminRail));
+await ev(`window.__mockSetMyRole('c2', 'member')`);
+await sleep(800);
+await nameMenu('Open Source Arabic');
+const memberName = await items();
+await press('Escape');
+await sleep(250);
+await railMenu('Open Source Arabic');
+const memberRail = await items();
+await press('Escape');
+await sleep(250);
+check('K4 a member sees Server Settings in neither menu', !memberName.some((l) => l.startsWith('Server Settings')) && !memberRail.some((l) => l.startsWith('Server Settings')), JSON.stringify({ memberName, memberRail }));
+await ev(`window.__mockSetMyRole('c2', 'owner')`);
+await sleep(800);
+// Both menus are one definition: the same items, in the same order, for each role. The owner is never offered Leave.
+const ALL = ['Mark As Read', 'Invite to Server', 'Mute Server', 'Notification Settings', 'Hide Muted Channels', 'Server Settings', 'Create Channel', 'Server Icon', 'Claim Handle', 'Copy Server Address', 'Leave Server'];
+const names = (list) => list.map((l) => ALL.find((a) => l.startsWith(a)) ?? l);
+for (const role of ['owner', 'admin', 'member']) {
+  await ev(`window.__mockSetMyRole('c2', '${role}')`);
+  await sleep(800);
+  const { fromName, fromRail } = await same(role);
+  check(`K4b for ${role === 'owner' ? 'the owner' : role === 'admin' ? 'an admin' : 'a member'} the name menu and the rail menu list the same items`, JSON.stringify(fromName) === JSON.stringify(fromRail), JSON.stringify({ fromName, fromRail }));
+  const shown = names(fromRail);
+  const expect = role === 'member'
+    ? ['Claim Handle', 'Copy Server Address', 'Leave Server', 'Invite to Server', 'Mark As Read', 'Mute Server']
+    : ['Server Settings', 'Create Channel', 'Claim Handle', 'Copy Server Address', 'Mark As Read', 'Mute Server', 'Notification Settings'];
+  const missing = expect.filter((e) => !shown.includes(e));
+  const leaveOk = role === 'owner' ? !shown.includes('Leave Server') : shown.includes('Leave Server');
+  const manageOk = role === 'member' ? !shown.includes('Server Settings') && !shown.includes('Create Channel') && !shown.includes('Server Icon') : true;
+  check(`K4c ${role}: the expected items, Leave Server ${role === 'owner' ? 'hidden' : 'offered'}`, missing.length === 0 && leaveOk && manageOk, JSON.stringify({ shown, missing }));
+}
+await ev(`window.__mockSetMyRole('c2', 'owner')`);
+await sleep(800);
+
+// (b) Bans: a banned member has Unban, which asks first and then lifts the ban.
+const ken = await ev(`(async () => (await window.__TAURI__.core.invoke('community_view', { communityId: 'c2' })).members.find((m) => m.role === 'member' && !m.banned)?.root_id)()`);
+const kenName = await ev(`(async () => (await window.__TAURI__.core.invoke('community_view', { communityId: 'c2' })).members.find((m) => m.root_id === ${JSON.stringify(ken)}).display_name)()`);
+await ev(`window.__TAURI__.core.invoke('moderate', { communityId: 'c2', action: 'ban', user: ${JSON.stringify(ken)} })`);
+await ev(`window.__mockSetMyRole('c2', 'owner')`);
+await sleep(800);
+await nameMenu('Open Source Arabic');
+await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('[data-server-settings] nav button')].find((n) => n.textContent.trim() === 'Bans')?.click()`);
+await sleep(400);
+const unbanBtn = `document.querySelector('[data-bans] button[aria-label=${JSON.stringify(`Unban ${kenName}`)}]')`;
+check('K5 the Bans page lists the banned member with an Unban button', (await ev(`!!${unbanBtn}`)) === true, String(await ev(`document.querySelector('[data-bans]')?.textContent ?? 'no list'`)));
+await ev(`${unbanBtn}.click()`);
+await sleep(400);
+check('K6 Unban asks first', (await ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`)).includes(`Unban ${kenName}?`));
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Unban').click()`);
+await sleep(800);
+const stillBanned = await ev(`(async () => (await window.__TAURI__.core.invoke('community_view', { communityId: 'c2' })).members.find((m) => m.root_id === ${JSON.stringify(ken)})?.banned ?? null)()`);
+check('K7 confirming lifts the ban', stillBanned === false, String(stillBanned));
+await press('Escape');
+await sleep(400);
+
+// (c) The private-channel reader picker: Admins is ticked and fixed, with a hint.
+await ev(`document.querySelector('${SIDE} div.group:has(span[title="#general"]) button[aria-label="Edit Channel"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('[aria-label="Channel settings"] nav button')].find((n) => n.textContent.trim() === 'Permissions')?.click()`);
+await sleep(300);
+await ev(`(() => { const s = document.querySelector('[aria-label="Channel settings"] input[role="switch"][aria-label="Private Channel"]'); if (s && !s.checked) s.click(); })()`);
+await sleep(400);
+const admins = await ev(`(() => { const n = document.querySelector('[data-access-role="admin"]'); return n ? { checked: n.checked, disabled: n.disabled, hint: !!document.querySelector('[data-access-admins-hint]') } : null; })()`);
+check('K8 the reader picker shows Admins ticked and disabled, with a hint that they always read', !!admins && admins.checked && admins.disabled && admins.hint, JSON.stringify(admins));
+const mods = await ev(`(() => { const n = document.querySelector('[data-access-role="moderator"]'); return n ? { disabled: n.disabled } : null; })()`);
+check('K9 Moderators stays a choice', !!mods && !mods.disabled, JSON.stringify(mods));
+await press('Escape');
+await sleep(300);
+await press('Escape');
+await sleep(300);
+
+// (d) The Transfers storage note says what the store does: partial downloads are kept 24 hours to resume.
+await ev(`document.querySelector('${RAIL} button[aria-label="Direct messages"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.includes('Transfers'))?.click()`);
+await sleep(600);
+check('K10 the Transfers note says partial downloads are kept 24 hours to resume', (await ev(`document.querySelector('[data-partial-note]')?.textContent ?? ''`)) === 'Partial and cancelled downloads are kept for 24 hours so they can resume, then cleared.');
+
+noConsoleErrors('consistency', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -4093,10 +4661,15 @@ const SECTIONS = [
   ['volunteers', section_volunteers],
   ['channelorder', section_channelorder],
   ['shortsidebar', section_shortsidebar],
+  ['videothumbs', section_videothumbs],
   ['paste', section_paste],
   ['dmmentions', section_dmmentions],
+  ['invitecards', section_invitecards],
   ['attachments', section_attachments],
   ['tooltips', section_tooltips],
+  ['disclaimer', section_disclaimer],
+  ['privacy', section_privacy],
+  ['consistency', section_consistency],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

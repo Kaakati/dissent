@@ -18,10 +18,27 @@ const LOOKUP_SLOW_MS = 5000;
 const PING_NORMAL_MS = 150;
 const PING_SLOW_MS = 400;
 
+// Which piece of the line a segment is. When the title bar is short of room, the line gives up pieces in FIT_STEPS order.
+export type NetKey = 'dht' | 'lookup' | 'reach' | 'peers' | 'relay' | 'ping';
+
 export interface NetSegment {
+  key: NetKey;
   text: string;
+  // A shorter form the line falls back to before it drops the segment ("DHT" for "DHT 9.2M nodes").
+  short?: string;
   tone?: 'warn' | 'slow';
 }
+
+// How the line makes room, one step at a time, until it fits: the node count goes first, then reachability, the lookup
+// time, the peer count and the relay round trip. The relay host goes last, and "DHT" with its status dot always stays.
+export const FIT_STEPS: { key: NetKey; to: 'short' | 'gone' }[] = [
+  { key: 'dht', to: 'short' },
+  { key: 'reach', to: 'gone' },
+  { key: 'lookup', to: 'gone' },
+  { key: 'peers', to: 'gone' },
+  { key: 'ping', to: 'gone' },
+  { key: 'relay', to: 'gone' },
+];
 
 export interface NetView {
   segments: NetSegment[]; // the visible line, in order; the text of each is joined with " · " by the caller
@@ -37,10 +54,12 @@ export function latencyTone(ms: number | null | undefined, kind: 'lookup' | 'pin
   return 'slow';
 }
 
-// "2529 ms lookup" for a DHT lookup, "42 ms" for a relay round trip, or a dash when there is no reading.
+// "2.5 s lookup" for a DHT lookup of a second or more ("850 ms lookup" below), "42 ms" for a relay round trip, or a dash
+// when there is no reading. The tooltip gives the exact milliseconds.
 export function latencyText(ms: number | null | undefined, kind: 'lookup' | 'ping'): string {
   if (ms === null || ms === undefined) return '—';
-  return kind === 'lookup' ? `${Math.round(ms)} ms lookup` : `${Math.round(ms)} ms`;
+  if (kind === 'ping') return `${Math.round(ms)} ms`;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s lookup` : `${Math.round(ms)} ms lookup`;
 }
 
 // The colour a latency segment gets. Normal text and a dash take no colour, so the bar stays quiet.
@@ -64,6 +83,11 @@ export function relayHost(relay: string | null | undefined): string | null {
   }
 }
 
+// The relay's short name for the bar: its first label ("use1-1" for use1-1.relay.n0.iroh.network). The tooltip has it all.
+export function relayShortName(host: string): string {
+  return host.split('.')[0] || host;
+}
+
 function formatCount(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
@@ -79,20 +103,24 @@ export function formatNet(status: NetStatus, latest: NetLatency | null = null): 
   const dht = status.dht;
   if (!dht) {
     const text = `DHT offline · ${status.peers} peers`;
-    return { segments: [{ text }], lines: [text, dialsLine].filter((l): l is string => l !== null), ok: false };
+    return {
+      segments: [{ key: 'dht', text: 'DHT offline' }, { key: 'peers', text: `${status.peers} peers` }],
+      lines: [text, dialsLine].filter((l): l is string => l !== null),
+      ok: false,
+    };
   }
   const dhtMs = latest ? latest.dht_ms : dht.latency_ms ?? null;
   const relayMs = latest ? latest.relay_ms : status.relay_ms ?? null;
   const reach = dht.firewalled ? 'firewalled' : 'reachable';
   const segments: NetSegment[] = [
-    { text: `DHT ≈ ${formatCount(dht.size_estimate)} nodes` },
-    { text: latencyText(dhtMs, 'lookup'), tone: toneClass(dhtMs, 'lookup') },
-    { text: reach },
-    { text: `${status.peers} peers` },
+    { key: 'dht', text: `DHT ${formatCount(dht.size_estimate)} nodes`, short: 'DHT' },
+    { key: 'lookup', text: latencyText(dhtMs, 'lookup'), tone: toneClass(dhtMs, 'lookup') },
+    { key: 'reach', text: reach },
+    { key: 'peers', text: `${status.peers} peers` },
   ];
   if (host) {
-    segments.push({ text: `relay ${host}` });
-    if (relayMs !== null && relayMs !== undefined) segments.push({ text: latencyText(relayMs, 'ping'), tone: toneClass(relayMs, 'ping') });
+    segments.push({ key: 'relay', text: `relay ${relayShortName(host)}` });
+    if (relayMs !== null && relayMs !== undefined) segments.push({ key: 'ping', text: latencyText(relayMs, 'ping'), tone: toneClass(relayMs, 'ping') });
   }
   const confidence = Math.round(dht.confidence * 100);
   const title = [
@@ -105,7 +133,7 @@ export function formatNet(status: NetStatus, latest: NetLatency | null = null): 
   // A lookup is the time to walk the DHT to its end, not one round trip. The bar shows the median of the last lookups.
   const latencyLine = dhtMs === null || dhtMs === undefined
     ? 'DHT lookup time: no lookup has been answered yet.'
-    : `DHT lookup time: ${latencyText(dhtMs, 'lookup')}, the median of the last lookups (about two minutes). Under 3 s is normal, 3 to 5 s is a warning, over 5 s is slow.`;
+    : `DHT lookup time: ${Math.round(dhtMs)} ms, the median of the last lookups (about two minutes). Under 3 s is normal, 3 to 5 s is a warning, over 5 s is slow.`;
   const relayLine = host && relayMs !== null && relayMs !== undefined ? `Relay round trip: ${latencyText(relayMs, 'ping')}.` : null;
   return {
     segments,

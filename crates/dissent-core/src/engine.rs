@@ -114,6 +114,9 @@ pub(crate) struct Inner {
     pub friends: crate::friends::FriendsState,
     /// Whether this device answers `HistorySupport` with yes. Off only in tests, to model an older device.
     pub history_support: AtomicBool,
+    /// Whether the history readiness check asks member devices. Off only in tests, so a test sees what the
+    /// `HistorySupport` events alone decide: every device then counts as not answering.
+    pub history_probes: AtomicBool,
     /// Whether this device answers `RotationSupport` with yes. Off only in tests, to model an older device.
     pub rotation_support: AtomicBool,
     /// Which devices said they accept a leave rotation, and which communities hold one back. See `rotation`.
@@ -130,12 +133,18 @@ pub(crate) struct Inner {
     pub legacy_calls: AtomicBool,
     /// Seeders that asked this device for a storage grant. See `storage_grants`.
     pub(crate) storage_asks: crate::storage_grants::StorageAsks,
+    /// Key packages handed to each requester lately. See `request_gates`.
+    pub(crate) key_package_asks: crate::request_gates::KeyPackageAsks,
+    /// Delivery receipts held while invisible. See `invisible`.
+    pub(crate) held_receipts: crate::invisible::HeldReceipts,
     /// Set only in tests: every community's boost level reads as this. `u8::MAX` means not set.
     pub boost_level_override: std::sync::atomic::AtomicU8,
     /// Whether every other member device supports history messages, as last checked, per community.
     pub history_ready: Mutex<BTreeMap<CommunityId, crate::history::ReadyAnswer>>,
     /// Communities with a background check of `history_ready` running.
     pub history_checking: Mutex<BTreeSet<CommunityId>>,
+    /// Communities where a `HistorySupport` declaration of this device is being authored, so two triggers send one.
+    pub history_declaring: Mutex<BTreeSet<CommunityId>>,
     /// Each community's history keys, read from its file once and kept in memory. See `history`.
     pub history_keys: Mutex<BTreeMap<CommunityId, crate::history::KeyMap>>,
     /// How many times a history keys file was read from disk. Tests check that sends do not read it.
@@ -147,6 +156,8 @@ pub(crate) struct Inner {
     pub dm_sync_seen: Mutex<BTreeMap<crate::groups::ConvId, u64>>,
     /// How often each device has hinted this seeder. See `mirror_hint`.
     pub mirror_hints: crate::mirror_hint::HintLimits,
+    /// When the blob gate last asked each refused device for its certificate. See `blob_gate`.
+    pub introductions: crate::blob_gate::Introductions,
 }
 
 /// Handle to the engine. Cheap to clone. All clones share one state.
@@ -253,6 +264,7 @@ impl Engine {
             relay_asks: Default::default(),
             friends: Default::default(),
             history_support: AtomicBool::new(true),
+            history_probes: AtomicBool::new(true),
             rotation_support: AtomicBool::new(true),
             leave_gate: Default::default(),
             profile_synced: Default::default(),
@@ -260,20 +272,25 @@ impl Engine {
             pretend_in_call: AtomicBool::new(false),
             legacy_calls: AtomicBool::new(false),
             storage_asks: crate::storage_grants::StorageAsks::default(),
+            key_package_asks: crate::request_gates::KeyPackageAsks::default(),
+            held_receipts: crate::invisible::HeldReceipts::default(),
             boost_level_override: std::sync::atomic::AtomicU8::new(u8::MAX),
             history_ready: Mutex::new(crate::history::load_ready(&paths_for_ready)),
             history_checking: Default::default(),
+            history_declaring: Default::default(),
             history_keys: Default::default(),
             history_file_reads: std::sync::atomic::AtomicU64::new(0),
             dm_devices_support: AtomicBool::new(true),
             dm_sync_seen: Default::default(),
             mirror_hints: Default::default(),
+            introductions: Default::default(),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;
         net.extra_protocols.push((
             dissent_files::ALPN.to_vec(),
-            std::sync::Arc::new(inner.files.protocol_handler()),
+            // Members only: the gate answers every connection and request. See `blob_gate`.
+            std::sync::Arc::new(inner.files.protocol_handler_with(crate::blob_gate::gate_events(&inner))),
         ));
         let config = NodeConfig {
             rpc: Some(handler_for(&inner)),
@@ -288,6 +305,8 @@ impl Engine {
         engine.refresh_lan_keys();
         engine.adopt_all_relays().await;
         engine.refetch_pictures();
+        engine.load_blob_scopes();
+        engine.release_unreferenced_at_start();
         // Local stamps must sort after every stored event, so the clock starts past the newest.
         if let Some(newest) = newest_stored {
             engine.clock().observe(newest, now_ms());
@@ -309,6 +328,9 @@ impl Engine {
             let topic_rx = engine.subscribe_topic(id, bootstrap).await?;
             engine.spawn_receiver(id, topic_rx);
         }
+        // A device that upgraded, or whose setting changed, says once per community whether it reads history
+        // messages, so members count it without asking.
+        engine.declare_history_everywhere();
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::store::log_flush_loop(Arc::downgrade(&engine.inner)));
@@ -379,7 +401,7 @@ impl Engine {
             return dissent_discovery::short_url(&self.inner.me).to_string();
         }
         let w = self.read();
-        let peers: Vec<String> = w.my_addr.iter().map(|a| a.to_string()).collect();
+        let peers: Vec<String> = w.my_addr.iter().map(|a| self.shareable(a).to_string()).collect();
         let cert = self.inner.identity.cert.clone();
         let card = ContactCard::new(cert.clone(), &w.my_name(), peers.clone())
             .or_else(|_| ContactCard::new(cert, &w.anon_name(), peers));

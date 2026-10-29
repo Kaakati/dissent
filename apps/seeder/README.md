@@ -27,6 +27,9 @@ Other useful flags:
 - `--loopback`: binds only to this machine, with no relays and no DHT. Only for tests on one computer.
 - `--status-every <seconds>`: how often the seeder logs and updates its status file. Defaults to 60.
 - `--log-dir <dir>`: also writes log files there.
+- `--keep-files-up-to <MB>`: the largest file it keeps a copy of. Defaults to 2048 (2 GB).
+- `--files-quota <GB>`: the most file data it keeps in all. Defaults to 50. A file that would pass the quota is not kept.
+- `--no-files`: keep messages only, no files.
 
 ## Running it in the background
 
@@ -56,7 +59,10 @@ Paths in the run arguments must be absolute, because a service does not run from
 
 ## What it can and cannot do
 
-- It keeps every encrypted message and file for the communities you give it, and serves them to members who ask.
+- It keeps every encrypted message for the communities you give it, and serves them to members who ask.
+- It keeps an encrypted copy of each file whose sender ticked "Let the seeder keep an encrypted copy", within the file
+  limits above, so members can download it while the sender is offline. Files in private channels and in direct
+  messages are never offered to it. It serves a file only to members of the server it was shared in.
 - It knows who is in a community, and when messages were sent, because that is visible in the community's structure.
 - It cannot read message text or files. It has no keys for them.
 - It cannot add anyone to a community's encryption group. A member who is in the group does that when they are online.

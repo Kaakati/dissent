@@ -33,6 +33,8 @@ pub(crate) struct ControlEffects {
     pictures: Vec<crate::avatars::PictureFetch>,
     /// An accepted `CommunityRename`, so the founder republishes the record.
     renamed: bool,
+    /// Blobs of messages an accepted `Delete` removed. Unpinned unless something else refers to them.
+    released: Vec<[u8; 32]>,
 }
 
 /// Collects what the accepted `events` ask of the engine: a notice for each, the relays a
@@ -62,6 +64,9 @@ pub(crate) fn control_effects(
             fx.pictures.push(fetch);
         }
         fx.renamed |= matches!(ev.body.payload, Payload::CommunityRename { .. });
+        if let Payload::Delete { target } = &ev.body.payload {
+            fx.released.extend(crate::blob_release::message_blobs_in(c, *target));
+        }
         if let Payload::KeyRotation(rot) = &ev.body.payload {
             let (old, new) = (rot.request.old_root, rot.request.new_root);
             if c.is_member(&new)
@@ -266,6 +271,8 @@ impl Engine {
         self.retry_deferred_commits(community);
         self.perform_effects(fx);
         self.unseal_pending(community);
+        // A newly linked device becomes active here when it first syncs the community. It declares then.
+        self.declare_history_soon(community);
         Ok(batch.stalled)
     }
 
@@ -279,6 +286,7 @@ impl Engine {
         if fx.renamed {
             self.after_rename();
         }
+        self.release_blobs(fx.released);
         for fetch in fx.pictures {
             if let Some(poster) = fetch.poster {
                 self.fetch_picture(fetch.owner, poster, fetch.roots.clone());
@@ -369,9 +377,9 @@ impl Engine {
                 match genesis {
                     Some(genesis) => Response::Genesis {
                         genesis,
-                        addrs: self.member_addrs(community),
+                        addrs: self.member_addrs_for(&conn_from, community),
                     },
-                    None => Response::Error("unknown community".into()),
+                    None => Response::Error(crate::request_gates::REFUSED.into()),
                 }
             }
             Request::Reconcile {
@@ -383,7 +391,7 @@ impl Engine {
                 match self.reconcile_reply(community, &msg) {
                     Ok(reply) => Response::Reconcile {
                         msg: Some(reply),
-                        addrs: self.member_addrs(community),
+                        addrs: self.member_addrs_for(&conn_from, community),
                     },
                     Err(e) => Response::Error(e.to_string()),
                 }
@@ -397,10 +405,8 @@ impl Engine {
             Request::MlsJoin { community, from } => {
                 self.handle_mls_join(conn_from, community, from).await
             }
-            Request::KeyPackages { .. } | Request::DmKeyPackage => match self.with_mls(|mls| mls.take_key_packages(1)) {
-                Ok(packages) => Response::KeyPackages(packages),
-                Err(e) => Response::Error(format!("no key packages: {e}")),
-            },
+            Request::KeyPackages { community } => self.serve_join_key_packages(conn_from, community),
+            Request::DmKeyPackage => self.serve_dm_key_package(conn_from),
             Request::MlsCommits { community, after } => {
                 Response::MlsCommits(self.commits_after(community, after))
             }
@@ -423,15 +429,18 @@ impl Engine {
             Request::HistoryKeys { community } => self.serve_history_keys(conn_from, community),
             Request::MirrorHint { community, blobs } => self.serve_mirror_hint(conn_from, community, blobs),
             Request::PushHistoryKeys { community, pairs } => self.accept_history_keys(conn_from, community, pairs),
-            Request::DmDevicesSupport => Response::DmDevicesSupport(
-                self.inner.dm_devices_support.load(std::sync::atomic::Ordering::Relaxed),
+            Request::DmDevicesSupport => self.answer_probe(
+                &conn_from,
+                Response::DmDevicesSupport(self.inner.dm_devices_support.load(std::sync::atomic::Ordering::Relaxed)),
             ),
-            Request::HistorySupport => Response::HistorySupport(
-                self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed),
+            Request::HistorySupport => self.answer_probe(
+                &conn_from,
+                Response::HistorySupport(self.inner.history_support.load(std::sync::atomic::Ordering::Relaxed)),
             ),
             Request::StorageGrantAsk { community } => self.answer_storage_ask(conn_from, community),
-            Request::RotationSupport => Response::RotationSupport(
-                self.inner.rotation_support.load(std::sync::atomic::Ordering::Relaxed),
+            Request::RotationSupport => self.answer_probe(
+                &conn_from,
+                Response::RotationSupport(self.inner.rotation_support.load(std::sync::atomic::Ordering::Relaxed)),
             ),
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
@@ -451,7 +460,7 @@ impl Engine {
             Request::Collect(req) => self.receive_collect(*req),
             Request::AckEnvelopes(ack) => self.receive_ack(*ack),
             Request::DepositKeyPackages(body) => self.receive_key_packages(*body),
-            Request::TakeKeyPackage { root } => self.take_key_package(root),
+            Request::TakeKeyPackage { root } => self.serve_inbox_key_package(conn_from, root),
             Request::Call(msg) => Response::Call(self.handle_call(conn_from, *msg).await),
             Request::Guardians(set) => self.accept_guardians(*set),
             Request::Presence(sp) => match self.accept_presence(None, *sp) {
@@ -849,7 +858,8 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
             engine.publish_records().await;
         }
         // The user record is republished hourly, so it stays on the DHT and follows device changes.
-        if rounds == 1 || rounds.is_multiple_of(USER_REPUBLISH_ROUNDS) {
+        // Not while invisible: a fresh record shows we are online. It goes out once visible again.
+        if (rounds == 1 || rounds.is_multiple_of(USER_REPUBLISH_ROUNDS)) && !engine.invisible() {
             engine.publish_user_record().await;
         }
     }

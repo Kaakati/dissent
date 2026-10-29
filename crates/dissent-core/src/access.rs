@@ -202,11 +202,13 @@ pub(crate) fn check(
     let Some(community) = env.req.community() else {
         return Ok(());
     };
+    // An unknown community and a refused one get the same answer, so a stranger cannot tell
+    // whether this device belongs to a community.
     let Some(keys) = keys_of(&community) else {
-        return Err(CoreError::NotFound(format!("community {community}")));
+        return Err(CoreError::Invalid(crate::request_gates::REFUSED.into()));
     };
     if banned_for(&community) || !keys.accepts(&community, env.token, now) {
-        return Err(CoreError::Invalid("access denied".into()));
+        return Err(CoreError::Invalid(crate::request_gates::REFUSED.into()));
     }
     Ok(())
 }

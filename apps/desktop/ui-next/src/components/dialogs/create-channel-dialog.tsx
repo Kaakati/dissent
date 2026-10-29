@@ -60,7 +60,7 @@ function KindRow({
   );
 }
 
-function CreateChannelBody({ communityId, kind, close }: { communityId: string; kind: 'text' | 'voice'; close: () => void }) {
+function CreateChannelBody({ communityId, kind, category, close }: { communityId: string; kind: 'text' | 'voice'; category?: string; close: () => void }) {
   const [voice, setVoice] = useState(kind === 'voice');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -74,7 +74,7 @@ function CreateChannelBody({ communityId, kind, close }: { communityId: string; 
     const next = cleanChannelName(name, voice).trim();
     if (!next || busy) return;
     setBusy(true);
-    const ok = await createChannel(communityId, next, { voice, access: privateText ? access : undefined });
+    const ok = await createChannel(communityId, next, { voice, access: privateText ? access : undefined, category });
     if (ok) close();
     else setBusy(false);
   };
@@ -145,12 +145,16 @@ function CreateChannelBody({ communityId, kind, close }: { communityId: string; 
   );
 }
 
-export function openCreateChannelDialog(communityId: string, kind: 'text' | 'voice' = 'text'): void {
-  const serverName = useShell.getState().community?.id === communityId ? useShell.getState().community?.name : '';
+// With `category`, the new channel goes at the end of that category in the server's layout.
+export function openCreateChannelDialog(communityId: string, kind: 'text' | 'voice' = 'text', category?: string): void {
+  const community = useShell.getState().community?.id === communityId ? useShell.getState().community : null;
+  const found = category ? community?.layout?.find((e) => e.kind === 'category' && e.id === category) : undefined;
+  const categoryName = found?.kind === 'category' ? found.name : undefined;
+  const where = categoryName ?? community?.name;
   openDialog({
     title: 'Create Channel',
-    sub: serverName ? `in ${serverName}` : null,
+    sub: where ? `in ${where}` : null,
     className: FRAME,
-    content: (close) => <CreateChannelBody communityId={communityId} kind={kind} close={close} />,
+    content: (close) => <CreateChannelBody communityId={communityId} kind={kind} category={category} close={close} />,
   });
 }

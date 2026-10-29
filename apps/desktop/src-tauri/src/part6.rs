@@ -249,6 +249,18 @@ pub async fn reorder_channels(
     engine(&state).await?.reorder_channels(community, text, voice).await.map_err(err)
 }
 
+/// Sets the server's channel layout for everyone: channels outside categories and categories, top first. A
+/// category sent without an id is new.
+#[tauri::command]
+pub async fn set_channel_layout(
+    state: State<'_, AppState>,
+    community_id: String,
+    entries: Vec<dissent_core::LayoutEntryView>,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_channel_layout(community, entries).await.map_err(err)
+}
+
 /// The invites this device made for a community.
 #[tauri::command]
 pub async fn list_invites(

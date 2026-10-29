@@ -16,10 +16,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
-import { clearCommunityIcon, saveServerProfile, setCommunityIcon, setCommunityIconAnimated, type ServerProfileChanges } from '@/lib/actions';
+import { clearCommunityIcon, moderate, saveServerProfile, setCommunityIcon, setCommunityIconAnimated, type ServerProfileChanges } from '@/lib/actions';
 import { bannerOf, bannersStill, draftUrlOf, sameBanner, subscribeBannerMotion, type BannerDraft } from '@/lib/banners';
 import { boostLabel, videoLabel } from '@/lib/boosts';
-import { useDialogs } from '@/lib/dialog';
+import { confirm, useDialogs } from '@/lib/dialog';
 import { iconSrc } from '@/lib/images';
 import { useShell } from '@/lib/store';
 import { loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
@@ -232,7 +232,7 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
             </>
           ) : null}
           {section === 'invites' ? <InviteList communityId={community.id} /> : null}
-          {section === 'bans' ? <PeopleList people={community.members.filter((m) => m.banned)} empty="Nobody is banned." /> : null}
+          {section === 'bans' ? <BansList community={community} /> : null}
           {section === 'boosts' ? <BoostsSection community={community} /> : null}
           {dirty ? (
             <div
@@ -581,6 +581,38 @@ function SeederList({ community, seeders }: { community: CommunityView; seeders:
         ))}
       </ul>
     </Block>
+  );
+}
+
+// Who may lift a ban, as replay decides: the owner for anyone, an admin for anyone who was not an admin. The page is
+// for the owner and admins only.
+function canUnban(mine: CommunityView['my_role'], target: string): boolean {
+  return mine === 'owner' || (mine === 'admin' && target !== 'admin' && target !== 'owner');
+}
+
+// The banned members, each with Unban after a confirm.
+function BansList({ community }: { community: CommunityView }) {
+  const banned = community.members.filter((m) => m.banned);
+  if (!banned.length) return <Hint>Nobody is banned.</Hint>;
+  const unban = async (m: CommunityView['members'][number]) => {
+    if (await confirm({ message: `Unban ${m.display_name}? They can rejoin ${community.name} with an invite link.`, okLabel: 'Unban' })) {
+      await moderate(community.id, 'unban', m.root_id);
+    }
+  };
+  return (
+    <ul role="list" className="m-0 flex list-none flex-col gap-s-1 p-0" data-bans>
+      {banned.map((m) => (
+        <li key={m.root_id} className="flex h-11 items-center gap-s-3 rounded-lg border border-border bg-panel px-s-3">
+          <span className="min-w-0 flex-1 truncate text-ui font-medium text-text-strong">{m.display_name}</span>
+          <span className="text-sm text-muted-foreground capitalize">{m.role}</span>
+          {canUnban(community.my_role, m.role) ? (
+            <Button size="sm" variant="secondary" onClick={() => void unban(m)} aria-label={`Unban ${m.display_name}`}>
+              Unban
+            </Button>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 
