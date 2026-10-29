@@ -30,6 +30,7 @@ mod private_keys;
 #[cfg(test)]
 mod private_create_tests;
 mod contact_times;
+pub mod custom_roles;
 mod contacts;
 mod conv_actions;
 mod dht_probe;
@@ -75,6 +76,7 @@ mod server_prefs;
 mod store;
 mod sync;
 mod timings;
+pub mod tracker;
 mod typing;
 mod video_thumbs;
 mod views;

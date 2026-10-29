@@ -7,16 +7,21 @@
 mod crypt;
 mod error;
 mod file_ref;
+mod inplace;
 mod name;
 mod store;
+mod swarm;
 mod tally;
 mod thumbnail;
+pub mod tracker;
 
 pub use crypt::{chunk_count, cipher_len, decrypt, encrypt, FileKey, CHUNK_SIZE, MAX_PLAINTEXT};
 pub use error::{FilesError, Result};
 pub use file_ref::FileRef;
-pub use iroh_blobs::BlobsProtocol;
+pub use inplace::{FilesProtocol, Linked};
+pub use iroh_blobs::provider::events::EventSender;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
+pub use swarm::{SwarmFetch, MAX_PARALLEL};
 pub use tally::{pieces_of, SourceCount, PIECE_BYTES};
 pub use thumbnail::{
     is_preview_image, is_thumbnail, make_preview_image, make_thumbnail, make_thumbnail_rgb, Thumbnail, PREVIEW_IMAGE_MAX_BYTES,

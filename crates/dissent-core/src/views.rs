@@ -208,6 +208,10 @@ pub struct MemberInfo {
     pub storage: bool,
     /// For a seeder: whether an admin granted it storage (`StorageGrant`). False for a person.
     pub storage_granted: bool,
+    /// Ids of the custom roles the member holds. See `custom_roles`.
+    pub roles: Vec<String>,
+    /// Whether an admin registered the member as a bot.
+    pub bot: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

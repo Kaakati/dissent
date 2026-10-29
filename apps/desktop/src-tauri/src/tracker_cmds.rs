@@ -1,0 +1,223 @@
+//! The server file tracker: the Files area and the Files section of Server Settings. See `dissent_core::tracker`.
+
+use std::path::PathBuf;
+
+use dissent_core::tracker::catalog::{AddItem, CandidateView, CategoryInput, FilesView};
+use dissent_core::tracker::swarm::SwarmView;
+use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
+use dissent_core::{CommunityId, RootId, TransferView};
+use dissent_events::{CategoryId, EventId, ReputationRules};
+use tauri::State;
+
+use crate::commands::{engine, err, parse, AppState};
+
+#[tauri::command]
+pub async fn files_view(state: State<'_, AppState>, community_id: String) -> Result<FilesView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.files_view(community).map_err(err)
+}
+
+#[tauri::command]
+pub async fn create_category(state: State<'_, AppState>, community_id: String, category: CategoryInput) -> Result<String, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id = engine(&state).await?.create_category(community, category).await.map_err(err)?;
+    Ok(id.to_string())
+}
+
+#[tauri::command]
+pub async fn update_category(
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+    category: CategoryInput,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    engine(&state).await?.update_category(community, id, category).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_category(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    engine(&state).await?.delete_category(community, id).await.map_err(err)
+}
+
+/// Opens a folder picker and links the chosen folder to the category on this computer. Returns the path, or `None`
+/// when the picker was cancelled.
+#[tauri::command]
+pub async fn pick_category_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let folder: PathBuf = picked.into_path().map_err(err)?;
+    engine(&state).await?.set_category_folder(community, id, Some(folder.clone())).map_err(err)?;
+    Ok(Some(folder.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub async fn unlink_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    engine(&state).await?.set_category_folder(community, id, None).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_category_auto_import(
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+    on: bool,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    engine(&state).await?.set_category_auto_import(community, id, on).map_err(err)
+}
+
+/// Opens a file picker and reports what adding the picked files would do.
+#[tauri::command]
+pub async fn pick_files_for_category(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+) -> Result<Vec<CandidateView>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
+        .await
+        .map_err(|e| e.to_string())?;
+    let paths: Vec<PathBuf> = picked.unwrap_or_default().into_iter().filter_map(|f| f.into_path().ok()).collect();
+    engine(&state).await?.prepare_listing(community, id, paths).await.map_err(err)
+}
+
+/// The files in the category's linked folder this computer does not seed yet, and what adding each would do.
+#[tauri::command]
+pub async fn scan_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<Vec<CandidateView>, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    engine(&state).await?.scan_category_folder(community, id).await.map_err(err)
+}
+
+/// `limit` is `forever`, `ratio:<thousandths>`, `hours:<n>` or `until:<ms>`.
+#[tauri::command]
+pub async fn list_files(
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+    items: Vec<AddItem>,
+    limit: String,
+) -> Result<Vec<String>, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    let limit = parse_limit(&limit).map_err(err)?;
+    engine(&state).await?.list_files(community, id, items, limit).await.map_err(err)
+}
+
+
+#[tauri::command]
+pub async fn update_listing(
+    state: State<'_, AppState>,
+    community_id: String,
+    listing_id: String,
+    tags: Vec<String>,
+    description: String,
+) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.update_listing(community, id, tags, description).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_listing(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.remove_listing(community, id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn download_listing(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<TransferView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.download_listing(community, id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn listing_swarm(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<SwarmView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.listing_swarm(community, id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_reputation_rules(state: State<'_, AppState>, community_id: String, rules: ReputationRules) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_reputation_rules(community, rules).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn reset_reputation(state: State<'_, AppState>, community_id: String, user_id: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let user: RootId = parse("user id", &user_id)?;
+    engine(&state).await?.reset_reputation(community, user).await.map_err(err)
+}
+
+fn blob_of(text: &str) -> Result<[u8; 32], String> {
+    parse_blob(text).map_err(err)
+}
+
+#[tauri::command]
+pub async fn seeding_view(state: State<'_, AppState>, community_id: String) -> Result<SeedingView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.seeding_view(community).map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_seeding_settings(state: State<'_, AppState>, settings: SeedingSettings) -> Result<(), String> {
+    engine(&state).await?.set_seeding_settings(settings).map_err(err)
+}
+
+/// `limit` as for `list_files`.
+#[tauri::command]
+pub async fn set_seed_limit(state: State<'_, AppState>, community_id: String, blob: String, limit: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let limit = parse_limit(&limit).map_err(err)?;
+    engine(&state).await?.set_seed_limit(community, blob_of(&blob)?, limit).map_err(err)
+}
+
+#[tauri::command]
+pub async fn pause_seed(state: State<'_, AppState>, community_id: String, blob: String, paused: bool) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.pause_seed(community, blob_of(&blob)?, paused).map_err(err)
+}
+
+#[tauri::command]
+pub async fn stop_seed(state: State<'_, AppState>, community_id: String, blob: String) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.stop_seed(community, blob_of(&blob)?).map_err(err)
+}
+
+#[tauri::command]
+pub async fn pause_all_seeds(state: State<'_, AppState>, community_id: String, paused: bool) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.pause_all_seeds(community, paused).map_err(err)
+}
+
+/// The UI's local time offset (`-Date.getTimezoneOffset()`), for the alternative schedule.
+#[tauri::command]
+pub async fn set_utc_offset(state: State<'_, AppState>, minutes: i32) -> Result<(), String> {
+    engine(&state).await?.set_utc_offset_min(minutes);
+    Ok(())
+}

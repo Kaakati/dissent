@@ -151,6 +151,8 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     .await
     .map_err(err)?;
     crate::attachments::prepare_engine(app, &engine);
+    // A new engine starts on mains power and an unmetered network until told otherwise: tell it now.
+    engine.set_device_conditions(crate::device_conditions::read());
     crate::fake_capture(&engine);
     crate::voice::prepare(&engine, &app.state::<crate::voice::Voice>());
     *state.identity.lock().map_err(err)? = identity;

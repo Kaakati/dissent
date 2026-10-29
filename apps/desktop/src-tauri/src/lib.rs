@@ -13,6 +13,9 @@ mod avatar_cmds;
 mod server_prefs_cmds;
 mod paging_cmds;
 mod server_settings_cmds;
+mod roles_cmds;
+mod tracker_cmds;
+mod device_conditions;
 mod voice;
 mod voice_settings;
 mod mic_test;
@@ -247,6 +250,37 @@ pub fn run() {
             paging_cmds::dm_messages_before,
             paging_cmds::group_messages_before,
             server_settings_cmds::rename_community,
+            roles_cmds::roles_view,
+            roles_cmds::create_role,
+            roles_cmds::update_role,
+            roles_cmds::delete_role,
+            roles_cmds::assign_role,
+            roles_cmds::create_bot,
+            roles_cmds::unregister_bot,
+            roles_cmds::set_custom_role_perms,
+            tracker_cmds::files_view,
+            tracker_cmds::create_category,
+            tracker_cmds::update_category,
+            tracker_cmds::delete_category,
+            tracker_cmds::pick_category_folder,
+            tracker_cmds::unlink_category_folder,
+            tracker_cmds::set_category_auto_import,
+            tracker_cmds::pick_files_for_category,
+            tracker_cmds::scan_category_folder,
+            tracker_cmds::list_files,
+            tracker_cmds::update_listing,
+            tracker_cmds::remove_listing,
+            tracker_cmds::download_listing,
+            tracker_cmds::listing_swarm,
+            tracker_cmds::seeding_view,
+            tracker_cmds::set_seeding_settings,
+            tracker_cmds::set_seed_limit,
+            tracker_cmds::pause_seed,
+            tracker_cmds::stop_seed,
+            tracker_cmds::pause_all_seeds,
+            tracker_cmds::set_utc_offset,
+            tracker_cmds::set_reputation_rules,
+            tracker_cmds::reset_reputation,
             server_settings_cmds::set_community_banner,
             server_settings_cmds::clear_community_banner,
             server_settings_cmds::set_community_banner_preset,

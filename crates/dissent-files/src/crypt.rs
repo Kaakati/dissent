@@ -88,8 +88,25 @@ where
     R: Read + ?Sized,
     W: Write + ?Sized,
 {
+    encrypt_stream_with(input, output, limit, FileKey::generate(), None)
+}
+
+/// Encrypts `input` into `output` under `key`. The same key and plaintext always give the same ciphertext, so a key
+/// must never be used for two different plaintexts: see `tracker::content_key`. With `expect`, the plaintext's BLAKE3
+/// hash must equal it, or this fails after the last chunk, so a caller that streams the output into a store can drop it.
+pub(crate) fn encrypt_stream_with<R, W>(
+    input: &mut R,
+    output: &mut W,
+    limit: u64,
+    key: FileKey,
+    expect: Option<[u8; 32]>,
+) -> Result<Sealed>
+where
+    R: Read + ?Sized,
+    W: Write + ?Sized,
+{
     let limit = limit.min(MAX_PLAINTEXT);
-    let key = FileKey::generate();
+    let mut hasher = expect.map(|_| blake3::Hasher::new());
     let cipher = cipher_for(&key)?;
     let mut cur = vec![0u8; CHUNK_SIZE];
     let mut next = vec![0u8; CHUNK_SIZE];
@@ -108,6 +125,13 @@ where
         // Read one chunk ahead so we know whether the current one is the last.
         let next_len = read_full(input, &mut next)?;
         let last = next_len == 0;
+        if let Some(h) = hasher.as_mut() {
+            h.update(&cur[..cur_len]);
+            // The last chunk is withheld when the whole does not match, so no complete ciphertext of other bytes exists.
+            if last && expect.is_some_and(|e| *h.finalize().as_bytes() != e) {
+                return Err(FilesError::Changed);
+            }
+        }
         let sealed = seal(&cipher, &key, index, last, &cur[..cur_len])?;
         output.write_all(&sealed)?;
         out_len += sealed.len() as u64;
@@ -178,7 +202,7 @@ pub fn decrypt(cipher: &[u8], key: &FileKey) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn cipher_for(key: &FileKey) -> Result<Aes256Gcm> {
+pub(crate) fn cipher_for(key: &FileKey) -> Result<Aes256Gcm> {
     Aes256Gcm::new_from_slice(&key.key).map_err(|_| FilesError::Crypto)
 }
 
@@ -188,6 +212,11 @@ fn nonce(prefix: &[u8; 8], index: u64, last: bool) -> [u8; 12] {
     n[8..8 + INDEX_BYTES].copy_from_slice(&index.to_be_bytes()[8 - INDEX_BYTES..]);
     n[11] = u8::from(last);
     n
+}
+
+/// Seals one chunk, as the streaming encryptor does. For serving a linked file at any offset.
+pub(crate) fn seal_chunk(cipher: &Aes256Gcm, key: &FileKey, index: u64, last: bool, data: &[u8]) -> Result<Vec<u8>> {
+    seal(cipher, key, index, last, data)
 }
 
 fn seal(cipher: &Aes256Gcm, key: &FileKey, index: u64, last: bool, data: &[u8]) -> Result<Vec<u8>> {
@@ -217,7 +246,7 @@ fn open(cipher: &Aes256Gcm, key: &FileKey, index: u64, last: bool, data: &[u8]) 
 }
 
 /// Fills `buf` unless the input ends first. Returns how many bytes were read.
-fn read_full<R: Read + ?Sized>(input: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+pub(crate) fn read_full<R: Read + ?Sized>(input: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match input.read(&mut buf[filled..]) {

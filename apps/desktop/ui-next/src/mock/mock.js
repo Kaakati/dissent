@@ -425,6 +425,8 @@ if (!window.__TAURI__) {
       banned: c.banned.has(r),
       status: MEMBER_STATUS[r],
       relay_host: Boolean(c.relayHosts?.[r]?.length),
+      roles: (c.customRoles ?? []).filter((x) => x.members.includes(r)).map((x) => x.id),
+      bot: Boolean(c.bots?.[r]),
     })).concat(Object.entries(c.seeders ?? {}).map(([r, granted]) => ({
       root_id: r, suffix: suffix(r), display_name: people[r], avatar: null, handle: null, role: 'member', banned: false,
       status: 'online', relay_host: false, storage: true, storage_granted: granted,
@@ -640,6 +642,8 @@ if (!window.__TAURI__) {
       return DISCLAIMER_UPDATED;
     }
   };
+  // My seeding: the settings and a record per seeded listing.
+  const seeding = { settings: null, records: {} };
   const handlers = {
     disclaimer_accepted: () => disclaimerSaved(),
     accept_disclaimer: ({ updated }) => {
@@ -810,6 +814,237 @@ if (!window.__TAURI__) {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'NoPermission');
       c.seederForwardsCalls = on;
+      return null;
+    },
+    // The file tracker, as `dissent_core::tracker::catalog` reports it. Fingerprints stand in for blake3; a picked file
+    // with the name of a listed one is the same file, so it shows as already listed.
+    files_view: ({ communityId }) => {
+      const c = servers[communityId];
+      const levels = [['Newcomer', 0, 0], ['Sharer', 5, 5], ['Seeder', 25, 15], ['Keeper', 100, 40], ['Archivist', 250, 80]];
+      const f = (c.files ??= {
+        categories: [],
+        listings: [],
+        rules: { levels: levels.map(([name, gb, members]) => ({ name, bytes: gb * 1e9, members })), distinct: true, decay_days: 30, admins_reset: true },
+      });
+      const staff = ['owner', 'admin'].includes(myRole(c));
+      return {
+        can_manage: staff,
+        categories: f.categories.map((cat) => {
+          const mine = f.listings.filter((l) => l.category === cat.id);
+          return { ...cat, readable: true, restricted: false, can_add: staff || cat.add.min_rank === 'member', files: mine.length, bytes: mine.reduce((n, l) => n + l.size, 0) };
+        }),
+        listings: f.listings,
+        locked: 0,
+        standing: { level: 1, level_name: 'Newcomer', next: { level: 2, name: 'Sharer', bytes_needed: 5e9, members_needed: 5, progress: 0 }, credited_bytes: 0, served_members: 0, uploaded: 0, downloaded: 0, ratio: null },
+        rules: f.rules,
+        all_types: ['Installer', 'Archive', 'Document', 'Image', 'Audio', 'Video', 'Other'],
+      };
+    },
+    create_category: ({ communityId, category }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'NoPermission');
+      need(category.name.trim().length > 0, 'a category name is 1 to 48 characters');
+      handlers.files_view({ communityId });
+      const tags = category.default_tags.map((t) => t.replace(/^#/, '').toLowerCase());
+      const cat = { id: id(`cat${c.files.categories.length}x${Date.now()}`), folder: null, auto_import: false, ...category, name: category.name.trim(), default_tags: tags };
+      c.files.categories.push(cat);
+      return cat.id;
+    },
+    update_category: ({ communityId, categoryId, category }) => {
+      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
+      need(Boolean(cat), 'UnknownTarget');
+      Object.assign(cat, category, { default_tags: category.default_tags.map((t) => t.replace(/^#/, '').toLowerCase()) });
+      return null;
+    },
+    delete_category: ({ communityId, categoryId }) => {
+      const f = servers[communityId].files;
+      f.categories = f.categories.filter((x) => x.id !== categoryId);
+      f.listings = f.listings.filter((l) => l.category !== categoryId);
+      return null;
+    },
+    pick_category_folder: ({ communityId, categoryId }) => {
+      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
+      cat.folder = 'D:\\Dissent\\releases';
+      return cat.folder;
+    },
+    unlink_category_folder: ({ communityId, categoryId }) => {
+      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
+      Object.assign(cat, { folder: null, auto_import: false });
+      return null;
+    },
+    set_category_auto_import: ({ communityId, categoryId, on }) => {
+      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
+      cat.auto_import = Boolean(cat.folder) && on;
+      return null;
+    },
+    pick_files_for_category: ({ communityId, categoryId }) => {
+      const f = servers[communityId].files;
+      const cat = f.categories.find((x) => x.id === categoryId);
+      const kinds = { msi: 'Installer', dmg: 'Installer', txt: 'Document' };
+      const names = ['dissent-0.4.1-windows-x64.msi', 'dissent-0.4.1-macos-arm64.dmg', 'RELEASE-NOTES-draft.txt'];
+      return names.map((name, i) => {
+        const ext = name.split('.').pop();
+        const kind = kinds[ext];
+        const listed = f.listings.find((l) => l.name === name);
+        const state = cat.types.length && !cat.types.includes(kind) ? 'type_not_allowed' : listed ? 'already_listed' : 'ready';
+        return {
+          path: `D:\\Dissent\\releases\\${name}`, name, ext: ext.toUpperCase(), kind, size: [88_700_000, 96_400_000, 6_000][i], state,
+          fingerprint: `9f2c41${String(i).repeat(52)}e07e1a`, listed_by: listed?.lister_name ?? null, listing: listed?.id ?? null,
+        };
+      });
+    },
+    scan_category_folder: ({ communityId, categoryId }) => {
+      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
+      need(Boolean(cat?.folder), 'this category is not linked to a folder here');
+      return handlers.pick_files_for_category({ communityId, categoryId }).filter((f) => f.state !== 'already_listed');
+    },
+    list_files: ({ communityId, categoryId, items }) => {
+      const f = servers[communityId].files;
+      const picks = handlers.pick_files_for_category({ communityId, categoryId });
+      return items.map((item) => {
+        const name = item.path.split('\\').pop();
+        const old = f.listings.find((l) => l.name === name);
+        if (old) {
+          old.local = 'seeding';
+          return old.id;
+        }
+        const pick = picks.find((x) => x.name === name);
+        const listing = {
+          id: id(`listing${f.listings.length}x${Date.now()}`), category: categoryId, name, ext: pick.ext, kind: pick.kind, mime: 'application/octet-stream',
+          size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: pick.fingerprint,
+          tags: item.tags.map((t) => t.replace(/^#/, '').toLowerCase()), description: item.description, lister: ME, lister_name: people[ME], added_ms: Date.now(),
+          also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine: true, local: 'seeding', local_path: item.path, progress: 1, can_edit: true,
+        };
+        f.listings.push(listing);
+        return listing.id;
+      });
+    },
+    update_listing: ({ communityId, listingId, tags, description }) => {
+      const l = servers[communityId].files.listings.find((x) => x.id === listingId);
+      Object.assign(l, { tags, description });
+      return null;
+    },
+    remove_listing: ({ communityId, listingId }) => {
+      const f = servers[communityId].files;
+      f.listings = f.listings.filter((x) => x.id !== listingId);
+      return null;
+    },
+    download_listing: ({ communityId, listingId }) => {
+      const l = servers[communityId].files.listings.find((x) => x.id === listingId);
+      Object.assign(l, { local: 'downloaded', progress: 1, local_path: `C:\\Users\\sami\\Downloads\\${l.name}` });
+      return {
+        id: listingId, message_id: `files:${communityId}:${listingId}`, direction: 'download', name: l.name, size: l.size, state: 'done', progress: 1,
+        peers: 1, started_ms: Date.now(), local_path: l.local_path, error: null, sources: [], pieces: null,
+      };
+    },
+    listing_swarm: ({ communityId, listingId }) => {
+      const l = servers[communityId].files.listings.find((x) => x.id === listingId);
+      const pieces = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
+      return {
+        seeders: l.seeders, downloading: l.leechers, asked: 8, pieces,
+        peers: [{ root_id: LINUS, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
+      };
+    },
+    // My seeding, as `dissent_core::tracker::seeding` reports it. The mock keeps a record per seeded listing.
+    seeding_view: ({ communityId }) => {
+      const f = servers[communityId].files;
+      const s = (seeding.settings ??= { upload_bps: null, download_bps: null, alt: null, alt_on: false, max_active: 5, unmetered_only: true, pause_on_battery: false });
+      const rows = f.listings.filter((l) => l.local === 'seeding' || l.local === 'paused').map((l) => {
+        const r = (seeding.records[l.id] ??= { limit: 'forever', paused: false, stopped: false });
+        const state = r.stopped ? 'stopped' : r.paused ? 'paused' : 'seeding';
+        const note = { seeding: 'Serving now', paused: 'Paused by you', stopped: 'Stopped by you' }[state];
+        return {
+          blob: l.id, listing: l.id, name: l.name, ext: l.ext, kind: l.kind, category: l.category, folder: null, path: l.local_path,
+          state, note, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
+        };
+      });
+      return { rows, seeding: rows.filter((r) => r.state === 'seeding').length, uploaded: 0, settings: s, conditions: { metered: false, on_battery: false, metered_known: true }, caps_now: [s.upload_bps, s.download_bps], held_back: false };
+    },
+    set_seeding_settings: ({ settings }) => {
+      need(settings.max_active >= 1 && settings.max_active <= 100, 'seed between 1 and 100 files at once');
+      seeding.settings = settings;
+      return null;
+    },
+    set_seed_limit: ({ blob, limit }) => {
+      (seeding.records[blob] ??= { limit: 'forever', paused: false, stopped: false }).limit = limit;
+      return null;
+    },
+    pause_seed: ({ blob, paused }) => {
+      const r = (seeding.records[blob] ??= { limit: 'forever', paused: false, stopped: false });
+      r.paused = paused;
+      if (!paused) r.stopped = false;
+      return null;
+    },
+    stop_seed: ({ blob }) => {
+      (seeding.records[blob] ??= { limit: 'forever', paused: false, stopped: false }).stopped = true;
+      return null;
+    },
+    pause_all_seeds: ({ communityId, paused }) => {
+      for (const l of servers[communityId].files.listings) (seeding.records[l.id] ??= { limit: 'forever', paused: false, stopped: false }).paused = paused;
+      return null;
+    },
+    set_utc_offset: () => null,
+    set_reputation_rules: ({ communityId, rules }) => {
+      servers[communityId].files.rules = rules;
+      return null;
+    },
+    reset_reputation: () => null,
+    // Custom roles and bots, as `dissent_core::custom_roles` reports them. The mock skips the position rules.
+    roles_view: ({ communityId }) => {
+      const c = servers[communityId];
+      const all = ['manage_roles', 'manage_channels', 'manage_server', 'manage_messages', 'ban_members', 'manage_invites',
+        'mention_everyone', 'bypass_slowmode', 'manage_files', 'manage_bots', 'manage_storage'];
+      const staff = ['owner', 'admin'].includes(myRole(c));
+      return {
+        roles: [...(c.customRoles ?? [])].sort((a, b) => b.position - a.position),
+        bots: Object.entries(c.bots ?? {}).map(([root_id, name]) => ({ root_id, name, joined: Boolean(c.roles[root_id]) })),
+        all_perms: all,
+        my_perms: staff ? all : [],
+        my_ceiling: staff ? null : 0,
+        honored: Boolean(c.rolesHonored),
+      };
+    },
+    create_role: ({ communityId, name, color, perms, position }) => {
+      const c = servers[communityId];
+      need(['owner', 'admin'].includes(myRole(c)), 'NoPermission');
+      need(name.trim().length > 0 && name.trim().length <= 32, 'Malformed');
+      const role = { id: id(`role${Date.now()}${Math.random()}`), name: name.trim(), color, perms, position, members: [] };
+      c.customRoles = [...(c.customRoles ?? []), role];
+      return role.id;
+    },
+    update_role: ({ communityId, roleId, name, color, perms, position }) => {
+      const r = (servers[communityId].customRoles ?? []).find((x) => x.id === roleId);
+      need(Boolean(r), 'UnknownTarget');
+      Object.assign(r, { name: name.trim(), color, perms, position });
+      return null;
+    },
+    delete_role: ({ communityId, roleId }) => {
+      const c = servers[communityId];
+      c.customRoles = (c.customRoles ?? []).filter((x) => x.id !== roleId);
+      return null;
+    },
+    assign_role: ({ communityId, userId, roleId, on }) => {
+      const r = (servers[communityId].customRoles ?? []).find((x) => x.id === roleId);
+      need(Boolean(r), 'UnknownTarget');
+      r.members = on ? [...new Set([...r.members, userId])] : r.members.filter((m) => m !== userId);
+      return null;
+    },
+    create_bot: ({ communityId, name, roleIds }) => {
+      const c = servers[communityId];
+      const root = id(`bot${Date.now()}`);
+      c.bots = { ...(c.bots ?? {}), [root]: name };
+      for (const r of c.customRoles ?? []) if (roleIds.includes(r.id)) r.members.push(root);
+      return { root_id: root, token: `dissent-bot:${'a'.repeat(52)}:dissent://invite/mock` };
+    },
+    unregister_bot: ({ communityId, userId }) => {
+      const c = servers[communityId];
+      delete c.bots?.[userId];
+      return null;
+    },
+    set_custom_role_perms: ({ communityId, on }) => {
+      const c = servers[communityId];
+      need(myRole(c) === 'owner', 'NoPermission');
+      c.rolesHonored = on;
       return null;
     },
     set_members_host_relays: ({ communityId, on }) => {

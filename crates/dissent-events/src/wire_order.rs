@@ -58,6 +58,20 @@ const V0111_PAYLOAD: &[&str] = &[
     "StorageGrant",
     "HistorySupport",
     "ChannelLayout",
+    "RoleCreate",
+    "RoleUpdate",
+    "RoleDelete",
+    "RoleAssign",
+    "BotRegister",
+    "CustomRolePerms",
+    "FileCategorySet",
+    "FileCategoryDelete",
+    "FileListing",
+    "FileListingUpdate",
+    "FileListingRemove",
+    "FileReceipt",
+    "ReputationRulesSet",
+    "ReputationReset",
 ];
 
 const LAYOUT_ENTRY: &[&str] = &["Channel", "Category"];

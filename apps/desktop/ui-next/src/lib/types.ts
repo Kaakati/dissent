@@ -79,6 +79,8 @@ export interface Member {
   relay_host?: boolean; // this device verifies the member as a relay host of the server
   storage?: boolean; // a seeder: a storage member, outside the encrypted group
   storage_granted?: boolean; // for a seeder: an admin granted it storage
+  roles?: Id[]; // custom roles the member holds
+  bot?: boolean; // an admin registered the member as a bot
 }
 
 export interface VoiceChannelView {
@@ -195,7 +197,7 @@ export interface GroupSummary {
 
 export type ConversationSummary = DirectSummary | GroupSummary;
 
-export type Page = 'contacts' | 'transfers' | 'saved';
+export type Page = 'contacts' | 'transfers' | 'saved' | 'files'; // 'files' is the open server's Files area
 
 export type Route = { kind: 'home' } | { kind: 'server'; communityId: Id };
 

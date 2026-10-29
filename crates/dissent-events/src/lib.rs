@@ -21,6 +21,8 @@ pub mod names;
 pub mod picture;
 pub mod relay;
 pub mod replayer;
+pub mod roles;
+pub mod tracker;
 pub mod state;
 #[cfg(test)]
 mod channel_order_tests;
@@ -30,6 +32,10 @@ mod history_support_tests;
 mod private_tests;
 #[cfg(test)]
 mod relay_host_tests;
+#[cfg(test)]
+mod roles_tests;
+#[cfg(test)]
+mod tracker_tests;
 #[cfg(test)]
 mod wire_order;
 #[cfg(test)]
@@ -54,6 +60,11 @@ pub use names::{confusable, normalize_handle, skeleton, NameError};
 pub use picture::{AnimatedIcon, Banner, Picture, BANNER_PRESETS, MAX_ANIMATED_BANNER_BYTES, MAX_ANIMATED_ICON_BYTES, MAX_BANNER_BYTES, MAX_PICTURE_BYTES};
 pub use relay::{loopback_relay_host, public_relay_host, valid_relay_url, valid_relays, MAX_COMMUNITY_RELAYS};
 pub use replayer::{ReplayStats, Replayer};
+pub use tracker::{
+    is_files_payload, AddSpec, CategoryId, CategoryState, Credit, FilesBook, FilesSealed, LevelRule, ListingState, ReaderSpec,
+    ReputationRules, NO_RANK,
+};
+pub use roles::{is_roles_payload, BotEntry, Perms, RoleBook, RoleId, RoleSpec, MAX_CUSTOM_ROLES, MAX_ROLE_NAME_CHARS};
 pub use state::{replay, replay_keyed, replay_with, ChannelOrderSpec, CommunityState, Member, MessageView, Rejection};
 pub use wire::SignedEvent;
 

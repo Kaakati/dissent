@@ -418,6 +418,8 @@ impl World {
                 relay_host: hosts.contains(root),
                 storage: c.state().members.get(root).is_some_and(|m| m.storage),
                 storage_granted: c.state().members.get(root).is_some_and(|m| m.storage) && c.state().storage_granted(root),
+                roles: c.state().custom.roles_of(root).iter().map(|r| r.to_string()).collect(),
+                bot: c.state().is_bot(root),
             })
             .collect();
         CommunityView {

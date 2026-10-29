@@ -1451,3 +1451,133 @@ async fn a_provider_that_refuses_once_is_asked_again_and_serves() {
     assert_eq!(fs::read(out).unwrap(), plain);
     assert_eq!(refused.load(Ordering::SeqCst), 2, "one refusal, then the second ask was served");
 }
+
+#[tokio::test]
+async fn the_same_file_under_a_derived_key_makes_the_same_blob_on_two_peers() {
+    let alice = Peer::new().await;
+    let bob = Peer::new().await;
+    let plain = sample(300 * 1024 + 17);
+    let (fp, len) = dissent_files::tracker::fingerprint_reader(&mut plain.as_slice(), |_| true).unwrap();
+    assert_eq!(len, plain.len() as u64);
+    let key = dissent_files::tracker::content_key(&[5; 32], &fp);
+    let a = alice
+        .files
+        .add_with_key(Input::Bytes { name: "build.zip".into(), mime: "application/zip".into(), data: plain.clone() }, key.clone(), fp)
+        .await
+        .unwrap();
+    let b = bob
+        .files
+        .add_with_key(Input::Bytes { name: "other-name.zip".into(), mime: "application/zip".into(), data: plain.clone() }, key, fp)
+        .await
+        .unwrap();
+    assert_eq!(a.hash, b.hash, "one blob, so one swarm");
+    // A different generation's key gives another blob.
+    let c = bob
+        .files
+        .add_with_key(
+            Input::Bytes { name: "build.zip".into(), mime: "application/zip".into(), data: plain.clone() },
+            dissent_files::tracker::content_key(&[6; 32], &fp),
+            fp,
+        )
+        .await
+        .unwrap();
+    assert_ne!(a.hash, c.hash);
+    // Bob downloads alice's copy and it decrypts.
+    let out = bob.files.fetch(&bob.endpoint, &[alice.addr()], &a, &bob.downloads(), |_, _| {}).await.unwrap();
+    assert_eq!(fs::read(&out).unwrap(), plain);
+}
+
+#[tokio::test]
+async fn a_file_that_does_not_match_its_fingerprint_is_not_stored() {
+    let alice = Peer::new().await;
+    let plain = sample(200 * 1024);
+    let fp = blake3_of(b"something else");
+    let key = dissent_files::tracker::content_key(&[5; 32], &fp);
+    let err = tokio::time::timeout(
+        Duration::from_secs(20),
+        alice.files.add_with_key(Input::Bytes { name: "a.bin".into(), mime: "application/octet-stream".into(), data: plain }, key, fp),
+    )
+    .await
+    .expect("add returns")
+    .unwrap_err();
+    assert!(matches!(err, dissent_files::FilesError::Changed), "{err}");
+    let pinned = tokio::time::timeout(Duration::from_secs(20), alice.files.pinned_stats()).await.expect("stats return");
+    assert_eq!(pinned.unwrap().0, 0, "nothing was kept");
+}
+
+#[tokio::test]
+async fn a_swarm_download_takes_slices_from_every_provider_and_skips_one_without_the_file() {
+    let alice = Peer::new().await;
+    let bob = Peer::new().await;
+    let carol = Peer::new().await;
+    let dan = Peer::new().await;
+    let plain = sample(13 * MIB + 5);
+    let fp = blake3_of(&plain);
+    let key = dissent_files::tracker::content_key(&[3; 32], &fp);
+    let input = || Input::Bytes { name: "big.bin".into(), mime: "application/octet-stream".into(), data: plain.clone() };
+    let a = alice.files.add_with_key(input(), key.clone(), fp).await.unwrap();
+    let b = bob.files.add_with_key(input(), key.clone(), fp).await.unwrap();
+    assert_eq!(a.hash, b.hash);
+
+    // The provider in the middle has nothing; its slices go to the others.
+    let mut last = Vec::new();
+    let done = dan
+        .files
+        .fetch_swarm(&dan.endpoint, &[alice.addr(), carol.addr(), bob.addr()], &a, &dan.downloads(), |_, _| {}, |counts| {
+            last = counts.to_vec();
+        })
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&done.path).unwrap(), plain);
+    assert_eq!(done.failed, vec![1], "carol has no copy");
+    assert!(last[0].bytes > 0 && last[2].bytes > 0, "both holders delivered: {last:?}");
+    assert_eq!(last[0].bytes + last[2].bytes, a.cipher_size);
+
+    // Pieces: alice holds them all, carol none.
+    let full = dan.files.piece_map(&dan.endpoint, alice.addr(), a.hash, a.cipher_size).await.unwrap();
+    assert_eq!(full.len() as u64, dissent_files::pieces_of(a.cipher_size));
+    assert!(full.iter().all(|p| *p));
+    let none = dan.files.piece_map(&dan.endpoint, carol.addr(), a.hash, a.cipher_size).await;
+    assert!(none.map(|m| m.iter().all(|p| !*p)).unwrap_or(true));
+}
+
+#[tokio::test]
+async fn a_linked_file_is_served_from_disk_without_a_copy() {
+    let alice = Peer::new().await;
+    let bob = Peer::new().await;
+    let dan = Peer::new().await;
+    let plain = sample(6 * MIB + 77);
+    let src = alice.dir.path().join("release.msi");
+    fs::write(&src, &plain).unwrap();
+    let fp = blake3_of(&plain);
+    let key = dissent_files::tracker::content_key(&[9; 32], &fp);
+    let linked = alice.files.link_file(&src, "application/x-msi", key.clone(), fp).await.unwrap();
+    assert_eq!(alice.files.pinned_stats().await.unwrap().0, 0, "nothing was copied into the store");
+    assert!(alice.files.is_linked(linked.hash));
+    // The same bytes added to a store make the same blob.
+    let stored = bob
+        .files
+        .add_with_key(Input::Bytes { name: "release.msi".into(), mime: "application/x-msi".into(), data: plain.clone() }, key.clone(), fp)
+        .await
+        .unwrap();
+    assert_eq!(stored.hash, linked.hash);
+
+    // Dan downloads from the linked copy and the stored copy together.
+    let done = dan
+        .files
+        .fetch_swarm(&dan.endpoint, &[alice.addr(), bob.addr()], &linked, &dan.downloads(), |_, _| {}, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&done.path).unwrap(), plain);
+    assert!(done.failed.is_empty(), "{:?}", done.failed);
+    let map = dan.files.piece_map(&dan.endpoint, alice.addr(), linked.hash, linked.cipher_size).await.unwrap();
+    assert!(map.iter().all(|p| *p), "a linked file is all there");
+
+    // A wrong fingerprint is refused, and unlinking stops serving.
+    assert!(matches!(
+        alice.files.link_file(&src, "application/x-msi", key, blake3_of(b"other")).await,
+        Err(dissent_files::FilesError::Changed)
+    ));
+    alice.files.unlink(linked.hash);
+    assert!(!alice.files.is_linked(linked.hash));
+}

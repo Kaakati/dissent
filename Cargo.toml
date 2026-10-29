@@ -61,6 +61,8 @@ iroh-gossip = "0.101"
 iroh-blobs = "0.103"
 # The channel type of iroh-blobs' provider events. The version and features iroh-blobs already uses.
 irpc = { version = "0.17", default-features = false, features = ["spans", "stream"] }
+# The bao encoding iroh-blobs verifies in. The same version as iroh-blobs uses, for serving linked files.
+bao-tree = { version = "0.16", default-features = false }
 iroh-mainline-address-lookup = "0.6"
 pkarr = { version = "8", default-features = false, features = ["dht", "signed_packet"] }
 url = { version = "2", features = ["serde"] }
@@ -79,7 +81,7 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-autostart = "=2.7.0"
 # Match tauri-plugin-dialog, which uses rfd's gtk3 backend; rfd refuses gtk3 and xdg-portal together.
 rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Power", "Win32_System_LibraryLoader", "Win32_Networking_WinSock"] }
 mime_guess = "2"
 futures-lite = "2"
 n0-future = "0.3"

@@ -12,6 +12,7 @@ function viewOf(s: Pick<ShellState, 'route' | 'channelId' | 'page' | 'peer' | 'p
   if (s.page === 'contacts') return { title: 'Friends', view: 'Friends' };
   if (s.page === 'transfers') return { title: 'Transfers', view: 'Transfers' };
   if (s.page === 'saved') return { title: 'Saved Messages', view: 'Saved Messages' };
+  if (s.page === 'files') return { title: 'Files', view: 'Files' };
   if (s.route.kind === 'server') {
     const channel = s.community?.channels.find((c) => c.id === s.channelId);
     if (s.voiceChannelId) return { title: channel?.name ?? '', view: 'Voice channel board' };

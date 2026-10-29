@@ -1079,7 +1079,7 @@ impl Engine {
         Ok((image.file, roots))
     }
 
-    fn transfer_view(&self, id: &str) -> Result<TransferView> {
+    pub(crate) fn transfer_view(&self, id: &str) -> Result<TransferView> {
         let w = self.read();
         if let Some(path) = w.attach.downloads.get(id) {
             return Ok(TransferView {
@@ -1123,7 +1123,7 @@ impl Engine {
     }
 
     /// Writes the attachment book to disk.
-    fn persist_attach(&self) {
+    pub(crate) fn persist_attach(&self) {
         let guard = self.read();
         if let Err(e) = guard.attach.save(&guard.paths) {
             warn!(error = %e, "could not save transfers");
@@ -1191,7 +1191,7 @@ impl Engine {
     }
 
     /// Spawns the task that fetches one download, and keeps its handle so it can be paused.
-    fn start_download(&self, id: &str) {
+    pub(crate) fn start_download(&self, id: &str) {
         let engine = Engine {
             inner: self.inner.clone(),
         };
@@ -1238,21 +1238,34 @@ impl Engine {
             inner: self.inner.clone(),
         };
         let sink_id = id.to_string();
-        let result = self
-            .inner
-            .files
-            .fetch_tallied(
-                node.endpoint(),
-                &from,
-                &file,
-                &dest,
-                move |held, total| {
-                    let progress = if total == 0 { 0.0 } else { held as f64 / total as f64 };
-                    engine.set_progress(&att, progress, &msg);
-                },
-                move |counts| sink.record_sources(&sink_id, counts),
-            )
-            .await;
+        let on_progress = move |held: u64, total: u64| {
+            let progress = if total == 0 { 0.0 } else { held as f64 / total as f64 };
+            engine.set_progress(&att, progress, &msg);
+        };
+        let on_sources = move |counts: &[SourceCount]| sink.record_sources(&sink_id, counts);
+        // A tracker listing comes from its whole swarm at once; an attachment from its providers in turn.
+        let swarm = message_id.starts_with(crate::tracker::catalog::TRANSFER_PREFIX);
+        let mut failed: Vec<usize> = Vec::new();
+        let result = if swarm {
+            match self.inner.files.fetch_swarm(node.endpoint(), &from, &file, &dest, on_progress, on_sources).await {
+                Ok(done) => {
+                    failed = done.failed;
+                    // A listing's key comes from the fingerprint it claims, so a lister could encrypt other bytes under
+                    // it. The saved file must hash to that fingerprint, or it is removed.
+                    match self.check_listing_download(&message_id, &done.path).await {
+                        Ok(()) => Ok(done.path),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&done.path);
+                            let _ = self.inner.files.unpin(file.hash).await;
+                            Err(e)
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.inner.files.fetch_tallied(node.endpoint(), &from, &file, &dest, on_progress, on_sources).await
+        };
         match result {
             Ok(path) => {
                 {
@@ -1267,6 +1280,11 @@ impl Engine {
                     if let Err(e) = guard.attach.save(&guard.paths) {
                         warn!(error = %e, "could not save download state");
                     }
+                }
+                // A tracker listing is kept and seeded once it is in. See `tracker::catalog`.
+                if swarm {
+                    self.seed_downloaded(&message_id, file.hash, path.clone()).await;
+                    self.send_receipt(id, &message_id, &failed).await;
                 }
                 self.emit(EngineEvent::AttachmentProgress {
                     message_id,

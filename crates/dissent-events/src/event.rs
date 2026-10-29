@@ -320,6 +320,52 @@ pub enum Payload {
     /// live channels and channels left out are handled, and `state::valid_layout` for the caps. Carried: see
     /// `control::carry_sealed`. Appended. See `docs/design/02-communities-and-dms.md`, "Channel categories".
     ChannelLayout { entries: Vec<LayoutEntry> },
+    /// A custom role. Its id is this event's id. Needs `MANAGE_ROLES`; the role must sit below the author and
+    /// carry only bits the author holds. On the control channel. Carried. Appended. See
+    /// `docs/design/14-file-tracker.md`, "Phase 0".
+    RoleCreate { spec: crate::roles::RoleSpec },
+    /// Replaces a custom role's spec. The latest by HLC wins. Rules as for `RoleCreate`. Carried. Appended.
+    RoleUpdate { role: crate::roles::RoleId, spec: crate::roles::RoleSpec },
+    /// Deletes a custom role for good, and every assignment of it. Carried. Appended.
+    RoleDelete { role: crate::roles::RoleId },
+    /// Gives `user` a custom role, or takes it away when `on` is false. The latest by HLC per user and role
+    /// wins. Carried. Appended.
+    RoleAssign { user: RootId, role: crate::roles::RoleId, on: bool },
+    /// Marks `root` as a bot, with a name, or unmarks it when `on` is false. Needs `MANAGE_BOTS`. The latest by
+    /// HLC per root wins. Carried. Appended.
+    BotRegister { root: RootId, name: String, on: bool },
+    /// Whether replay honors custom roles' bits on the kinds released clients know. Owner only; the latest by
+    /// HLC wins; off until set. Carried. Appended.
+    CustomRolePerms { on: bool },
+    /// Makes a file category (`category: None`; its id is this event's id) or replaces one's spec. Needs
+    /// `MANAGE_FILES`. `inner` holds the name, icon, allowed types, default tags and download rules under the files
+    /// key. On the control channel. Carried. Appended. See `docs/design/14-file-tracker.md`.
+    FileCategorySet {
+        category: Option<crate::tracker::CategoryId>,
+        add: crate::tracker::AddSpec,
+        visible: Option<crate::tracker::ReaderSpec>,
+        inner: crate::tracker::FilesSealed,
+    },
+    /// Deletes a file category and its listings. Needs `MANAGE_FILES`. Carried. Appended.
+    FileCategoryDelete { category: crate::tracker::CategoryId },
+    /// Lists a file in a category, for whoever its `AddSpec` admits. `blob` is the ciphertext hash and size, in clear
+    /// for an everyone-visible category and `None` for a restricted one. Carried. Appended.
+    FileListing {
+        category: crate::tracker::CategoryId,
+        blob: Option<([u8; 32], u64)>,
+        inner: crate::tracker::FilesSealed,
+    },
+    /// Replaces a listing's tags and description. The lister or `MANAGE_FILES`. Carried. Appended.
+    FileListingUpdate { listing: EventId, inner: crate::tracker::FilesSealed },
+    /// Removes a listing. The lister or `MANAGE_FILES`. Carried. Appended.
+    FileListingRemove { listing: EventId },
+    /// A downloader's credit to the seeders of one finished download. It does not name the file: `tag` is a keyed
+    /// hash only the downloader can link to the listing, so the same download counts once. Carried. Appended.
+    FileReceipt { tag: [u8; 16], credits: Vec<(RootId, u64)> },
+    /// The server's reputation rules. Needs `MANAGE_FILES`; the latest by HLC wins. Carried. Appended.
+    ReputationRulesSet { rules: crate::tracker::ReputationRules },
+    /// Clears a member's reputation, while the rules let admins reset. Needs `MANAGE_FILES`. Carried. Appended.
+    ReputationReset { root: RootId },
 }
 
 /// One entry of a channel layout: a channel outside any category, or a category. Appended only: the variant

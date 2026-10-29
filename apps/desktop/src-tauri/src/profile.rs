@@ -618,6 +618,7 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
         identity: std::sync::Mutex::new(identity),
         engine: tokio::sync::RwLock::new(Some(engine)),
     });
+    crate::device_conditions::watch(app.clone());
     events::forward_events(app.clone(), rx);
     events::forward_notification_clicks(app);
     app.manage(status_cmds::LastInput::new());

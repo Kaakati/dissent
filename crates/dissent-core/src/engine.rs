@@ -119,6 +119,16 @@ pub(crate) struct Inner {
     pub history_probes: AtomicBool,
     /// Whether this device answers `RotationSupport` with yes. Off only in tests, to model an older device.
     pub rotation_support: AtomicBool,
+    /// The bits this device answers `Request::Features` with. All of `custom_roles::FEATURES` but in tests,
+    /// which clear bits to model an older device.
+    pub features: std::sync::atomic::AtomicU64,
+    /// Devices' answers to `Request::Features`, with when. In memory only. See `custom_roles`.
+    pub(crate) feature_answers: Mutex<BTreeMap<DeviceId, (u64, std::time::Instant)>>,
+    /// The file tracker's keys and local book, per community. See `tracker`.
+    pub(crate) tracker: Mutex<crate::tracker::TrackerState>,
+    /// Whether the network is metered and the device on battery, as the app reports it. See `tracker::seeding`.
+    pub(crate) device_conditions: Mutex<crate::tracker::seeding::DeviceConditions>,
+    pub(crate) utc_offset_min: std::sync::atomic::AtomicI32,
     /// Which devices said they accept a leave rotation, and which communities hold one back. See `rotation`.
     pub leave_gate: Mutex<crate::rotation::LeaveGate>,
     /// Contacts whose direct profile this run has exchanged. See `profile_sync`.
@@ -266,6 +276,11 @@ impl Engine {
             history_support: AtomicBool::new(true),
             history_probes: AtomicBool::new(true),
             rotation_support: AtomicBool::new(true),
+            features: std::sync::atomic::AtomicU64::new(crate::custom_roles::FEATURES),
+            feature_answers: Default::default(),
+            tracker: Default::default(),
+            device_conditions: Default::default(),
+            utc_offset_min: std::sync::atomic::AtomicI32::new(0),
             leave_gate: Default::default(),
             profile_synced: Default::default(),
             legacy_profiles: AtomicBool::new(false),
@@ -305,6 +320,7 @@ impl Engine {
         engine.refresh_lan_keys();
         engine.adopt_all_relays().await;
         engine.refetch_pictures();
+        engine.reconcile_all_linked();
         engine.load_blob_scopes();
         engine.release_unreferenced_at_start();
         // Local stamps must sort after every stored event, so the clock starts past the newest.

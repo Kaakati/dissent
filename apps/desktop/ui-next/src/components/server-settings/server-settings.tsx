@@ -10,6 +10,8 @@ import { BannerPicker } from '@/components/banner-picker';
 import { InviteList } from '@/components/channel-settings/channel-settings';
 import { openEmojiPicker } from '@/components/chat/emoji-picker';
 import { ServerCard } from '@/components/server-card';
+import { FilesSection } from '@/components/server-settings/files-section';
+import { RolesSection } from '@/components/server-settings/roles-section';
 import { chooseImage } from '@/components/settings/avatar-editor';
 import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
@@ -32,11 +34,13 @@ const MAX_DESCRIPTION = 300;
 const MAX_LABEL = 24;
 const SLOTS = 5;
 
-export type Section = 'profile' | 'boosts' | 'members' | 'invites' | 'bans';
+export type Section = 'profile' | 'boosts' | 'files' | 'members' | 'roles' | 'invites' | 'bans';
 const NAV: { key: Section; label: string; group: 'server' | 'people' }[] = [
   { key: 'profile', label: 'Server Profile', group: 'server' },
   { key: 'boosts', label: 'Boosts', group: 'server' },
+  { key: 'files', label: 'Files', group: 'server' },
   { key: 'members', label: 'Members', group: 'people' },
+  { key: 'roles', label: 'Roles', group: 'people' },
   { key: 'invites', label: 'Invites', group: 'people' },
   { key: 'bans', label: 'Bans', group: 'people' },
 ];
@@ -231,6 +235,8 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
               <SeederList community={community} seeders={members.filter((m) => m.storage)} />
             </>
           ) : null}
+          {section === 'roles' ? <RolesSection community={community} /> : null}
+          {section === 'files' ? <FilesSection community={community} /> : null}
           {section === 'invites' ? <InviteList communityId={community.id} /> : null}
           {section === 'bans' ? <BansList community={community} /> : null}
           {section === 'boosts' ? <BoostsSection community={community} /> : null}
