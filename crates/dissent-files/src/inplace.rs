@@ -154,6 +154,12 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+/// Whether two modification times are the same to the millisecond, the precision the tracker's book keeps.
+fn same_time(a: Option<SystemTime>, b: Option<SystemTime>) -> bool {
+    let ms = |t: Option<SystemTime>| t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis());
+    ms(a) == ms(b)
+}
+
 impl Files {
     fn outboard_path(&self, hash: &Hash) -> PathBuf {
         self.blobs_dir.join("outboards").join(format!("{}.obao", hash.to_hex()))
@@ -222,7 +228,7 @@ impl Files {
         if !self.outboard_path(&hash).is_file() {
             return Err(FilesError::Store("the file's outboard is gone".into()));
         }
-        if modified(&linked.path) != linked.modified || std::fs::metadata(&linked.path).map(|m| m.len()).ok() != Some(linked.size) {
+        if !same_time(modified(&linked.path), linked.modified) || std::fs::metadata(&linked.path).map(|m| m.len()).ok() != Some(linked.size) {
             return Err(FilesError::Changed);
         }
         self.linked.0.write().unwrap_or_else(PoisonError::into_inner).insert(hash, linked);
@@ -257,17 +263,29 @@ impl Files {
             events,
             linked: self.linked.clone(),
             outboards: self.blobs_dir.join("outboards"),
+            served: None,
         }
     }
 }
 
+/// Told the bytes of each piece of a linked file as it is sent, with the blob's hash; answers how long to wait
+/// before the next, for an upload cap. Linked files are served outside iroh-blobs, so its transfer events miss them.
+pub type ServedHook = Arc<dyn Fn([u8; 32], u64) -> std::time::Duration + Send + Sync>;
+
 /// Serves the iroh-blobs protocol for a store, with linked files answered from disk.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FilesProtocol {
     store: Store,
     events: EventSender,
     linked: LinkedSet,
     outboards: PathBuf,
+    served: Option<ServedHook>,
+}
+
+impl std::fmt::Debug for FilesProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesProtocol").field("outboards", &self.outboards).finish_non_exhaustive()
+    }
 }
 
 impl ProtocolHandler for FilesProtocol {
@@ -301,6 +319,12 @@ impl ProtocolHandler for FilesProtocol {
 }
 
 impl FilesProtocol {
+    /// Reports the bytes of linked files as they are sent, and waits as `hook` says between pieces.
+    pub fn with_served(mut self, hook: ServedHook) -> Self {
+        self.served = Some(hook);
+        self
+    }
+
     async fn dispatch(&self, mut pair: StreamPair) -> std::result::Result<(), String> {
         let request = pair.read_request().await.map_err(|e| e.to_string())?;
         let store = self.store.clone();
@@ -330,7 +354,7 @@ impl FilesProtocol {
         };
         // A path that became a link since it was linked is not followed, and a changed file is not read.
         let is_file = std::fs::symlink_metadata(&linked.path).is_ok_and(|m| m.is_file());
-        if !is_file || modified(&linked.path) != linked.modified {
+        if !is_file || !same_time(modified(&linked.path), linked.modified) {
             writer.inner.reset(iroh_blobs::protocol::ERR_INTERNAL).ok();
             return Err("the linked file changed on disk".into());
         }
@@ -341,6 +365,12 @@ impl FilesProtocol {
         writer.inner.write_all(&linked_size_prefix(&request, &self.linked)).await.map_err(|e| e.to_string())?;
         while let Some(bytes) = rx.recv().await {
             writer.inner.write_all(&bytes).await.map_err(|e| e.to_string())?;
+            if let Some(hook) = &self.served {
+                let wait = hook(*hash.as_bytes(), bytes.len() as u64);
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+            }
         }
         let outcome = encoder.await.map_err(|e| e.to_string()).and_then(|r| r);
         match outcome {

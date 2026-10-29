@@ -305,7 +305,18 @@ impl Engine {
         net.extra_protocols.push((
             dissent_files::ALPN.to_vec(),
             // Members only: the gate answers every connection and request. See `blob_gate`.
-            std::sync::Arc::new(inner.files.protocol_handler_with(crate::blob_gate::gate_events(&inner))),
+            std::sync::Arc::new(inner.files.protocol_handler_with(crate::blob_gate::gate_events(&inner)).with_served({
+                // Linked files are served outside iroh-blobs' events: count and cap them here. See `tracker::gate`.
+                let weak = std::sync::Arc::downgrade(&inner);
+                std::sync::Arc::new(move |hash: [u8; 32], bytes: u64| match weak.upgrade() {
+                    Some(inner) => {
+                        let engine = Engine { inner };
+                        engine.tracker_served(hash, bytes);
+                        engine.upload_wait(bytes)
+                    }
+                    None => std::time::Duration::ZERO,
+                })
+            })),
         ));
         let config = NodeConfig {
             rpc: Some(handler_for(&inner)),

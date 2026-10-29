@@ -401,5 +401,6 @@ impl Engine {
             self.reconcile_linked(community);
             self.refresh_holdings(community, false).await;
         }
+        self.save_dirty_tracker_books();
     }
 }

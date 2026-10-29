@@ -1256,7 +1256,7 @@ impl Engine {
                         Ok(()) => Ok(done.path),
                         Err(e) => {
                             let _ = std::fs::remove_file(&done.path);
-                            let _ = self.inner.files.unpin(file.hash).await;
+                            self.release_blobs(vec![file.hash]);
                             Err(e)
                         }
                     }

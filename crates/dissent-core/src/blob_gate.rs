@@ -53,6 +53,9 @@ pub(crate) enum Scope {
     Conv(ConvId),
     Shared,
     Public,
+    /// A file tracker listing's blob: whoever may see its category. Storage members only for a category every
+    /// member sees. See `tracker`.
+    Category(CommunityId, dissent_events::CategoryId),
 }
 
 /// Which scopes each blob held on this device belongs to.
@@ -62,6 +65,9 @@ pub(crate) struct BlobScopes {
     /// Blobs a seeder keeps because a member hinted them, with the hint's community. Persisted.
     hinted: BTreeMap<[u8; 32], CommunityId>,
     rebuilt: Option<Instant>,
+    /// The tracker's blobs that replay alone cannot place, such as a restricted category's, whose hash is only in its
+    /// sealed listing. The tracker keeps it current; a rebuild carries it over. See `Engine::sync_tracker_scopes`.
+    pub(crate) tracker: HashMap<[u8; 32], Scope>,
     /// Devices a test told the gate to treat as unknown until it asks them for their certificate. See
     /// `test_support::gate_forget_device`.
     pub(crate) forgotten: std::collections::BTreeSet<DeviceId>,
@@ -142,10 +148,14 @@ impl World {
         let mut scopes = BlobScopes {
             hinted: std::mem::take(&mut self.blob_scopes.hinted),
             forgotten: std::mem::take(&mut self.blob_scopes.forgotten),
+            tracker: std::mem::take(&mut self.blob_scopes.tracker),
             ..BlobScopes::default()
         };
         for (hash, community) in &scopes.hinted.clone() {
             scopes.add(*hash, Scope::Community(*community));
+        }
+        for (hash, scope) in &scopes.tracker.clone() {
+            scopes.add(*hash, *scope);
         }
         for (id, c) in &self.communities {
             let s = c.state();
@@ -167,6 +177,14 @@ impl World {
                     for entry in crate::attachments::split_manifest(ciphertext).0 {
                         scopes.add(entry.hash, Scope::Community(*id));
                     }
+                }
+            }
+        }
+        // Listings of a category every member sees name their blob in clear.
+        for (id, c) in &self.communities {
+            for listing in c.state().files.listings.values() {
+                if let Some((hash, _)) = listing.blob {
+                    scopes.add(hash, Scope::Category(*id, listing.category));
                 }
             }
         }
@@ -249,6 +267,11 @@ impl World {
             Scope::Conv(conv) => self.in_conv(conv, root),
             Scope::Shared => self.shares_with(root),
             Scope::Public => true,
+            Scope::Category(c, category) => self.communities.get(c).is_some_and(|comm| {
+                let s = comm.state();
+                let restricted = s.files.categories.get(category).is_some_and(|cat| cat.visible.is_some());
+                self.is_member(c, root, restricted) && s.may_see_files(&s.canonical(root), category)
+            }),
         }
     }
 
@@ -378,22 +401,24 @@ impl Engine {
 
 /// Whether the gate asks `Engine::throttle` before each chunk it sends. Off: the tracker turns it on with its upload
 /// caps. Each ask is one in-process round trip per 16 KiB.
-const THROTTLE: ThrottleMode = ThrottleMode::None;
+const THROTTLE: ThrottleMode = ThrottleMode::Intercept;
 
 impl Engine {
     /// Bytes of `hash` this device just sent to `device`. The tracker's seeding counters read it.
-    pub(crate) fn on_served(&self, _device: DeviceId, _hash: [u8; 32], _bytes: u64) {}
+    pub(crate) fn on_served(&self, _device: DeviceId, hash: [u8; 32], bytes: u64) {
+        self.tracker_served(hash, bytes);
+    }
 
     /// How long to wait before sending `bytes` more of `hash` to `device`. The tracker's upload caps answer it;
     /// asked only while `THROTTLE` is on.
-    pub(crate) fn throttle(&self, _device: DeviceId, _hash: [u8; 32], _bytes: u64) -> Duration {
-        Duration::ZERO
+    pub(crate) fn throttle(&self, _device: DeviceId, _hash: [u8; 32], bytes: u64) -> Duration {
+        self.upload_wait(bytes)
     }
 
     /// Whether this device serves `hash` at all once the requester may fetch it. The tracker says no for a listing
     /// whose seeding is paused, stopped or queued. Attachments and pictures are always served.
-    pub(crate) fn serves(&self, _hash: &[u8; 32]) -> bool {
-        true
+    pub(crate) fn serves(&self, hash: &[u8; 32]) -> bool {
+        self.tracker_serves(*hash)
     }
 }
 

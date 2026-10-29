@@ -12,6 +12,7 @@
 
 pub(crate) mod bodies;
 pub mod catalog;
+pub(crate) mod gate;
 pub(crate) mod restricted;
 pub(crate) mod scan;
 pub mod seeding;
@@ -106,6 +107,10 @@ pub(crate) struct Local {
     /// This device's last holdings answer and when it was made, so a member asking in a loop costs one build per
     /// `HOLDINGS_CACHE`. In memory only.
     pub(crate) answer: Option<(Instant, Vec<swarm::Holding>)>,
+    /// The seeds that are seeding now, for the blob gate. Set by every reconcile.
+    pub(crate) serving: BTreeSet<[u8; 32]>,
+    /// Upload counters moved since the book was saved.
+    pub(crate) dirty: bool,
 }
 
 /// A file's modification time, in ms since the epoch.
@@ -118,6 +123,10 @@ pub(crate) fn modified_ms(path: &std::path::Path) -> Option<u64> {
 #[derive(Default)]
 pub(crate) struct TrackerState {
     pub communities: BTreeMap<CommunityId, Local>,
+    /// The upload cap's bucket, shared by every server. See `gate`.
+    pub(crate) upload: gate::UploadBucket,
+    /// The seeding settings as last read or saved.
+    pub(crate) settings: Option<seeding::SeedingSettings>,
 }
 
 fn aad(id: &CommunityId, what: &[u8]) -> Vec<u8> {

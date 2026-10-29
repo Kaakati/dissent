@@ -192,9 +192,13 @@ impl Engine {
 
     /// Unpins the candidates that are not referenced, and forgets them as mirrored. Returns how many were unpinned.
     pub(crate) async fn unpin_unreferenced(&self, candidates: Vec<[u8; 32]>, keep_fresh_uploads: bool) -> usize {
+        // What the file tracker keeps: every blob this device seeds or keeps for a listing. Read before the world, whose
+        // lock the tracker also takes.
+        let seeded = self.tracker_kept_blobs();
         let release: Vec<[u8; 32]> = {
             let w = self.read();
             let mut live = w.referenced_blobs();
+            live.extend(seeded);
             if keep_fresh_uploads {
                 let since = now_ms().saturating_sub(FRESH_UPLOAD.as_millis() as u64);
                 live.extend(

@@ -813,6 +813,8 @@ impl Engine {
             out.push(listing.to_string());
         }
         self.save_tracker_book(community);
+        // The gate serves a seed only once it knows its state and category.
+        self.reconcile_linked(community);
         self.emit(EngineEvent::CommunityUpdated { community_id: community.to_string() });
         Ok(out)
     }
@@ -862,12 +864,13 @@ impl Engine {
             return;
         }
         let Some(record) = self.with_tracker(community, |l| l.book.seeds.remove(&blob)) else { return };
+        self.save_tracker_book(community);
         if record.linked {
             self.inner.files.forget_linked(blob);
         } else {
-            let _ = self.inner.files.unpin(blob).await;
+            // Through the release path, so a blob an attachment also uses keeps its pin.
+            self.release_blobs(vec![blob]);
         }
-        self.save_tracker_book(community);
     }
 
     /// Starts downloading a listing into the download folder. It shows in Transfers like an attachment.
@@ -936,6 +939,8 @@ impl Engine {
             }
         }
         self.persist_attach();
+        // The gate learns the blob's category, so this device can pass on the pieces it gets.
+        self.reconcile_linked(community);
         self.start_download(&id);
         self.emit(EngineEvent::TransfersChanged);
         self.transfer_view(&id)
@@ -977,6 +982,7 @@ impl Engine {
             });
         });
         self.save_tracker_book(community);
+        self.reconcile_linked(community);
         self.emit(EngineEvent::CommunityUpdated { community_id: community.to_string() });
     }
 

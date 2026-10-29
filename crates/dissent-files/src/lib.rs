@@ -18,7 +18,7 @@ pub mod tracker;
 pub use crypt::{chunk_count, cipher_len, decrypt, encrypt, FileKey, CHUNK_SIZE, MAX_PLAINTEXT};
 pub use error::{FilesError, Result};
 pub use file_ref::FileRef;
-pub use inplace::{FilesProtocol, Linked};
+pub use inplace::{FilesProtocol, Linked, ServedHook};
 pub use iroh_blobs::provider::events::EventSender;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
 pub use swarm::{SwarmFetch, MAX_PARALLEL};

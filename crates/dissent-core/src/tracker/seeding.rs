@@ -238,6 +238,7 @@ impl Engine {
             }
         }
         write_bin(&settings_path(self), &settings)?;
+        self.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).settings = Some(settings.clone());
         self.inner.files.set_download_cap(caps(&settings, now_ms(), self.utc_offset_min()).1);
         self.emit(EngineEvent::TransfersChanged);
         Ok(())
@@ -269,7 +270,7 @@ impl Engine {
         let book = self.with_tracker(community, |l| l.book.seeds.clone());
         let seeds: Vec<([u8; 32], SeedRecord)> = book.into_iter().collect();
         let refs: Vec<(&SeedRecord, u64)> = seeds.iter().map(|(b, r)| (r, sizes.get(b).copied().unwrap_or(0))).collect();
-        let states = states(&refs, &self.seeding_settings(), self.device_conditions(), now_ms(), self.utc_offset_min());
+        let states = states(&refs, &self.cached_seeding_settings(), self.device_conditions(), now_ms(), self.utc_offset_min());
         seeds.iter().map(|(b, _)| *b).zip(states).collect()
     }
 
@@ -335,6 +336,7 @@ impl Engine {
     /// on disk since it was linked is not served again until it is added anew.
     pub(crate) fn reconcile_linked(&self, community: CommunityId) {
         let states = self.seed_states(community);
+        self.sync_tracker_gate(community, &states);
         let linked: Vec<([u8; 32], SeedRecord)> =
             self.with_tracker(community, |l| l.book.seeds.iter().filter(|(_, r)| r.linked).map(|(b, r)| (*b, r.clone())).collect());
         if linked.is_empty() {

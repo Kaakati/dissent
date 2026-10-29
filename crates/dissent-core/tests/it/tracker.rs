@@ -369,3 +369,63 @@ async fn a_lying_listing_is_not_saved_cannot_squat_its_fingerprint_and_planted_k
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn seeded_listings_survive_the_restart_sweep_and_count_their_uploads() {
+    bounded(async {
+        let alice = peer("sweep-alice").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let src = scratch("sweep-src");
+        let folder = scratch("sweep-folder");
+        let stored_bytes = sample(600_000, 11);
+        let linked_bytes = sample(700_000, 12);
+        let stored = write(&src, "stored.zip", &stored_bytes);
+        write(&folder, "linked.zip", &linked_bytes);
+        alice.engine.set_category_folder(id, cat, Some(folder.clone())).unwrap();
+        alice.engine.prepare_listing(id, cat, vec![stored.clone()]).await.unwrap();
+        let a = alice.engine.list_files(id, cat, vec![item(&stored, &[])], SeedLimit::Forever).await.unwrap();
+        let scanned = alice.engine.scan_category_folder(id, cat).await.unwrap();
+        let b = alice
+            .engine
+            .list_files(id, cat, scanned.iter().map(|f| AddItem { path: f.path.clone(), tags: vec![], description: String::new() }).collect(), SeedLimit::Forever)
+            .await
+            .unwrap();
+
+        // The restart runs the sweep that unpins what nothing refers to. The seeds must survive it.
+        let (identity, data) = stop(alice).await;
+        let alice = start(identity, data).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(alice.engine.store_stats().await.unwrap().files, 1, "the stored seed keeps its pin");
+
+        let bob = peer("sweep-bob").await;
+        let invite = alice.engine.create_invite(id).await.unwrap();
+        join_ready(&alice, &bob, &invite).await;
+        for (listing, bytes) in [(&a[0], &stored_bytes), (&b[0], &linked_bytes)] {
+            until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+                bob.engine.files_view(id).ok().filter(|v| v.listings.iter().any(|l| &l.id == listing)).map(|_| ())
+            })
+            .await;
+            bob.engine.download_listing(id, listing.parse().unwrap()).await.unwrap();
+            let path = until_event(&bob.engine, Duration::from_secs(60), "bob has it", || {
+                bob.engine
+                    .files_view(id)
+                    .ok()
+                    .and_then(|v| v.listings.into_iter().find(|l| &l.id == listing && l.local == "seeding"))
+                    .and_then(|l| l.local_path)
+            })
+            .await;
+            assert_eq!(&std::fs::read(&path).unwrap(), bytes);
+        }
+        // What alice served shows in her seeding counters, from the gate for the stored copy and from the linked
+        // server for the other.
+        let rows = alice.engine.seeding_view(id).unwrap().rows;
+        assert!(rows.iter().all(|r| r.uploaded > 0), "{:?}", rows.iter().map(|r| (r.name.clone(), r.uploaded)).collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&folder);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}

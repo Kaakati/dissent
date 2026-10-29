@@ -249,3 +249,14 @@ fn a_carried_role_event_opens_and_applies() {
     let st = replay_with(f.id(OWNER), &f.dag, &[]);
     assert!(st.rejected.iter().any(|(r, why)| *r == id && *why == Rejection::Locked));
 }
+
+#[test]
+fn a_manage_channels_role_arranges_channels_once_custom_bits_count() {
+    let mut f = Fixture::new();
+    f.role_for(BOB, spec("Arrangers", Perms::MANAGE_CHANNELS, 1));
+    let bob = f.id(BOB);
+    assert!(!f.state().may_manage_channels(&bob), "released kinds wait for the switch");
+    f.push(OWNER, Payload::CustomRolePerms { on: true });
+    assert!(f.state().may_manage_channels(&bob));
+    assert!(!f.state().may_manage_channels(&f.id(CAROL)));
+}
