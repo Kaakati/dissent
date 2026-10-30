@@ -82,11 +82,12 @@ export function toggleReaction(target: ChatTarget, messageId: Id, emoji: string,
 
 // Sends files with an optional caption. A channel gets them with the seeder's choice; a direct conversation or a group
 // gets them through the direct file path, as the current UI does.
-export function sendFiles(target: ChatTarget, paths: string[], text: string | null, mentions?: { users: Id[]; everyone: boolean }): Promise<boolean> {
+// `scrub` is one "Remove identifying details" choice per path (lib/scrub.ts).
+export function sendFiles(target: ChatTarget, paths: string[], text: string | null, mentions?: { users: Id[]; everyone: boolean }, scrub?: boolean[]): Promise<boolean> {
   return run(
     async () => {
-      if (target.kind === 'channel') await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: true, mentions });
-      else await api.sendDmFiles(target.kind === 'dm' ? target.peer : target.groupId, paths, text ?? '');
+      if (target.kind === 'channel') await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: true, mentions, scrub });
+      else await api.sendDmFiles(target.kind === 'dm' ? target.peer : target.groupId, paths, text ?? '', scrub);
       if (has('transfers')) await useShell.getState().loadTransfers();
     },
     { lists: target.kind !== 'channel' },

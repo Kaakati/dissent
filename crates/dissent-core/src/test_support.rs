@@ -253,3 +253,16 @@ pub async fn publish_hosted_relays_unchecked(
 pub async fn check_relay_hosts(engine: &crate::Engine) {
     engine.check_relay_hosts().await;
 }
+
+/// The direct IP addresses `engine` holds for `device`, from the signed addresses it has learned. A
+/// device that hides its IP should have none.
+pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::DeviceId) -> usize {
+    engine
+        .read()
+        .addresses
+        .all()
+        .into_iter()
+        .filter(|stored| stored.addr.id == device)
+        .map(|stored| stored.addr.direct.len())
+        .sum()
+}

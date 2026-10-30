@@ -13,11 +13,17 @@ You cannot make yourself a guardian. Changing the list later means signing a new
 
 ## Recovering a lost key
 
-1. On a new device, choose **Recover account** and enter a fresh root key. The app creates it on the device.
-2. The app shows a `dissent://recover/...` link or QR code. It names your old root and the new one.
-3. Send that link to your guardians. Each one opens it and approves with their own app. Their approval is a `dissent://approve/...` link that comes back to you.
-4. Once the threshold of different guardians has approved, the new device assembles a rotation and signs it with the new root key. The rotation proves you hold the new key.
-5. Anyone can check the rotation. Nothing secret moves between devices.
+1. On a new device, finish first run with its fresh key (save its recovery phrase: this key becomes the account), then choose **Continue and recover with guardians**, or **Settings › Recovery › Recover with guardians** later.
+2. Enter the lost account's id, which a friend can read off your profile, or its `dissent://guardians/...` link.
+3. The app shows a `dissent://recover/...` link and QR code naming the old root and the new one. The link also carries this device's address after `?via=`. It shows a nine-digit code made from the request.
+4. Send the link to each guardian, then call them or meet them and read the code out loud. Never send the code with the link.
+5. The guardian opens the link (or pastes it in **Settings › Recovery › Help a friend recover**). Their app shows whose account it is, whether they are on its guardian list, and the servers they share. They type the code they heard and confirm they heard it from you directly. A wrong code is refused, so a link passed on by someone else cannot be approved unseen. They can also decline; a decline is signed, so you see who said no.
+6. Their app signs the approval and sends it straight to your new device, with the owner's signed guardian list and, if they choose, invites to the servers they share with you. When the new device cannot be reached, the guardian gets a `dissent://approve/...` link to send back by hand, and you paste it into the recovery dialog.
+7. The dialog shows each guardian as waiting, approved or declined, and "k of n approvals needed" once the list is known. When the threshold of different guardians on the list has approved, **Finish recovery** syncs the servers from the invites, publishes the rotation in each, and joins as the new identity.
+
+Nothing secret moves between devices: approvals, the guardian list and invites are all things the person could paste.
+
+Every guardian keeps the owner's signed list from the moment it was named (`Request::GuardianOf`), so the new device gets it from the first approval and never needs the owner's old device. The recovery in progress survives restarts (`recovery.bin`) until it finishes or is cancelled. See `dissent-core/src/recovery_flow.rs`.
 
 If you still have the old root key, skip the guardians and rotate directly. Your old key signs the request.
 
@@ -65,11 +71,11 @@ A handle like `@example.com` lets people recognise you by a domain you own. It i
 3. In your domain's DNS settings, add a **TXT** record. Name it `_dissent`, so the full name is `_dissent.example.com`. Put the text in as the content.
 4. DNS changes can take a while to spread. Ask the app to check again once the record exists.
 
-**How checking works:** each person's app looks up the TXT record itself, using the system DNS and a public fallback. It accepts the handle only if the value matches your root key exactly. A handle is never trusted because a peer says it is verified. If a peer shows you a handle, your own app checks it again before you see the verified mark.
+**How checking works:** each person's app looks up the TXT record itself, using the system DNS. A public resolver (Cloudflare) is asked as well only if the user turns that on in Settings › Contacts & privacy. It accepts the handle only if the value matches your root key exactly. A handle is never trusted because a peer says it is verified. If a peer shows you a handle, your own app checks it again before you see the verified mark.
 
 **How others learn it:** the website handle is your server handle. After a pass, Settings › My identity offers to claim it in every server you are in, as an ordinary handle claim, so nothing new goes on the wire. Any server handle that is a domain is checked this way. The first claim in a server still wins, so someone else can hold `@example.com` in a server, but it never gets the mark.
 
-**When it is checked:** the desktop app checks a handle when it is shown, and keeps the result for this run only. A pass shows the mark for 6 hours and is checked again after 1 hour, so a removed record stops verifying within that window. A failure is retried after 10 minutes, and a lookup that could not finish after 2. Until a fresh check passes, the handle says "not checked yet", never verified.
+**When it is checked:** a lookup tells the resolver and the domain's owner that someone is looking at the handle, so the desktop app never checks a handle just because it is shown. It checks when you open that person's profile, or point at the handle in the member list, and keeps the result for this run only. The member list and message headers show the mark only from a result the app already has. A pass shows the mark for 24 hours and is checked again, when next asked, after 6 hours, so a removed record stops verifying within a day. A failure is checked again after 1 hour, and a lookup that could not finish after 10 minutes. Until a fresh check passes, the handle says "not checked yet", never verified. See "Website handles" in `06-threat-model.md`.
 
 **Limits:** the check proves who controls the domain, not who the person is. Look-alike domains that mix scripts are refused. Losing control of the domain, or the TXT record being removed, makes the handle stop verifying.
 

@@ -1,4 +1,6 @@
 mod commands;
+mod badge;
+mod pictures;
 mod disclaimer;
 mod secret_clipboard;
 mod events;
@@ -18,8 +20,10 @@ mod voice_settings;
 mod mic_test;
 mod transfers_cmds;
 mod part6;
+mod recovery_cmds;
 mod contacts_cmds;
 mod saved_cmds;
+mod inbox_cmds;
 mod conv_cmds;
 mod status_cmds;
 mod typing_cmds;
@@ -66,7 +70,13 @@ pub fn run() {
     // Custom and portable profiles are locked before Tauri starts (see profile::claim_early). The guard lives
     // until run() returns, which is when the app exits.
     let _profile_lock = profile::claim_early();
-    let mut builder = tauri::Builder::default();
+    // Sealed pictures reach the window through `dimg`, which opens them (see pictures.rs).
+    let mut builder = tauri::Builder::default().register_asynchronous_uri_scheme_protocol(pictures::SCHEME, |ctx, request, responder| {
+        let app = ctx.app_handle().clone();
+        tauri::async_runtime::spawn(async move {
+            responder.respond(pictures::respond(&app, request).await);
+        });
+    });
     // Only the default profile is single instance, and only it takes dissent:// links. Dev and portable profiles can run
     // beside it (see profile.rs) and never claim the scheme.
     let default_profile = profile::mode() == profile::Mode::Default;
@@ -105,6 +115,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             deep_link::take_deep_links,
+            badge::set_unread_badge,
+            badge::clear_message_notifications,
             commands::identity_status,
             commands::identity_export_phrase,
             commands::identity_import_phrase,
@@ -159,6 +171,7 @@ pub fn run() {
             transfers_cmds::reset_download_dir,
             transfers_cmds::send_files,
             transfers_cmds::send_dm_files,
+            transfers_cmds::inspect_files,
             transfers_cmds::list_transfers,
             transfers_cmds::download_attachment,
             transfers_cmds::pause_transfer,
@@ -179,6 +192,12 @@ pub fn run() {
             transfers_cmds::link_preview_prompted,
             transfers_cmds::mark_link_preview_prompted,
             contacts_cmds::pinned_conversations,
+            inbox_cmds::inbox_settings,
+            inbox_cmds::inbox_status,
+            inbox_cmds::inbox_candidates,
+            inbox_cmds::set_inboxes,
+            inbox_cmds::set_serve_inbox,
+            inbox_cmds::host_inbox_for,
             saved_cmds::add_bookmark,
             saved_cmds::remove_bookmark,
             saved_cmds::list_bookmarks,
@@ -321,6 +340,13 @@ pub fn run() {
             part6::ignored_users,
             part6::list_guardians,
             part6::sign_guardians,
+            recovery_cmds::begin_recovery,
+            recovery_cmds::recovery_status,
+            recovery_cmds::add_recovery_link,
+            recovery_cmds::finish_recovery,
+            recovery_cmds::cancel_recovery,
+            recovery_cmds::inspect_recovery_request,
+            recovery_cmds::answer_recovery_request,
             part6::list_devices,
             part6::revoke_device,
             part6::link_device_code,

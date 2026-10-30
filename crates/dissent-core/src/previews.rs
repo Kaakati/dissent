@@ -25,7 +25,6 @@ use tokio::time::Instant;
 use crate::attachments::{EmbedExtra, EmbedImage};
 use crate::engine::Engine;
 use crate::error::Result;
-use crate::store::{read_bin, write_bin};
 use crate::world::World;
 
 /// Most previews one message carries.
@@ -416,14 +415,15 @@ impl Engine {
 
     /// Whether this device has asked the sender about link previews. The question is asked once.
     pub fn link_preview_prompted(&self) -> bool {
-        read_bin::<bool>(&prompted_path(&self.read())).ok().flatten().unwrap_or(false)
+        let w = self.read();
+        w.paths.read_bin::<bool>(&prompted_path(&w)).ok().flatten().unwrap_or(false)
     }
 
     /// Records that this device has asked the sender about link previews.
     pub fn mark_link_preview_prompted(&self) -> Result<()> {
-        let path = prompted_path(&self.read());
+        let (paths, path) = (self.paths(), prompted_path(&self.read()));
         let _serial = self.write();
-        write_bin(&path, &true)
+        paths.write_bin(&path, &true)
     }
 
     /// Previews for the links in `text`, when the sender has them on, and the pictures that arrived in

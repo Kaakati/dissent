@@ -19,20 +19,20 @@ const WATCH: Duration = Duration::from_secs(20);
 /// about 50 packets a second each way, so a relayed call carries about 100.
 const RELAYED_FLOOR: u64 = 30;
 
-struct TestRelay {
-    server: Server,
-    url: Url,
+pub(crate) struct TestRelay {
+    pub(crate) server: Server,
+    pub(crate) url: Url,
     cert: CertificateDer<'static>,
 }
 
 impl TestRelay {
     /// Packets the relay has forwarded so far, in all directions.
-    fn forwarded(&self) -> u64 {
+    pub(crate) fn forwarded(&self) -> u64 {
         self.server.metrics().server.send_packets_sent.get()
     }
 }
 
-async fn spawn_relay() -> TestRelay {
+pub(crate) async fn spawn_relay() -> TestRelay {
     let (certs, server_config) = iroh_relay::server::testing::self_signed_tls_certs_and_config();
     let mut relay = RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0));
     relay.tls = Some(TlsConfig::new((Ipv4Addr::LOCALHOST, 0), CertConfig::Manual { server_config }));
@@ -49,7 +49,7 @@ async fn spawn_relay() -> TestRelay {
 /// the engine's own DHT client off (so contact links carry the relay address instead of a DHT
 /// short address) and lets it accept a relay on 127.0.0.1. DHT lookup in the node is off, so no
 /// UDP socket opens at all.
-async fn start_on_relay(relay: &TestRelay, name: &str) -> Peer {
+pub(crate) async fn start_on_relay(relay: &TestRelay, name: &str) -> Peer {
     let dir = scratch(name);
     let identity = Identity::create(now());
     let net = NodeConfig {
@@ -86,7 +86,7 @@ struct Sample {
 
 /// Makes `a` and `b` contacts. A relay-only engine has no address until it reaches the relay, so
 /// its first contact links carry nothing to dial. Each try takes a fresh link.
-async fn contacts_once_online(a: &Peer, b: &Peer) {
+pub(crate) async fn contacts_once_online(a: &Peer, b: &Peer) {
     wait_online(&[a, b]).await;
     for (from, to) in [(a, b), (b, a)] {
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -111,7 +111,7 @@ async fn contacts_once_online(a: &Peer, b: &Peer) {
 }
 
 /// Waits until every engine has a home relay, so the addresses it hands out can be dialled.
-async fn wait_online(peers: &[&Peer]) {
+pub(crate) async fn wait_online(peers: &[&Peer]) {
     for p in peers {
         let deadline = Instant::now() + Duration::from_secs(30);
         while p.engine.net_status().await.relay.is_none() {
@@ -158,8 +158,7 @@ async fn forwarded_call(owner: &Peer, others: &[Peer]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_forwarded_call_through_a_relay_shows_every_participant_relayed() {
-    let _serial = heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
         let relay = spawn_relay().await;
         let owner = start_on_relay(&relay, "owner-relayed").await;
         let mut others = Vec::new();
@@ -194,8 +193,7 @@ async fn a_forwarded_call_through_a_relay_shows_every_participant_relayed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_forwarded_call_on_direct_links_shows_every_participant_direct() {
-    let _serial = heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
         let owner = peer("owner-direct").await;
         let mut others = Vec::new();
         for n in 1..7 {

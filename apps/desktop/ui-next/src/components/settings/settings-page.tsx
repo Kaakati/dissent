@@ -2,11 +2,12 @@
 // chat surface. Esc or the close button returns to the window, and focus goes back to whatever opened it. Ported from
 // views/settings.js.
 import { useEffect, useRef, useState } from 'react';
-import { Download, Info, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon } from 'lucide-react';
+import { Download, Inbox, Info, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon } from 'lucide-react';
 import { AboutPage } from '@/components/settings/about-page';
 import { AccountPage } from '@/components/settings/account-page';
 import { AppearancePage } from '@/components/settings/appearance-page';
 import { DevicesPage } from '@/components/settings/devices-page';
+import { InboxPage } from '@/components/settings/inbox-page';
 import { NetworkPage } from '@/components/settings/network-page';
 import { PrivacyPage } from '@/components/settings/privacy-page';
 import { RecoveryPage } from '@/components/settings/recovery-page';
@@ -24,6 +25,7 @@ const NAV: { key: SettingsSection; label: string; icon: LucideIcon; feature?: Fe
   { key: 'recovery', label: 'Recovery', icon: KeyRound, feature: 'guardians' },
   { key: 'devices', label: 'Devices', icon: Server, feature: 'devices' },
   { key: 'profile', label: 'Contacts & privacy', icon: ShieldCheck },
+  { key: 'inbox', label: 'Offline delivery', icon: Inbox, feature: 'offline_delivery' },
   { key: 'appearance', label: 'Appearance', icon: Palette },
   { key: 'sounds', label: 'Notifications & sounds', icon: Volume2 },
   { key: 'voice', label: 'Voice', icon: Mic },
@@ -40,6 +42,7 @@ function Body({ section }: { section: SettingsSection }) {
     case 'recovery': return <RecoveryPage />;
     case 'devices': return <DevicesPage />;
     case 'profile': return <PrivacyPage />;
+    case 'inbox': return <InboxPage />;
     case 'appearance': return <AppearancePage />;
     case 'sounds': return <SoundsPage />;
     case 'voice': return <VoicePage />;

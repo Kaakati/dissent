@@ -44,6 +44,8 @@ export default function App() {
   // call takes its place (call-mode.ts decides which).
   const chatOpen = useShell((s) => !s.page && !s.voiceChannelId && (s.route.kind === 'server' || s.peer !== null));
   const board = useCallBoard();
+  // A direct or group call shows its conversation below the stage, so files dropped on it go to the conversation.
+  const conversationCall = useShell((s) => board === 'call' && s.call !== null && s.call.scope !== 'channel');
   const right = useRightColumn();
   return (
     <TipProvider>
@@ -55,7 +57,7 @@ export default function App() {
           <MainArea
             header={board === 'call' ? <CallHeader /> : board === 'lobby' ? <LobbyHeader /> : !transfers && chatOpen ? <ChatHeader /> : undefined}
             headerExtra={transfers ? <TransfersTabs /> : friends ? <FriendsTabs /> : null}
-            overlay={!transfers && chatOpen && board === null ? <ChatOverlay /> : null}
+            overlay={!transfers && chatOpen && (board === null || conversationCall) ? <ChatOverlay /> : null}
           >
             {transfers ? <TransfersBody /> : friends ? <FriendsBody /> : saved ? <SavedBody /> : board === 'call' ? <CallBody /> : board === 'lobby' ? <LobbyBody /> : chatOpen ? <ChatBody /> : <div className="flex min-h-0 items-center justify-center"><EmptyPane /></div>}
           </MainArea>

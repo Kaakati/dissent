@@ -10,7 +10,6 @@ use tracing::warn;
 
 use crate::engine::{now_ms, Engine, Inner};
 use crate::error::Result;
-use crate::store::{read_bin, write_bin};
 use crate::views::EngineEvent;
 use std::sync::{Arc, Weak};
 
@@ -74,9 +73,9 @@ fn reminders_path(engine: &Engine) -> PathBuf {
 impl Engine {
     /// Saves a message. Saving one twice keeps the first save.
     pub fn add_bookmark(&self, message: MessageRef) -> Result<()> {
-        let path = bookmarks_path(self);
+        let (paths, path) = (self.paths(), bookmarks_path(self));
         let _serial = self.write();
-        let mut all: Vec<Bookmark> = read_bin(&path)?.unwrap_or_default();
+        let mut all: Vec<Bookmark> = paths.read_bin(&path)?.unwrap_or_default();
         let key = message.key();
         if !all.iter().any(|b| b.key == key) {
             all.push(Bookmark {
@@ -85,22 +84,22 @@ impl Engine {
                 saved_ms: now_ms(),
             });
         }
-        write_bin(&path, &all)
+        paths.write_bin(&path, &all)
     }
 
     /// Removes a saved message by its key.
     pub fn remove_bookmark(&self, key: &str) -> Result<()> {
-        let path = bookmarks_path(self);
+        let (paths, path) = (self.paths(), bookmarks_path(self));
         let _serial = self.write();
-        let mut all: Vec<Bookmark> = read_bin(&path)?.unwrap_or_default();
+        let mut all: Vec<Bookmark> = paths.read_bin(&path)?.unwrap_or_default();
         all.retain(|b| b.key != key);
-        write_bin(&path, &all)
+        paths.write_bin(&path, &all)
     }
 
     /// Saved messages, most recently saved first.
     pub fn list_bookmarks(&self) -> Vec<Bookmark> {
-        let path = bookmarks_path(self);
-        let mut all: Vec<Bookmark> = read_bin(&path).ok().flatten().unwrap_or_default();
+        let (paths, path) = (self.paths(), bookmarks_path(self));
+        let mut all: Vec<Bookmark> = paths.read_bin(&path).ok().flatten().unwrap_or_default();
         // Stored oldest first. Reversing before the stable sort keeps the later save first when two
         // share a millisecond.
         all.reverse();
@@ -110,44 +109,44 @@ impl Engine {
 
     /// Asks to be reminded about a message at `at_ms`. Returns the reminder, with its id.
     pub fn add_reminder(&self, message: MessageRef, at_ms: u64) -> Result<Reminder> {
-        let path = reminders_path(self);
+        let (paths, path) = (self.paths(), reminders_path(self));
         let _serial = self.write();
-        let mut all: Vec<Reminder> = read_bin(&path)?.unwrap_or_default();
+        let mut all: Vec<Reminder> = paths.read_bin(&path)?.unwrap_or_default();
         let reminder = Reminder {
             id: format!("{:016x}", rand::random::<u64>()),
             at_ms,
             message,
         };
         all.push(reminder.clone());
-        write_bin(&path, &all)?;
+        paths.write_bin(&path, &all)?;
         Ok(reminder)
     }
 
     /// Reminders not yet fired, soonest first.
     pub fn list_reminders(&self) -> Vec<Reminder> {
-        let path = reminders_path(self);
-        let mut all: Vec<Reminder> = read_bin(&path).ok().flatten().unwrap_or_default();
+        let (paths, path) = (self.paths(), reminders_path(self));
+        let mut all: Vec<Reminder> = paths.read_bin(&path).ok().flatten().unwrap_or_default();
         all.sort_by_key(|r| r.at_ms);
         all
     }
 
     /// Cancels a reminder by its id.
     pub fn remove_reminder(&self, id: &str) -> Result<()> {
-        let path = reminders_path(self);
+        let (paths, path) = (self.paths(), reminders_path(self));
         let _serial = self.write();
-        let mut all: Vec<Reminder> = read_bin(&path)?.unwrap_or_default();
+        let mut all: Vec<Reminder> = paths.read_bin(&path)?.unwrap_or_default();
         all.retain(|r| r.id != id);
-        write_bin(&path, &all)
+        paths.write_bin(&path, &all)
     }
 
     /// Takes the reminders due at `now` out of the list, and returns them. Each fires once.
     pub fn take_due_reminders(&self, now: u64) -> Result<Vec<Reminder>> {
-        let path = reminders_path(self);
+        let (paths, path) = (self.paths(), reminders_path(self));
         let _serial = self.write();
-        let all: Vec<Reminder> = read_bin(&path)?.unwrap_or_default();
+        let all: Vec<Reminder> = paths.read_bin(&path)?.unwrap_or_default();
         let (due, later): (Vec<Reminder>, Vec<Reminder>) = all.into_iter().partition(|r| r.at_ms <= now);
         if !due.is_empty() {
-            write_bin(&path, &later)?;
+            paths.write_bin(&path, &later)?;
         }
         Ok(due)
     }

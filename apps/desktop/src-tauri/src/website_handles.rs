@@ -5,6 +5,10 @@
 //! The claim travels as an ordinary `HandleClaim` in each server, so nothing on the wire changes. This module keeps
 //! the results of those checks for this run, decides when each is stale or due again, and stores the domain you are
 //! setting up for yourself in `website-handle.json` in the data folder.
+//!
+//! A lookup tells the resolver, and the domain's own name servers, that someone is looking at that handle. So a
+//! handle is checked only when the user opens that person's profile or points at the handle, never because it was
+//! drawn in a list or a message, and a result is reused for hours.
 
 use std::collections::HashMap;
 use std::io;
@@ -18,14 +22,15 @@ use serde::{Deserialize, Serialize};
 const FILE: &str = "website-handle.json";
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 const MINUTE_MS: u64 = 60_000;
+const HOUR_MS: u64 = 60 * MINUTE_MS;
 /// A pass is shown as verified for this long. After it the handle is "not checked yet" until a new check passes.
-pub const VERIFIED_FOR_MS: u64 = 6 * 60 * MINUTE_MS;
-/// A pass is checked again in the background once it is this old, well before it goes stale.
-pub const RECHECK_AFTER_MS: u64 = 60 * MINUTE_MS;
-/// A definite failure (no record, wrong value) is shown for this long, then checked again.
-pub const RETRY_FAILED_MS: u64 = 10 * MINUTE_MS;
-/// A lookup that could not finish (offline, timed out) is tried again after this.
-pub const RETRY_ERROR_MS: u64 = 2 * MINUTE_MS;
+pub const VERIFIED_FOR_MS: u64 = 24 * HOUR_MS;
+/// A pass is checked again, when the user next asks, once it is this old, well before it goes stale.
+pub const RECHECK_AFTER_MS: u64 = 6 * HOUR_MS;
+/// A definite failure (no record, wrong value) is shown for this long before it can be checked again.
+pub const RETRY_FAILED_MS: u64 = HOUR_MS;
+/// A lookup that could not finish (offline, timed out) can be tried again after this.
+pub const RETRY_ERROR_MS: u64 = 10 * MINUTE_MS;
 /// Most checks remembered. The oldest are dropped first.
 pub const MAX_ENTRIES: usize = 1024;
 
@@ -251,6 +256,15 @@ mod tests {
         assert_eq!(state_of(Some(&fail), T0), (State::Failed, Some("gone".into())));
         let error = (Outcome::Error("offline".into()), T0);
         assert_eq!(state_of(Some(&error), T0), (State::Unchecked, Some("offline".into())));
+    }
+
+    #[test]
+    fn a_result_is_reused_for_hours() {
+        let hour = 60 * MINUTE_MS;
+        assert!(!due(Some(&(Outcome::Verified, T0)), T0 + 5 * hour));
+        assert!(!due(Some(&(Outcome::Failed(String::new()), T0)), T0 + hour - 1));
+        assert!(!due(Some(&(Outcome::Error(String::new()), T0)), T0 + 9 * MINUTE_MS));
+        assert!(VERIFIED_FOR_MS >= 24 * hour);
     }
 
     #[test]

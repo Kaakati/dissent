@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::engine::{clean_message, now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::groups::{msg_id, packet_conv, Action, Body, ConvBook, ConvId, ConvKind, ConvMeta, ConvMsg, Delivery};
-use crate::store::{append_record, read_records, rewrite_records, Paths};
+use crate::store::Paths;
 use crate::views::{DmItem, EngineEvent, ReactionView, ReplyPreview};
 use crate::world::World;
 
@@ -45,7 +45,7 @@ pub(crate) struct ConvAct {
 pub(crate) fn load_acts(paths: &Paths, book: &ConvBook) -> BTreeMap<ConvId, Vec<ConvAct>> {
     book.convs
         .keys()
-        .map(|id| (*id, read_records::<ConvAct>(&paths.conv_acts(id)).unwrap_or_default()))
+        .map(|id| (*id, paths.read_records::<ConvAct>(&paths.conv_acts(id)).unwrap_or_default()))
         .collect()
 }
 
@@ -154,7 +154,7 @@ fn clear_text(w: &mut World, conv: ConvId, target: [u8; 32]) -> Result<()> {
         return Ok(());
     }
     msg.text.clear();
-    rewrite_records(&w.paths.conv_log(&conv), msgs.as_slice())
+    w.paths.rewrite_records(&w.paths.conv_log(&conv), msgs.as_slice())
 }
 
 /// The body of a message we sent, rebuilt from its stored text. It is used only when it gives back the message's
@@ -358,7 +358,7 @@ impl Engine {
         };
         {
             let mut guard = self.write();
-            append_record(&guard.paths.conv_log(&conv), &stored)?;
+            guard.paths.append_record(&guard.paths.conv_log(&conv), &stored)?;
             guard.index_conv_message(conv, &stored.text);
             guard.conv_msgs.entry(conv).or_default().push(stored);
         }
@@ -388,7 +388,7 @@ impl Engine {
             return Err(CoreError::Invalid("only the author may change this message".into()));
         }
         let act = ConvAct { id, from, hlc, action };
-        append_record(&w.paths.conv_acts(&conv), &act)?;
+        w.paths.append_record(&w.paths.conv_acts(&conv), &act)?;
         let mut released = Vec::new();
         if let Action::Delete { target } = act.action {
             if author == Some(from) {
@@ -680,10 +680,10 @@ mod tests {
     #[test]
     fn a_message_log_written_before_actions_existed_still_loads() {
         let dir = std::env::temp_dir().join(format!("dissent-conv-log-{}", now_ms()));
-        let paths = Paths::new(dir.clone());
+        let paths = Paths::for_test(dir.clone());
         let conv = ConvId([9; 32]);
         let old = msg(1, root(1), "from before");
-        append_record(&paths.conv_log(&conv), &old).unwrap();
+        crate::store::append_record_plain(&paths.conv_log(&conv), &old).unwrap();
         let mut book = ConvBook::default();
         book.convs.insert(
             conv,

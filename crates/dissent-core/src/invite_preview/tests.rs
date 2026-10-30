@@ -37,11 +37,32 @@ async fn a_token_holder_gets_a_preview_that_verifies() {
         let Response::InvitePreview(signed) = reply else {
             panic!("expected a preview, got {reply:?}");
         };
-        signed.verify(&id).expect("the preview is signed by alice's device");
+        signed.verify(&id).expect("the preview verifies");
         assert_eq!(signed.preview.name, "Vault");
         assert_eq!(signed.preview.member_count, 1);
         assert_eq!(signed.preview.invite, InviteStatus::Live);
         assert!(signed.verify(&CommunityKey::generate().id()).is_err(), "a preview is for one community");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_preview_names_neither_the_answering_root_nor_its_device() {
+    crate::testutil::bounded(async {
+        let (alice, id) = gated_community().await;
+        let token = token_of(&alice, id);
+        let answer = |asker| match alice.engine.answer_invite_preview_more(asker, id, token, None) {
+            Response::InvitePreviewMore(more) => *more,
+            other => panic!("expected a preview, got {other:?}"),
+        };
+        let first = answer(DeviceKey::generate().id());
+        first.verify(&id).expect("every part verifies under the answer's own key");
+        let cert = &first.full.base.cert;
+        assert_ne!(cert.root, alice.identity.root_id(), "the answer does not name alice's root");
+        assert_ne!(cert.device, alice.identity.device_id(), "nor her device");
+        assert_ne!(cert.root, first.full.base.genesis.owner, "nor the owner as the signer");
+        let second = answer(DeviceKey::generate().id());
+        assert_ne!(second.full.base.cert.root, cert.root, "two answers cannot be linked by their key");
     })
     .await;
 }
@@ -83,7 +104,7 @@ async fn each_requester_gets_a_fixed_number_of_previews_a_minute() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_revoked_invite_is_reported_as_revoked() {
+async fn a_revoked_or_expired_invite_gets_the_refusal_a_wrong_secret_gets() {
     crate::testutil::bounded(async {
         let (alice, id) = gated_community().await;
         let invite_id: [u8; 16] = rand::random();
@@ -104,14 +125,40 @@ async fn a_revoked_invite_is_reported_as_revoked() {
             .revoke_invite(id, invite_id)
             .await
             .expect("alice revokes it");
+        let expired: [u8; 16] = rand::random();
+        alice
+            .engine
+            .author_publish(
+                id,
+                dissent_events::ChannelId::CONTROL,
+                dissent_events::Payload::InviteCreate {
+                    invite_id: expired,
+                    expires_ms: Some(1),
+                },
+            )
+            .await
+            .expect("alice records an invite that has run out");
         let token = token_of(&alice, id);
+        let wrong = alice
+            .engine
+            .answer_invite_preview(DeviceKey::generate().id(), id, community_token(&[9; 32], &id), None);
+        for (what, dead) in [("revoked", invite_id), ("expired", expired)] {
+            for reply in [
+                alice.engine.answer_invite_preview(DeviceKey::generate().id(), id, token, Some(dead)),
+                alice.engine.answer_invite_preview_full(DeviceKey::generate().id(), id, token, Some(dead)),
+                alice.engine.answer_invite_preview_more(DeviceKey::generate().id(), id, token, Some(dead)),
+            ] {
+                assert_eq!(format!("{reply:?}"), format!("{wrong:?}"), "a {what} invite is refused as a wrong secret is");
+            }
+        }
+        // An id this member has not seen yet still gets an answer: it may be a fresh invite on its way.
         let reply = alice
             .engine
-            .answer_invite_preview(DeviceKey::generate().id(), id, token, Some(invite_id));
+            .answer_invite_preview(DeviceKey::generate().id(), id, token, Some(rand::random()));
         let Response::InvitePreview(signed) = reply else {
             panic!("expected a preview, got {reply:?}");
         };
-        assert_eq!(signed.preview.invite, InviteStatus::Revoked);
+        assert_eq!(signed.preview.invite, InviteStatus::Unknown);
     })
     .await;
 }
@@ -196,7 +243,8 @@ async fn a_members_own_preview_shows_the_new_name_and_banner() {
         assert!(view.already_member);
         assert_eq!(view.name, "Vault Two");
         let banner = view.banner.expect("the banner file is on this device");
-        assert_eq!(std::fs::read(banner).unwrap(), banner_bytes());
+        // Pictures are sealed at rest; the window reads them through `open_picture`.
+        assert_eq!(alice.engine.open_picture(std::path::Path::new(&banner)).unwrap().0, banner_bytes());
     })
     .await;
 }

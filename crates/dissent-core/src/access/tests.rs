@@ -363,6 +363,12 @@ async fn two_admins_rotating_at_once_converge_on_one_secret() {
         } else {
             (rb.event.id, secret_b)
         };
+        // Each author installs its own secret as it publishes, as `rotate_if_due` does. An MLS
+        // sender cannot open its own message, so without this the winning author could learn its
+        // own secret only by asking the other admin, and a member's maintenance pass would retry
+        // that only 30 s later.
+        alice.engine.install_secret(id, 1, secret_a, ra.event.id.0).await;
+        bob.engine.install_secret(id, 1, secret_b, rb.event.id.0).await;
 
         // Each admin sees the other's rotation, in opposite orders.
         alice

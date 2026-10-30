@@ -76,9 +76,7 @@ const EXT_EMBEDS: u8 = 3;
 
 /// Keeps a link preview's picture on this device, under its attachment id, where the thumbnails are.
 pub(crate) fn keep_picture(paths: &crate::store::Paths, file: &FileRef, jpeg: &[u8]) -> Result<()> {
-    std::fs::create_dir_all(paths.thumbnails_dir())?;
-    std::fs::write(thumb_path(paths, &attachment_id(file)), jpeg)?;
-    Ok(())
+    paths.write_bytes(&thumb_path(paths, &attachment_id(file)), jpeg)
 }
 
 /// The picture of a link preview: a re-encoded JPEG blob, and its size.
@@ -500,13 +498,66 @@ pub(crate) struct AttachBook {
     /// Running download tasks, by attachment id.
     #[serde(skip)]
     pub tasks: BTreeMap<String, tokio::task::JoinHandle<()>>,
-    /// Photos and videos go out with their location and camera details. Off by default, so they are removed. Set by
-    /// the app from its own settings on each start (`set_keep_photo_metadata`), so it is not stored here.
+    /// The default of "Remove identifying details" for photos and personal videos is off. False by default, so the
+    /// details are removed unless the user changes a file's choice. Set by the app from its own settings on each start
+    /// (`set_keep_photo_metadata`), so it is not stored here.
     #[serde(skip)]
     pub keep_photo_metadata: bool,
 }
 
-/// A copy of a file with its metadata removed, in its own folder under the staging folder. Dropping it deletes both.
+/// A file to send, and whether its identifying details are removed. `scrub: None` follows the default for its kind
+/// (`FileInspection::scrub_default`).
+#[derive(Clone, Debug)]
+pub struct OutgoingFile {
+    pub path: PathBuf,
+    pub scrub: Option<bool>,
+}
+
+impl From<PathBuf> for OutgoingFile {
+    fn from(path: PathBuf) -> Self {
+        Self { path, scrub: None }
+    }
+}
+
+/// What the app shows for a file before it is sent: its kind, whether "Remove identifying details" starts on, and
+/// whether the details can be removed at all (when they cannot, the app asks before sending it as it is).
+#[derive(Clone, Debug, Serialize)]
+pub struct FileInspection {
+    pub path: String,
+    pub kind: crate::scrub::MediaKind,
+    pub scrub_default: bool,
+    pub scrubbable: bool,
+}
+
+fn inspection_of(path: &Path, keep_default: bool) -> FileInspection {
+    use crate::scrub::MediaKind;
+    let found = crate::scrub::inspect(path, &mime_of(path));
+    let scrub_default = !keep_default && match found.kind {
+        MediaKind::Photo => true,
+        MediaKind::Video => found.identifying,
+        MediaKind::Audio | MediaKind::Other => false,
+    };
+    FileInspection { path: path.to_string_lossy().into_owned(), kind: found.kind, scrub_default, scrubbable: found.removable }
+}
+
+/// Each file's kind and whether its details are removed: its own choice, else the default for it.
+async fn plan_files(files: &[OutgoingFile], keep_default: bool) -> Vec<(crate::scrub::MediaKind, bool)> {
+    let files = files.to_vec();
+    tokio::task::spawn_blocking(move || {
+        files
+            .iter()
+            .map(|f| {
+                let kind = crate::scrub::kind_of(&mime_of(&f.path));
+                let scrub = f.scrub.unwrap_or_else(|| inspection_of(&f.path, keep_default).scrub_default);
+                (kind, scrub)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// A staged copy of a file being sent, in its own folder under the staging folder. Dropping it deletes both.
 struct StagedCopy {
     dir: PathBuf,
     path: PathBuf,
@@ -520,55 +571,51 @@ impl Drop for StagedCopy {
     }
 }
 
-/// Largest picture whose metadata is removed. It is read whole; a larger one is sent as it is.
-const STRIP_IMAGE_MAX: u64 = 64 * 1024 * 1024;
-
-/// The path to a copy of `path` without location and camera details, under the same file name, or `None` when it
-/// has none to remove, is not a format `photo_metadata` handles, or cannot be read. The original is never changed.
-fn stage_without_metadata(staging: &Path, path: &Path, mime: &str) -> std::io::Result<Option<StagedCopy>> {
-    let name = path.file_name().map(|n| n.to_owned()).unwrap_or_else(|| "file".into());
-    let new_dir = || -> std::io::Result<PathBuf> {
-        let dir = staging.join(format!("{:016x}", rand::random::<u64>()));
-        std::fs::create_dir_all(&dir)?;
-        Ok(dir)
+/// The name a file goes out under when its details are removed: what it is, not what the camera or the owner called
+/// it ("photo.jpg" rather than "IMG_20261029_1530.jpg" or "Maya's birthday.jpg"). `suffix` tells several apart.
+fn generic_name(kind: crate::scrub::MediaKind, ext: &str, suffix: Option<&str>) -> String {
+    use crate::scrub::MediaKind;
+    let stem = match kind {
+        MediaKind::Photo => "photo",
+        MediaKind::Video => "video",
+        MediaKind::Audio => "audio",
+        MediaKind::Other => "file",
     };
-    if mime.starts_with("image/") {
-        if std::fs::metadata(path)?.len() > STRIP_IMAGE_MAX {
-            return Ok(None);
-        }
-        let data = std::fs::read(path)?;
-        let Some(stripped) = crate::photo_metadata::strip_image(mime, &data) else {
-            return Ok(None);
-        };
-        let dir = new_dir()?;
-        let staged = StagedCopy { path: dir.join(&name), dir };
-        std::fs::write(&staged.path, stripped)?;
-        return Ok(Some(staged));
-    }
-    if crate::photo_metadata::is_mp4_family(mime) {
-        let patches = crate::photo_metadata::mp4_patches(&mut std::fs::File::open(path)?)?;
-        if patches.is_empty() {
-            return Ok(None);
-        }
-        // The overwrites keep every box's size, so the copy is the original with a few bytes changed.
-        let dir = new_dir()?;
-        let staged = StagedCopy { path: dir.join(&name), dir };
-        std::fs::copy(path, &staged.path)?;
-        let mut copy = std::fs::OpenOptions::new().write(true).open(&staged.path)?;
-        for patch in patches {
-            use std::io::{Seek, Write};
-            copy.seek(std::io::SeekFrom::Start(patch.offset))?;
-            copy.write_all(&patch.bytes)?;
-        }
-        copy.sync_all()?;
-        return Ok(Some(staged));
-    }
-    Ok(None)
+    let stem = suffix.map_or_else(|| stem.to_string(), |s| format!("{stem}-{s}"));
+    if ext.is_empty() { stem } else { format!("{stem}.{ext}") }
+}
+
+/// The original's extension, lowercased, if it is a plain one.
+fn plain_ext(path: &Path) -> String {
+    path.extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .filter(|e| !e.is_empty() && e.len() <= 8 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_default()
+}
+
+/// Writes a copy of `path` without its identifying details, under `name`, to its own folder in `staging`. A photo that
+/// had to be re-encoded gets a `.png` name. The original is never changed.
+fn stage_scrubbed(staging: &Path, path: &Path, kind: crate::scrub::MediaKind, suffix: Option<&str>) -> std::result::Result<StagedCopy, crate::scrub::Failed> {
+    let dir = staging.join(format!("{:016x}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir)?;
+    let work = dir.join("scrubbing");
+    let guard = StagedCopy { path: work.clone(), dir: dir.clone() };
+    let how = crate::scrub::scrub(path, &work)?;
+    let ext = match how {
+        crate::scrub::Scrubbed::ReencodedPng => "png".to_string(),
+        crate::scrub::Scrubbed::Cleaned => plain_ext(path),
+    };
+    let named = dir.join(generic_name(kind, &ext, suffix));
+    std::fs::rename(&work, &named)?;
+    let staged = StagedCopy { path: named, dir };
+    std::mem::forget(guard); // `staged` owns the folder now
+    Ok(staged)
 }
 
 #[cfg(test)]
 mod staging_tests {
     use super::*;
+    use crate::scrub::MediaKind;
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("dissent-staging-{tag}-{}-{:x}", std::process::id(), rand::random::<u64>()));
@@ -576,28 +623,31 @@ mod staging_tests {
         dir
     }
 
-    /// SOI, a JFIF header, an Exif block with a location in it, then the scan.
+    /// A real picture with an Exif block that holds a location, and a name that says who and when.
     fn tagged_jpeg() -> Vec<u8> {
-        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
-        j.extend_from_slice(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
-        let exif = b"Exif\0\0MM\0\x2A\0\0\0\x08\0\0GPS 37.3349 N";
+        let img = image::RgbImage::from_fn(4, 4, |x, y| image::Rgb([x as u8 * 60, y as u8 * 60, 90]));
+        let mut clean = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut clean, image::ImageFormat::Jpeg).unwrap();
+        let clean = clean.into_inner();
+        let app0_end = 4 + u16::from_be_bytes([clean[4], clean[5]]) as usize;
+        let exif = [b"Exif\0\0II*\0\x08\0\0\0\0\0".as_slice(), b"GPS 37.3349 N Owner Maya Doe"].concat();
+        let mut j = clean[..app0_end].to_vec();
         j.extend_from_slice(&[0xFF, 0xE1]);
         j.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
-        j.extend_from_slice(exif);
-        j.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9]);
+        j.extend_from_slice(&exif);
+        j.extend_from_slice(&clean[app0_end..]);
         j
     }
 
     #[test]
-    fn a_photo_is_sent_from_a_stripped_copy_and_the_original_is_never_changed() {
+    fn a_photo_is_sent_from_a_scrubbed_copy_under_a_generic_name_and_the_original_never_changes() {
         let dir = scratch("photo");
-        let original = dir.join("beach.jpg");
+        let original = dir.join("IMG_20261029_1530 Maya.JPG");
         std::fs::write(&original, tagged_jpeg()).unwrap();
-        let staging = dir.join("staging");
-        let staged = stage_without_metadata(&staging, &original, "image/jpeg").unwrap().expect("a stripped copy");
-        assert_eq!(staged.path.file_name().unwrap(), "beach.jpg", "the copy keeps the file name");
+        let staged = stage_scrubbed(&dir.join("staging"), &original, MediaKind::Photo, None).expect("a scrubbed copy");
+        assert_eq!(staged.path.file_name().unwrap(), "photo.jpg", "a generic name, with the extension lowercased");
         let copy = std::fs::read(&staged.path).unwrap();
-        assert!(!copy.windows(7).any(|w| w == b"37.3349"), "the copy has no location");
+        assert!(!copy.windows(7).any(|w| w == b"37.3349") && !copy.windows(8).any(|w| w == b"Maya Doe"));
         assert_eq!(std::fs::read(&original).unwrap(), tagged_jpeg(), "the original is untouched");
         let staged_dir = staged.dir.clone();
         drop(staged);
@@ -606,21 +656,21 @@ mod staging_tests {
     }
 
     #[test]
-    fn a_file_with_nothing_to_remove_is_sent_as_it_is() {
-        let dir = scratch("plain");
+    fn several_files_get_suffixes_and_a_file_that_cannot_be_scrubbed_is_refused() {
+        assert_eq!(generic_name(MediaKind::Video, "mp4", Some("3fa2")), "video-3fa2.mp4");
+        assert_eq!(generic_name(MediaKind::Other, "", None), "file");
+        let dir = scratch("refuse");
         let notes = dir.join("notes.txt");
-        std::fs::write(&notes, "GPS 37.3349").unwrap();
-        assert!(stage_without_metadata(&dir.join("staging"), &notes, "text/plain").unwrap().is_none());
-        let clean = dir.join("clean.jpg");
-        std::fs::write(&clean, [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9]).unwrap();
-        assert!(stage_without_metadata(&dir.join("staging"), &clean, "image/jpeg").unwrap().is_none());
+        std::fs::write(&notes, "by Maya Doe").unwrap();
+        assert!(stage_scrubbed(&dir.join("staging"), &notes, MediaKind::Other, None).is_err());
+        assert!(std::fs::read_dir(dir.join("staging")).map(|d| d.count()).unwrap_or(0) == 0, "a failed copy leaves nothing behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
 impl AttachBook {
     pub fn load(paths: &crate::store::Paths) -> Result<Self> {
-        let mut book: AttachBook = crate::store::read_bin(&paths.attachments())?.unwrap_or_default();
+        let mut book: AttachBook = paths.read_bin(&paths.attachments())?.unwrap_or_default();
         // A download that was running when the engine stopped is paused. Its bytes are kept.
         for t in book.transfers.values_mut() {
             if t.state == "active" || t.state == "waiting" {
@@ -631,7 +681,7 @@ impl AttachBook {
     }
 
     pub fn save(&self, paths: &crate::store::Paths) -> Result<()> {
-        crate::store::write_bin(&paths.attachments(), self)
+        paths.write_bin(&paths.attachments(), self)
     }
 }
 
@@ -668,9 +718,16 @@ impl World {
                         )
                     })
                     .unwrap_or_default();
+                // A file this device sent shows under the name it has here; the others got it under the name it was
+                // sent with, which is generic when its details were removed.
+                let own_name = transfer
+                    .filter(|t| t.direction == "upload")
+                    .and_then(|t| t.local_path.as_ref())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned());
                 AttachmentView {
                     id: id.clone(),
-                    name: a.file.safe_name(),
+                    name: own_name.unwrap_or_else(|| a.file.safe_name()),
                     size: a.file.size,
                     mime: a.file.mime.clone(),
                     needed: state != "downloaded",
@@ -735,13 +792,20 @@ impl World {
     }
 }
 
-/// The blobs a message's thumbnails and preview pictures point at, as `(hash, ciphertext size)`. Seeders are told these
-/// so they can keep them. See `mirror_hint`.
+/// The blobs a message's thumbnails and preview pictures point at, as `(hash, ciphertext size)`. The sender tells the
+/// seeders these so they can keep them (see `mirror_hint`), and nobody else does. A thumbnail is named only when its file
+/// is marked `seed`, so a file its sender kept off the seeders keeps its thumbnail off them too. Preview pictures have
+/// no such mark; they are the sender's own message's pictures.
 pub(crate) fn media_blobs(plain: &str) -> Vec<([u8; 32], u64)> {
     let Some(o) = open(plain) else {
         return Vec::new();
     };
-    let thumbs = o.thumbs.iter().filter(|t| valid_thumb(t)).map(|t| (t.file.hash, t.file.cipher_size));
+    let seeded = |of: &[u8; 32]| o.files.iter().any(|f| f.seed && f.file.hash == *of);
+    let thumbs = o
+        .thumbs
+        .iter()
+        .filter(|t| valid_thumb(t) && seeded(&t.of))
+        .map(|t| (t.file.hash, t.file.cipher_size));
     let previews = o.extras.iter().filter_map(|e| e.image.as_ref()).map(|i| (i.file.hash, i.file.cipher_size));
     thumbs.chain(previews).collect()
 }
@@ -753,26 +817,42 @@ fn thumb_path(paths: &crate::store::Paths, id: &str) -> PathBuf {
 
 impl Engine {
     /// Encrypts the files and returns them ready to pack into a message, with the thumbnails of the
-    /// images among them.
-    pub(crate) async fn add_files(&self, paths: &[PathBuf], seed: bool) -> Result<(Vec<Attached>, Vec<Thumb>)> {
+    /// images among them. A file whose details are to be removed goes from a scrubbed copy under a generic name; one
+    /// whose details cannot be removed fails the send, so nothing goes out with what the user asked to remove.
+    pub(crate) async fn add_files(&self, files: &[OutgoingFile], seed: bool) -> Result<(Vec<Attached>, Vec<Thumb>)> {
         let mut out = Vec::new();
         let mut thumbs = Vec::new();
-        let (keep_metadata, staging) = {
+        let (keep_default, staging) = {
             let w = self.read();
             (w.attach.keep_photo_metadata, w.paths.staging_dir())
         };
-        for path in paths {
+        // How many files of each generic name this send has, so several photos become photo-xxxx.jpg.
+        let plans: Vec<(crate::scrub::MediaKind, bool)> = plan_files(files, keep_default).await;
+        let mut names: BTreeMap<String, usize> = BTreeMap::new();
+        for (file, (kind, scrub)) in files.iter().zip(&plans) {
+            if *scrub {
+                *names.entry(generic_name(*kind, &plain_ext(&file.path), None)).or_default() += 1;
+            }
+        }
+        for (file, (kind, scrub)) in files.iter().zip(plans) {
+            let path = &file.path;
             let mime = mime_of(path);
-            // Location and camera details are removed into a staged copy; the file on disk stays as it is. A copy that
-            // cannot be made fails the send rather than sending the details the user asked to remove.
-            let staged = if keep_metadata {
-                None
+            let staged = if scrub {
+                let crowded = names.get(&generic_name(kind, &plain_ext(path), None)).copied().unwrap_or(0) > 1;
+                let suffix = crowded.then(|| format!("{:04x}", rand::random::<u16>()));
+                let (staging, source) = (staging.clone(), path.clone());
+                let shown = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                Some(
+                    tokio::task::spawn_blocking(move || stage_scrubbed(&staging, &source, kind, suffix.as_deref()))
+                        .await
+                        .map_err(|e| CoreError::Invalid(format!("could not prepare {shown}: {e}")))?
+                        .map_err(|e| {
+                            debug!(file = %shown, reason = %e.0, "details not removed");
+                            CoreError::Invalid(format!("Couldn't remove details from {shown}"))
+                        })?,
+                )
             } else {
-                let (staging, source, kind) = (staging.clone(), path.clone(), mime.clone());
-                tokio::task::spawn_blocking(move || stage_without_metadata(&staging, &source, &kind))
-                    .await
-                    .map_err(|e| CoreError::Invalid(format!("could not prepare {}: {e}", path.display())))?
-                    .map_err(|e| CoreError::Invalid(format!("could not remove the photo details from {}: {e}", path.display())))?
+                None
             };
             let file = self
                 .inner
@@ -885,7 +965,21 @@ impl Engine {
         seed: bool,
         mentions: Mentions,
     ) -> Result<crate::views::MessageItem> {
-        let (attached, thumbs) = self.add_files(&paths, seed).await?;
+        let files: Vec<OutgoingFile> = paths.into_iter().map(OutgoingFile::from).collect();
+        self.send_files_with_options(community, channel, files, text, seed, mentions).await
+    }
+
+    /// Sends files to a channel, each with its own "Remove identifying details" choice.
+    pub async fn send_files_with_options(
+        &self,
+        community: dissent_identity::CommunityId,
+        channel: dissent_events::ChannelId,
+        files: Vec<OutgoingFile>,
+        text: String,
+        seed: bool,
+        mentions: Mentions,
+    ) -> Result<crate::views::MessageItem> {
+        let (attached, thumbs) = self.add_files(&files, seed).await?;
         let plain = pack_all(text.trim(), &attached, &[], &thumbs, Some(&mentions))?;
         self.send_channel_plain(community, channel, plain).await
     }
@@ -897,7 +991,18 @@ impl Engine {
         paths: Vec<PathBuf>,
         text: String,
     ) -> Result<crate::views::DmItem> {
-        let (attached, thumbs) = self.add_files(&paths, true).await?;
+        let files: Vec<OutgoingFile> = paths.into_iter().map(OutgoingFile::from).collect();
+        self.send_conversation_files_with(conv, files, text).await
+    }
+
+    /// Sends files to a conversation, each with its own "Remove identifying details" choice.
+    pub async fn send_conversation_files_with(
+        &self,
+        conv: crate::groups::ConvId,
+        files: Vec<OutgoingFile>,
+        text: String,
+    ) -> Result<crate::views::DmItem> {
+        let (attached, thumbs) = self.add_files(&files, true).await?;
         let plain = pack_full(text.trim(), &attached, &[], &thumbs)?;
         self.send_conversation_plain(conv, plain).await
     }
@@ -911,6 +1016,22 @@ impl Engine {
     ) -> Result<crate::views::DmItem> {
         let conv = self.ensure_dm(peer)?;
         self.send_conversation_files(conv, paths, text).await
+    }
+
+    /// Sends files to a person in a 1:1 conversation, each with its own "Remove identifying details" choice.
+    pub async fn send_dm_files_with(&self, peer: dissent_identity::RootId, files: Vec<OutgoingFile>, text: String) -> Result<crate::views::DmItem> {
+        let conv = self.ensure_dm(peer)?;
+        self.send_conversation_files_with(conv, files, text).await
+    }
+
+    /// The kind of each file, whether "Remove identifying details" starts on for it, and whether its details can be
+    /// removed. Photos start on, and so do videos that name the device or place they were recorded with, unless the
+    /// user made "keep" the default; music, other videos and other files start off.
+    pub async fn inspect_files(&self, paths: Vec<PathBuf>) -> Vec<FileInspection> {
+        let keep_default = self.read().attach.keep_photo_metadata;
+        tokio::task::spawn_blocking(move || paths.iter().map(|p| inspection_of(p, keep_default)).collect())
+            .await
+            .unwrap_or_default()
     }
 
     /// Providers for files from `roots`: their devices whose addresses we know.
@@ -1647,36 +1768,6 @@ impl Engine {
         }
     }
 
-    /// Whether a message is not in a public channel. It is private, or its place is unknown, and either way
-    /// its media hashes are not given to seeders.
-    fn is_private_message(&self, community: dissent_identity::CommunityId, message: &str) -> bool {
-        let Ok(id) = message.parse::<dissent_events::EventId>() else {
-            return true;
-        };
-        let w = self.read();
-        let Some(c) = w.communities.get(&community) else {
-            return true;
-        };
-        let state = c.state();
-        !state.channels.keys().any(|chan| {
-            !state.is_private(*chan) && state.messages.get(chan).is_some_and(|ms| ms.iter().any(|m| m.id == id))
-        })
-    }
-
-    /// Tells the seeders about the thumbnails and preview pictures of a message this device has fetched.
-    fn hint_media_of(&self, community: Option<dissent_identity::CommunityId>, message: &str) {
-        let Some(c) = community else {
-            return;
-        };
-        // A private channel's media hashes are for its readers only, so seeders are not told them.
-        if self.is_private_message(c, message) {
-            return;
-        }
-        if let Ok((text, _)) = self.message_text(Some(c), message) {
-            self.hint_seeders(c, media_blobs(&text));
-        }
-    }
-
     /// Fetches one thumbnail and tells the UI when it is on this device.
     async fn fetch_thumbnail(
         &self,
@@ -1684,10 +1775,9 @@ impl Engine {
         message: String,
         attachment: String,
     ) {
+        // A fetch tells the seeders nothing: a hint from each fetching member would tell them who fetched what, and
+        // when. Only the sender hints (see `media_blobs`).
         let result = self.download_thumbnail(community, &message, &attachment).await;
-        if result.is_ok() {
-            self.hint_media_of(community, &message);
-        }
         self.write().thumb_fetching.remove(&attachment);
         match result {
             Ok(()) => self.emit(EngineEvent::AttachmentChanged {
@@ -1733,9 +1823,6 @@ impl Engine {
         picture: String,
     ) {
         let result = self.download_embed_image(community, &message, &picture).await;
-        if result.is_ok() {
-            self.hint_media_of(community, &message);
-        }
         self.write().thumb_fetching.remove(&picture);
         match result {
             Ok(()) => self.emit(EngineEvent::AttachmentChanged {
@@ -1782,31 +1869,20 @@ impl Engine {
             .filter_map(|p| p.to_iroh().ok())
             .collect();
         let node = self.node();
-        let (target, scratch) = {
-            let w = self.read();
-            (
-                thumb_path(&w.paths, id),
-                w.paths.thumbnails_dir().join(format!("{id}.part")),
-            )
-        };
-        // Each picture decrypts into its own folder, so two fetches cannot pick the same name.
-        std::fs::create_dir_all(&scratch)?;
-        let fetched = self
+        let paths = self.paths();
+        let target = thumb_path(&paths, id);
+        // Decrypted in memory and kept sealed, so the picture is never plaintext on disk.
+        let data = self
             .inner
             .files
-            .fetch(node.endpoint(), &from, &file, &scratch, |_, _| {})
-            .await;
-        let result = fetched.map_err(files_err).and_then(|path| {
-            // The sender chose these bytes. Keep them only if they are a picture this device could make.
-            let data = std::fs::read(&path)?;
-            if !valid(&data) {
-                return Err(CoreError::Invalid("the blob is not a picture this device accepts".into()));
-            }
-            std::fs::rename(&path, &target)?;
-            Ok(())
-        });
-        let _ = std::fs::remove_dir_all(&scratch);
-        result
+            .fetch_bytes(node.endpoint(), &from, &file, file.size)
+            .await
+            .map_err(files_err)?;
+        // The sender chose these bytes. Keep them only if they are a picture this device could make.
+        if !valid(&data) {
+            return Err(CoreError::Invalid("the blob is not a picture this device accepts".into()));
+        }
+        paths.write_bytes(&target, &data)
     }
 }
 
@@ -2259,6 +2335,15 @@ mod wire_tests {
         let sealed = pack_full("look", &[a_file()], &[], &[a_thumb()]).unwrap();
         assert_eq!(unpack(&sealed), ("look".to_string(), vec![a_file()]));
         assert_eq!(thumbs_of(&sealed), vec![a_thumb()]);
+    }
+
+    #[test]
+    fn seeders_are_told_a_thumbnail_only_when_its_file_may_be_seeded() {
+        let seeded = pack_full("look", &[a_file()], &[], &[a_thumb()]).unwrap();
+        assert_eq!(media_blobs(&seeded), vec![([2; 32], 56)]);
+        let kept_off = Attached { seed: false, ..a_file() };
+        let unseeded = pack_full("look", &[kept_off], &[], &[a_thumb()]).unwrap();
+        assert!(media_blobs(&unseeded).is_empty(), "a file kept off the seeders keeps its thumbnail off them");
     }
 
     #[test]

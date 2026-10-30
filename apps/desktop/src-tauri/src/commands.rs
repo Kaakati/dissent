@@ -151,6 +151,10 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     .await
     .map_err(err)?;
     crate::attachments::prepare_engine(app, &engine);
+    // The engine keeps no copy of the photo choice, so a new one is told before it serves any command.
+    if let Some(shell) = app.try_state::<crate::shell_cmds::ShellState>() {
+        engine.set_keep_photo_metadata(shell.get().keep_photo_metadata);
+    }
     crate::fake_capture(&engine);
     crate::voice::prepare(&engine, &app.state::<crate::voice::Voice>());
     *state.identity.lock().map_err(err)? = identity;

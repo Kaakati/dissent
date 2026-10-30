@@ -197,7 +197,8 @@ A seeder is a storage member. It holds ciphertext and no read keys, and it serve
 - **Thumbnails and link-preview images.** Their references sit inside the sealed message, so a seeder cannot
   read their hashes, and the cleartext manifest is left alone (older readers refuse a message whose manifest does
   not match its files). Instead, the sender tells the community's seeders the hash and size of each thumbnail and
-  preview picture when it posts, and a member does the same after it fetches one. A seeder keeps the ciphertext
+  preview picture when it posts: a thumbnail only when its file is marked `seed`. A member that fetches one tells
+  the seeders nothing, so they never learn who fetched what. A seeder keeps the ciphertext
   within its `MirrorPolicy`, from any member who holds it, and accepts hints only from members. See `mirror_hint`
   and `06-threat-model.md`, "Seeder hints". Older seeders reject the unknown request, which costs nothing.
 - **History keys and epoch keys. Never.** Storage members are outside the group, and `EpochHistory` and

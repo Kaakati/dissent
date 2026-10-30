@@ -25,8 +25,8 @@ use url::Url;
 
 pub use contact::{short_url, ContactCard, ContactLink};
 pub use dns::{
-    check_dns_handle, dns_record_name, dns_record_value, normalize_domain, verify_dns_handle,
-    DnsHandleCheck,
+    check_dns_handle, check_dns_handle_using, dns_record_name, dns_record_value, normalize_domain,
+    verify_dns_handle, DnsHandleCheck,
 };
 pub use invite::{Invite, InviteLink, ShortInvite};
 pub use latency::LatencyWindow;

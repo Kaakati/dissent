@@ -80,6 +80,8 @@ tauri-plugin-autostart = "=2.7.0"
 # Match tauri-plugin-dialog, which uses rfd's gtk3 backend; rfd refuses gtk3 and xdg-portal together.
 rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+# WinRT toast history, to clear the app's delivered notifications. The version tauri-winrt-notification already uses.
+windows = { version = "0.62", features = ["UI_Notifications"] }
 mime_guess = "2"
 futures-lite = "2"
 n0-future = "0.3"

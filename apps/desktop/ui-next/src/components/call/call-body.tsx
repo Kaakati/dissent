@@ -3,7 +3,7 @@
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import { Composer } from '@/components/chat/composer';
 import { listKey, rowsFor } from '@/components/chat/message-list';
@@ -21,6 +21,7 @@ import { useShell } from '@/lib/store';
 import type { CallState, Id, ShareSource, VoiceParticipant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import './call.css';
+import { DmCallSplit } from './dm-call-split';
 
 // The name of the open call: the voice channel, or the person or group of a direct or group call.
 function useCallName(): string {
@@ -34,7 +35,8 @@ function useCallName(): string {
 export function CallHeader() {
   const call = useShell((s) => s.call);
   const name = useCallName();
-  const count = call?.participants.length ?? 0;
+  // Everyone in the call, you included, as the voice roster lists them.
+  const count = call ? call.participants.length + 1 : 0;
   return (
     <div className="chat-header">
       <div className="chat-title">
@@ -118,6 +120,9 @@ export function CallBody() {
     });
   }, []);
   if (!call) return null;
+  // A direct or group call puts the conversation itself below the stage (dm-call-split.tsx). A voice channel keeps the
+  // call chat, since its board is not a text channel.
+  if (call.scope !== 'channel') return <DmCallSplit call={call} />;
   const side = width >= SIDE_CHAT_MIN_PANE;
   return (
     <div
@@ -164,7 +169,21 @@ function TileGrid({ count, children }: { count: number; children: ReactNode }) {
   );
 }
 
-function CallStage({ call, chatOpen, onToggleChat }: { call: CallState; chatOpen: boolean; onToggleChat: () => void }) {
+// The stage of a call: the route, the tiles and the controls. The call-chat button shows when `onToggleChat` is given;
+// the collapse button when `onToggleCompact` is. Compact, the stage is one strip: the people in the call and the controls.
+export function CallStage({
+  call,
+  chatOpen = false,
+  onToggleChat,
+  compact = false,
+  onToggleCompact,
+}: {
+  call: CallState;
+  chatOpen?: boolean;
+  onToggleChat?: () => void;
+  compact?: boolean;
+  onToggleCompact?: () => void;
+}) {
   const toggleMuted = useShell((s) => s.toggleMuted);
   const toggleDeafened = useShell((s) => s.toggleDeafened);
   const toggleCamera = useShell((s) => s.toggleCamera);
@@ -172,18 +191,49 @@ function CallStage({ call, chatOpen, onToggleChat }: { call: CallState; chatOpen
   const me = useShell((s) => s.me);
   const ownPreviews = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
   const ownScreen = useShell((s) => (me ? s.videoFrames[`${me.root_id}:screen`] : undefined));
-  const selfTile = Boolean(me && (call.camera || call.screen));
+  // You always have a tile, as in Discord: your video while you share it, else your avatar.
+  const selfTile = Boolean(me);
   return (
-    <section className="grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)_80px] overflow-hidden rounded-lg bg-ink" aria-label="Call">
-      <RouteBanner call={call} />
-      <TileGrid count={call.participants.length + (selfTile ? 1 : 0)}>
-        {selfTile && me ? (
-          <SelfTile name={me.display_name} rootId={me.root_id} preview={call.screen ? ownScreen ?? ownPreviews : ownPreviews} />
-        ) : null}
-        {call.participants.map((p) => (
-          <Tile key={p.root_id} person={p} />
-        ))}
-      </TileGrid>
+    <section
+      className={cn(
+        'grid min-h-0 min-w-0 flex-1 overflow-hidden rounded-lg bg-ink',
+        compact ? 'grid-cols-[minmax(0,1fr)_auto] items-center gap-s-3 px-s-3 py-s-2' : 'grid-rows-[auto_minmax(0,1fr)_80px]',
+      )}
+      aria-label="Call"
+      data-call-compact={compact ? 'true' : undefined}
+    >
+      {compact ? (
+        <ul className="flex min-w-0 items-center gap-s-2 overflow-hidden" aria-label="In the call">
+          {me ? (
+            <li title={`${me.display_name} (you)`} className={cn('shrink-0 rounded-full', call.self_speaking && 'ring-2 ring-success')} data-self-tile>
+              <UserAvatar name={me.display_name} seed={me.root_id} size="sm" />
+            </li>
+          ) : null}
+          {call.participants.map((p) => (
+            <li key={p.root_id} title={p.display_name} className={cn('shrink-0 rounded-full', p.speaking && 'ring-2 ring-success')}>
+              <UserAvatar name={p.display_name} seed={p.root_id} size="sm" />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <>
+          <RouteBanner call={call} />
+          <TileGrid count={call.participants.length + (selfTile ? 1 : 0)}>
+            {selfTile && me ? (
+              <SelfTile
+                name={me.display_name}
+                rootId={me.root_id}
+                preview={call.camera || call.screen ? (call.screen ? ownScreen ?? ownPreviews : ownPreviews) : undefined}
+                speaking={Boolean(call.self_speaking)}
+                muted={call.muted}
+              />
+            ) : null}
+            {call.participants.map((p) => (
+              <Tile key={p.root_id} person={p} />
+            ))}
+          </TileGrid>
+        </>
+      )}
       <div className="flex items-center justify-center gap-s-3">
         <ControlButton
           label={call.muted ? 'Unmute microphone' : 'Mute microphone'}
@@ -207,9 +257,16 @@ function CallStage({ call, chatOpen, onToggleChat }: { call: CallState; chatOpen
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
         </ControlButton>
         <ShareButton sharing={Boolean(call.screen)} />
-        <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
-          <MessageCircle className="size-7" />
-        </ControlButton>
+        {onToggleChat ? (
+          <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
+            <MessageCircle className="size-7" />
+          </ControlButton>
+        ) : null}
+        {onToggleCompact ? (
+          <ControlButton label={compact ? 'Expand the call' : 'Collapse the call'} expanded={!compact} onClick={onToggleCompact}>
+            {compact ? <ChevronDown className="size-7" /> : <ChevronUp className="size-7" />}
+          </ControlButton>
+        ) : null}
         <Tip label="Leave call">
           <button
             type="button"
@@ -294,11 +351,21 @@ function VideoImage({ preview, label }: { preview: { jpeg: string }; label: stri
 }
 
 // This device's own tile. It shows the shared screen when there is one, else the camera.
-function SelfTile({ name, rootId, preview }: { name: string; rootId: Id; preview?: { jpeg: string } }) {
+function SelfTile({ name, rootId, preview, speaking, muted }: { name: string; rootId: Id; preview?: { jpeg: string }; speaking: boolean; muted: boolean }) {
   return (
-    <div className="relative grid place-items-center overflow-hidden rounded-lg" style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(rootId)})` }}>
-      {preview ? <VideoImage preview={preview} label="Your video" /> : <UserAvatar name={name} seed={rootId} size="xl" className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
-      <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
+    <div
+      data-self-tile
+      data-speaking={speaking || undefined}
+      className={cn('relative grid place-items-center overflow-hidden rounded-lg', speaking && 'shadow-[inset_0_0_0_3px_var(--success)]')}
+      style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(rootId)})` }}
+    >
+      {preview ? (
+        <VideoImage preview={preview} label="Your video" />
+      ) : (
+        <UserAvatar name={name} seed={rootId} size="xl" speaking={speaking} className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />
+      )}
+      <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
+        {muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}
         {`${name} (you)`}
       </span>
     </div>
@@ -336,6 +403,8 @@ function Tile({ person }: { person: VoiceParticipant }) {
   return (
     <div
       ref={ref}
+      data-tile={person.root_id}
+      data-speaking={person.speaking || undefined}
       className={cn('relative grid place-items-center overflow-hidden rounded-lg', person.speaking && 'shadow-[inset_0_0_0_3px_var(--success)]')}
       style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(person.root_id)})` }}
     >
@@ -356,7 +425,7 @@ function Tile({ person }: { person: VoiceParticipant }) {
           />
         </>
       ) : null}
-      {encoded || preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
+      {encoded || preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" speaking={person.speaking} className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
       {encoded || !preview ? null : <VideoImage preview={preview} label={`${person.display_name}'s video`} />}
       <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-[12px] leading-[18px] font-medium text-text-strong">
         {person.muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}

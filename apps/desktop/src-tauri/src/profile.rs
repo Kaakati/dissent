@@ -27,7 +27,7 @@ use tauri::{App, AppHandle, Manager, Runtime};
 
 use crate::commands::{self, AppState};
 use crate::part6::PendingLink;
-use crate::{attachments, avatar_cmds, events, network, shell_cmds, shell_settings, status_cmds, storage, tray, updates, voice, voice_settings};
+use crate::{attachments, events, network, shell_cmds, shell_settings, status_cmds, storage, tray, updates, voice, voice_settings};
 
 /// The identifier Tauri uses for the app data folder. The installed app's profile lives under it.
 const IDENTIFIER: &str = "chat.dissent.desktop";
@@ -585,10 +585,10 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     let profile = storage::profile_dir(&data_dir, &identity);
     storage::migrate_legacy(&data_dir, &profile).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
+    // On Unix the data folder and everything in it are the user's only (0700 folders, 0600 files). The engine does the
+    // same for its profile folder each start. Pictures are sealed and reach the window through `dimg` (pictures.rs).
+    dissent_core::harden_folder(&data_dir);
     tracing::info!(dir = %profile.display(), "engine data dir");
-    attachments::allow_thumbnails(app, &data_dir).map_err(|e| e.to_string())?;
-    // The engine keeps pictures under the profile folder (`Store::avatars_dir`), not the data dir.
-    avatar_cmds::allow_avatars(app, &profile).map_err(|e| e.to_string())?;
 
     let settings = network::load(&data_dir);
     let voice = voice::Voice::new(data_dir.clone());

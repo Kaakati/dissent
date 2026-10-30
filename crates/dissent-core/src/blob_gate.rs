@@ -320,7 +320,7 @@ impl Engine {
             w.blob_scopes.hinted.insert(*hash, community);
         }
         let hinted: Vec<([u8; 32], CommunityId)> = w.blob_scopes.hinted.iter().map(|(h, c)| (*h, *c)).collect();
-        if let Err(e) = crate::store::write_bin(&w.paths.blob_hints(), &hinted) {
+        if let Err(e) = w.paths.write_bin(&w.paths.blob_hints(), &hinted) {
             debug!(error = %e, "could not save hinted blobs");
         }
     }
@@ -328,7 +328,7 @@ impl Engine {
     /// Loads the hinted blobs and builds the scope index. Called once at start.
     pub(crate) fn load_blob_scopes(&self) {
         let mut w = self.write();
-        let hinted: Vec<([u8; 32], CommunityId)> = crate::store::read_bin(&w.paths.blob_hints()).ok().flatten().unwrap_or_default();
+        let hinted: Vec<([u8; 32], CommunityId)> = w.paths.read_bin(&w.paths.blob_hints()).ok().flatten().unwrap_or_default();
         w.blob_scopes.hinted = hinted.into_iter().collect();
         w.rebuild_blob_scopes();
     }
@@ -361,7 +361,7 @@ impl Engine {
                 Ok(Response::AddrLookup { record: Some(record), .. }) if record.device() == device => {
                     // The certificate is learned before the address. A record no newer than the one held still
                     // brings the certificate, so only the outcome below matters.
-                    if let Err(e) = engine.learn_record(record) {
+                    if let Err(e) = engine.learn_record(*record) {
                         debug!(device = %device, error = %e, "the record of a refused device was not kept");
                     }
                     let mut w = engine.write();

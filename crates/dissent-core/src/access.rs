@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::rpc::Request;
-use crate::store::{write_bin, Paths};
+use crate::store::Paths;
 
 /// How long a retired secret keeps working after a rotation. Invites made before it stay valid for
 /// this long, and then have to be re-issued.
@@ -119,12 +119,9 @@ pub(crate) fn load(
 ) -> Result<BTreeMap<CommunityId, Keys>> {
     let mut out = BTreeMap::new();
     for id in ids {
-        match std::fs::read(paths.access(&id)) {
-            Ok(bytes) => {
-                out.insert(id, decode_keys(&bytes)?);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        // Sealed at rest; a file from before sealing still reads.
+        if let Some(bytes) = paths.read_bytes(&paths.access(&id))? {
+            out.insert(id, decode_keys(&bytes)?);
         }
     }
     Ok(out)
@@ -174,7 +171,7 @@ fn decode_keys(bytes: &[u8]) -> Result<Keys> {
 
 /// Stores a community's keys, so they survive restarts.
 pub(crate) fn save(paths: &Paths, id: &CommunityId, keys: &Keys) -> Result<()> {
-    write_bin(&paths.access(id), keys)
+    paths.write_bin(&paths.access(id), keys)
 }
 
 /// Sender side of a request: the request plus the token for its community, if it has one.

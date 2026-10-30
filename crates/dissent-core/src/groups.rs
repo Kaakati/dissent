@@ -34,7 +34,7 @@ use crate::error::{CoreError, Result};
 use crate::inbox::DepositOutcome;
 use crate::rpc::{decode, encode, Request, Response};
 use crate::sealed::mls_err;
-use crate::store::{read_bin, read_records, write_bin, Paths};
+use crate::store::Paths;
 use crate::views::{ConversationSummary, DmItem, EngineEvent};
 use crate::world::World;
 
@@ -250,13 +250,13 @@ pub(crate) struct RefusedBook {
 impl RefusedBook {
     /// Loads the book and drops the entries past their lifetime.
     pub fn load(paths: &Paths) -> Result<Self> {
-        let mut book: Self = read_bin(&paths.refused_packets())?.unwrap_or_default();
+        let mut book: Self = paths.read_bin(&paths.refused_packets())?.unwrap_or_default();
         book.prune(now_ms());
         Ok(book)
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_bin(&paths.refused_packets(), self)
+        paths.write_bin(&paths.refused_packets(), self)
     }
 
     pub fn keep(&mut self, id: [u8; 32], device: DeviceId, item: &Queued, now: u64) {
@@ -330,11 +330,11 @@ pub(crate) struct ConvBook {
 
 impl ConvBook {
     pub fn load(paths: &Paths) -> Result<Self> {
-        Ok(read_bin(&paths.conv_book())?.unwrap_or_default())
+        Ok(paths.read_bin(&paths.conv_book())?.unwrap_or_default())
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_bin(&paths.conv_book(), self)
+        paths.write_bin(&paths.conv_book(), self)
     }
 }
 
@@ -343,7 +343,7 @@ pub(crate) fn load_messages(paths: &Paths, book: &ConvBook) -> BTreeMap<ConvId, 
     book.convs
         .keys()
         .map(|id| {
-            let msgs = read_records::<ConvMsg>(&paths.conv_log(id)).unwrap_or_default();
+            let msgs = paths.read_records::<ConvMsg>(&paths.conv_log(id)).unwrap_or_default();
             (*id, msgs)
         })
         .collect()

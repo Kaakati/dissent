@@ -15,7 +15,7 @@ fn picture(tag: u8) -> Vec<u8> {
 
 fn avatar_of(viewer: &Peer, of: &Peer) -> Option<Vec<u8>> {
     let path = viewer.engine.user_profile(of.identity.root_id()).avatar?;
-    std::fs::read(path).ok()
+    viewer.engine.open_picture(std::path::Path::new(&path)).ok().map(|(bytes, _)| bytes)
 }
 
 #[tokio::test(flavor = "multi_thread")]

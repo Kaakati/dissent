@@ -155,7 +155,8 @@ Nothing changes in the cipher layer. A forwarder of any kind:
 The new forwarder kinds add exposure. A volunteer or the seeder learns who is in a call they're not
 in, who speaks and when, and each participant's IP address or relay. It is in `06-threat-model.md`
 as "A forwarder who is not in the call". The seeder already learns membership timing, but not call
-presence.
+presence: it hears a call's roster only while its setting is on and the call is big enough to need a forwarder,
+and it never gets a join (see "What a seeder hears of calls" there).
 
 ## Layers per viewer
 

@@ -317,8 +317,7 @@ async fn caller_outside_the_dm_policy_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn banned_member_loses_the_call_key_on_rekey() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(3, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -424,8 +423,7 @@ async fn voice_pipeline_carries_audio_between_peers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn ten_engines_in_a_voice_channel_go_forwarded() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(10, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..10 {
@@ -536,8 +534,7 @@ async fn direct_call_rings_every_device_and_the_first_to_accept_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn banned_member_of_a_forwarded_call_loses_audio_after_the_rekey() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..7 {
@@ -617,8 +614,7 @@ async fn banned_member_of_a_forwarded_call_loses_audio_after_the_rekey() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_late_joiner_is_verified_without_being_flagged() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(3, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -681,8 +677,7 @@ async fn a_late_joiner_is_verified_without_being_flagged() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_call_grows_from_three_to_eight_and_back_to_four_without_dropping_audio() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(8, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..8 {
@@ -746,8 +741,7 @@ async fn a_call_grows_from_three_to_eight_and_back_to_four_without_dropping_audi
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_call_above_the_cascade_threshold_relays_through_a_tree() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..9 {
@@ -784,8 +778,7 @@ async fn a_call_above_the_cascade_threshold_relays_through_a_tree() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn losing_the_cascade_root_keeps_everyone_hearing() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..9 {
@@ -858,8 +851,7 @@ pub(crate) fn forwarder_root(engine: &dissent_core::Engine) -> Option<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_forwarder_that_slows_down_is_replaced_by_a_clearly_better_device() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let owner = peer("owner").await;
     let mut others = Vec::new();
     for n in 1..7 {
@@ -922,8 +914,7 @@ fn group_id_named(p: &Peer, name: &str) -> Option<dissent_core::ConvId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_group_call_rings_every_member_and_late_joiners_join_quietly() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(4, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -992,8 +983,7 @@ async fn a_group_call_rings_every_member_and_late_joiners_join_quietly() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn an_outsider_cannot_join_a_group_call() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(5, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -1041,8 +1031,7 @@ fn live_group(engine: &dissent_core::Engine, conv: dissent_core::ConvId) -> Opti
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_group_call_shows_as_live_to_a_member_outside_it_who_joins_and_hears_it() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(4, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -1112,8 +1101,7 @@ async fn a_group_call_shows_as_live_to_a_member_outside_it_who_joins_and_hears_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_dm_call_stays_live_after_one_side_steps_away_and_rejoins() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(2, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     make_contacts_ready(&alice, &bob).await;
@@ -1181,8 +1169,7 @@ async fn a_dm_call_stays_live_after_one_side_steps_away_and_rejoins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn an_outsider_sees_no_live_call() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let alice = peer("alice").await;
     let bob = peer("bob").await;
     let carol = peer("carol").await;
@@ -1255,8 +1242,7 @@ pub(crate) async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn boosted_mesh_grows_to_the_level_limit_then_forwards() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     // Level 2 keeps a mesh up to 8. Every device has the upload for seven copies of audio.
     let (everyone, community, channel) = boosted_call(9, 2, 5_000).await;
     for p in &everyone[..8] {
@@ -1281,8 +1267,7 @@ async fn boosted_mesh_grows_to_the_level_limit_then_forwards() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_released_device_holds_a_boosted_call_to_level_zero_and_still_takes_part() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let (everyone, community, channel) = boosted_call(7, 2, 5_000).await;
     // One device runs a released build. It sends no `Features`, and answers each one with the
     // decode error a released build gives.
@@ -1326,8 +1311,7 @@ async fn a_released_device_holds_a_boosted_call_to_level_zero_and_still_takes_pa
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_boosted_call_with_a_device_short_of_upload_forwards_at_seven() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let (everyone, community, channel) = boosted_call(7, 2, 5_000).await;
     // Six copies of audio need 192 kbps. This device has 150.
     everyone[3].engine.set_capacity_override(Some(150));
@@ -1342,8 +1326,7 @@ async fn a_boosted_call_with_a_device_short_of_upload_forwards_at_seven() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn measured_upload_elects_a_forwarder() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     // No capacity overrides: every device announces what it measures.
     let (everyone, community, channel) = boosted_call(7, 0, 0).await;
     for p in &everyone {
@@ -1374,8 +1357,7 @@ async fn measured_upload_elects_a_forwarder() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_boosted_mesh_holds_on_measured_upload() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let (everyone, community, channel) = boosted_call(7, 2, 0).await;
     for p in &everyone {
         p.engine.set_capacity_override(None);
@@ -1443,8 +1425,7 @@ pub(crate) fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let (everyone, forwarder) = simulcast_call(&[]).await;
     let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
     let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
@@ -1474,8 +1455,7 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_the_others() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     let (everyone, forwarder) = simulcast_call(&[]).await;
     // Only budgets set by this test limit the viewers, so a loaded runner's link estimates can't.
     assert!(
@@ -1610,8 +1590,7 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_viewer_the_base() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(7, async {
     // Devices 5 and 6 run a released build: 5 sends one stream, 6 knows no layers.
     let (everyone, forwarder) = simulcast_call(&[5, 6]).await;
     let (old_sender, old_viewer) = (&everyone[5], &everyone[6]);

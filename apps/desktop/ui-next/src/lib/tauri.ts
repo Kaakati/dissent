@@ -15,7 +15,7 @@ export interface TauriWindow {
 export interface TauriGlobal {
   core: {
     invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
-    convertFileSrc?(path: string): string; // the asset protocol: a local path the backend wrote, as an image source
+    convertFileSrc?(path: string, protocol?: string): string; // a local path as a URL: `asset` for files as they are, `dimg` for sealed pictures
   };
   event: {
     listen<T = unknown>(name: string, handler: (event: { payload: T }) => void): Promise<Unlisten>;

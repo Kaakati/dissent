@@ -46,7 +46,7 @@ pub mod service;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use dissent_core::{ChannelId, CommunityId, Engine, MirrorPolicy, NodeConfig, RelayChoice};
-use dissent_identity::{IdentityError, Vault, keystore};
+use dissent_identity::{IdentityError, RootId, Vault, keystore};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -129,9 +129,26 @@ pub struct RunArgs {
     /// Keep no files, only messages.
     #[arg(long, env = "DISSENT_SEEDER_NO_FILES")]
     pub no_files: bool,
+    /// Hold offline direct messages for this person: their address (`dsu1…`). Repeat the flag for more
+    /// people. They then pick this seeder as an inbox in Settings > Offline delivery.
+    #[arg(long, value_name = "ADDRESS", env = "DISSENT_SEEDER_INBOX_FOR", value_delimiter = ',')]
+    pub inbox_for: Vec<String>,
 }
 
 impl RunArgs {
+    /// The people `--inbox-for` names. An address that does not parse is an error, so a typo is not
+    /// silently ignored.
+    pub fn inbox_roots(&self) -> Result<Vec<RootId>> {
+        self.inbox_for
+            .iter()
+            .map(|a| {
+                RootId::parse_address(a)
+                    .or_else(|_| a.trim().parse::<RootId>())
+                    .with_context(|| format!("--inbox-for {a:?} is not a person's address"))
+            })
+            .collect()
+    }
+
     /// What the seeder keeps of the files senders allow it to keep, or `None` with `--no-files`.
     pub fn mirror_policy(&self) -> Option<MirrorPolicy> {
         const MB: u64 = 1024 * 1024;
@@ -300,6 +317,7 @@ async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Resul
     let identity = keystore::load_or_create(&data_dir.join(IDENTITY_FILE), now_ms(), &vault)
         .context("load or create identity")?;
     let started_ms = now_ms();
+    let device = identity.device_id();
     let (engine, _events) = Engine::start(
         identity,
         data_dir.join(PROFILE_DIR),
@@ -319,6 +337,21 @@ async fn run_seeder(run: RunArgs, data_dir: PathBuf, stop: Arc<Notify>) -> Resul
         None => info!("keeping no files (--no-files)"),
     }
     engine.set_mirror_policy(policy).context("set the file policy")?;
+    // The inbox list is applied on every start too: the flags name exactly the people it holds mail for.
+    let hosted = run.inbox_roots()?;
+    for gone in engine.hosted_inboxes() {
+        if let Ok(root) = gone.root.parse::<RootId>() {
+            if !hosted.contains(&root) {
+                engine.host_inbox_for(root, false).context("stop holding mail")?;
+            }
+        }
+    }
+    for root in &hosted {
+        engine.host_inbox_for(*root, true).context("hold mail")?;
+    }
+    if !hosted.is_empty() {
+        info!(people = hosted.len(), device = %device, "holding offline messages");
+    }
 
     // A seeder joins as storage. It keeps and serves sealed history, but it is never added to a
     // community's encryption group, so it cannot read messages or attachments.
@@ -764,6 +797,17 @@ mod tests {
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(std::iter::once("dissent-seeder").chain(args.iter().copied())).expect("valid")
+    }
+
+    #[test]
+    fn inbox_for_takes_addresses_and_refuses_a_typo() {
+        let a = dissent_identity::Identity::create(1).root_id();
+        let b = dissent_identity::Identity::create(2).root_id();
+        let cli = parse(&["--inbox-for", &a.address(), "--inbox-for", &b.to_string()]);
+        assert_eq!(cli.run.inbox_roots().unwrap(), vec![a, b], "an address and a bare id both name a person");
+        let cli = parse(&["--inbox-for", "dsu1notanaddress"]);
+        assert!(cli.run.inbox_roots().is_err(), "a typo is an error, not ignored");
+        assert!(parse(&[]).run.inbox_roots().unwrap().is_empty());
     }
 
     #[test]

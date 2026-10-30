@@ -3,6 +3,7 @@
 import { api, listenTo, onEngineEvent } from './api';
 import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
+import { startBadge } from './badge';
 import { clearMentions, reloadForEvent, startChat, useChat } from './chat';
 import { handleDeepLinks } from './deep-link';
 import { has } from './features';
@@ -10,6 +11,8 @@ import { useShell, type ShellState } from './store';
 import type { CallState, EngineEvent, ShellSettings, TypingTarget, UpdateInfo, UserStatus } from './types';
 import { useShellPrefs } from './shell-prefs';
 import { onStorageAskEvent } from './storage-asks';
+import { onInboxEvent } from './inbox-notices';
+import { onRecoveryEvent } from './recovery';
 
 // The alerts for a new message, and the reload of the open conversation when the event is for it.
 function onMessageEvent(ev: EngineEvent): void {
@@ -64,10 +67,13 @@ export function startShellEvents(): void {
   const shell = useShell.getState;
   // Errors from a listener that cannot be attached (no backend) are ignored: the shell still renders.
   startChat();
+  startBadge();
   onEngineEvent((ev) => {
     void shell().handleEngineEvent(ev);
     onMessageEvent(ev);
     onStorageAskEvent(ev);
+    onRecoveryEvent(ev);
+    onInboxEvent(ev);
   }).catch(() => {});
   listenTo<{ conv?: string } | null>('dissent://notification-click', (p) => {
     const conv = p?.conv;

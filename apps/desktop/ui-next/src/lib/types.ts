@@ -117,6 +117,14 @@ export interface CommunityView extends CommunitySummary {
   can_manage_channels?: boolean; // this person may arrange the channels: create categories and move channels
 }
 
+// Whether member-only control is on, and whether the owner may turn it on now: every other member device must say it
+// supports it, and `waiting` counts the ones that did not (offline, or on an older version).
+export interface MemberOnlyStatus {
+  on: boolean;
+  can_enable: boolean;
+  waiting: number;
+}
+
 // A category in a server's channel layout. `id` is 32 hex digits from the engine; the sidebar gives a category the
 // engine has not named yet a local key. `collapsed` is how it starts for someone who never opened or closed it.
 export interface LayoutCategory {
@@ -237,6 +245,7 @@ export interface CallState {
   route?: CallRoute;
   quality?: CallQuality;
   forwarded_by?: string | null; // a member who forwards the call without being in it, never listed as a participant
+  self_speaking?: boolean; // this device's person is speaking now: it sent audio within the hold
   channel_name?: string;
   community_name?: string;
   where?: string;
@@ -363,6 +372,7 @@ export type EngineEvent =
   | { kind: 'communities_changed' }
   | { kind: 'community_updated'; community_id: Id }
   | { kind: 'storage_grant_asked'; community_id: Id; community_name: string; root_id: Id; display_name: string }
+  | { kind: 'inbox_host_changed'; root_id: Id; display_name: string; device_id: Id; on: boolean }
   | { kind: 'message'; community_id: Id; channel_id: Id }
   | { kind: 'messages_changed'; community_id: Id; channel_id: Id }
   | { kind: 'dm_changed'; peer: Id }
@@ -373,6 +383,7 @@ export type EngineEvent =
   | { kind: 'presence' }
   | { kind: 'attachment_changed'; message_id: Id; attachment_id: Id } // a thumbnail arrived: re-read, no alert
   | { kind: 'attachment_progress'; message_id: Id; attachment_id: Id; progress: number } // a download moved: update in place
+  | { kind: 'recovery_changed' } // a guardian answered the recovery on this device, or it finished
   | { kind: 'transfers_changed' } // a download started, finished, failed or paused, or files were shared: re-read
   | { kind: 'call_missed'; call_id: string }
   | { kind: 'call_answered_elsewhere'; call_id: string }
@@ -441,6 +452,16 @@ export interface ShellSettings {
   notifications_muted: boolean; // desktop notifications for new messages are off
   emoticons_as_text?: boolean; // emoticons are sent as typed, not as emoji; absent from an older desktop app
   keep_photo_metadata?: boolean; // photos keep their location and camera details; absent from an older desktop app
+  dns_public_fallback?: boolean; // website handle checks may also ask Cloudflare; absent from an older desktop app
+}
+
+// One file before it is sent (inspect_files): its kind, whether "Remove identifying details" starts on, and whether its
+// details can be removed.
+export interface FileInspection {
+  path: string;
+  kind: 'photo' | 'video' | 'audio' | 'other';
+  scrub_default: boolean;
+  scrubbable: boolean;
 }
 
 export interface NetworkSettings {
@@ -455,6 +476,8 @@ export interface NetworkSettings {
   use_community_relays?: boolean;
   // Find devices through number0's DNS directory. Used only with number0's relays.
   use_n0_lookup?: boolean;
+  // Hide my IP address: every connection goes through a relay. Applied when the engine restarts.
+  hide_ip?: boolean;
 }
 
 // One relay in Settings > Network, with what the node measured. `source` is where the relay came from.
@@ -481,7 +504,51 @@ export interface GuardianView {
   root_id: Id;
   display_name: string;
   suffix?: string;
-  shared_servers: number;
+  shared_servers: number | string[]; // the engine names the servers; older mocks sent a count
+}
+
+// A guardian of a recovery in progress, as the recovering device sees them.
+export interface RecoveryGuardian {
+  root_id: Id;
+  suffix: string;
+  display_name: string | null;
+  state: 'waiting' | 'approved' | 'declined';
+}
+
+// The recovery in progress on this device (recovery_status, begin_recovery, add_recovery_link).
+export interface RecoveryView {
+  old_root: Id;
+  old_suffix: string;
+  request_link: string; // dissent://recover/…, with this device's address so answers come back by themselves
+  code: string; // "123 456 789", read out to each guardian
+  threshold: number | null; // known once the guardian list arrived
+  guardians: RecoveryGuardian[];
+  approvals: number;
+  set_known: boolean;
+  invites: number;
+  ready: boolean;
+  requested_ms: number;
+}
+
+// A recovery request as a guardian sees it before answering (inspect_recovery_request).
+export interface RecoveryRequestView {
+  old_root: Id;
+  old_suffix: string;
+  old_name: string | null;
+  new_suffix: string;
+  listed: boolean | null; // null when this device holds no guardian list for that account
+  shared_servers: string[];
+  reachable: boolean;
+  requested_ms: number;
+  key_changed_ms: number | null; // when this device last saw that account's key change
+  already_moved: boolean; // a shared server already moved that account to another key
+}
+
+// What answering a request did (answer_recovery_request).
+export interface RecoveryAnswerView {
+  approval_link: string | null;
+  delivered: boolean;
+  note: string | null;
 }
 
 export interface GuardianList {
@@ -716,4 +783,46 @@ export interface WebsiteHandleSetup {
   record_name: string | null;
   record_value: string;
   check: HandleCheck | null;
+}
+
+// Offline delivery (Settings > Offline delivery). An inbox is an always-on device that holds this person's direct
+// messages while they are offline. See docs/design/10-dm-delivery.md.
+export interface InboxView {
+  device: Id;
+  owner: Id | null; // the device owner's root, when known
+  name: string; // the owner's name, or "Your device"
+  own_device: boolean;
+  chosen: boolean;
+  reachable: boolean;
+  serving: boolean; // it holds mail for this person
+  envelopes: number;
+  key_packages: number;
+  bytes: number;
+}
+
+export interface HostedInbox {
+  root: Id;
+  name: string;
+  envelopes: number;
+  bytes: number;
+}
+
+// A device told this person it started (`on`) or stopped holding their mail.
+export interface HostNotice {
+  root: Id;
+  name: string;
+  device: Id;
+  on: boolean;
+  chosen: boolean;
+  ts_ms: number;
+}
+
+export interface InboxSettings {
+  serving_own: boolean;
+  hosted: HostedInbox[];
+  envelopes: number;
+  bytes: number;
+  max_inboxes: number;
+  max_hosted: number;
+  notices: HostNotice[]; // newest first
 }

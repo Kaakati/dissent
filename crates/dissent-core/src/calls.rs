@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, Mutex as AsyncMutex};
 use tracing::{debug, warn};
 
+pub(crate) mod speaking;
 pub(crate) mod volunteers;
 
 /// Identifies a call. Both sides compute it the same way.
@@ -49,8 +50,6 @@ const KEY_LABEL: &str = "SFrame 1.0 Base Key";
 /// One synthetic audio frame every 20 ms, 160 bytes.
 const FRAME_MS: u64 = 20;
 const FRAME_BYTES: usize = 160;
-/// How long a participant counts as speaking after its last frame.
-const SPEAKING_WINDOW: Duration = Duration::from_millis(300);
 /// How long the accepting side waits for the media link that the offering side dials.
 const LINK_WAIT: Duration = Duration::from_secs(10);
 /// How long one signalling request may take.
@@ -209,6 +208,13 @@ pub(crate) struct Heard {
     pub members: Vec<PresenceMember>,
     /// When this device last heard the roster, in milliseconds.
     pub seen_ms: u64,
+}
+
+impl Heard {
+    /// The sender's own entry: the one part of a roster its device vouches for first-hand.
+    pub(crate) fn own_entry(&self) -> Option<&PresenceMember> {
+        self.members.iter().find(|m| m.root == self.from)
+    }
 }
 
 /// The most people a presence message may list. Groups are capped well below this.
@@ -636,6 +642,8 @@ pub(crate) struct Room {
     remote_video: Mutex<RemoteVideo>,
     /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
     keyframe_wanted: AtomicBool,
+    /// Who speaks: this device's last sent frame, and the speakers last shown. See `speaking`.
+    speaking: Mutex<speaking::Speaking>,
 }
 
 /// A received camera or screen frame, still encoded, for a window that decodes it itself.
@@ -848,6 +856,12 @@ pub struct CallView {
     /// The display name of a member who forwards the call without being in it, as the call
     /// screen's "Forwarded by" names them. `None` when a participant forwards, or nobody does.
     pub forwarded_by: Option<String>,
+    /// Whether this device's person is speaking now: it sent audio within `speaking::SPEAKING_HOLD`
+    /// and is not muted.
+    pub self_speaking: bool,
+    /// For a voice channel call: the channel's and the server's names, for the rail's "Connected to #name".
+    pub channel_name: Option<String>,
+    pub community_name: Option<String>,
 }
 
 /// The sender id of a device in a direct call. A direct call has no MLS group, so each device
@@ -882,13 +896,26 @@ fn call_err(e: impl std::fmt::Display) -> CoreError {
 }
 
 /// The route sentence for the call panel. The engine writes it, the UI shows it verbatim.
-fn route_for(topology: Topology, participants: &[ParticipantView], relayed: bool, forwarded_by: Option<&str>) -> CallRoute {
+fn route_for(
+    scope: CallScope,
+    topology: Topology,
+    participants: &[ParticipantView],
+    relayed: bool,
+    forwarded_by: Option<&str>,
+) -> CallRoute {
     let via = if relayed {
         " Some links go through a relay."
     } else {
         ""
     };
     match (topology, participants.first()) {
+        // A voice channel or group with one other person in it is not a direct call, though its
+        // audio takes the same straight path.
+        (Topology::P2p, Some(p)) if scope != CallScope::Dm => CallRoute {
+            kind: "p2p".into(),
+            title: "Voice connected".into(),
+            detail: format!("You and {} are here. Audio goes straight between your devices.{via}", p.display_name),
+        },
         (Topology::P2p, Some(p)) => CallRoute {
             kind: "p2p".into(),
             title: "Direct call".into(),
@@ -999,6 +1026,7 @@ impl Room {
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
             keyframe_wanted: AtomicBool::new(false),
+            speaking: Mutex::new(speaking::Speaking::default()),
         }
     }
 
@@ -1210,7 +1238,10 @@ async fn pump_forwarded(engine: &Engine, room: &Room, forwarding: &Forwarding) {
             // The first byte of a frame is its audio level, which the forwarder ranks speakers by.
             let level = bytes.first().copied().unwrap_or(127);
             match participant.send_audio_frame_at(&bytes, timestamp, level).await {
-                Ok(()) => lock(&room.stall).note_spoke(Instant::now()),
+                Ok(()) => {
+                    lock(&room.stall).note_spoke(Instant::now());
+                    room.note_sent_audio();
+                }
                 Err(e) => debug!(error = %e, "call frame not sent"),
             }
         }
@@ -1417,6 +1448,7 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
     let mut tick = tokio::time::interval(Duration::from_millis(FRAME_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut since_check: u32 = 0;
+    let mut since_speaking: u32 = 0;
     loop {
         tick.tick().await;
         let (Some(inner), Some(room)) = (weak.upgrade(), room.upgrade()) else {
@@ -1426,6 +1458,11 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
             break;
         }
         let engine = Engine { inner };
+        since_speaking += 1;
+        if since_speaking >= speaking::SPEAKING_EVERY {
+            since_speaking = 0;
+            engine.check_speaking(&room);
+        }
         let mut mesh = room.mesh.lock().await;
         since_check += 1;
         if since_check >= MEMBERSHIP_EVERY {
@@ -1451,8 +1488,9 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
         }
         if !room.is_muted() {
             for (timestamp, bytes) in outgoing {
-                if let Err(e) = mesh.send_audio_frame_at(&bytes, timestamp).await {
-                    debug!(error = %e, "call frame not sent");
+                match mesh.send_audio_frame_at(&bytes, timestamp).await {
+                    Ok(()) => room.note_sent_audio(),
+                    Err(e) => debug!(error = %e, "call frame not sent"),
                 }
             }
         }
@@ -1827,7 +1865,8 @@ impl Engine {
             if c.state().banned.contains(&self.inner.me) {
                 return Err(CoreError::Rejected("Banned".into()));
             }
-            w.member_devices(c)
+            // A seeder is never in a call, so it is not told who joins: a join carries the joiner's addresses.
+            channel_call_devices(&w, c, false)
                 .into_iter()
                 .filter(|d| *d != self.inner.identity.device_id())
                 .collect::<Vec<DeviceId>>()
@@ -2243,19 +2282,22 @@ impl Engine {
                 let w = self.read();
                 w.communities
                     .get(&community)
-                    .map(|c| w.member_devices(c))
+                    .map(|c| channel_call_devices(&w, c, volunteers::seeders_hear_call(c.state().seeder_forwards_calls, members.len())))
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|d| *d != me)
                     .collect()
             }
         };
+        let seeders = self.storage_devices(room.scope);
         for device in devices {
+            // A seeder hears a call only to offer to forward it, so it gets who is in it and nothing more.
+            let to_seeder = seeders.contains(&device);
             let msg = PresenceMsg {
                 room: room.id,
                 scope: room.scope,
-                started_ms: room.started_ms,
-                members: members.clone(),
+                started_ms: if to_seeder { 0 } else { room.started_ms },
+                members: if to_seeder { volunteers::for_seeder(&members) } else { members.clone() },
             };
             let engine = self.clone();
             self.spawn_task(async move {
@@ -2332,25 +2374,46 @@ impl Engine {
             }
             let here = Scope::Channel { community, channel: *channel };
             let mut people: BTreeMap<RootId, VoiceParticipantView> = BTreeMap::new();
-            for h in heard.iter().filter(|h| h.scope == here) {
-                for m in &h.members {
-                    if m.root == me || c.state().banned.contains(&m.root) {
+            // Each person is shown only from their own device's report: a roster's other entries are
+            // relayed, and anyone could list people who are not there (privacy audit P-30).
+            for m in heard.iter().filter(|h| h.scope == here).filter_map(Heard::own_entry) {
+                if m.root == me || c.state().banned.contains(&m.root) || !c.is_member(&m.root) {
+                    continue;
+                }
+                people.entry(m.root).or_insert_with(|| VoiceParticipantView {
+                    root_id: m.root.to_string(),
+                    display_name: w.display_name(&m.root),
+                    muted: m.muted,
+                    deafened: m.deafened,
+                    speaking: false,
+                });
+            }
+            // The people this device's own call has live media links with are first-hand too, so they show before their
+            // own roster arrives.
+            if let Some(room) = mine.as_ref().filter(|r| r.scope == here) {
+                let my_device = self.inner.identity.device_id();
+                let peers = lock(&room.peers);
+                for device in lock(&room.live).values().filter(|d| **d != my_device) {
+                    let Some(root) = w.directory.root_of(device) else { continue };
+                    if root == me || c.state().banned.contains(&root) || !c.is_member(&root) {
                         continue;
                     }
-                    let entry = people.entry(m.root).or_insert_with(|| VoiceParticipantView {
-                        root_id: m.root.to_string(),
-                        display_name: w.display_name(&m.root),
-                        muted: m.muted,
-                        deafened: m.deafened,
+                    people.entry(root).or_insert_with(|| VoiceParticipantView {
+                        root_id: root.to_string(),
+                        display_name: w.display_name(&root),
+                        muted: peers.values().any(|p| p.device == *device && p.muted),
+                        deafened: false,
                         speaking: false,
                     });
-                    if m.root == h.from {
-                        entry.muted = m.muted;
-                        entry.deafened = m.deafened;
-                    }
                 }
             }
+            // This device's own call: its person, once, and who speaks in it now.
             if let Some(room) = mine.as_ref().filter(|r| r.scope == here) {
+                let now = Instant::now();
+                let speaking = room.speaking_roots(now);
+                for person in people.values_mut() {
+                    person.speaking = speaking.contains(&person.root_id);
+                }
                 people.insert(
                     me,
                     VoiceParticipantView {
@@ -2358,7 +2421,7 @@ impl Engine {
                         display_name: w.display_name(&me),
                         muted: room.is_muted(),
                         deafened: room.deafened.load(Ordering::Relaxed),
-                        speaking: false,
+                        speaking: room.self_speaking(now),
                     },
                 );
             }
@@ -2682,9 +2745,31 @@ impl Engine {
                 if !c.is_member(&root) {
                     return Err("not a member".into());
                 }
+                if c.state().members.get(&root).is_some_and(|m| m.storage) {
+                    return Err("a seeder does not join calls".into());
+                }
                 Ok(())
             }
         }
+    }
+
+    /// The devices of `scope`'s server's seeders, when it is a voice channel.
+    fn storage_devices(&self, scope: Scope) -> Vec<DeviceId> {
+        let Scope::Channel { community, .. } = scope else {
+            return Vec::new();
+        };
+        let w = self.read();
+        w.communities
+            .get(&community)
+            .map(|c| {
+                c.state()
+                    .members
+                    .iter()
+                    .filter(|(_, m)| m.storage)
+                    .flat_map(|(root, _)| w.directory.devices_of(root))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Creates the room for an incoming DM call, keyed by the caller's key.
@@ -2989,7 +3074,7 @@ impl Engine {
                 video: false,
                 speaking: !p.muted
                     && p.last_frame
-                        .is_some_and(|t| now.duration_since(t) < SPEAKING_WINDOW),
+                        .is_some_and(|t| now.duration_since(t) < speaking::SPEAKING_HOLD),
                 forwarder: room.forwarding.as_ref().is_some_and(|f| f.forwarder == *sid || f.children.contains(sid)),
                 path: room.path_of(&p.device, forwarder.as_ref()),
                 video_paused: paused.contains(&(*sid, false)),
@@ -3019,6 +3104,14 @@ impl Engine {
             Scope::Group { .. } => CallScope::Group,
         };
         let camera_on = lock(&room.camera).is_some();
+        let (channel_name, community_name) = match room.scope {
+            Scope::Channel { community, channel } => w
+                .communities
+                .get(&community)
+                .map(|c| (c.state().channels.get(&channel).cloned(), Some(c.name().to_string())))
+                .unwrap_or((None, None)),
+            _ => (None, None),
+        };
         let forwarded_by = room
             .forwarding
             .as_ref()
@@ -3032,7 +3125,7 @@ impl Engine {
             deafened: room.deafened.load(Ordering::Relaxed),
             camera: camera_on,
             started_ms: room.started_ms,
-            route: route_for(topology, &participants, relayed, forwarded_by.as_deref()),
+            route: route_for(scope, topology, &participants, relayed, forwarded_by.as_deref()),
             participants,
             topology,
             quality: CallQuality {
@@ -3044,6 +3137,9 @@ impl Engine {
             key_epoch: room.epoch.load(Ordering::Relaxed),
             frames_received: quality.frames_received,
             forwarded_by,
+            self_speaking: room.self_speaking(now),
+            channel_name,
+            community_name,
         })
     }
 
@@ -3214,6 +3310,19 @@ impl Engine {
             lost as f64 * 100.0 / sent as f64
         };
     }
+}
+
+/// The devices that hear of a voice channel call in `c`: every current member's but this root's, and a seeder's only
+/// with `seeders`. A seeder is never in a call, so it hears of one only to offer to forward it (see
+/// `volunteers::seeders_hear_call`).
+fn channel_call_devices(w: &crate::world::World, c: &crate::community::Community, seeders: bool) -> Vec<DeviceId> {
+    c.state()
+        .members
+        .iter()
+        .filter(|(root, m)| !m.left && **root != w.me && (seeders || !m.storage))
+        .flat_map(|(root, _)| w.directory.devices_of(root))
+        .filter(|device| *device != w.device)
+        .collect()
 }
 
 #[cfg(test)]
@@ -4196,12 +4305,13 @@ impl Engine {
         let mut calls: Vec<Heard> = self.fresh_heard().into_iter().filter(|h| want(h)).collect();
         calls.sort_by_key(|h| h.started_ms);
         let first = calls.first()?.clone();
+        // Each person counts only from their own device's report, as in a voice channel. In a group,
+        // only the group's members count.
         let mut roster: Vec<PresenceMember> = Vec::new();
-        for call in calls.iter().filter(|h| h.room == first.room) {
-            for member in &call.members {
-                if !roster.iter().any(|m| m.root == member.root) {
-                    roster.push(*member);
-                }
+        for member in calls.iter().filter(|h| h.room == first.room).filter_map(Heard::own_entry) {
+            let in_group = group.is_none_or(|g| g.contains(&member.root));
+            if in_group && !roster.iter().any(|m| m.root == member.root) {
+                roster.push(*member);
             }
         }
         let me = self.inner.me;
@@ -4457,5 +4567,66 @@ mod features_compat_tests {
             postcard::from_bytes::<ReleasedCallMsg>(&mute),
             Ok(ReleasedCallMsg::Mute { muted: true, .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod roster_trust_tests {
+    use super::*;
+    use crate::membership::tests::Node;
+
+    fn member(root: RootId) -> PresenceMember {
+        PresenceMember { root, muted: false, deafened: false }
+    }
+
+    #[test]
+    fn only_the_senders_own_entry_is_first_hand() {
+        let (bob, mallory) = (RootId([2; 32]), RootId([3; 32]));
+        let heard = Heard {
+            room: [0; 32],
+            scope: Scope::Dm,
+            started_ms: 0,
+            from: bob,
+            members: vec![member(mallory), member(bob)],
+            seen_ms: 0,
+        };
+        assert_eq!(heard.own_entry().map(|m| m.root), Some(bob));
+        let empty = Heard { members: vec![member(mallory)], ..heard };
+        assert!(empty.own_entry().is_none(), "a roster that leaves out its sender vouches for nobody");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relayed_entry_does_not_put_anyone_in_a_voice_channel() {
+        crate::testutil::bounded(async {
+            let alice = Node::named("alice").await;
+            let community: CommunityId = alice.engine.create_community("Hall".into()).await.expect("create").id.parse().unwrap();
+            let channel: ChannelId = alice
+                .engine
+                .create_voice_channel(community, "Lounge".into())
+                .await
+                .expect("voice channel")
+                .id
+                .parse()
+                .unwrap();
+            // A roster that lists alice's own root beside its non-member sender: neither shows. The sender is not a
+            // member, and alice is never listed from someone else's report.
+            let stranger = RootId([7; 32]);
+            lock(&alice.engine.inner.calls.heard).insert(
+                DeviceKey::generate().id(),
+                Heard {
+                    room: [1; 32],
+                    scope: Scope::Channel { community, channel },
+                    started_ms: now_ms(),
+                    from: stranger,
+                    members: vec![member(stranger), member(RootId([8; 32]))],
+                    seen_ms: now_ms(),
+                },
+            );
+            let views = alice.engine.voice_channel_views(community);
+            let lounge = views.iter().find(|v| v.id == channel.to_string()).expect("the lounge");
+            assert!(lounge.participants.is_empty(), "{:?}", lounge.participants);
+            assert_eq!(alice.engine.voice_headcount(community, channel), 0, "a fake roster cannot fill a channel");
+        })
+        .await;
     }
 }

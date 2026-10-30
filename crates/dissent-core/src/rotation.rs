@@ -175,7 +175,10 @@ impl Engine {
 
     /// Joins the topic of the current secret, and keeps the old one running for a drain period.
     /// Messages already sent on the old topic still reach us, and leaving at once would drop them.
+    /// Moves run one at a time: each takes the parts the previous move left and subscribes with the
+    /// secret current then, so the last move always lands on the current secret's topic.
     async fn move_topic(&self, community: CommunityId) {
+        let _one_at_a_time = self.inner.topic_move_lock.lock().await;
         let bootstrap = self.bootstrap_for(&community);
         let (old_sender, old_task) = {
             let mut w = self.write();

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{now_ms, Engine};
 use crate::error::Result;
-use crate::store::{read_bin, write_bin, Paths};
+use crate::store::Paths;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct MentionReads {
@@ -18,11 +18,11 @@ pub(crate) struct MentionReads {
 
 impl MentionReads {
     pub fn load(paths: &Paths) -> Result<Self> {
-        Ok(read_bin(&paths.mention_reads())?.unwrap_or_default())
+        Ok(paths.read_bin(&paths.mention_reads())?.unwrap_or_default())
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_bin(&paths.mention_reads(), self)
+        paths.write_bin(&paths.mention_reads(), self)
     }
 }
 

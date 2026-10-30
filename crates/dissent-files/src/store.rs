@@ -364,6 +364,46 @@ impl Files {
         result
     }
 
+    /// Like [`Files::fetch`], but decrypts into memory and writes no plaintext to disk. For small files the caller keeps
+    /// sealed, such as pictures and thumbnails. A file over `max_bytes` is refused before any byte moves.
+    pub async fn fetch_bytes(
+        &self,
+        endpoint: &Endpoint,
+        from: &[EndpointAddr],
+        fref: &FileRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        fref.check(self.size_limit.min(max_bytes))?;
+        self.check_space(fref.cipher_size + DISK_MARGIN).await?;
+        let hash = Hash::from_bytes(fref.hash);
+        let mut sink = |_: &[SourceCount]| {};
+        let mut observer = Observer::new(fref.cipher_size, from.len(), &mut sink);
+        let mut progress = |_, _| {};
+        let keep = self
+            .ensure_blob(endpoint, from, hash, fref.cipher_size, &mut progress, &mut observer)
+            .await?;
+        let mut reader = StoreReader {
+            handle: Handle::current(),
+            reader: self.store.blobs().reader(hash),
+            read: 0,
+        };
+        let (key, size, cipher_size) = (fref.file_key(), fref.size, fref.cipher_size);
+        let result = run_blocking(move || {
+            let mut out = Vec::with_capacity(size as usize);
+            let plain_len = {
+                let mut input = BufReader::new(&mut reader);
+                crypt::decrypt_stream(&mut input, &mut out, &key)?
+            };
+            if plain_len != size || reader.read != cipher_size {
+                return Err(FilesError::Decrypt);
+            }
+            Ok(out)
+        })
+        .await;
+        drop(keep);
+        result
+    }
+
     /// Downloads and pins the ciphertext for `hash` without needing the key, so a seeder can
     /// keep a community's attachments available. The bytes are verified against `hash` as they
     /// arrive, and the store never sees plaintext.

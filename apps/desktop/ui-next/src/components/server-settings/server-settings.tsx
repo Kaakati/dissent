@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { api } from '@/lib/api';
+import { has } from '@/lib/features';
 import { clearCommunityIcon, moderate, saveServerProfile, setCommunityIcon, setCommunityIconAnimated, type ServerProfileChanges } from '@/lib/actions';
 import { bannerOf, bannersStill, draftUrlOf, sameBanner, subscribeBannerMotion, type BannerDraft } from '@/lib/banners';
 import { boostLabel, videoLabel } from '@/lib/boosts';
@@ -24,7 +25,7 @@ import { iconSrc } from '@/lib/images';
 import { useShell } from '@/lib/store';
 import { loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
 import { toast } from '@/lib/toasts';
-import type { CommunityView, Id, Trait } from '@/lib/types';
+import type { CommunityView, Id, MemberOnlyStatus, Trait } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const MAX_NAME = 64; // the engine's limits, in characters
@@ -32,9 +33,12 @@ const MAX_DESCRIPTION = 300;
 const MAX_LABEL = 24;
 const SLOTS = 5;
 
-export type Section = 'profile' | 'boosts' | 'members' | 'invites' | 'bans';
-const NAV: { key: Section; label: string; group: 'server' | 'people' }[] = [
+export type Section = 'profile' | 'privacy' | 'boosts' | 'members' | 'invites' | 'bans';
+// The page's sections. Privacy shows only when the engine reports member-only control, which is known once the
+// capabilities are read, so the list is built when the page renders.
+const nav = (): { key: Section; label: string; group: 'server' | 'people' }[] => [
   { key: 'profile', label: 'Server Profile', group: 'server' },
+  ...(has('member_only') ? [{ key: 'privacy' as const, label: 'Privacy', group: 'server' as const }] : []),
   { key: 'boosts', label: 'Boosts', group: 'server' },
   { key: 'members', label: 'Members', group: 'people' },
   { key: 'invites', label: 'Invites', group: 'people' },
@@ -176,7 +180,7 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
               <h2 className={cn('flex h-8 items-center truncate px-2.5', BLOCK_TITLE, group === 'people' && 'mt-s-3')} title={group === 'server' ? community.name : undefined}>
                 {group === 'server' ? community.name : 'People'}
               </h2>
-              {NAV.filter((n) => n.group === group).map((n) => (
+              {nav().filter((n) => n.group === group).map((n) => (
                 <button
                   key={n.key}
                   type="button"
@@ -203,7 +207,7 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
       <div className="flex min-h-0 overflow-y-auto bg-chat px-s-10 pt-[60px] pb-s-10">
         <div className="flex min-h-full w-[900px] max-w-full flex-col gap-7">
           <header>
-            <h1 className="text-title font-bold text-text-strong">{NAV.find((n) => n.key === section)?.label}</h1>
+            <h1 className="text-title font-bold text-text-strong">{nav().find((n) => n.key === section)?.label}</h1>
             {section === 'profile' ? <Hint className="mt-1">Customize how your server appears in invite links and to members.</Hint> : null}
           </header>
           {section === 'profile' ? (
@@ -234,6 +238,7 @@ function ServerSettingsPage({ community, section: initial }: { community: Commun
           {section === 'invites' ? <InviteList communityId={community.id} /> : null}
           {section === 'bans' ? <BansList community={community} /> : null}
           {section === 'boosts' ? <BoostsSection community={community} /> : null}
+          {section === 'privacy' ? <PrivacySection community={community} /> : null}
           {dirty ? (
             <div
               key={shake}
@@ -499,6 +504,83 @@ function BoostsSection({ community }: { community: CommunityView }) {
         ) : null}
       </Block>
     </div>
+  );
+}
+
+// Member-only control: the owner seals the server's details (who is in it, names, roles, channels, settings) under the
+// encryption group, so only current members read them. Invite holders who have not joined and seeders (storage
+// members) stop seeing them. It turns on only when every member device says it can read sealed details, since a device
+// that cannot would lose them; the status names how many have not said so. It turns off at any time. The default stays
+// off (docs/design/05-encrypted-servers.md, "Member-only control").
+function PrivacySection({ community }: { community: CommunityView }) {
+  const [status, setStatus] = useState<MemberOnlyStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const loadCommunity = useShell((s) => s.loadCommunity);
+  const load = useCallback(async () => {
+    try {
+      setStatus(await api.memberOnlyStatus(community.id));
+    } catch (err) {
+      toast(err);
+    }
+  }, [community.id]);
+  useEffect(() => {
+    let live = true;
+    api.memberOnlyStatus(community.id).then((v) => live && setStatus(v), (err) => live && toast(err));
+    return () => {
+      live = false;
+    };
+  }, [community.id]);
+  const owner = community.my_role === 'owner';
+  const change = async (next: boolean) => {
+    setBusy(true);
+    try {
+      await api.setMemberOnly(community.id, next);
+      await loadCommunity(community.id);
+    } catch (err) {
+      toast(`Could not change member-only details: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await load();
+    setBusy(false);
+  };
+  if (!status) return <Hint>Checking the members' devices…</Hint>;
+  const blocked = !status.on && !status.can_enable;
+  return (
+    <Block title="Member-only details">
+      <CheckRow>
+        <input
+          type="checkbox"
+          className={CHECK_CLASS}
+          aria-label="Hide server details from people who are not members"
+          aria-describedby="member-only-what member-only-status"
+          checked={status.on}
+          disabled={!owner || busy || blocked}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        Hide server details from people who are not members
+      </CheckRow>
+      <Hint id="member-only-what">
+        On: who is in the server, their names, roles, channels and settings are encrypted for current members only. People
+        who hold an invite link but have not joined, and this server’s seeders, can no longer read them. They still see
+        the server’s name, icon and invite card. Details from before you turn it on stay readable to them.
+      </Hint>
+      <p id="member-only-status" data-member-only-status className="text-sm text-muted-foreground" role="status">
+        {status.on
+          ? 'On. New server details are only readable by members.'
+          : blocked
+            ? `${status.waiting} member ${status.waiting === 1 ? 'device has' : 'devices have'} not confirmed they support this. They may be offline or need to update the app. You can turn it on once every member device answers.`
+            : 'Every member device supports this.'}
+      </p>
+      {blocked ? (
+        <div>
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void load()}>Check again</Button>
+        </div>
+      ) : null}
+      <Hint>
+        Members on an app version from before this setting cannot read sealed details, which is why it waits for every
+        device. A device that joins later on an older version sees them as locked.
+      </Hint>
+      {owner ? null : <Hint>Only the owner can change this.</Hint>}
+    </Block>
   );
 }
 

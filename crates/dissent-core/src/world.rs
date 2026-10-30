@@ -11,7 +11,7 @@ use crate::identity_watch::IdentityChange;
 use crate::directory::{AddressBook, Directory, StoredAddr};
 use crate::error::{CoreError, Result};
 use crate::store::{
-    content_vault, migrate_plain_log, read_bin, read_records, read_sealed_records, write_bin, Paths,
+    content_vault, migrate_plain_log, read_sealed_records, Paths,
 };
 use crate::views::{
     ChannelInfo, CommunityRef, CommunitySummary, CommunityView, HandleView, MemberInfo,
@@ -116,10 +116,10 @@ pub(crate) struct World {
 impl World {
     /// Reads everything under `paths`. Communities that fail to load are skipped with a warning.
     pub fn load(paths: Paths, identity: &Identity, vault: &Vault) -> Result<World> {
-        let profile: Profile = read_bin(&paths.profile())?.unwrap_or_default();
-        let contacts: Vec<ContactCard> = read_bin(&paths.contacts())?.unwrap_or_default();
-        let addrs: Vec<StoredAddr> = read_bin(&paths.addresses())?.unwrap_or_default();
-        let my_signed: Option<SignedAddr> = read_bin(&paths.own_addr())?;
+        let profile: Profile = paths.read_bin(&paths.profile())?.unwrap_or_default();
+        let contacts: Vec<ContactCard> = paths.read_bin(&paths.contacts())?.unwrap_or_default();
+        let addrs: Vec<StoredAddr> = paths.read_bin(&paths.addresses())?.unwrap_or_default();
+        let my_signed: Option<SignedAddr> = paths.read_bin(&paths.own_addr())?;
         let my_addr_ts = my_signed.as_ref().map_or(0, |own| own.ts_ms);
         let mut directory = Directory::default();
         directory.learn(&identity.cert);
@@ -128,7 +128,7 @@ impl World {
         }
         let mut communities = load_communities(&paths, &mut directory, vault);
         let dms = load_dms(&paths, &mut directory);
-        let outbox: Vec<SignedDm> = read_bin::<Vec<SignedDm>>(&paths.outbox())?
+        let outbox: Vec<SignedDm> = paths.read_bin::<Vec<SignedDm>>(&paths.outbox())?
             .unwrap_or_default()
             .into_iter()
             .filter(|d| d.verify().is_ok())
@@ -167,7 +167,7 @@ impl World {
             }
         }
         let identity_changes: Vec<IdentityChange> =
-            crate::store::read_records(&paths.identity_changes()).unwrap_or_default();
+            paths.read_records(&paths.identity_changes()).unwrap_or_default();
         let own = crate::presence::load_own(&paths);
         let own_avatar = crate::avatars::read_sealed::<Option<Picture>>(&paths.own_avatar(), &crate::avatars::own_vault(vault))?
             .flatten();
@@ -226,7 +226,7 @@ impl World {
     }
 
     pub fn save_profile(&self) -> Result<()> {
-        write_bin(
+        self.paths.write_bin(
             &self.paths.profile(),
             &Profile {
                 display_name: self.profile_name.clone(),
@@ -235,15 +235,15 @@ impl World {
     }
 
     pub fn save_contacts(&self) -> Result<()> {
-        write_bin(&self.paths.contacts(), &self.contacts)
+        self.paths.write_bin(&self.paths.contacts(), &self.contacts)
     }
 
     pub fn save_addresses(&self) -> Result<()> {
-        write_bin(&self.paths.addresses(), &self.addresses.all())
+        self.paths.write_bin(&self.paths.addresses(), &self.addresses.all())
     }
 
     pub fn save_outbox(&self) -> Result<()> {
-        write_bin(&self.paths.outbox(), &self.outbox)
+        self.paths.write_bin(&self.paths.outbox(), &self.outbox)
     }
 
     pub fn anon_name(&self) -> String {
@@ -634,13 +634,13 @@ fn load_community(
     directory: &mut Directory,
     vault: &Vault,
 ) -> Result<Community> {
-    let genesis: Genesis = read_bin(&paths.genesis(id))?
+    let genesis: Genesis = paths.read_bin(&paths.genesis(id))?
         .ok_or_else(|| CoreError::NotFound(format!("genesis for community {id}")))?;
     genesis.verify()?;
     if genesis.community != *id {
         return Err(CoreError::Invalid("genesis belongs to another community".into()));
     }
-    let valid: Vec<SignedEvent> = crate::store::read_records_skipping::<SignedEvent>(&paths.events_log(id))?
+    let valid: Vec<SignedEvent> = crate::store::read_records_skipping_plain::<SignedEvent>(&paths.events_log(id))?
         .into_iter()
         .filter(|se| se.verify().is_ok())
         .collect();
@@ -669,7 +669,7 @@ fn load_dms(paths: &Paths, directory: &mut Directory) -> BTreeMap<RootId, Vec<Si
         else {
             continue;
         };
-        match read_records::<SignedDm>(&path) {
+        match paths.read_records::<SignedDm>(&path) {
             Ok(records) => {
                 let valid: Vec<SignedDm> = records.into_iter().filter(|d| d.verify().is_ok()).collect();
                 for dm in &valid {

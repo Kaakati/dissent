@@ -10,7 +10,7 @@ import { bannerOf } from '@/lib/banners';
 import { useShell } from '@/lib/store';
 import type { InvitePreview } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { imageSrc } from './attachments';
+import { pictureSrc } from './attachments';
 
 const INVITE_RE = /dissent:\/\/invite\/[^\s<>"']+/g;
 
@@ -116,7 +116,7 @@ function InviteCard({ link }: { link: string }) {
     ? () => void useShell.getState().openServer(preview.community)
     : () => void join();
   // The same card as Server Settings' preview, with the Join button under it.
-  const banner = bannerOf(preview.banner ? imageSrc(preview.banner) : null, preview.banner_preset, preview.banner_poster ? imageSrc(preview.banner_poster) : null);
+  const banner = bannerOf(preview.banner ? pictureSrc(preview.banner) : null, preview.banner_preset, preview.banner_poster ? pictureSrc(preview.banner_poster) : null);
 
   return (
     <ServerCard
@@ -124,8 +124,8 @@ function InviteCard({ link }: { link: string }) {
       variant="invite"
       id={preview.community}
       name={preview.name}
-      icon={preview.icon ? imageSrc(preview.icon) : null}
-      iconPoster={preview.icon_poster ? imageSrc(preview.icon_poster) : null}
+      icon={preview.icon ? pictureSrc(preview.icon) : null}
+      iconPoster={preview.icon_poster ? pictureSrc(preview.icon_poster) : null}
       banner={banner}
       memberCount={preview.member_count}
       onlineCount={preview.online_count}

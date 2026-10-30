@@ -88,7 +88,7 @@ type ReadyFile = BTreeMap<CommunityId, (Vec<DeviceId>, bool)>;
 /// Loads the last readiness answers, so a restart starts from them rather than from "unknown". A missing or unreadable
 /// file starts empty, which is the older form until a check runs.
 pub(crate) fn load_ready(paths: &Paths) -> BTreeMap<CommunityId, ReadyAnswer> {
-    let saved: ReadyFile = crate::store::read_bin(&paths.history_ready()).ok().flatten().unwrap_or_default();
+    let saved: ReadyFile = paths.read_bin(&paths.history_ready()).ok().flatten().unwrap_or_default();
     saved
         .into_iter()
         .map(|(community, (devices, ready))| (community, (Instant::now(), devices, ready)))
@@ -493,7 +493,7 @@ impl Engine {
             .map(|(community, (_, devices, ready))| (*community, (devices.clone(), *ready)))
             .collect();
         let paths = self.read().paths.clone();
-        if let Err(e) = crate::store::write_bin(&paths.history_ready(), &snapshot) {
+        if let Err(e) = paths.write_bin(&paths.history_ready(), &snapshot) {
             warn!(error = %e, "could not save the history readiness");
         }
     }
@@ -656,6 +656,18 @@ impl Engine {
             wait = (wait * 2).min(RETRY_CAP);
         }
     }
+}
+
+/// Seals the key file at `path` again from `from` to `to`, for a profile copy under a new vault. A missing file is
+/// nothing to do, and one that does not open under `from` is an error.
+pub(crate) fn reseal(path: &std::path::Path, from: &Vault, to: &Vault, id: &CommunityId) -> Result<()> {
+    let sealed = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let plain = from.subkey(STORE_PURPOSE).open_sealed(&store_aad(id), &sealed)?;
+    crate::store::write_bytes_atomic(path, &to.subkey(STORE_PURPOSE).seal(&store_aad(id), &plain))
 }
 
 #[cfg(test)]

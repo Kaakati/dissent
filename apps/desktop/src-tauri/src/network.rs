@@ -48,6 +48,11 @@ pub struct NetworkSettings {
     /// Find devices through number0's DNS directory. It is faster to connect, but number0 sees this device's
     /// ID and addresses. Used only with number0's relays, so custom relays never reach it. On by default.
     pub use_n0_lookup: bool,
+    /// "Hide my IP address": every connection goes through a relay, so peers see the relay's address
+    /// and never this device's. No direct paths, no LAN discovery, and no Mainline DHT, whose client
+    /// would show this device's IP to strangers. The relay sees the IP and the traffic's metadata, and
+    /// calls and transfers are slower. Off by default. Applied when the engine restarts.
+    pub hide_ip: bool,
 }
 
 impl Default for NetworkSettings {
@@ -60,6 +65,7 @@ impl Default for NetworkSettings {
             disabled: Vec::new(),
             use_community_relays: true,
             use_n0_lookup: true,
+            hide_ip: false,
         }
     }
 }
@@ -135,6 +141,7 @@ pub fn check(settings: &NetworkSettings) -> Result<NetworkSettings, String> {
         disabled,
         use_community_relays: settings.use_community_relays,
         use_n0_lookup: settings.use_n0_lookup,
+        hide_ip: settings.hide_ip,
     };
     if enabled(&checked).is_empty() {
         return Err(EMPTY_OFF_MESSAGE.to_string());
@@ -188,7 +195,10 @@ pub fn relay_choice(settings: &NetworkSettings) -> RelayChoice {
 pub fn node_config(settings: &NetworkSettings) -> NodeConfig {
     NodeConfig {
         relay: relay_choice(settings),
-        lan_discovery: settings.lan_discovery,
+        // Hiding the IP leaves the node no IP transport, so nothing reaches a peer but through a relay.
+        relay_only: settings.hide_ip,
+        dht_lookup: !settings.hide_ip,
+        lan_discovery: settings.lan_discovery && !settings.hide_ip,
         community_relays: settings.use_community_relays,
         n0_address_lookup: settings.use_n0_lookup,
         ..Default::default()
@@ -338,6 +348,26 @@ mod tests {
         let saved = parse_settings(r#"{"use_n0_lookup": false}"#).unwrap();
         assert!(!saved.use_n0_lookup);
         assert!(!node_config(&saved).n0_address_lookup);
+    }
+
+    #[test]
+    fn hide_ip_is_off_by_default_and_an_old_file_keeps_it_off() {
+        assert!(!NetworkSettings::default().hide_ip);
+        let config = node_config(&NetworkSettings::default());
+        assert!(!config.relay_only && config.dht_lookup);
+        let old = parse_settings(r#"{"use_public_relays": true, "relays": [], "lan_discovery": true}"#).unwrap();
+        assert!(!old.hide_ip, "a network.json from before the switch reads as off");
+    }
+
+    #[test]
+    fn hide_ip_routes_everything_through_relays_and_leaves_the_dht_and_lan() {
+        let on = parse_settings(r#"{"hide_ip": true, "lan_discovery": true}"#).unwrap();
+        assert!(on.hide_ip);
+        let config = node_config(&on);
+        assert!(config.relay_only, "no IP transport");
+        assert!(!config.dht_lookup, "no Mainline DHT socket");
+        assert!(!config.lan_discovery, "no LAN beacons");
+        assert!(!matches!(config.relay, RelayChoice::Disabled), "a relay to go through");
     }
 
     #[test]

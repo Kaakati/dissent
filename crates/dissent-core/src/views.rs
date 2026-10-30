@@ -435,6 +435,8 @@ pub enum EngineEvent {
     TransfersChanged,
     /// An attachment's thumbnail arrived. The UI re-reads the open conversation, without an alert.
     AttachmentChanged { message_id: String, attachment_id: String },
+    /// A guardian answered the recovery on this device, or it finished or was cancelled. The recovery screen re-reads it.
+    RecoveryChanged,
     /// A file for an attachment moved. `progress` is `0..1`.
     AttachmentProgress {
         message_id: String,
@@ -495,6 +497,16 @@ pub enum EngineEvent {
         community_name: String,
         root_id: String,
         display_name: String,
+    },
+    /// Who speaks in the current call changed. Read `call_state` again for the rings. Sent at most
+    /// about ten times a second, see `calls::speaking`.
+    CallSpeaking,
+    /// A device started (`on`) or stopped holding our offline mail. See `inbox::host_inbox_for`.
+    InboxHostChanged {
+        root_id: String,
+        display_name: String,
+        device_id: String,
+        on: bool,
     },
 }
 

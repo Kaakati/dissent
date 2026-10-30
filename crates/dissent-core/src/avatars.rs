@@ -138,6 +138,16 @@ pub(crate) fn read_sealed<T: Serialize + DeserializeOwned>(path: &Path, vault: &
     Ok(Some(plain))
 }
 
+/// The MIME type of a picture, from its first bytes, as `extension_of` names it.
+pub(crate) fn mime_of_bytes(bytes: &[u8]) -> &'static str {
+    match extension_of(bytes) {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "jpg" => "image/jpeg",
+        _ => "image/webp",
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -316,10 +326,10 @@ impl Engine {
             nonce_prefix: fref.nonce_prefix,
             size: fref.size,
         };
-        let dir = self.read().paths.avatars_dir();
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.{}", stem(&picture), extension_of(&bytes)));
-        crate::store::write_bytes_atomic(&path, &bytes)?;
+        let paths = self.paths();
+        let path = paths.avatars_dir().join(format!("{}.{}", stem(&picture), extension_of(&bytes)));
+        // Kept sealed. The window reads it through the app's picture scheme, which opens it (`open_picture`).
+        paths.write_bytes(&path, &bytes)?;
         Ok(picture)
     }
 
@@ -424,11 +434,11 @@ impl Engine {
         });
     }
 
-    /// Downloads, verifies and decrypts one picture into the avatars directory.
+    /// Downloads, verifies and decrypts one picture, in memory, and keeps it sealed in the avatars directory.
     pub(crate) async fn fetch_blob(&self, picture: &Picture, providers: &[PeerAddr]) -> Result<()> {
         let from: Vec<_> = providers.iter().filter_map(|p| p.to_iroh().ok()).collect();
-        let dir = self.read().paths.avatars_dir();
-        std::fs::create_dir_all(&dir)?;
+        let paths = self.paths();
+        let dir = paths.avatars_dir();
         let fref = FileRef {
             hash: picture.hash,
             size: picture.size,
@@ -439,26 +449,45 @@ impl Engine {
             nonce_prefix: picture.nonce_prefix,
         };
         let node = self.node();
-        let path = self
+        // Replay already held the size the event names to its kind's cap, so a file larger than that size, or than
+        // the largest kind, is refused before it moves.
+        let bytes = self
             .inner
             .files
-            .fetch(node.endpoint(), &from, &fref, &dir, |_, _| {})
+            .fetch_bytes(node.endpoint(), &from, &fref, picture.size.min(MAX_ANIMATED_BANNER_BYTES))
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
         self.add_blob_scope(picture.hash, crate::blob_gate::Scope::Shared);
-        // The plaintext's type decides its extension, which the asset protocol uses as the MIME type.
-        // Replay already held the size the event names to its kind's cap, so a file larger than that
-        // size, or than the largest kind, is refused.
-        let bytes = std::fs::read(&path)?;
-        if bytes.len() as u64 > picture.size.min(MAX_ANIMATED_BANNER_BYTES) {
-            let _ = std::fs::remove_file(&path);
-            return Err(CoreError::Invalid("the picture is larger than its event says".into()));
-        }
+        // The plaintext's type decides its extension, which the picture scheme uses as the MIME type.
         let named = dir.join(format!("{}.{}", stem(picture), extension_of(&bytes)));
-        if named != path {
-            std::fs::rename(&path, &named)?;
-        }
+        paths.write_bytes(&named, &bytes)?;
         Ok(())
+    }
+
+    /// The bytes and MIME type of a picture this device keeps: an avatar, an icon, a banner, a thumbnail or a link
+    /// preview's picture. Pictures are sealed at rest, so the window reads them through the app's picture scheme, which
+    /// calls this. Any path outside the avatars and thumbnails folders is refused, so the scheme cannot read other files.
+    pub fn open_picture(&self, path: &Path) -> Result<(Vec<u8>, &'static str)> {
+        let paths = self.paths();
+        let refused = || CoreError::Invalid("not a picture this app keeps".into());
+        let folders: Vec<_> = [paths.avatars_dir(), paths.thumbnails_dir()]
+            .into_iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        let in_folders = |p: &Path| folders.iter().any(|dir| p.starts_with(dir));
+        // The folder is checked first, so a missing picture is told apart from a path elsewhere.
+        let parent = path.parent().and_then(|p| p.canonicalize().ok());
+        if !path.is_absolute() || !parent.is_some_and(|p| in_folders(&p)) {
+            return Err(refused());
+        }
+        // Canonicalizing the file itself resolves a link, so one that leads out of the folders is refused too.
+        match path.canonicalize() {
+            Err(_) => return Err(CoreError::NotFound("picture".into())),
+            Ok(file) if !in_folders(&file) || !file.is_file() => return Err(refused()),
+            Ok(_) => {}
+        }
+        let bytes = paths.read_bytes(path)?.ok_or_else(|| CoreError::NotFound("picture".into()))?;
+        Ok((bytes.clone(), mime_of_bytes(&bytes)))
     }
 
     /// Fetches the pictures this device names but has not decrypted, for example after a restart.

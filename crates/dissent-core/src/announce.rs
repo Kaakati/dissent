@@ -6,7 +6,6 @@ use crate::engine::{now_ms, Engine, Inner};
 use crate::error::Result;
 use crate::identity_watch;
 use crate::rpc::Request;
-use crate::store::write_bin;
 use crate::wire::{encode_gossip, GossipMsg, SignedAddr, MAX_ADDRS_PER_REPLY};
 use dissent_identity::{CommunityId, DeviceId, RootId};
 use dissent_net::{PeerAddr, TopicSender};
@@ -44,7 +43,7 @@ impl Engine {
             guard.my_addr = Some(addr);
             guard.my_addr_ts = ts;
             guard.my_signed = Some(signed.clone());
-            if let Err(e) = write_bin(&guard.paths.own_addr(), &signed) {
+            if let Err(e) = guard.paths.write_bin(&guard.paths.own_addr(), &signed) {
                 warn!(error = %e, "could not persist our address");
             }
             signed
@@ -197,7 +196,7 @@ impl Engine {
             &w.dms,
             &w.conv_book,
             &mut w.identity_changes,
-            &w.paths.identity_changes(),
+            &w.paths,
             &sa.cert,
             now_ms(),
         );

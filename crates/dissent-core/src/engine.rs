@@ -53,6 +53,8 @@ pub(crate) struct Inner {
     pub vault: Arc<Vault>,
     /// Where the MLS snapshot is written.
     pub mls_path: PathBuf,
+    /// The profile's paths and file seal, for paths that must not take the world lock, such as the MLS ones.
+    pub store: crate::store::Paths,
     /// Ratchet steps since the last MLS flush. A flush writes the whole state.
     pub mls_dirty: std::sync::atomic::AtomicU64,
     pub mls_flushed_at: Mutex<std::time::Instant>,
@@ -84,6 +86,10 @@ pub(crate) struct Inner {
     pub publish_lock: tokio::sync::Mutex<()>,
     /// Serializes conversation queue flushes, so one packet is never sent twice at once.
     pub flush_lock: tokio::sync::Mutex<()>,
+    /// Serializes gossip topic moves after a secret change. Two rival rotations installed in quick
+    /// succession would otherwise move at once, and the one that finished last could leave the
+    /// community on the losing secret's topic. See `rotation::move_topic`.
+    pub topic_move_lock: tokio::sync::Mutex<()>,
     /// Next member to try first in anti-entropy, per community.
     pub sync_cursor: Mutex<BTreeMap<CommunityId, usize>>,
     /// Devices whose last anti-entropy attempt failed, until the given instant.
@@ -203,15 +209,22 @@ impl Engine {
         let me = identity.root_id();
         let files_dir = data_dir.join("files");
         let files = std::sync::Arc::new(Self::open_files(&files_dir).await?);
-        let paths_for_ready = Paths::new(data_dir.clone());
-        let mut world = World::load(Paths::new(data_dir), &identity, &vault)?;
+        let paths = Paths::new(data_dir, vault.clone());
+        // A profile from before sealing is sealed here, before anything reads it.
+        paths.migrate()?;
+        let paths_for_ready = paths.clone();
+        let mut world = World::load(paths, &identity, &vault)?;
         world.timings = timings;
         world.attach.default_download_dir = default_download_dir;
         let newest_stored = world.max_hlc();
         let founded = load_founded(&world, &vault)?;
         let mls = open_mls(&identity, &world, &vault)?;
         let mls_path = world.paths.mls_state();
-        let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only {
+        let store_paths = world.paths.clone();
+        // A relay-only node ("Hide my IP address") stays off the Mainline DHT too: a DHT client talks to
+        // strangers from its own UDP socket, which would show them this device's IP beside the keys it
+        // looks up and publishes.
+        let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only || net.relay_only {
             None
         } else {
             match Discovery::new() {
@@ -240,6 +253,7 @@ impl Engine {
             mls: Mutex::new(mls),
             vault,
             mls_path,
+            store: store_paths,
             mls_dirty: std::sync::atomic::AtomicU64::new(0),
             mls_flushed_at: Mutex::new(std::time::Instant::now()),
             dirty_logs: Default::default(),
@@ -250,6 +264,7 @@ impl Engine {
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),
             flush_lock: tokio::sync::Mutex::new(()),
+            topic_move_lock: tokio::sync::Mutex::new(()),
             sync_cursor: Mutex::new(BTreeMap::new()),
             sync_backoff: Mutex::new(BTreeMap::new()),
             member_seen: tokio::sync::Notify::new(),
@@ -487,6 +502,12 @@ impl Engine {
         NetStatusView { dht, peers, relay, relay_ms, dials }
     }
 
+    /// The profile's paths, with the key its files are sealed under. Taken before a lock, so a file is read and
+    /// written without holding the world.
+    pub(crate) fn paths(&self) -> crate::store::Paths {
+        self.read().paths.clone()
+    }
+
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, World> {
         self.inner
             .world
@@ -675,7 +696,7 @@ fn open_mls(identity: &Identity, w: &World, vault: &Vault) -> Result<MlsClient> 
     match restored {
         Ok(mut client) => {
             // Resume past every sender generation that may have been used before the last restart.
-            client.restore_reservations(crate::sealed::read_reservations(&crate::sealed::reserve_path(&path))?);
+            client.restore_reservations(crate::sealed::read_reservations(&w.paths, &crate::sealed::reserve_path(&path))?);
             client
                 .resume_sends()
                 .map_err(|e| CoreError::Invalid(format!("MLS state could not resume its sends: {e}")))?;

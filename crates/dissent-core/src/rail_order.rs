@@ -8,7 +8,6 @@ use dissent_identity::CommunityId;
 
 use crate::engine::Engine;
 use crate::error::Result;
-use crate::store::{read_bin, write_bin};
 use crate::views::CommunitySummary;
 use crate::world::World;
 
@@ -17,13 +16,13 @@ fn path(w: &World) -> PathBuf {
 }
 
 /// The saved order. A missing or unreadable file gives no order, so the default one is used.
-fn read_order(path: &Path) -> Vec<CommunityId> {
-    read_bin(path).ok().flatten().unwrap_or_default()
+fn read_order(paths: &crate::store::Paths, path: &Path) -> Vec<CommunityId> {
+    paths.read_bin(path).ok().flatten().unwrap_or_default()
 }
 
 /// The saved order of this device, for the community list.
 pub(crate) fn saved_order(w: &World) -> Vec<CommunityId> {
-    read_order(&path(w))
+    read_order(&w.paths, &path(w))
 }
 
 /// The ids to save: only communities still joined, each once, in the order given.
@@ -51,9 +50,9 @@ impl Engine {
     /// dropped.
     pub fn set_server_order(&self, ids: Vec<CommunityId>) -> Result<()> {
         let joined: BTreeSet<CommunityId> = self.read().communities.keys().copied().collect();
-        let path = path(&self.read());
+        let (paths, path) = (self.paths(), path(&self.read()));
         let _serial = self.write();
-        write_bin(&path, &kept(ids, &joined))
+        paths.write_bin(&path, &kept(ids, &joined))
     }
 }
 
@@ -120,11 +119,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dissent-rail-order-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("rail_order.bin");
-        assert!(read_order(&file).is_empty(), "a missing file gives no order");
+        let paths = crate::store::Paths::for_test(dir.clone());
+        assert!(read_order(&paths, &file).is_empty(), "a missing file gives no order");
         std::fs::write(&file, [0xff, 0xff, 0xff]).unwrap();
-        assert!(read_order(&file).is_empty(), "a corrupt file gives no order");
-        write_bin(&file, &vec![id(3), id(1)]).unwrap();
-        assert_eq!(read_order(&file), vec![id(3), id(1)]);
+        assert!(read_order(&paths, &file).is_empty(), "a corrupt file gives no order");
+        crate::store::write_bin_plain(&file, &vec![id(3), id(1)]).unwrap();
+        assert_eq!(read_order(&paths, &file), vec![id(3), id(1)]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

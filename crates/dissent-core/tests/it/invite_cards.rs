@@ -115,3 +115,29 @@ async fn the_full_link_is_the_long_form_that_older_versions_open() {
     })
     .await;
 }
+
+/// A revoked invite gets no preview, as a forged secret gets none, so its holder learns no counts (privacy audit P-16).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_invite_gets_no_preview() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let id: CommunityId = alice
+            .engine
+            .create_community("Closed".into())
+            .await
+            .expect("create")
+            .id
+            .parse()
+            .unwrap();
+        let link = alice.engine.create_invite(id).await.expect("invite");
+        let invite_id = InviteLink::parse(&link).expect("parse").invite_id().expect("the invite has an id");
+        alice.engine.revoke_invite(id, invite_id).await.expect("alice revokes it");
+
+        let mallory = peer("mallory").await;
+        let refused = mallory.engine.invite_preview(&link).await;
+        let err = refused.expect_err("a revoked invite gets no preview");
+        assert!(err.to_string().contains("no member answered"), "the same error as for a forged secret: {err}");
+        finish(vec![alice, mallory]).await;
+    })
+    .await;
+}

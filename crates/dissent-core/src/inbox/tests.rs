@@ -11,7 +11,13 @@ use dissent_net::{NodeConfig, PeerAddr, RelayChoice};
 use crate::engine::Engine;
 use crate::conv_actions::parse_message_id;
 use crate::groups::{ConvPacket, REFUSED_TTL_MS};
-use crate::inbox::{sign_over, Envelope, DEPOSITS_PER_HOUR, DEPOSIT_DOMAIN, MAX_AGE_MS};
+use crate::contacts::ContactMsg;
+use crate::inbox::{
+    sign_over, Collect, DepositKeys, Envelope, InboxStats, Probe, ProbeAnswer, COLLECT_DOMAIN, DEPOSITS_PER_HOUR,
+    DEPOSIT_DOMAIN, KEYS_DOMAIN, KEY_PACKAGES_PER_DEVICE, MAX_AGE_MS, MAX_HOSTED, NOT_SERVED, PROBE_DOMAIN,
+};
+use crate::rpc::Request;
+use crate::views::EngineEvent;
 use crate::rpc::{decode, Response};
 use crate::views::DmItem;
 
@@ -64,7 +70,7 @@ fn introduce(to: &Engine, of: &Engine) {
 }
 
 async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + crate::testutil::scaled(Duration::from_secs(60));
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -391,4 +397,244 @@ async fn a_refused_message_is_sent_again_sealed_anew_once_the_inbox_accepts() {
     alice.shutdown().await.expect("alice shuts down");
     bob.shutdown().await.expect("bob shuts down");
     seeder.shutdown().await.expect("seeder shuts down");
+}
+
+/// A deposit for `root` made by `from`, as `deposit_packet` would make it.
+fn deposit_for(from: &Engine, root: RootId, tag: &str) -> Envelope {
+    let me = from.inner.identity.clone();
+    let packet = tag.as_bytes().to_vec();
+    let id = *blake3::hash(&packet).as_bytes();
+    let recipient = DeviceKey::generate().id();
+    let expires_ms = now() + MAX_AGE_MS / 2;
+    let sig = sign_over(&me.device, DEPOSIT_DOMAIN, &(recipient, root, id, expires_ms, &packet)).expect("deposit signs");
+    Envelope {
+        recipient,
+        recipient_root: root,
+        id,
+        expires_ms,
+        packet,
+        from: me.cert.clone(),
+        sig,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_friends_device_holds_mail_only_for_the_people_it_hosts() {
+    let bob_id = Identity::create(now());
+    let bob_root = bob_id.root_id();
+    let bob = start(bob_id, scratch("host-bob")).await;
+    let carol = start(Identity::create(now()), scratch("host-carol")).await;
+    let dave_id = Identity::create(now());
+    let dave_root = dave_id.root_id();
+    let dave = start(dave_id, scratch("host-dave")).await;
+    introduce(&bob, &carol);
+    introduce(&dave, &carol);
+    introduce(&carol, &bob);
+    let carol_dev = carol.inner.identity.device_id();
+
+    // Carol holds nothing for anyone yet. Bob may list her, but she answers that she does not serve him.
+    bob.set_inboxes(vec![carol_dev]).await.expect("bob lists carol's device");
+    let status = bob.inbox_status().await;
+    assert_eq!(status.len(), 1);
+    assert!(status[0].reachable && status[0].chosen, "carol answers");
+    assert!(!status[0].serving, "carol does not hold bob's mail before she agrees");
+    assert!(
+        !matches!(carol.receive_deposit(deposit_for(&dave, bob_root, "early")), Response::Ack),
+        "a device that hosts no one refuses deposits"
+    );
+
+    // Carol hosts Bob. His key packages and deposits for him are taken, and his status shows them.
+    carol.host_inbox_for(bob_root, true).expect("carol hosts bob");
+    bob.deposit_key_packages().await.expect("bob deposits key packages");
+    assert_eq!(carol.inbox_stats().key_packages, KEY_PACKAGES_PER_DEVICE);
+    assert!(matches!(carol.receive_deposit(deposit_for(&dave, bob_root, "for bob")), Response::Ack));
+    let status = bob.inbox_status().await;
+    assert!(status[0].serving, "carol now holds bob's mail");
+    assert_eq!(status[0].envelopes, 1);
+    assert_eq!(status[0].key_packages, KEY_PACKAGES_PER_DEVICE as u32);
+    assert!(status[0].bytes > 0);
+    let hosted = carol.hosted_inboxes();
+    assert_eq!(hosted.len(), 1);
+    assert_eq!(hosted[0].root, bob_root.to_string());
+    assert_eq!(hosted[0].envelopes, 1);
+
+    // Dave is not hosted: his deposits and key packages are refused, and his probe shows nothing,
+    // not even that Carol holds mail for someone else.
+    assert!(!matches!(carol.receive_deposit(deposit_for(&bob, dave_root, "for dave")), Response::Ack));
+    dave.set_inboxes(vec![carol_dev]).await.expect("dave lists carol");
+    assert_eq!(carol.inbox_stats().key_packages, KEY_PACKAGES_PER_DEVICE, "dave's key packages are refused");
+    let status = dave.inbox_status().await;
+    assert!(status[0].reachable && !status[0].serving);
+    assert_eq!((status[0].envelopes, status[0].key_packages, status[0].bytes), (0, 0, 0));
+    assert!(matches!(carol.take_key_package(dave_root), Response::Error(_)));
+
+    // A probe signed by one device but naming another's cert is answered as from a stranger.
+    let forged = {
+        let cert = bob.inner.identity.cert.clone();
+        let ts_ms = now();
+        let sig = sign_over(&dave.inner.identity.device, PROBE_DOMAIN, &(cert.root, cert.device, ts_ms)).expect("signs");
+        Probe { cert, ts_ms, sig }
+    };
+    assert!(matches!(carol.receive_probe(forged), Response::InboxProbe(a) if *a == ProbeAnswer::default()));
+
+    // Carol stops: what she held for Bob is dropped, and his status shows she no longer serves him.
+    carol.host_inbox_for(bob_root, false).expect("carol stops hosting bob");
+    assert_eq!(carol.inbox_stats(), InboxStats::default());
+    assert!(!bob.inbox_status().await[0].serving);
+
+    // Hosting oneself goes through the inbox switch, not this list.
+    assert!(carol.host_inbox_for(carol.inner.me, true).is_err());
+
+    bob.shutdown().await.expect("bob shuts down");
+    carol.shutdown().await.expect("carol shuts down");
+    dave.shutdown().await.expect("dave shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hosted_people_survive_a_restart_and_are_capped() {
+    let carol_id = Identity::create(now());
+    let carol_dir = scratch("cap-carol");
+    let carol = start(carol_id.clone(), carol_dir.clone()).await;
+    let roots: Vec<RootId> = (0..MAX_HOSTED).map(|_| Identity::create(now()).root_id()).collect();
+    for root in &roots {
+        carol.host_inbox_for(*root, true).expect("within the cap");
+    }
+    carol.host_inbox_for(roots[0], true).expect("hosting someone again is not a new slot");
+    assert!(carol.host_inbox_for(Identity::create(now()).root_id(), true).is_err(), "one past the cap is refused");
+    carol.shutdown().await.expect("carol shuts down");
+
+    let carol = start(carol_id, carol_dir).await;
+    assert_eq!(carol.inbox_stats().hosted, MAX_HOSTED, "the hosted list is kept on disk");
+    carol.shutdown().await.expect("carol shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refusals_do_not_show_whether_a_device_is_an_inbox() {
+    // Carol holds mail for no one. Erin holds Bob's. Dave asks both for himself, and gets the same answers.
+    let bob_root = Identity::create(now()).root_id();
+    let carol = start(Identity::create(now()), scratch("same-carol")).await;
+    let erin = start(Identity::create(now()), scratch("same-erin")).await;
+    let dave_id = Identity::create(now());
+    let dave_root = dave_id.root_id();
+    let dave = start(dave_id, scratch("same-dave")).await;
+    erin.host_inbox_for(bob_root, true).expect("erin hosts bob");
+
+    let answers = |inbox: &Engine| {
+        let deposit = format!("{:?}", inbox.receive_deposit(deposit_for(&dave, dave_root, "for dave")));
+        let keys = {
+            let cert = dave.inner.identity.cert.clone();
+            let packages = vec![b"package".to_vec()];
+            let sig = sign_over(&dave.inner.identity.device, KEYS_DOMAIN, &packages).expect("signs");
+            format!("{:?}", inbox.receive_key_packages(DepositKeys { cert, packages, sig }))
+        };
+        let take = format!("{:?}", inbox.take_key_package(dave_root));
+        let collect = {
+            let device = dave.inner.identity.device_id();
+            let ts_ms = now();
+            let sig = sign_over(&dave.inner.identity.device, COLLECT_DOMAIN, &(device, ts_ms)).expect("signs");
+            format!("{:?}", inbox.receive_collect(Collect { device, ts_ms, sig }))
+        };
+        (deposit, keys, take, collect)
+    };
+    let (none, other) = (answers(&carol), answers(&erin));
+    assert_eq!(none, other, "an inbox for someone else answers as a device that is no inbox");
+    assert!(none.0.contains(NOT_SERVED), "{}", none.0);
+    assert_eq!(none.3, format!("{:?}", Response::Envelopes(Vec::new())), "a collect gets an empty list, not an error");
+    // A served person whose packages ran out reads the same as an unserved one.
+    assert_eq!(format!("{:?}", erin.take_key_package(bob_root)), none.2);
+
+    carol.shutdown().await.expect("carol shuts down");
+    erin.shutdown().await.expect("erin shuts down");
+    dave.shutdown().await.expect("dave shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invisible_host_still_takes_mail_for_the_people_it_hosts() {
+    let bob_root = Identity::create(now()).root_id();
+    let alice_id = Identity::create(now());
+    let alice_root = alice_id.root_id();
+    let alice = start(alice_id, scratch("invisible-alice")).await;
+    let carol = start(Identity::create(now()), scratch("invisible-carol")).await;
+    introduce(&alice, &carol);
+    carol.host_inbox_for(bob_root, true).expect("carol hosts bob");
+    carol
+        .set_status(crate::presence::Status::Invisible, None)
+        .expect("carol goes invisible");
+    let carol_dev = carol.inner.identity.device_id();
+    let ask = |req: Request| {
+        let bytes = alice.request_bytes(&req).expect("request encodes");
+        let node = alice.node();
+        async move { node.request(carol_dev, bytes).await.ok().and_then(|r| decode::<Response>(&r).ok()) }
+    };
+
+    // A deposit for Bob, whom Carol hosts, is answered: hosting is consent.
+    let held = ask(Request::Deposit(Box::new(deposit_for(&alice, bob_root, "for bob")))).await;
+    assert!(matches!(held, Some(Response::Ack)), "{held:?}");
+    assert_eq!(carol.inbox_stats().envelopes, 1);
+    // Anything else from a device Carol did not contact gets no answer, as if she were offline: a deposit
+    // for someone she does not host, and a probe for Alice herself.
+    let other = ask(Request::Deposit(Box::new(deposit_for(&alice, alice_root, "for alice")))).await;
+    assert!(other.is_none(), "{other:?}");
+    let probe = {
+        let cert = alice.inner.identity.cert.clone();
+        let ts_ms = now();
+        let sig = sign_over(&alice.inner.identity.device, PROBE_DOMAIN, &(cert.root, cert.device, ts_ms)).expect("signs");
+        ask(Request::InboxProbe(Box::new(Probe { cert, ts_ms, sig }))).await
+    };
+    assert!(probe.is_none(), "{probe:?}");
+
+    alice.shutdown().await.expect("alice shuts down");
+    carol.shutdown().await.expect("carol shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_tells_the_person_when_it_starts_and_stops_holding_their_mail() {
+    let bob_id = Identity::create(now());
+    let bob_root = bob_id.root_id();
+    let bob_dir = scratch("notice-bob");
+    let bob = start(bob_id.clone(), bob_dir.clone()).await;
+    let carol = start(Identity::create(now()), scratch("notice-carol")).await;
+    introduce(&carol, &bob);
+    introduce(&bob, &carol);
+    let carol_root = carol.inner.me;
+    let carol_dev = carol.inner.identity.device_id().to_string();
+    let mut events = bob.subscribe();
+
+    carol.host_inbox_for(bob_root, true).expect("carol hosts bob");
+    eventually("bob hears carol holds his mail", || {
+        bob.inbox_notices().first().is_some_and(|n| n.on && n.device == carol_dev && n.root == carol_root.to_string())
+    })
+    .await;
+    let mut seen = None;
+    while let Ok(ev) = events.try_recv() {
+        if let EngineEvent::InboxHostChanged { device_id, on, .. } = ev {
+            seen = Some((device_id, on));
+        }
+    }
+    assert_eq!(seen, Some((carol_dev.clone(), true)), "the app is told, for an in-app notice");
+    assert!(!bob.inbox_notices()[0].chosen, "bob has not picked it yet");
+
+    // Setting what is already set sends nothing.
+    carol.host_inbox_for(bob_root, true).expect("again");
+    let queued = |e: &Engine| {
+        e.read()
+            .contact_book
+            .outbox
+            .iter()
+            .filter(|o| matches!(o.msg.msg, ContactMsg::InboxHost { .. }))
+            .count()
+    };
+    assert_eq!(queued(&carol), 0, "no notice for a change that is none");
+
+    carol.host_inbox_for(bob_root, false).expect("carol stops");
+    eventually("bob hears carol stopped", || bob.inbox_notices().first().is_some_and(|n| !n.on)).await;
+    assert_eq!(bob.inbox_notices().len(), 1, "a device's newer notice replaces its older one");
+
+    // A notice is kept across a restart, so the Offline delivery page still shows it.
+    bob.shutdown().await.expect("bob shuts down");
+    let bob = start(bob_id, bob_dir).await;
+    assert!(bob.inbox_notices().first().is_some_and(|n| !n.on && n.device == carol_dev));
+
+    bob.shutdown().await.expect("bob shuts down");
+    carol.shutdown().await.expect("carol shuts down");
 }

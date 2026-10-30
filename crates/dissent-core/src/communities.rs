@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use crate::error::{CoreError, Result};
 use crate::net::ReceiverTask;
 use crate::rpc::{Request, Response};
-use crate::store::{write_bin, write_community_key};
+use crate::store::write_community_key;
 use crate::views::{CommunitySummary, CommunityView, EngineEvent};
 use crate::wire::SignedAddr;
 use dissent_discovery::{CommunityRecord, Invite, InviteLink, ShortInvite};
@@ -40,7 +40,7 @@ impl Engine {
         {
             let mut guard = self.write();
             let paths = guard.paths.clone();
-            write_bin(&paths.genesis(&id), &genesis)?;
+            paths.write_bin(&paths.genesis(&id), &genesis)?;
             write_community_key(&paths.community_key(&id), &self.inner.vault, &id, &key.0.seed())?;
             let secret = crate::access::random_secret();
             let keys = crate::access::Keys::from_invite(0, secret);
@@ -324,7 +324,7 @@ impl Engine {
         let (fetched, peers) = self.fetch_for_join(&invite.genesis, &invite.secret, &invited, &my_addr).await?;
         {
             let mut guard = self.write();
-            write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
+            guard.paths.write_bin(&guard.paths.genesis(&id), &invite.genesis)?;
             let mut community = Community::new(invite.genesis.clone());
             if let Some(keys) = guard.access.get(&id) {
                 community.set_ring(keys.history.clone());

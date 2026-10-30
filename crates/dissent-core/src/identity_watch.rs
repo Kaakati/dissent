@@ -4,7 +4,6 @@
 //! log, so the user sees the notice again after a restart.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use dissent_events::SignedDm;
 use dissent_identity::{DeviceCert, RootId};
@@ -12,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::directory::Directory;
-use crate::store::append_records;
 use crate::views::EngineEvent;
 
 pub(crate) const ROTATED: &str = "rotated";
@@ -32,7 +30,7 @@ pub(crate) struct IdentityChange {
 /// already recorded.
 pub(crate) fn record(
     log: &mut Vec<IdentityChange>,
-    path: &Path,
+    paths: &crate::store::Paths,
     user: RootId,
     key: String,
     reason: &str,
@@ -47,7 +45,7 @@ pub(crate) fn record(
         reason: reason.to_string(),
         ms,
     };
-    if let Err(e) = append_records(path, std::slice::from_ref(&change)) {
+    if let Err(e) = paths.append_records(&paths.identity_changes(), std::slice::from_ref(&change)) {
         warn!(error = %e, "could not persist identity change");
     }
     log.push(change);
@@ -66,7 +64,7 @@ pub(crate) fn learn_device(
     dms: &BTreeMap<RootId, Vec<SignedDm>>,
     convs: &crate::groups::ConvBook,
     log: &mut Vec<IdentityChange>,
-    path: &Path,
+    paths: &crate::store::Paths,
     cert: &DeviceCert,
     ms: u64,
 ) -> Option<EngineEvent> {
@@ -76,7 +74,7 @@ pub(crate) fn learn_device(
     let notice = if fresh {
         record(
             log,
-            path,
+            paths,
             cert.root,
             format!("dev:{}", cert.device),
             NEW_DEVICE,

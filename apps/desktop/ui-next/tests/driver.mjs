@@ -432,7 +432,7 @@ check('SS1 the owner\'s server menu offers Server Settings', (await menuItems())
 await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
 await sleep(400);
 check('SS2 Server Settings opens on Server Profile', (await ev(`document.querySelector('${SS} h1')?.textContent`)) === 'Server Profile');
-check('SS3 the nav lists Server Profile and Boosts, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Boosts', 'Members', 'Invites', 'Bans']));
+check('SS3 the nav lists Server Profile, Privacy and Boosts, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Privacy', 'Boosts', 'Members', 'Invites', 'Bans']));
 check('SS4 the form holds Name, Server Icon, Banner, Traits, Message history and Description', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} section h2')].map((n) => n.textContent))`)) === JSON.stringify(['Name', 'Server Icon', 'Banner', 'Traits', 'Message history', 'Description']));
 check('SS5 the name field holds the name, stops at 64, and nothing is unsaved', (await ev(`(() => { const i = document.querySelector('${SS} input[aria-label="Server Name"]'); return i.value === 'Settings test' && i.maxLength === 64; })()`)) === true && !(await ssBar()));
 check('SS6 the icon block offers Change Server Icon', (await ev(`!!${ssButton('Change Server Icon')}`)) === true);
@@ -1453,9 +1453,8 @@ await sleep(300);
 await clickBy('section[aria-label="Get ready to join"] button', 'Join call');
 await sleep(600);
 check('C3 Join opens the call pane in place of the lobby', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && !document.querySelector('section[aria-label="Get ready to join"]')`)) === true);
-check('C3 the call pane has the call chat', (await b.ev(`!!document.querySelector('section[aria-label="Call chat"]')`)) === true);
-check('C3 the group call chat shows the messages of the group the call is in', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
-check('C3 the group call chat says everyone in the group reads it', (await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)) === '· Messages go to Saturday workshop crew. Everyone in the group can read them.', String(await b.ev(`document.querySelector('section[aria-label="Call chat"] [data-call-chat-audience]')?.textContent`)));
+check('C3 the group call shows the group\'s conversation below the stage', (await b.ev(`(() => { const split = document.querySelector('[data-call-layout="split"]'); const stage = split?.querySelector('section[aria-label="Call"]')?.getBoundingClientRect(); const list = split?.querySelector('.messages'); return !!stage && !!list && list.getBoundingClientRect().top >= stage.bottom && list.querySelectorAll('time').length > 0; })()`)) === true);
+check('C3 the chat below the group call writes to the group', (await b.ev(`document.querySelector('[data-call-layout="split"] .composer textarea')?.placeholder`)) === 'Message Saturday workshop crew', String(await b.ev(`document.querySelector('[data-call-layout="split"] .composer textarea')?.placeholder`)));
 check('C3 the camera and screen share buttons are live', (await b.ev(`(() => { const cam = document.querySelector('button[aria-label="Turn camera on"]'); const share = document.querySelector('button[aria-label="Share screen"]'); return Boolean(cam) && !cam.disabled && Boolean(share) && !share.disabled; })()`)) === true);
 check('C3 the header says how many are in the call', (await b.ev(`document.body.textContent.includes('in call') && document.body.textContent.includes('End-to-end encrypted')`)) === true);
 check('C3 the tiles report their drawn width to the engine', (await b.ev(`Object.values(window.__tileWidths ?? {}).some((w) => w > 0)`)) === true, JSON.stringify(await b.ev(`window.__tileWidths ?? null`)));
@@ -1654,12 +1653,14 @@ check('C11 the DM header has the Start voice call button', (await b.ev(`!!docume
 await clickBy('button[aria-label="Start voice call with Maya"]');
 await sleep(700);
 check('C11 the DM call button shows the call pane with the person it rings', (await b.ev(`!!document.querySelector('section[aria-label="Call"]') && document.body.textContent.includes('Calling Maya')`)) === true);
-check('C11 the DM call chat shows the messages of the conversation', (await b.ev(`document.querySelector('section[aria-label="Call chat"]')?.querySelectorAll('time').length > 0`)) === true);
-// The call chat renders with the chat's own rows and composer: link previews, formatting and invite cards, as in the chat.
-const CALL_CHAT = 'section[aria-label="Call chat"]';
-check('C11 the call chat shows a link preview card', (await b.ev(`!!document.querySelector('${CALL_CHAT} article.embed .embed-title')`)) === true);
-check('C11 the call chat has the chat composer', (await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea')?.placeholder`)) === 'Message the call');
-check('C11 the DM call chat says who reads it: the chat with Maya', (await b.ev(`document.querySelector('${CALL_CHAT} [data-call-chat-audience]')?.textContent`)) === '· Messages go to your chat with Maya.');
+// A DM call puts the conversation itself below the stage, the full chat with its composer, split by a divider.
+const CALL_CHAT = '[data-call-layout="split"]';
+const SPLIT_DIVIDER = `${CALL_CHAT} [data-call-divider]`;
+check('C11 the DM call shows the conversation below the stage', (await b.ev(`(() => { const stage = document.querySelector('${CALL_CHAT} section[aria-label="Call"]')?.getBoundingClientRect(); const list = document.querySelector('${CALL_CHAT} .messages')?.getBoundingClientRect(); return !!stage && !!list && list.top >= stage.bottom && document.querySelector('${CALL_CHAT} .messages').querySelectorAll('time').length > 0; })()`)) === true);
+check('C11 a DM call has no separate call chat', (await b.ev(`!document.querySelector('section[aria-label="Call chat"]') && ![...document.querySelectorAll('section[aria-label="Call"] button')].some((x) => /call chat/.test(x.getAttribute('aria-label') ?? ''))`)) === true);
+check('C11 the chat below the call shows a link preview card', (await b.ev(`!!document.querySelector('${CALL_CHAT} article.embed .embed-title')`)) === true);
+check('C11 the chat below the call has the conversation composer', (await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea')?.placeholder`)) === 'Message @Maya');
+check('C11 the call header names the person and the count', (await b.ev(`(() => { const h = document.querySelector('.chat-header')?.textContent ?? ''; return h.includes('Maya') && h.includes('in call'); })()`)) === true);
 await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea').focus()`);
 await b.send('Input.insertText', { text: '**Loud** news: dissent://invite/mock-rustaceans' });
 await sleep(250);
@@ -1667,34 +1668,68 @@ await b.press('Enter');
 await sleep(500);
 await b.ev(SHOW_INVITES(CALL_CHAT));
 await sleep(1000);
-check('C11 bold text in the call chat is strong', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body strong')].some((n) => n.textContent === 'Loud')`)) === true, String(await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body')].map((n) => n.innerHTML).at(-1)`)));
-check('C11 an invite link in the call chat shows the invite card', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} [data-server-card]')].at(-1)?.textContent.includes('Rustaceans')`)) === true);
-check('C11 the call chat message has the hover actions and the message menu', (await b.ev(`(() => { const m = [...document.querySelectorAll('${CALL_CHAT} article.msg')].at(-1); return !!m?.querySelector('button[aria-label="More message actions"]'); })()`)) === true);
-check('C11 the call chat stays at its end once the invite card has loaded', (await until(() => b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return l.scrollHeight - l.scrollTop - l.clientHeight < 4; })()`))) === true, JSON.stringify(await b.ev(`(() => { const l = document.querySelector('${CALL_CHAT} .messages'); return [l.scrollHeight, l.scrollTop, l.clientHeight]; })()`)));
+check('C11 a message sent during the call shows with its bold text', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body strong')].some((n) => n.textContent === 'Loud')`)) === true, String(await b.ev(`[...document.querySelectorAll('${CALL_CHAT} .msg .body')].map((n) => n.innerHTML).at(-1)`)));
+check('C11 an invite link sent during the call shows the invite card', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} [data-server-card]')].at(-1)?.textContent.includes('Rustaceans')`)) === true);
+check('C11 the message has the hover actions and the message menu', (await b.ev(`(() => { const m = [...document.querySelectorAll('${CALL_CHAT} article.msg')].at(-1); return !!m?.querySelector('button[aria-label="More message actions"]'); })()`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C11-call-chat.png`);
-// The layout at a normal window size: the video gets most of the pane, the chat a capped part, and a 1:1 call's tile is
-// large. The mock answers the call after four seconds.
+// The split at a normal window size. The mock answers the call after four seconds, so the tile is waited for.
 await b.resize(1100, 729);
-for (let i = 0; i < 40 && !(await b.ev(`!!document.querySelector('[data-call-tiles] > div > *')`)); i++) await sleep(200);
+for (let i = 0; i < 40 && !(await b.ev(`!!document.querySelector('[data-call-tiles] [data-tile]')`)); i++) await sleep(200);
 await sleep(400);
-const layoutAt = () => b.ev(`(() => { const pane = document.querySelector('[data-call-layout]').getBoundingClientRect(); const tiles = document.querySelector('[data-call-tiles]').getBoundingClientRect(); return { share: tiles.height / pane.height, chat: !!document.querySelector('section[aria-label="Call chat"]'), tiles: document.querySelectorAll('[data-call-tiles] > div > *').length }; })()`);
-const small = await layoutAt();
-check('C11 at 1100×729 with the chat open, the tiles take at least 40% of the pane', small.chat && small.share >= 0.4, JSON.stringify(small));
-check('C11 a 1:1 call reports a tile wider than 300 px', small.tiles === 1 && Math.max(0, ...Object.values((await b.ev(`window.__tileWidths ?? {}`)) ?? {})) > 300, JSON.stringify(await b.ev(`window.__tileWidths ?? null`)));
+const tiles = await b.ev(`document.querySelectorAll('[data-call-tiles] [data-tile]').length`); // the other person's tile, not your own
+// Your own tile sits beside theirs, and the stage takes 55% of the pane, so 200 px is what a 1100 px window gives.
+check('C11 at the default split, a 1:1 call reports the other tile wider than 200 px', tiles === 1 && Math.max(0, ...Object.values((await b.ev(`window.__tileWidths ?? {}`)) ?? {})) > 200, JSON.stringify(await b.ev(`window.__tileWidths ?? null`)));
 await b.screenshot(`${SCRATCH}/shots/C11-call-1100x729.png`);
-await clickBy('section[aria-label="Call chat"] button', 'Hide call chat');
-await sleep(400);
-const hidden = await layoutAt();
-check('C11 Hide call chat gives the video the pane', !hidden.chat && hidden.share > small.share, JSON.stringify(hidden));
-await clickBy('section[aria-label="Call"] button', 'Show call chat');
-await sleep(400);
-check('C11 Show call chat brings the chat back', (await layoutAt()).chat === true);
+const splitNow = () => b.ev(`(() => { const d = document.querySelector('${SPLIT_DIVIDER}'); const stage = document.querySelector('${CALL_CHAT} [data-call-stage]'); return d ? { now: Number(d.getAttribute('aria-valuenow')), min: Number(d.getAttribute('aria-valuemin')), max: Number(d.getAttribute('aria-valuemax')), stage: Math.round(stage.getBoundingClientRect().height), focusable: d.tabIndex === 0, orient: d.getAttribute('aria-orientation') } : null; })()`);
+const first = await splitNow();
+check('C11 the divider is a focusable horizontal separator that starts at 55%', first?.now === 55 && first.focusable && first.orient === 'horizontal' && first.min > 0 && first.max < 100, JSON.stringify(first));
+// Drag the divider up by 80 px with the mouse.
+const grip = await b.ev(`(() => { const r = document.querySelector('${SPLIT_DIVIDER}').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: grip.x, y: grip.y });
+await b.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: grip.x, y: grip.y, button: 'left', clickCount: 1, buttons: 1 });
+for (let i = 1; i <= 4; i++) await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: grip.x, y: grip.y - 20 * i, button: 'left', buttons: 1 });
+await b.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: grip.x, y: grip.y - 80, button: 'left', clickCount: 1, buttons: 0 });
+await sleep(300);
+const dragged = await splitNow();
+check('C11 dragging the divider up makes the stage smaller', dragged.stage <= first.stage - 70 && dragged.now < first.now, JSON.stringify([first, dragged]));
+check('C11 the dragged split is kept on this device', Math.round(Number(await b.ev(`localStorage.getItem('dissent.dmCallSplit')`)) * 100) === dragged.now, String(await b.ev(`localStorage.getItem('dissent.dmCallSplit')`)));
+// The keys: Arrow Down grows the stage by 5%, Home takes it to its least.
+await b.ev(`document.querySelector('${SPLIT_DIVIDER}').focus()`);
+await b.press('ArrowDown');
+await sleep(200);
+check('C11 Arrow Down on the divider grows the stage by 5%', (await splitNow()).now === dragged.now + 5, JSON.stringify(await splitNow()));
+await b.press('Home');
+await sleep(200);
+const least = await splitNow();
+check('C11 Home takes the stage to its least height, and the chat keeps room', least.now === least.min && least.stage >= 170, JSON.stringify(least));
+// A double-click resets the split.
+await b.ev(`document.querySelector('${SPLIT_DIVIDER}').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+await sleep(200);
+check('C11 a double-click on the divider resets the split', (await splitNow()).now === 55, JSON.stringify(await splitNow()));
+await b.press('ArrowUp');
+await sleep(200);
+const kept = (await splitNow()).now;
+// Collapse shrinks the stage to a strip with the people and the controls; Expand brings the split back.
+await clickBy('section[aria-label="Call"] button', 'Collapse the call');
+await sleep(300);
+const strip = await b.ev(`(() => { const s = document.querySelector('${CALL_CHAT} section[aria-label="Call"]'); return { collapsed: document.querySelector('${CALL_CHAT}').dataset.callCollapsed, height: Math.round(s.getBoundingClientRect().height), people: s.querySelectorAll('[aria-label="In the call"] li').length, self: !!s.querySelector('[aria-label="In the call"] li[data-self-tile]'), leave: !!s.querySelector('button[aria-label="Leave call"]'), divider: !!document.querySelector('${SPLIT_DIVIDER}') }; })()`);
+check('C11 Collapse the call leaves a strip with you, the others and the controls', strip.collapsed === 'true' && strip.height < 100 && strip.people >= 2 && strip.self && strip.leave && !strip.divider, JSON.stringify(strip));
+await clickBy('section[aria-label="Call"] button', 'Expand the call');
+await sleep(300);
+check('C11 Expand the call brings the split back where it was', (await splitNow())?.now === kept, JSON.stringify(await splitNow()));
+// The composer works while the call is open.
+await b.ev(`document.querySelector('${CALL_CHAT} .composer textarea').focus()`);
+await b.send('Input.insertText', { text: 'typed during the call' });
+await sleep(200);
+await b.press('Enter');
+await sleep(700);
+check('C11 the composer sends during the call', (await b.ev(`[...document.querySelectorAll('${CALL_CHAT} article.msg')].some((a) => a.textContent.includes('typed during the call'))`)) === true);
 await b.resize(1600, 1000);
 await sleep(300);
 await clickBy('section[aria-label="Call"] button', 'Leave call');
 await sleep(500);
 // The same message in the DM chat, once the call is left: the same rows, so the same bold text and card.
-check('C11 the message sent in the call chat reads the same in the chat', (await b.ev(`(() => { const rows = [...document.querySelectorAll('.messages[aria-label="Messages"] article.msg')]; const m = rows.at(-1); return !!m && [...m.querySelectorAll('.body strong')].some((n) => n.textContent === 'Loud') && !!m.querySelector('[data-server-card]'); })()`)) === true);
+check('C11 the message sent during the call reads the same once the call is left', (await b.ev(`(() => { const rows = [...document.querySelectorAll('.messages[aria-label="Messages"] article.msg')]; const m = rows.findLast((r) => r.textContent.includes('Loud')); return !!m && [...m.querySelectorAll('.body strong')].some((n) => n.textContent === 'Loud') && !!m.querySelector('[data-server-card]'); })()`)) === true);
 
 // The call chat checks open their own DM call with Maya, so they do not depend on the call above. The call is left after.
 await clickBy('button[aria-label="Direct messages"]');
@@ -1704,6 +1739,7 @@ await sleep(500);
 await clickBy('button[aria-label="Start voice call with Maya"]');
 await sleep(1200);
 check('E42 a DM call with Maya is open with its chat', (await b.ev(`!!document.querySelector('${CALL_CHAT}')`)) === true);
+check('C11 a new DM call opens at the split kept on this device', Number(await b.ev(`document.querySelector('${SPLIT_DIVIDER}')?.getAttribute('aria-valuenow')`)) === kept, String(await b.ev(`document.querySelector('${SPLIT_DIVIDER}')?.getAttribute('aria-valuenow')`)));
 // The call chat follows its DM while the call is open. A reaction (dm_changed) shows in it; and when two loads overlap,
 // the older reply arriving last does not replace the newer list.
 await b.ev(`window.__mockReactLastDm('Maya', '\\u{1F389}')`);
@@ -1981,6 +2017,7 @@ await sleep(2500);
 const continueDisabled = () => onboard.ev(`[...document.querySelectorAll('button')].find(n => n.textContent.trim() === 'Continue')?.disabled ?? null`);
 check('E26 first run shows the identity screen', (await onboard.ev(`!!document.querySelector('[aria-label="Welcome to Dissent"]')`)) === true);
 check('E27 the recovery phrase lists 24 words', (await onboard.ev(`document.querySelectorAll('[aria-label="Recovery phrase"] li').length`)) === 24);
+check('E27b first run offers recovering a lost account with guardians, after the words are saved', (await onboard.ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Continue and recover with guardians')?.disabled`)) === true);
 check('E28 Continue waits for the checkbox', (await continueDisabled()) === true);
 await onboard.ev(`document.getElementById('onboard-saved').focus()`);
 await keyPress(onboard, ' ', 'Space', 32, 0, ' ');
@@ -1996,6 +2033,7 @@ await onboard.close();
 const portable = await launch({ url: `${BASE}/?unlock=new`, width: 2000, height: 1333, port: 9993, profile: `${SCRATCH}/kb-profile-next-unlock` });
 await sleep(2500);
 check('E32 a new portable profile asks for a passphrase', (await portable.ev(`document.querySelector('h1')?.textContent === 'Create a passphrase'`)) === true);
+check('E32b it says what the window keeps on this PC, outside DissentData', (await portable.ev(`document.body.textContent.includes('keeps a few settings in its own storage, outside DissentData') && document.body.textContent.includes('stay on this PC after you unplug the stick')`)) === true);
 await portable.typeText('short');
 await pressEnter(portable);
 await sleep(300);
@@ -3396,14 +3434,28 @@ await ev(`window.__mockSetHandleByName('Jonas', 'jonas.example')`);
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
 await sleep(1200);
 const rowOf = (name) => `[...document.querySelectorAll('${RIGHT} button')].find(n => n.textContent.includes(${JSON.stringify(name)}))`;
+const lookups = () => ev('window.__mockDnsLookups.filter(d => d !== "sami.example")');
+const drawn = await ev(`({ handles: !!(${rowOf('Omar')})?.querySelector('[data-member-handle]') && !!(${rowOf('Jonas')})?.querySelector('[data-member-handle]'), marks: document.querySelectorAll('${RIGHT} [data-website-verified], [data-author-handle]').length })`);
+check('W14a drawing the member list and the messages looks up no handle', JSON.stringify(await lookups()) === '[]' && drawn.handles && drawn.marks === 0, JSON.stringify({ lookups: await lookups(), drawn }));
+const omarTitle = await ev(`(${rowOf('Omar')})?.querySelector('[data-member-handle]')?.title ?? null`);
+check('W14b a member list handle says what checking it asks', omarTitle === 'Checking this asks your DNS resolver about omar.example.', String(omarTitle));
+await b.hover(`${RIGHT} [data-member-handle]`, await ev(`[...document.querySelectorAll('${RIGHT} [data-member-handle]')].findIndex(n => n.textContent.includes('omar.example'))`));
 const omarMarked = await until(() => ev(`!!(${rowOf('Omar')})?.querySelector('[data-website-verified]')`), 4000);
-check('W14 the member list shows the verified mark after a handle this app verified', omarMarked === true, String(await ev(`(${rowOf('Omar')})?.textContent ?? null`)));
+check('W14 pointing at a member list handle verifies it and shows the mark', omarMarked === true && JSON.stringify(await lookups()) === '["omar.example"]', JSON.stringify({ row: await ev(`(${rowOf('Omar')})?.textContent ?? null`), lookups: await lookups() }));
+await b.hover(`${RIGHT} [data-member-handle]`, await ev(`[...document.querySelectorAll('${RIGHT} [data-member-handle]')].findIndex(n => n.textContent.includes('jonas.example'))`));
+await until(async () => (await lookups()).includes('jonas.example'), 4000);
+await sleep(300);
 check('W15 the member list shows no mark for a handle whose record is missing', (await ev(`!!(${rowOf('Jonas')}) && !(${rowOf('Jonas')}).querySelector('[data-website-verified]')`)) === true);
 check('W16 a handle that is not a domain is never marked or checked', (await ev(`!(${rowOf('Leila')})?.querySelector('[data-website-verified], [data-website-status]')`)) === true);
 
 const headMarked = await until(() => ev(`[...document.querySelectorAll('[data-author-handle]')].some(n => n.textContent.includes('@omar.example') && n.querySelector('[data-website-verified]'))`), 4000);
-check('W17 message headers show the verified handle with its mark', headMarked === true);
+check('W17 once verified, message headers show the handle with its mark from the saved result', headMarked === true);
 check('W18 message headers show nothing for a handle that failed', (await ev(`![...document.querySelectorAll('[data-author-handle]')].some(n => n.textContent.includes('jonas.example'))`)) === true);
+await b.moveAway();
+await b.hover(`${RIGHT} [data-member-handle]`, await ev(`[...document.querySelectorAll('${RIGHT} [data-member-handle]')].findIndex(n => n.textContent.includes('omar.example'))`));
+await sleep(600);
+check('W18b pointing at a verified handle again reuses the result, with no new lookup', JSON.stringify(await lookups()) === '["omar.example","jonas.example"]', JSON.stringify(await lookups()));
+await b.moveAway();
 
 await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Omar'))`));
 await sleep(600);
@@ -3414,6 +3466,7 @@ await sleep(300);
 await b.screenshot(`${SCRATCH}/shots/website-handle-card.png`);
 const tip = await until(() => ev(`[...document.querySelectorAll('[data-slot="tooltip-content"]')].map(n => n.textContent).join('|')`), 3000);
 check('W20 the mark\'s tooltip says "Checked by your app"', String(tip).includes('Checked by your app'), String(tip));
+check('W20b the card says what checking the handle asks', (await ev(`document.querySelector('${CARD} [data-profile-handle] [title]')?.title ?? null`)) === 'Checking this asks your DNS resolver about omar.example.');
 await b.moveAway();
 await b.press('Escape');
 await sleep(300);
@@ -3425,7 +3478,7 @@ check('W21 a failing website handle is never shown as verified on the card, and 
 await b.press('Escape');
 await sleep(300);
 
-// A check that has not answered yet: the card says "not checked yet", never verified.
+// A check that has not answered yet: opening the card starts it, and the card says "checking", never verified.
 await ev('window.__mockDnsHold = true');
 await ev(`window.__mockSetHandleByName('Leila', 'leila.example')`);
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
@@ -3433,7 +3486,7 @@ await sleep(800);
 await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Leila'))`));
 await sleep(600);
 const leilaCard = await ev(`(() => { const n = document.querySelector('${CARD} [data-profile-handle]'); return n ? { text: n.textContent, mark: !!n.querySelector('[data-website-verified]'), status: n.querySelector('[data-website-status]')?.dataset.websiteStatus } : null; })()`);
-check('W22 a handle with no answer yet says not checked yet, never verified', !!leilaCard && !leilaCard.mark && leilaCard.status === 'unchecked' && leilaCard.text.includes('not checked yet'), JSON.stringify(leilaCard));
+check('W22 opening a profile checks its handle, and with no answer yet it says checking, never verified', !!leilaCard && !leilaCard.mark && leilaCard.status === 'checking' && leilaCard.text.includes('checking'), JSON.stringify(leilaCard));
 await b.press('Escape');
 await sleep(300);
 await ev('window.__mockDnsHold = false');
@@ -3447,6 +3500,31 @@ await ev(`[...document.querySelectorAll('button')].find(x => x.textContent.trim(
 await sleep(800);
 const fullMarked = await until(() => ev(`[...document.querySelectorAll('[role="dialog"] li')].some(n => n.textContent.includes('@omar.example') && n.querySelector('[data-website-verified]'))`), 4000);
 check('W23 the full profile shows the verified handle with its mark', fullMarked === true);
+await b.press('Escape');
+await sleep(400);
+
+// The public resolver is a setting, off by default, and the words say when it is on.
+await b.press(',', 2);
+await sleep(500);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Contacts & privacy').click()`);
+await sleep(400);
+const fallbackBox = `document.querySelector('[data-dns-public-fallback]')`;
+check('W25 Settings offers the public resolver as a setting that starts off', (await ev(`${fallbackBox}?.checked`)) === false, String(await ev(`${fallbackBox}?.outerHTML ?? null`)));
+await ev(`${fallbackBox}.click()`);
+await sleep(300);
+const savedFallback = await ev(`window.__TAURI__.core.invoke('shell_settings').then(s => s.dns_public_fallback)`);
+check('W26 turning it on saves it with the desktop settings', savedFallback === true && (await ev(`${fallbackBox}.checked`)) === true);
+await b.press('Escape');
+await sleep(400);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]')?.click()`);
+await sleep(800);
+await b.click(`${RIGHT} button`, await ev(`[...document.querySelectorAll('${RIGHT} button')].findIndex(n => n.textContent.includes('Omar'))`));
+await sleep(600);
+const cloudTitle = await ev(`document.querySelector('${CARD} [data-profile-handle] [title]')?.title ?? null`);
+check('W27 with it on, the card says Cloudflare is asked too', String(cloudTitle).includes("Cloudflare's public resolver is asked too"), String(cloudTitle));
+await b.press('Escape');
+await sleep(300);
+await ev(`window.__TAURI__.core.invoke('set_shell_settings', { settings: { keep_running: false, start_at_login: false, notifications_muted: false, dns_public_fallback: false } })`);
 
 const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
 check('W24 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
@@ -4374,6 +4452,13 @@ check('IC8 a second invite waits for its own click', (await ev(`!!${lastCard}?.q
 await ev(`${lastCard}?.querySelector('button[data-invite-show]')?.click()`);
 const failed = await until(() => ev(`${lastCard}?.textContent.includes('Could not load this invite') ?? false`), 3000);
 check('IC9 a broken invite shows its error after the click', failed === true);
+// A revoked invite gets no preview at all: no name, no counts, only the refusal.
+await ev(`window.__mockPost('c1', 'ch1', 'k3f9q2xagrace', 'dissent://invite/mock-revoked')`);
+await ev(`window.__mockEngineEvent({ kind: 'message', community_id: 'c1', channel_id: 'ch1' })`);
+await sleep(1000);
+await ev(`${lastCard}?.querySelector('button[data-invite-show]')?.click()`);
+const revoked = await until(() => ev(`(() => { const t = ${lastCard}?.textContent ?? ''; return t.includes('Could not load this invite') ? t : null; })()`), 3000);
+check('IC10 a revoked invite shows the refusal and nothing about the server', typeof revoked === 'string' && revoked.includes('may be expired or revoked') && !revoked.includes('Old Workshop') && !/Members|Online/.test(revoked), String(revoked));
 noConsoleErrors('invitecards', b.consoleErrors);
 await b.close();
 }
@@ -4496,6 +4581,98 @@ await o.close();
 }
 
 // ---- consistency: the two server menus agree, Bans has Unban, admins are fixed readers, the Transfers note is true ----
+// ---- Settings > Offline delivery: pick inboxes from the devices that offer, see each one's status, and hold mail for others ----
+async function section_inbox() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9761, profile: `${SCRATCH}/inbox-next-profile` });
+const { ev } = b;
+await sleep(1200);
+const invoke = (cmd, args = {}) => ev(`window.__TAURI__.core.invoke(${JSON.stringify(cmd)}, ${JSON.stringify(args)})`);
+const clickText = (scope, text) => ev(`(() => { const n = [...document.querySelectorAll('${scope}')].find((x) => x.textContent.trim() === ${JSON.stringify(text)}); n?.click(); return Boolean(n); })()`);
+const rows = () => ev(`[...document.querySelectorAll('[data-inbox-row]')].map((n) => ({ device: n.dataset.inboxRow, state: n.dataset.inboxState, text: n.textContent }))`);
+const offers = () => ev(`[...document.querySelectorAll('[data-inbox-offer]')].map((n) => ({ device: n.dataset.inboxOffer, text: n.textContent }))`);
+
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+check('I1 Settings lists Offline delivery', await clickText('nav[aria-label="Settings sections"] button', 'Offline delivery'));
+await sleep(500);
+check('I2 with no inbox chosen the page says messages arrive only while a device is online', (await until(() => ev(`Boolean(document.querySelector('[data-inbox-empty]'))`))) === true);
+check('I3 the page says what an inbox learns', (await ev(`document.body.textContent.includes('What an inbox learns') && document.body.textContent.includes('Not what the messages say')`)) === true);
+
+await clickText('[data-settings-page] button', 'Find devices that offer');
+const offered = await until(async () => ((await offers()).length ? offers() : null));
+check('I4 the devices that hold mail for you are offered, and a device that does not is not', offered?.length === 2 && offered.some((o) => o.text.startsWith('Maya')) && offered.some((o) => o.text.startsWith('Riverside seeder')) && !offered.some((o) => o.text.includes('Your device')), JSON.stringify(offered));
+const maya = offered.find((o) => o.text.startsWith('Maya'));
+await ev(`document.querySelector('[data-inbox-offer="${maya.device}"] button').click()`);
+const chosen = await until(async () => ((await rows()).length ? rows() : null));
+check('I5 a picked device becomes an inbox and shows what it holds', chosen?.length === 1 && chosen[0].device === maya.device && chosen[0].state === 'serving' && chosen[0].text.includes('2 messages waiting') && chosen[0].text.includes('5 keys'), JSON.stringify(chosen));
+check('I6 the engine keeps the choice', JSON.stringify((await invoke('inbox_status')).map((v) => v.device)) === JSON.stringify([maya.device]));
+check('I7 a chosen device is no longer offered', !(await offers()).some((o) => o.device === maya.device), JSON.stringify(await offers()));
+
+// A device that stops answering shows as not answering; one added by id that holds nothing says its owner must agree.
+const seeder = offered.find((o) => o.text.startsWith('Riverside seeder'));
+await ev(`window.__mockInboxOffline(${JSON.stringify(seeder.device)})`);
+await ev(`document.querySelector('[data-inbox-offer="${seeder.device}"] button').click()`);
+await until(async () => (await rows()).length === 2);
+check('I8 an inbox that does not answer says so', (await rows()).find((r) => r.device === seeder.device)?.state === 'unreachable', JSON.stringify(await rows()));
+const phone = (await invoke('list_devices')).find((d) => !d.this_device).device_id;
+await ev(`(() => { const i = document.querySelector('input[aria-label="Inbox device id"]'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(i, ${JSON.stringify(phone)}); i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await sleep(200);
+await clickText('[data-settings-page] button', 'Add by id');
+await until(async () => (await rows()).length === 3);
+const phoneRow = (await rows()).find((r) => r.device === phone);
+check('I9 your own device added by id that holds nothing says to turn its switch on there', phoneRow?.state === 'refusing' && phoneRow.text.includes('Your device') && phoneRow.text.includes('Turn on “Hold my own messages” on that device'), JSON.stringify(phoneRow));
+
+// Remove takes it off the list, in the engine too.
+await ev(`document.querySelector('[data-inbox-row="${phone}"] button').click()`);
+await until(async () => (await rows()).length === 2);
+check('I10 Remove takes an inbox off the list', !(await invoke('inbox_status')).some((v) => v.device === phone));
+
+// At the most inboxes there can be, finding and adding are off.
+await invoke('set_inboxes', { devices: [maya.device, seeder.device, phone, 'x'.repeat(52)] });
+await b.press('Escape');
+await sleep(300);
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await clickText('nav[aria-label="Settings sections"] button', 'Offline delivery');
+await until(async () => (await rows()).length === 4);
+check('I11 with four inboxes, finding more is off and the page says why', (await ev(`[...document.querySelectorAll('[data-settings-page] button')].find((n) => n.textContent.includes('Find devices'))?.disabled === true && document.body.textContent.includes('the most there can be')`)) === true);
+
+// Holding mail for others: a friend and this device's own switch, saved in the engine.
+const jonas = await ev(`document.querySelector('input[aria-label="Hold messages for Jonas"]')?.dataset.inboxHost ?? null`);
+check('I12 each friend can be ticked to hold their messages', Boolean(jonas));
+await ev(`document.querySelector('input[aria-label="Hold messages for Jonas"]').click()`);
+await sleep(400);
+check('I13 ticking a friend holds their messages on this device', (await invoke('inbox_settings')).hosted.some((h) => h.root === jonas) && (await ev(`document.querySelector('input[aria-label="Hold messages for Jonas"]').checked`)) === true);
+await ev(`document.querySelector('input[aria-label="Hold messages for Jonas"]').click()`);
+await sleep(400);
+check('I14 unticking stops it', !(await invoke('inbox_settings')).hosted.some((h) => h.root === jonas));
+await ev(`document.querySelector('[data-inbox-serve-own]').click()`);
+await sleep(400);
+check('I15 the own-messages switch is saved', (await invoke('inbox_settings')).serving_own === true);
+// A device that starts holding your mail tells you: an in-app notice, and a line on this page with Use as inbox.
+await invoke('set_inboxes', { devices: [] });
+await b.press('Escape');
+await sleep(300);
+const mayaBox = maya.device;
+await ev(`window.__mockInboxNotice(${JSON.stringify(mayaBox)}, true)`);
+const toastText = await until(() => ev(`[...document.querySelectorAll('[data-sonner-toast], [role="status"], [data-toast]')].map((n) => n.textContent).join('|')`));
+check('I16 a device that starts holding your mail shows an in-app notice', /Maya now holds your messages while you are offline/.test(toastText ?? ''), String(toastText).slice(0, 200));
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await clickText('nav[aria-label="Settings sections"] button', 'Offline delivery');
+const notice = await until(() => ev(`document.querySelector('[data-inbox-notice="${mayaBox}"]')?.textContent ?? ''`));
+check('I17 the notice is listed on Offline delivery, with Use as inbox', notice.includes('Maya now holds your messages') && notice.includes('Use as inbox'), notice);
+await ev(`document.querySelector('[data-inbox-notice="${mayaBox}"] button').click()`);
+await until(async () => (await rows()).length === 1);
+check('I18 Use as inbox from a notice picks that device', JSON.stringify((await invoke('inbox_status')).map((v) => v.device)) === JSON.stringify([mayaBox]) && !(await ev(`Boolean(document.querySelector('[data-inbox-notice="${mayaBox}"] button'))`)));
+await ev(`window.__mockInboxNotice(${JSON.stringify(mayaBox)}, false)`);
+const stopped = await until(() => ev(`document.querySelector('[data-inbox-notice="${mayaBox}"]')?.dataset.inboxNoticeOn === 'off' ? document.querySelector('[data-inbox-notice="${mayaBox}"]').textContent : ''`), 3000);
+check('I19 a stop notice replaces the start notice on the open page', /stopped holding your messages/.test(stopped ?? '') && (await ev(`document.querySelectorAll('[data-inbox-notice]').length`)) === 1, String(stopped));
+await b.press('Escape');
+noConsoleErrors('inbox', b.consoleErrors);
+await b.close();
+}
+
 async function section_consistency() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9891, profile: `${SCRATCH}/consistency-next-profile` });
 const { ev, press } = b;
@@ -4513,7 +4690,7 @@ const nameMenu = async (name) => {
   await sleep(400);
 };
 
-const SECTIONS = ['Server Profile', 'Boosts', 'Members', 'Invites', 'Bans'];
+const SECTIONS = ['Server Profile', 'Privacy', 'Boosts', 'Members', 'Invites', 'Bans'];
 const railSections = async (name) => {
   await railMenu(name);
   await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].find((n) => n.textContent.startsWith('Server Settings'))?.focus()`);
@@ -4636,6 +4813,495 @@ noConsoleErrors('consistency', b.consoleErrors);
 await b.close();
 }
 
+// ---- Q. Server Settings › Privacy: the owner's member-only switch. Off by default, it explains what it hides and from
+// whom; it turns on and off; it waits while a member device has not confirmed support, with Check again; an admin sees
+// it but cannot change it. ----
+async function section_memberonly() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const SS = '[role="dialog"][aria-label="Server settings"]';
+const BOX = `${SS} input[aria-label="Hide server details from people who are not members"]`;
+const statusText = () => ev(`document.querySelector('${SS} [data-member-only-status]')?.textContent ?? ''`);
+const engineOn = () => ev(`window.__TAURI__.core.invoke('member_only_status', { communityId: 'c2' }).then((s) => s.on)`);
+const openPrivacy = async (name) => {
+  await ev(`document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(name)}) + ']').click()`);
+  await sleep(700);
+  await ev(`(() => { const n = document.querySelector('aside[aria-label="Channels and conversations"] button[aria-label=' + JSON.stringify(${JSON.stringify(`${name} menu`)}) + ']'); n.focus(); n.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  await sleep(400);
+  await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Privacy')?.click(); })()`);
+  await sleep(700);
+};
+
+await openPrivacy('Open Source Arabic');
+const pageTitle = await until(async () => ((await ev(`document.querySelector('${SS} h1')?.textContent ?? ''`)) === 'Privacy' ? 'Privacy' : ''), 5000);
+check('Q1 Server Settings opens on Privacy from the menu', pageTitle === 'Privacy', await ev(`document.querySelector('${SS} h1')?.textContent ?? 'no page'`));
+await until(async () => (await ev(`!!document.querySelector('${BOX}')`)) === true, 5000);
+check('Q1 the switch is off by default and the owner can use it', (await ev(`(() => { const n = document.querySelector('${BOX}'); return !!n && !n.checked && !n.disabled; })()`)) === true);
+const words = await ev(`document.querySelector('${SS} #member-only-what')?.textContent ?? ''`);
+check('Q1 it says what it hides and from whom', ['names, roles, channels and settings', 'invite link', 'seeders', 'stay readable'].every((w) => words.includes(w)), words);
+check('Q1 it says every member device supports it', (await statusText()) === 'Every member device supports this.', await statusText());
+check('Q1 it names the mixed-version caveat', (await ev(`document.querySelector('${SS}').textContent.includes('app version from before this setting')`)) === true);
+
+await ev(`document.querySelector('${BOX}').click()`);
+await sleep(600);
+check('Q2 checking it turns member-only on in the engine', (await engineOn()) === true && (await ev(`document.querySelector('${BOX}').checked`)) === true);
+check('Q2 the status says it is on', (await statusText()).startsWith('On.'), await statusText());
+await ev(`document.querySelector('${BOX}').click()`);
+await sleep(600);
+check('Q3 unchecking turns it off again', (await engineOn()) === false && (await ev(`document.querySelector('${BOX}').checked`)) === false);
+
+// Two member devices have not answered: the switch waits, and says why.
+await ev(`window.__mockMemberOnlyWaiting = 2`);
+await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again')?.click()`);
+await sleep(200);
+// Check again shows only while waiting, so the page is reopened to read the new status.
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(400);
+await openPrivacy('Open Source Arabic');
+await until(async () => (await statusText()).startsWith('2 member devices'), 5000);
+check('Q4 while member devices have not answered the switch is disabled', (await ev(`document.querySelector('${BOX}').disabled`)) === true);
+check('Q4 and the status counts them and says why', (await statusText()).startsWith('2 member devices have not confirmed they support this.'), await statusText());
+await ev(`window.__mockMemberOnlyWaiting = 0`);
+await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again').click()`);
+await sleep(500);
+check('Q5 Check again enables it once every device answers', (await ev(`document.querySelector('${BOX}').disabled`)) === false && (await statusText()) === 'Every member device supports this.', await statusText());
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(400);
+
+// An admin sees the setting, but only the owner changes it.
+await ev(`window.__mockSetMyRole('c1', 'admin')`);
+await openPrivacy('Riverside Makers');
+await until(async () => (await ev(`!!document.querySelector('${BOX}')`)) === true, 5000);
+check('Q6 an admin sees the switch but cannot change it', (await ev(`document.querySelector('${BOX}').disabled && document.querySelector('${SS}').textContent.includes('Only the owner can change this.')`)) === true);
+await ev(`window.__mockSetMyRole('c1', 'member')`);
+check('Q7 no console errors', b.consoleErrors.length === 0, b.consoleErrors.slice(0, 3).join(' | '));
+await b.close();
+}
+
+// ---- Voice state: the roster lists you once, the header counts you, you get a tile, rings follow who speaks, and the
+// rail's speaker badge marks where you are connected ----
+async function section_voicestate() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9827, profile: `${SCRATCH}/voicestate-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const ME = await ev(`window.__mockRootOf('Sami')`);
+const badgeOn = (selector) => ev(`(() => { const item = document.querySelector(${JSON.stringify(selector)})?.closest('.rail-item'); const n = item?.querySelector('[data-speaker-badge]'); return n ? n.getAttribute('aria-label') : null; })()`);
+
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+check('S0 no speaker badge before joining', (await badgeOn('button[aria-label="Riverside Makers"]')) === null);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('workshop'))?.click()`);
+await sleep(1200);
+
+// The engine lists you in the channel, and the sidebar must not add you again.
+const mine = await ev(`[...document.querySelectorAll('[role="list"][aria-label="In workshop"] [data-voice-member]')].map((n) => n.dataset.voiceMember)`);
+check('S1 the voice roster lists you exactly once, first', mine.filter((r) => r === ME).length === 1 && mine[0] === ME, JSON.stringify(mine));
+check('S1 the roster lists each person once', new Set(mine).size === mine.length, JSON.stringify(mine));
+const count = await ev(`[...document.querySelectorAll('.title-meta')].map((n) => n.textContent).find((t) => t.endsWith('in call'))`);
+check('S2 the header counts everyone in the call, you included', count === `${mine.length} in call`, `${count} / roster ${mine.length}`);
+check('S3 you have a tile on the stage without a camera', (await ev(`!!document.querySelector('section[aria-label="Call"] [data-self-tile]')`)) === true);
+
+// Speaking rings: yours on your tile and roster row, another person's on theirs, and gone when they stop.
+await ev(`window.__mockSpeaking('me', true)`);
+await sleep(300);
+check('S4 your tile shows the speaking ring', (await ev(`!!document.querySelector('[data-self-tile][data-speaking]')`)) === true);
+check('S4 your roster row shows the speaking ring', (await ev(`!!document.querySelector('[data-voice-member="${ME}"][data-speaking]')`)) === true);
+await ev(`window.__mockSpeaking('me', false)`);
+await ev(`window.__mockSpeaking('Jonas', true)`);
+await sleep(300);
+const JONAS = await ev(`window.__mockRootOf('Jonas')`);
+check('S5 your ring goes when you stop', (await ev(`!document.querySelector('[data-self-tile][data-speaking]')`)) === true);
+check('S5 a speaking person gets the ring on their tile', (await ev(`!!document.querySelector('[data-tile="${JONAS}"][data-speaking]')`)) === true);
+check('S5 and on their roster row', (await ev(`!!document.querySelector('[data-voice-member="${JONAS}"][data-speaking]')`)) === true);
+await ev(`window.__mockSpeaking('Jonas', false)`);
+await sleep(300);
+check('S5 the ring goes when they stop', (await ev(`!document.querySelector('[data-tile="${JONAS}"][data-speaking]')`)) === true);
+
+// The rail: the server you are connected in shows the speaker, bottom left, clear of the mention badge.
+const label = await badgeOn('button[aria-label="Riverside Makers"]');
+check('S6 the server shows the speaker badge, named for the channel', label === 'Connected to #workshop', String(label));
+const others = await ev(`[...document.querySelectorAll('nav[aria-label="Servers and direct messages"] [data-server-id]')].filter((b) => b.getAttribute('aria-label') !== 'Riverside Makers').some((b) => b.closest('.rail-item')?.querySelector('[data-speaker-badge]'))`);
+check('S6 no other server shows it', others === false);
+const sides = await ev(`(() => { const item = document.querySelector('button[aria-label="Riverside Makers"]').closest('.rail-item'); const s = item.querySelector('[data-speaker-badge]').getBoundingClientRect(); const m = [...item.querySelectorAll('span[aria-label$="mentions"]')][0]?.getBoundingClientRect(); return { left: s.left, mention: m ? m.left : null, right: s.right, mentionRight: m ? m.right : null }; })()`);
+check('S6 the speaker sits left of any mention badge', sides.mention === null || sides.right <= sides.mention, JSON.stringify(sides));
+await ev(`[...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === 'Disconnect')?.click()`);
+await sleep(700);
+check('S7 leaving clears the badge', (await badgeOn('button[aria-label="Riverside Makers"]')) === null);
+
+// A direct call shows the speaker on Home.
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(600);
+await ev(`(() => { const n = [...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya')); n?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 400, clientY: 300 })); })()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((n) => n.textContent.includes('Start a call'))?.click()`);
+await sleep(800);
+const home = await badgeOn('button[aria-label="Direct messages"]');
+check('S8 a direct call shows the speaker on Home', typeof home === 'string' && home.startsWith('Connected to a call'), String(home));
+await ev(`[...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === 'Disconnect' || x.textContent.trim() === 'Leave call' || x.getAttribute('aria-label') === 'Leave call')?.click()`);
+await sleep(700);
+check('S8 leaving the direct call clears it', (await badgeOn('button[aria-label="Direct messages"]')) === null);
+
+const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
+check('S9 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+await b.close();
+}
+
+// ---- Recovery: a new device asks its guardians; a guardian approves only with the code read to them ----
+async function section_recovery() {
+const b = await launch({ url: `${BASE}/`, width: 1400, height: 1000, port: 9873, profile: `${SCRATCH}/recovery-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const DIALOG = `[...document.querySelectorAll('[role="dialog"]')].at(-1)`;
+const dialogText = () => ev(`${DIALOG}?.textContent ?? ''`);
+const clickIn = (label) => ev(`(() => { const d = ${DIALOG}; const btn = [...d.querySelectorAll('button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)} || x.getAttribute('aria-label') === ${JSON.stringify(label)}); if (!btn) return false; btn.click(); return true; })()`);
+const disabledIn = (label) => ev(`[...${DIALOG}.querySelectorAll('button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)})?.disabled ?? null`);
+// Types into a React input as a person does: the value setter, then an input event.
+const typeInto = (selector, value) => ev(`(() => { const el = ${DIALOG}.querySelector(${JSON.stringify(selector)}) ?? document.querySelector(${JSON.stringify(selector)}); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+const states = () => ev(`JSON.stringify([...${DIALOG}.querySelectorAll('[data-guardian]')].map((n) => n.dataset.state))`).then((s) => JSON.parse(s));
+
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Recovery').click()`);
+await sleep(500);
+check('RC1 Settings › Recovery offers recovering a lost account and helping a friend', (await ev(`document.body.textContent.includes('Recover a lost account') && document.body.textContent.includes('Help a friend recover')`)) === true);
+
+// The new device's side.
+await ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Recover with guardians').click()`);
+await sleep(500);
+check('RC2 the recovery dialog asks for the lost account', (await ev(`!!${DIALOG}?.querySelector('input[aria-label="The account you lost"]')`)) === true);
+await typeInto('input[aria-label="The account you lost"]', 'mzlostaccountroot');
+await clickIn('Start recovery');
+await until(async () => (await dialogText()).includes('481 205 736'), 4000);
+const started = await dialogText();
+check('RC3 a started recovery shows the link to send and the code to read out', started.includes('481 205 736') && (await ev(`${DIALOG}.querySelector('input[aria-label="Recovery link"]').value.startsWith('dissent://recover/')`)) === true, started.slice(0, 200));
+check('RC4 it warns never to send the code with the link', started.includes('Never send it with the link'));
+check('RC5 Finish is disabled before any guardian approves', (await disabledIn('Finish recovery')) === true);
+
+await ev(`window.__mockGuardianAnswer('Maya', true)`);
+await until(async () => (await dialogText()).includes('1 of 2'), 4000);
+check('RC6 an approval arriving shows the progress and the guardian list', (await dialogText()).includes('1 of 2 guardian approvals needed') && JSON.stringify(await states()) === JSON.stringify(['approved', 'waiting', 'waiting']), JSON.stringify(await states()));
+await ev(`window.__mockGuardianAnswer('Jonas', false)`);
+await until(async () => (await states()).includes('declined'), 4000);
+check('RC7 a decline shows on its guardian', (await states())[1] === 'declined' && (await disabledIn('Finish recovery')) === true);
+await ev(`window.__mockGuardianAnswer('Omar', true)`);
+await until(async () => (await disabledIn('Finish recovery')) === false, 4000);
+check('RC8 enough approvals enable Finish', (await dialogText()).includes('2 of 2') && (await disabledIn('Finish recovery')) === false);
+await clickIn('Finish recovery');
+await until(async () => (await ev(`document.body.textContent.includes('Recovered. 1 server now know')`)) === true, 4000);
+check('RC9 finishing closes the dialog and says the servers know the new key', (await ev(`document.body.textContent.includes('Recovered.')`)) === true && !(await dialogText()).includes('481 205 736'));
+
+// The guardian's side, from a link pasted on the page.
+await typeInto(`input[aria-label="A friend's recovery link"]`, 'dissent://recover/friendrequest?via=frienddevice');
+await ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Open').click()`);
+await until(async () => (await dialogText()).includes('Maya'), 4000);
+const asked = await dialogText();
+check('RC10 the guardian sees who asks and that they are on the list', asked.includes('Maya') && asked.includes('You are one of their guardians.'), asked.slice(0, 200));
+check('RC11 Approve waits for the code and the heard-it check', (await disabledIn('Approve')) === true);
+check('RC11b Decline is the default: it holds the focus', (await ev(`document.activeElement?.textContent.trim()`)) === 'Decline');
+await typeInto('input[aria-label="Code they read to you"]', '000 000 000');
+await ev(`${DIALOG}.querySelector('input[type="checkbox"]').click()`);
+await sleep(200);
+await clickIn('Approve');
+await until(async () => (await dialogText()).includes('does not match'), 4000);
+check('RC12 a wrong code is refused with a reason', (await dialogText()).includes('the code does not match'));
+await typeInto('input[aria-label="Code they read to you"]', await ev(`window.__mockFriendCode`));
+await sleep(200);
+await clickIn('Approve');
+await until(async () => (await dialogText()).includes('You approved'), 4000);
+check('RC13 the right code approves and the answer reaches their device', (await dialogText()).includes('Their new device has your answer.'));
+await clickIn('Done');
+await sleep(300);
+
+// A link without the device's address: the approval link is offered to send back by hand.
+await ev(`window.__mockDeepLink('dissent://recover/friendrequest')`);
+await until(async () => (await dialogText()).includes('Maya'), 4000);
+check('RC14 a dissent://recover link opens the guardian dialog', (await dialogText()).includes('A friend asks you to approve a recovery'));
+await typeInto('input[aria-label="Code they read to you"]', await ev(`window.__mockFriendCode`));
+await ev(`${DIALOG}.querySelector('input[type="checkbox"]').click()`);
+await sleep(200);
+await clickIn('Approve');
+await until(async () => (await dialogText()).includes('You approved'), 4000);
+check('RC15 an unreachable device gets the approval link to send by hand', (await ev(`${DIALOG}.querySelector('input[aria-label="Approval link"]')?.value ?? ''`)) === 'dissent://approve/mockapproval');
+await clickIn('Done');
+await sleep(300);
+
+// A request for an account whose key changed lately carries the safety warning.
+await ev(`window.__mockDeepLink('dissent://recover/changedrequest?via=frienddevice')`);
+await until(async () => (await dialogText()).includes('Maya'), 4000);
+check('RC15b a recent key change warns the guardian to compare safety numbers', (await dialogText()).includes('Compare safety numbers with them before you approve'));
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(300);
+
+// Decline.
+await ev(`window.__mockDeepLink('dissent://recover/friendrequest?via=frienddevice')`);
+await until(async () => (await dialogText()).includes('Maya'), 4000);
+await clickIn('Decline');
+await until(async () => (await dialogText()).includes('You declined'), 4000);
+check('RC16 declining needs no code and tells their device', (await dialogText()).includes('Their new device has your answer.'));
+noConsoleErrors('recovery', b.consoleErrors);
+await b.close();
+}
+
+// ---- scrub: "Remove identifying details" per file, its defaults by kind, the question when it cannot, the Share dialog ----
+async function section_scrub() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9901, profile: `${SCRATCH}/scrub-next-profile` });
+const { ev, press } = b;
+await sleep(1200);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+await ev(`document.querySelector('nav[aria-label="Servers and direct messages"] button[aria-label="Direct messages"]').click()`);
+await sleep(500);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((x) => x.textContent.includes('Maya')).click()`);
+await sleep(800);
+const file = (name, mime, size = 2048) => ({ path: `C:/Users/ada/Desktop/${name}`, name, size, mime });
+const DROPPED = [
+  file('IMG_20261029_1530.jpg', 'image/jpeg'),
+  file('VID_20261029_1531.mp4', 'video/mp4'),
+  file('holiday-movie.mkv', 'video/x-matroska'),
+  file('song.mp3', 'audio/mpeg'),
+  file('report.pdf', 'application/pdf'),
+  file('scan.bmp', 'image/bmp'),
+];
+const toggles = () => ev(`Object.fromEntries([...document.querySelectorAll('[aria-label="Files to send"] [data-scrub-toggle]')].map((n) => [n.dataset.scrubToggle, n.querySelector('input').checked]))`);
+await ev(`window.__mockDropFiles(${JSON.stringify(DROPPED)})`);
+const shown = await until(async () => { const t = await toggles(); return Object.keys(t).length === DROPPED.length && t; }, 3000);
+check('S1 every dropped file gets a "Remove details" switch once the engine has looked at it', !!shown, JSON.stringify(await toggles()));
+check('S2 the defaults follow the kind: photos and phone videos on; movies, music and documents off', JSON.stringify(shown) === JSON.stringify({
+  'IMG_20261029_1530.jpg': true, 'VID_20261029_1531.mp4': true, 'holiday-movie.mkv': false, 'song.mp3': false, 'report.pdf': false, 'scan.bmp': true,
+}), JSON.stringify(shown));
+check('S3 the switch says what it removes', (await ev(`document.querySelector('[data-scrub-toggle="song.mp3"] input').getAttribute('aria-label')`)) === 'Remove identifying details (location, device, dates, names): song.mp3');
+
+// The user's own choice per file: the movie on, the phone video off.
+await ev(`document.querySelector('[data-scrub-toggle="holiday-movie.mkv"] input').click()`);
+await ev(`document.querySelector('[data-scrub-toggle="VID_20261029_1531.mp4"] input').click()`);
+await sleep(200);
+const changed = await toggles();
+check('S4 a file\'s switch can be changed before sending', changed['holiday-movie.mkv'] === true && changed['VID_20261029_1531.mp4'] === false, JSON.stringify(changed));
+
+// scan.bmp cannot be cleaned: sending asks, and Cancel sends nothing.
+await ev(`window.__mockSentScrub = []`);
+await b.click('.composer button[aria-label="Send message"]');
+await sleep(500);
+const asked = await ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`);
+check('S5 a file whose details cannot be removed asks before sending: Send as is or Cancel', asked.includes("Couldn't remove details from scan.bmp") && asked.includes('Send as is') && asked.includes('Cancel'), asked);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Cancel').click()`);
+await sleep(400);
+check('S6 Cancel sends nothing and keeps the files staged', (await ev(`window.__mockSentScrub.length`)) === 0 && Object.keys(await toggles()).length === DROPPED.length);
+
+// Send as is: every file goes with its own choice, scan.bmp as it is.
+await b.click('.composer button[aria-label="Send message"]');
+await sleep(500);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Send as is').click()`);
+await sleep(800);
+const sent = await ev(`window.__mockSentScrub.at(-1) ?? null`);
+check('S7 Send as is sends every file with its own choice, the one that could not be cleaned as it is', !!sent && JSON.stringify(sent.scrub) === JSON.stringify([true, false, true, false, false, false]) && sent.paths.length === DROPPED.length, JSON.stringify(sent));
+check('S8 the staged files are cleared after the send', (await ev(`document.querySelector('[aria-label="Files to send"]').hidden`)) === true);
+
+// The Settings default: with "keep" chosen, a new photo starts with the switch off.
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'Contacts & privacy').click()`);
+await sleep(400);
+check('S9 Settings names it a default for photos and videos', (await ev(`document.querySelector('[data-strip-photo-metadata]')?.getAttribute('aria-label')`)) === 'Remove identifying details from photos and videos by default');
+await ev(`document.querySelector('[data-strip-photo-metadata]').click()`);
+await sleep(400);
+await press('Escape');
+await sleep(400);
+await ev(`window.__mockDropFiles(${JSON.stringify([file('IMG_0002.jpg', 'image/jpeg')])})`);
+const off = await until(async () => { const t = await toggles(); return 'IMG_0002.jpg' in t && t; }, 3000);
+check('S10 with the default turned off, a new photo starts with the switch off and can still be turned on', !!off && off['IMG_0002.jpg'] === false, JSON.stringify(off));
+await ev(`document.querySelector('[aria-label="Files to send"] button[aria-label="Remove IMG_0002.jpg"]')?.click()`);
+await ev(`window.__TAURI__.core.invoke('set_shell_settings', { settings: { keep_running: false, start_at_login: false, notifications_muted: false, keep_photo_metadata: false } })`);
+await sleep(300);
+
+// The Share dialog lists each file with its switch, and sends their choices.
+await ev(`window.__mockSentScrub = []`);
+await b.click('.composer button[aria-label="More actions"]');
+await sleep(300);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((n) => n.textContent.includes('Upload a file'))?.click()`);
+const share = await until(async () => ev(`(() => { const l = document.querySelector('[data-share-files]'); return l && l.querySelectorAll('[data-scrub-toggle]').length === 2 ? Object.fromEntries([...l.querySelectorAll('[data-scrub-toggle]')].map((n) => [n.dataset.scrubToggle, n.querySelector('input').checked])) : null; })()`), 3000);
+check('S11 the Share dialog lists each file with its switch: the picture on, the notes off', JSON.stringify(share) === JSON.stringify({ 'parser-bench.png': true, 'notes.md': false }), JSON.stringify(share));
+await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((n) => /^Send/.test(n.textContent.trim()))?.click()`);
+await sleep(800);
+const shared = await ev(`window.__mockSentScrub.at(-1) ?? null`);
+check('S12 the Share dialog sends each file\'s choice', !!shared && JSON.stringify(shared.scrub) === JSON.stringify([true, false]), JSON.stringify(shared));
+
+noConsoleErrors('scrub', b.consoleErrors);
+await b.close();
+}
+
+// ---- Hide my IP address: Settings > Network asks first, saves, and names the relay that carries the traffic ----
+async function section_hideip() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9829, profile: `${SCRATCH}/hideip-next-profile` });
+const { ev } = b;
+await sleep(1500);
+await b.press(',', 2);
+await sleep(400);
+await ev(`[...document.querySelectorAll('[data-settings-page] nav button')].find(n => n.textContent === 'Network').click()`);
+await sleep(500);
+const box = () => ev(`(() => { const i = document.querySelector('[data-settings-page] input[aria-label="Hide my IP address"]'); return i ? i.checked : null; })()`);
+check('H1 Network offers Hide my IP address, off by default', (await box()) === false);
+check('H1 it says what it costs', (await ev(`document.querySelector('[data-settings-page]').textContent.includes('Calls and transfers are slower')`)) === true);
+await ev(`document.querySelector('[data-settings-page] input[aria-label="Hide my IP address"]').click()`);
+await sleep(400);
+const prompt = await ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`);
+check('H2 turning it on asks first, and says the connection restarts', prompt.includes('restarts') && prompt.includes('relay sees your IP'), prompt.slice(0, 160));
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((x) => x.textContent === 'Cancel')?.click()`);
+await sleep(400);
+check('H2 cancelling leaves it off', (await box()) === false);
+await ev(`document.querySelector('[data-settings-page] input[aria-label="Hide my IP address"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((x) => x.textContent === 'Hide my IP address')?.click()`);
+await sleep(1200);
+check('H3 confirming turns it on and saves it', (await box()) === true);
+const statusLine = await ev(`document.querySelector('[data-hide-ip-status]')?.textContent ?? ''`);
+check('H4 the status names the relay and who can see the IP', statusLine.startsWith('Connected through relay https://') && statusLine.includes('the relay can'), statusLine);
+
+const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
+check('H5 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+await b.close();
+}
+
+// ---- The conversation being watched: a message in the open DM, in a focused window at the end of the list, sounds no
+// alert and raises no desktop notification (on Windows that notification also badges the taskbar). Windows' native
+// window reports no focus while its webview has it, so the fake window here does too. ----
+async function section_watching() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9996, profile: `${SCRATCH}/watching-next-profile` });
+const { ev } = b;
+await sleep(1200);
+const JONAS = base32Encode(new TextEncoder().encode('w8r2d6nblinus')).padEnd(52, 'a').slice(0, 52);
+const GRACE = base32Encode(new TextEncoder().encode('k3f9q2xagrace')).padEnd(52, 'a').slice(0, 52);
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(700);
+await ev(`document.querySelector('button[title="Jonas"]')?.click()`);
+await sleep(900);
+await ev(`(() => {
+  window.__fakeWin = { minimized: false };
+  window.__TAURI__.window = { getCurrentWindow: () => ({ isMinimized: async () => window.__fakeWin.minimized, isFocused: async () => false }) };
+  window.__mockNotified = [];
+  window.__mockPlays = 0;
+  window.__origPlay = window.__origPlay ?? HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () { window.__mockPlays++; return window.__origPlay.apply(this, arguments); };
+  document.hasFocus = () => true;
+})()`);
+const alerts = () => ev(`JSON.stringify([window.__mockNotified.length, window.__mockPlays])`);
+const post = (peer, text) => ev(`window.__mockDm('${peer}', ${JSON.stringify(text)})`);
+
+await post(JONAS, 'Watched as it arrives');
+await until(() => ev(`document.querySelector('.messages')?.textContent.includes('Watched as it arrives')`), 4000);
+await sleep(600);
+check('WA1 a message in the open DM, in a focused window at the end of the list, neither notifies nor sounds', (await alerts()) === '[0,0]', await alerts());
+const unread = await ev(`[...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] button')].map((n) => n.getAttribute('aria-label'))`);
+check('WA2 it is read at once: no unread count for it on the rail', !(unread ?? []).some((l) => l.startsWith('Jonas')), JSON.stringify(unread));
+
+// Scrolled back through history, the user is not watching the end: the sound plays, and the focused window still does
+// not notify.
+await ev(`(() => { for (let i = 0; i < 60; i++) window.__mockDm('${JONAS}', 'History line ' + i); })()`);
+await sleep(1500);
+await ev(`(() => { const m = document.querySelector('.messages'); m.scrollTop = 0; m.dispatchEvent(new Event('scroll')); })()`);
+await sleep(400);
+await ev(`(() => { window.__mockNotified = []; window.__mockPlays = 0; })()`);
+await sleep(2200);
+await post(JONAS, 'While scrolled back');
+await sleep(900);
+check('WA3 scrolled back, a new message sounds but a focused window does not notify', (await alerts()) === '[0,1]', await alerts());
+
+// The page loses focus: the open DM notifies and sounds as before.
+await ev(`(() => { const m = document.querySelector('.messages'); m.scrollTop = m.scrollHeight; m.dispatchEvent(new Event('scroll')); })()`);
+await sleep(2200);
+await ev(`(() => { window.__mockNotified = []; window.__mockPlays = 0; document.hasFocus = () => false; })()`);
+await post(JONAS, 'While away');
+await sleep(900);
+check('WA4 with the window unfocused, the open DM notifies and sounds', (await alerts()) === '[1,1]', await alerts());
+
+// Minimised, with the page still reporting focus: it notifies.
+await sleep(5500);
+await ev(`(() => { window.__mockNotified = []; window.__mockPlays = 0; document.hasFocus = () => true; window.__fakeWin.minimized = true; })()`);
+await post(JONAS, 'While minimised');
+await sleep(900);
+check('WA5 with the window minimised, the open DM notifies', (await ev('window.__mockNotified.length')) === 1, await alerts());
+
+// Focused again, a message in another DM sounds but does not notify, the same as before.
+await sleep(2200);
+await ev(`(() => { window.__mockNotified = []; window.__mockPlays = 0; window.__fakeWin.minimized = false; })()`);
+await post(GRACE, 'From someone else');
+await sleep(900);
+check('WA6 in a focused window, a message in another DM sounds and does not notify', (await alerts()) === '[0,1]', await alerts());
+
+await ev(`(() => { delete document.hasFocus; HTMLMediaElement.prototype.play = window.__origPlay; delete window.__TAURI__.window; })()`);
+const errors = b.consoleErrors.filter((e) => !IGNORED_CONSOLE.test(e));
+check('WA7 no console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
+await b.close();
+}
+
+// ---- The conversation being watched: a message that lands in the open DM, in a focused window with the list at its
+// end, is read at once and adds nothing to the taskbar or dock badge and shows no notification. Away from the window, or
+// scrolled up, it stays unread and counts; coming back reads it and clears the delivered notifications. ----
+async function section_activebadge() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9893, profile: `${SCRATCH}/activebadge-next-profile` });
+const { ev } = b;
+await sleep(800);
+const mockId = (name) => base32Encode(new TextEncoder().encode(name)).padEnd(52, 'a').slice(0, 52);
+const LINUS = mockId('w8r2d6nblinus');
+const GRACE = mockId('k3f9q2xagrace');
+const post = (peer, text) => ev(`window.__mockDm('${peer}', ${JSON.stringify(text)})`);
+const SIDEBAR_BUTTONS = `[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')]`;
+const badge = async () => JSON.parse((await ev(`JSON.stringify(window.__mockBadge ?? null)`)) ?? 'null');
+const counted = async (key) => (await badge())?.sources.find((s) => s.key === key)?.unread ?? 0;
+const notified = async () => (await ev(`(window.__mockNotified ?? []).length`)) ?? 0;
+const jonas = `dm:${LINUS}`;
+
+await ev(`${SIDEBAR_BUTTONS}.find((n) => n.textContent.includes('Jonas'))?.click()`);
+await sleep(900);
+await ev(`window.__mockNotified = []`);
+check('AB1 the badge names the open, focused DM as the one being viewed', (await badge())?.viewing === jonas, JSON.stringify(await badge()));
+
+await post(LINUS, 'Seen as it lands');
+await sleep(900);
+check('AB2 a message in the viewed DM adds nothing to the badge', (await counted(jonas)) === 0, JSON.stringify(await badge()));
+check('AB3 a message in the viewed DM shows no notification', (await notified()) === 0, String(await notified()));
+check('AB4 the viewed DM stays off the unread rail', !((await ev(`[...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] button')].map((n) => n.getAttribute('aria-label'))`)) ?? []).some((l) => l.startsWith('Jonas,')));
+
+await post(GRACE, 'Another conversation');
+await sleep(900);
+check('AB5 a message in another conversation counts on the badge', (await counted(`dm:${GRACE}`)) === 1 && (await badge())?.viewing === jonas, JSON.stringify(await badge()));
+
+// The window loses focus: the open DM is not watched, so its message stays unread, counts and notifies.
+await ev(`(() => { document.hasFocus = () => false; window.dispatchEvent(new Event('blur')); })()`);
+await sleep(300);
+check('AB6 an unfocused window views no conversation', (await badge())?.viewing === null, JSON.stringify(await badge()));
+await post(LINUS, 'Arrives while away');
+await sleep(900);
+check('AB7 a message in the open DM while unfocused counts on the badge', (await counted(jonas)) === 1, JSON.stringify(await badge()));
+check('AB8 a message in the open DM while unfocused notifies', (await notified()) === 1, String(await notified()));
+
+// Focus comes back: the DM is read, it leaves the badge and the delivered notifications are cleared.
+const clearsBefore = (await ev(`window.__mockNotificationClears ?? 0`)) ?? 0;
+await ev(`(() => { delete document.hasFocus; window.dispatchEvent(new Event('focus')); })()`);
+await sleep(900);
+check('AB9 focusing the window reads the open DM and takes it off the badge', (await counted(jonas)) === 0 && (await badge())?.viewing === jonas, JSON.stringify(await badge()));
+check('AB10 focusing the window clears the delivered notifications', ((await ev(`window.__mockNotificationClears ?? 0`)) ?? 0) > clearsBefore);
+
+// Scrolled up for older messages: the open DM is not watched until the list is back at its end.
+for (let i = 0; i < 30; i++) await post(LINUS, `Filler line ${i} so the list scrolls`);
+await sleep(1200);
+const scrollable = await ev(`(() => { const el = document.querySelector('.messages[aria-label="Messages"]'); return el ? el.scrollHeight > el.clientHeight + 200 : false; })()`);
+check('AB11 the DM is long enough to scroll', scrollable === true);
+await ev(`(() => { const el = document.querySelector('.messages[aria-label="Messages"]'); el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); })()`);
+await sleep(500);
+await post(LINUS, 'Arrives while scrolled up');
+await sleep(900);
+check('AB12 a message while the list is scrolled up counts on the badge', (await counted(jonas)) === 1, JSON.stringify(await badge()));
+await ev(`(() => { const el = document.querySelector('.messages[aria-label="Messages"]'); el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); })()`);
+await sleep(900);
+check('AB13 scrolling back to the end reads it and takes it off the badge', (await counted(jonas)) === 0, JSON.stringify(await badge()));
+// The open DM's count lasts a moment, until the view reads it. Its avatar never shows on the rail, and the avatars
+// that came and went do not pile up there.
+check('AB14 the open DM never shows on the unread rail', (await ev(`document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] > div').length`)) <= 1, String(await ev(`[...document.querySelectorAll('[role="group"][aria-label="Unread direct messages"] > div')].map((n) => n.textContent).join('|')`)));
+noConsoleErrors('activebadge', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -4659,17 +5325,25 @@ const SECTIONS = [
   ['emoticons', section_emoticons],
   ['websitehandles', section_websitehandles],
   ['volunteers', section_volunteers],
+  ['voicestate', section_voicestate],
+  ['hideip', section_hideip],
+  ['activebadge', section_activebadge],
   ['channelorder', section_channelorder],
+  ['memberonly', section_memberonly],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['paste', section_paste],
   ['dmmentions', section_dmmentions],
   ['invitecards', section_invitecards],
   ['attachments', section_attachments],
+  ['recovery', section_recovery],
   ['tooltips', section_tooltips],
   ['disclaimer', section_disclaimer],
   ['privacy', section_privacy],
+  ['inbox', section_inbox],
   ['consistency', section_consistency],
+  ['scrub', section_scrub],
+  ['watching', section_watching],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

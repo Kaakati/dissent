@@ -187,6 +187,13 @@ function Unlock({ status, onUnlocked }: { status: VaultStatus; onUnlocked: (next
       ) : null}
       {creating ? <Callout warn>Keep this safe. Without it this portable profile can’t be opened.</Callout> : null}
       {copying ? <Callout warn>Both copies now share one device identity. Linking a new device is safer for a USB stick.</Callout> : null}
+      {/* The window's own storage is this PC's WebView2 profile, not DissentData. It holds no messages, but it does hold
+          which servers, channels and conversations you have (read markers and mutes keyed by their ids) and layout choices. */}
+      <Callout>
+        On this PC, the Dissent window also keeps a few settings in its own storage, outside DissentData: which conversations
+        and channels you have read, mutes, and layout choices. They stay on this PC after you unplug the stick. Your
+        messages and contacts are only in DissentData, encrypted under the passphrase.
+      </Callout>
       <p role="alert" className="text-danger-text">{error}</p>
       <p role="status" className="text-muted-foreground">{busy}</p>
       <div className="mt-s-2 flex justify-end">

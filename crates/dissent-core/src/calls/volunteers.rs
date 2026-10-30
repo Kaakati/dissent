@@ -46,7 +46,6 @@ use super::{
 };
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, write_bin};
 use crate::timings::millis;
 use crate::world::World;
 
@@ -59,6 +58,22 @@ const OFFER_LIFETIMES: u32 = 3;
 /// The fewest people a call needs before a volunteer offers to forward it. A smaller call is a
 /// mesh, which no forwarder serves.
 const MIN_PEOPLE: usize = 6;
+/// Whether a server's seeders hear of a voice call with `people` in it. Only while the owner lets seeders forward calls
+/// (`seeders_forward`), and
+/// only for a call big enough to need a forwarder, since that is all a seeder hears a call for. The empty roster that
+/// ends a call goes to them too, so a seeder forgets it at once.
+pub(crate) fn seeders_hear_call(seeders_forward: bool, people: usize) -> bool {
+    seeders_forward && (people == 0 || people >= MIN_PEOPLE)
+}
+
+/// A roster as a seeder gets it: who is in the call, which is what it counts, without whether each is muted or deafened.
+pub(crate) fn for_seeder(members: &[super::PresenceMember]) -> Vec<super::PresenceMember> {
+    members
+        .iter()
+        .map(|m| super::PresenceMember { root: m.root, muted: false, deafened: false })
+        .collect()
+}
+
 /// A volunteer's bonus in the ranking is this share of its capacity...
 const BONUS_DIVISOR: u32 = 10;
 /// ...and at most this, so a strong participant still wins over a weak volunteer.
@@ -285,7 +300,8 @@ pub(crate) async fn volunteer_loop(weak: Weak<Inner>) {
 impl Engine {
     /// The servers this device volunteers to forward calls for. Kept on this device only.
     fn forward_calls_set(&self) -> BTreeSet<CommunityId> {
-        read_bin(&prefs_path(&self.read())).ok().flatten().unwrap_or_default()
+        let paths = self.paths();
+        paths.read_bin(&prefs_path(&self.read())).ok().flatten().unwrap_or_default()
     }
 
     /// Whether this device volunteers in `community` now: a person who turned on "Help Forward
@@ -334,16 +350,16 @@ impl Engine {
         if !self.read().communities.contains_key(&community) {
             return Err(CoreError::NotFound(format!("community {community}")));
         }
-        let path = prefs_path(&self.read());
+        let (paths, path) = (self.paths(), prefs_path(&self.read()));
         {
             let _serial = self.write();
-            let mut set: BTreeSet<CommunityId> = read_bin(&path).ok().flatten().unwrap_or_default();
+            let mut set: BTreeSet<CommunityId> = paths.read_bin(&path).ok().flatten().unwrap_or_default();
             if on {
                 set.insert(community);
             } else {
                 set.remove(&community);
             }
-            write_bin(&path, &set)?;
+            paths.write_bin(&path, &set)?;
         }
         if !on {
             let engine = self.clone();
@@ -1196,6 +1212,21 @@ mod tests {
         assert_eq!(watch.deaf(later + SPEECH_GAP + Duration::from_millis(100)), Some(false), "a leaf that stopped speaking");
         watch.heard = Some(later - Duration::from_secs(1));
         assert_eq!(watch.deaf(later), None, "audio heard within the window");
+    }
+
+    #[test]
+    fn a_seeder_hears_of_a_call_only_when_it_may_forward_one() {
+        assert!(!seeders_hear_call(false, MIN_PEOPLE + 4), "never while the owner has not allowed it");
+        assert!(!seeders_hear_call(true, MIN_PEOPLE - 1), "not for a call too small to need a forwarder");
+        assert!(seeders_hear_call(true, MIN_PEOPLE));
+        assert!(seeders_hear_call(true, 0), "the empty roster that ends a call reaches it");
+    }
+
+    #[test]
+    fn a_seeder_gets_who_is_in_a_call_but_not_their_mute_or_deafen() {
+        let root = dissent_identity::RootKey::generate().id();
+        let roster = [super::super::PresenceMember { root, muted: true, deafened: true }];
+        assert_eq!(for_seeder(&roster), vec![super::super::PresenceMember { root, muted: false, deafened: false }]);
     }
 
     #[test]

@@ -224,7 +224,7 @@ if (!window.__TAURI__) {
   generalMessages[12].attachments = [att('print-log.txt', 1.2 * MB, 'text/plain')];
   const GB = 1024 * MB;
   // The desktop shell settings, as the desktop app would keep them. Start at login is offered in the mock.
-  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false, emoticons_as_text: false, keep_photo_metadata: false };
+  let mockShell = { keep_running: false, start_at_login: false, notifications_muted: false, emoticons_as_text: false, keep_photo_metadata: false, dns_public_fallback: false };
   const shellView = () => ({ ...mockShell, start_at_login_available: true, start_at_login_note: null });
   // The folder the user picked in the mock. Null is the default, which follows the OS Downloads folder.
   let pickedDownloadDir = null;
@@ -268,7 +268,7 @@ if (!window.__TAURI__) {
     ],
   };
 
-  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true };
+  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true, hide_ip: false };
   // Relays the mock node measures. Public relays are always there; a community's relay is listed once it is named.
   const mockRelayLatency = new Map([
     ['https://use1-1.relay.n0.iroh.link./', 38],
@@ -542,6 +542,15 @@ if (!window.__TAURI__) {
     servers[communityId].msgs[channelId].push({ ...msg(0, 0, LINUS, `@${people[ME]} the laser is free after all.`), mentions: [{ id: ME, display_name: people[ME] }], mentions_me: true, mentions_everyone: false });
   };
   window.__mockEngineEvent = (ev) => emit(ev);
+  // Who speaks in the call: `who` is 'me', or a participant's display name. Sends the call state, as the engine's
+  // `call_speaking` does.
+  window.__mockSpeaking = (who, on) => {
+    if (!calls.current) return false;
+    if (who === 'me') calls.current.self_speaking = on;
+    else calls.current.participants = calls.current.participants.map((p) => (p.display_name === who ? { ...p, speaking: on } : p));
+    emitTo('dissent://call-state', { ...calls.current });
+    return true;
+  };
   // A seeder joins the server named `serverName` as storage and asks this device for a grant.
   window.__mockAddSeeder = (serverName, seederName) => {
     const c = Object.values(servers).find((s) => s.name === serverName);
@@ -915,6 +924,9 @@ if (!window.__TAURI__) {
     invite_preview: async ({ link }) => {
       (window.__mockInvitePreviews ??= []).push(link); // the driver checks nothing is asked before a click
       if (link.includes('broken')) throw 'Invite not found. It may have been deleted.';
+      // Members refuse a revoked or expired invite as they refuse a wrong secret, so its holder learns nothing about the
+      // server (privacy audit P-16). The engine then reports that no member answered.
+      if (/revoked|expired/.test(link)) throw 'no member answered the invite preview; the invite may be expired or revoked';
       if (link.includes('slow')) await new Promise((r) => setTimeout(r, 1500));
       return invitePreview(link);
     },
@@ -1076,13 +1088,17 @@ if (!window.__TAURI__) {
       m.deleted = true;
       return null;
     },
+    // `window.__mockMemberOnlyWaiting = n` makes n member devices not answer, so the switch cannot turn on.
     member_only_status: ({ communityId }) => {
       const c = servers[communityId];
-      return { on: Boolean(c.memberOnly), can_enable: true, waiting: 0 };
+      const waiting = window.__mockMemberOnlyWaiting ?? 0;
+      return { on: Boolean(c.memberOnly), can_enable: waiting === 0, waiting };
     },
     set_member_only: ({ communityId, on }) => {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'Only the owner can hide server details');
+      const waiting = window.__mockMemberOnlyWaiting ?? 0;
+      need(!on || waiting === 0, `${waiting} member device(s) need to update`);
       c.memberOnly = Boolean(on);
       return null;
     },
@@ -1115,13 +1131,30 @@ if (!window.__TAURI__) {
       return { ...file };
     },
     pick_files: () => (window.__mockPickBig ? [...PICK, PICK_BIG] : [...PICK]).map((f) => ({ ...f })),
-    send_files: ({ communityId, channelId, paths, text }) => {
+    // "Remove identifying details", as the engine decides it (attachments.rs inspection_of and scrub/): photos on, videos
+    // on only when they name a recording device (here: a phone's file name), music and other files off. Formats this
+    // build cannot clean are marked, so sending asks first.
+    inspect_files: ({ paths }) => paths.map((path) => {
+      const name = path.split(/[\\/]/).pop() ?? '';
+      const ext = (name.split('.').pop() ?? '').toLowerCase();
+      const keep = mockShell.keep_photo_metadata;
+      const photo = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff', 'dng', 'bmp', 'svg'];
+      const video = ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'wmv', 'flv'];
+      const audio = ['mp3', 'flac', 'ogg', 'wav', 'm4a', 'opus'];
+      if (photo.includes(ext)) return { path, kind: 'photo', scrub_default: !keep, scrubbable: !['bmp', 'svg'].includes(ext) };
+      if (video.includes(ext)) return { path, kind: 'video', scrub_default: !keep && /^(VID|IMG|PXL|MOV)_/i.test(name), scrubbable: !['avi', 'wmv', 'flv'].includes(ext) };
+      if (audio.includes(ext)) return { path, kind: 'audio', scrub_default: false, scrubbable: ext === 'm4a' };
+      return { path, kind: 'other', scrub_default: false, scrubbable: false };
+    }),
+    send_files: ({ communityId, channelId, paths, text, scrub }) => {
+      (window.__mockSentScrub ??= []).push({ paths, scrub: scrub ?? null });
       const c = servers[communityId];
       const m = { ...msg(0, 0, ME, text ?? ''), ms: Date.now(), attachments: uploaded(paths) };
       c.msgs[channelId].push(m);
       return messageItem(c, channelId, m);
     },
-    send_dm_files: ({ peer, paths, text }) => {
+    send_dm_files: ({ peer, paths, text, scrub }) => {
+      (window.__mockSentScrub ??= []).push({ paths, scrub: scrub ?? null });
       const item = { id: id(`d${++seq}`), from: ME, text: text ?? '', ms: Date.now(), pending: false, attachments: uploaded(paths) };
       (dms[peer] ??= []).push(item);
       return dmItem(item);
@@ -1256,6 +1289,7 @@ if (!window.__TAURI__) {
         notifications_muted: settings.notifications_muted,
         emoticons_as_text: settings.emoticons_as_text ?? mockShell.emoticons_as_text,
         keep_photo_metadata: settings.keep_photo_metadata ?? mockShell.keep_photo_metadata,
+        dns_public_fallback: settings.dns_public_fallback ?? mockShell.dns_public_fallback,
       };
       return shellView();
     },
@@ -1277,6 +1311,7 @@ if (!window.__TAURI__) {
         disabled,
         use_community_relays: settings.use_community_relays !== false,
         use_n0_lookup: settings.use_n0_lookup !== false,
+        hide_ip: Boolean(settings.hide_ip),
       };
       return { ...mockNetwork, relays: [...mockNetwork.relays], pinned: [...pinned], disabled: [...disabled] };
     },
@@ -1340,11 +1375,67 @@ if (!window.__TAURI__) {
     { id: 't4', direction: 'download', name: 'cnc-enclosure-v3.pdf', size: 24.6 * MB, state: 'done', progress: 1, route: 'Direct', route_kind: 'direct', route_note: 'From Maya and the seeder', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 2, status_text: 'Done today 08:13 · verified' },
     { id: 't5', direction: 'download', name: 'panel-scan-full.tiff', size: 12.4 * 1024 * MB, state: 'failed', progress: 0, route: 'Refused', route_kind: 'refused', route_note: 'Nothing was downloaded', where: { kind: 'server', name: 'Riverside Makers · #hardware' }, sources: 0, status_text: 'Over the 10 GB limit', error: 'refused' },
   ];
+  // Guardian recovery. `recovery` is the one on this device (the new device's side); a friend's request is any
+  // dissent://recover/… link, and approving it needs the code below. The driver answers for the guardians with
+  // window.__mockGuardianAnswer(name, approve), as their devices would.
+  let recovery = null;
+  const RECOVERY_CODE = '481 205 736';
+  const FRIEND_CODE = '314 159 265';
+  window.__mockFriendCode = FRIEND_CODE;
+  const recoveryGuardians = [GRACE, LINUS, KEN];
+  const recoveryView = () => {
+    if (!recovery) return null;
+    const listed = recovery.setKnown ? recoveryGuardians : Object.keys(recovery.states);
+    const guardians = listed.map((r) => ({ root_id: r, suffix: suffix(r), display_name: people[r] ?? null, state: recovery.states[r] ?? 'waiting' }));
+    const approvals = guardians.filter((g) => g.state === 'approved').length;
+    const threshold = recovery.setKnown ? 2 : null;
+    return {
+      old_root: recovery.old, old_suffix: suffix(recovery.old), request_link: 'dissent://recover/mockrequest?via=mockdevice', code: RECOVERY_CODE,
+      threshold, guardians, approvals, set_known: recovery.setKnown, invites: recovery.invites, ready: threshold !== null && approvals >= threshold, requested_ms: recovery.at,
+    };
+  };
+  window.__mockGuardianAnswer = (name, approve) => {
+    const root = rootOf(name);
+    if (!recovery || !root) return false;
+    recovery.states[root] = approve ? 'approved' : 'declined';
+    if (approve) {
+      recovery.setKnown = true;
+      recovery.invites = Math.max(recovery.invites, 1);
+    }
+    emit({ kind: 'recovery_changed' });
+    return true;
+  };
   const guardianState = { threshold: 2, guardians: [GRACE, LINUS, RADIA].map((r) => ({ root_id: r, display_name: people[r], suffix: suffix(r), is_contact: true, shared_servers: 2 })) };
   const devices = [
     { device_id: id('dev-laptop'), name: 'Sami · laptop', this_device: true, added_ms: at(120, 0), last_seen_ms: Date.now() },
     { device_id: id('dev-phone'), name: 'Sami · phone', this_device: false, added_ms: at(40, 0), last_seen_ms: at(0, 25) },
   ];
+  // Offline delivery: Maya's always-on computer and the club seeder offer to hold Sami's mail; nothing is chosen yet.
+  // Sami's phone answers but holds nothing for Sami. `__mockInboxOffline(device)` makes a device stop answering.
+  const inbox = {
+    chosen: [],
+    servingOwn: false,
+    hosted: new Set(),
+    offline: new Set(),
+    devices: {
+      [id('dev-maya-box')]: { owner: GRACE, name: 'Maya', own_device: false, serving: true, envelopes: 2, key_packages: 5, bytes: 18432 },
+      [id('dev-seeder')]: { owner: id('seeder-club'), name: 'Riverside seeder', own_device: false, serving: true, envelopes: 0, key_packages: 5, bytes: 0 },
+      [id('dev-phone')]: { owner: ME, name: 'Your device', own_device: true, serving: false, envelopes: 0, key_packages: 0, bytes: 0 },
+    },
+  };
+  const inboxView = (device) => {
+    const d = inbox.devices[device] ?? { owner: null, name: `device·${device.slice(0, 8)}`, own_device: false, serving: false, envelopes: 0, key_packages: 0, bytes: 0 };
+    const reachable = Boolean(inbox.devices[device]) && !inbox.offline.has(device);
+    return { device, ...d, chosen: inbox.chosen.includes(device), reachable, serving: reachable && d.serving, envelopes: reachable && d.serving ? d.envelopes : 0, key_packages: reachable && d.serving ? d.key_packages : 0, bytes: reachable && d.serving ? d.bytes : 0 };
+  };
+  window.__mockInboxOffline = (device) => inbox.offline.add(device);
+  // A friend's device starts or stops holding Sami's mail: the notice event, and the Offline delivery list.
+  inbox.notices = [];
+  window.__mockInboxNotice = (device, on) => {
+    const d = inbox.devices[device];
+    inbox.notices = [{ root: d.owner, name: d.name, device, on, chosen: false, ts_ms: Date.now() }, ...inbox.notices.filter((n) => n.device !== device)];
+    emit({ kind: 'inbox_host_changed', root_id: d.owner, display_name: d.name, device_id: device, on });
+  };
   // The demo call is the "workshop" voice channel of Riverside Makers, with the design's six people (Part 6.3).
   const at2 = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
   const CALL_PEOPLE = [
@@ -1563,10 +1654,27 @@ if (!window.__TAURI__) {
             ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
             : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
         forwarded_by: volunteer ?? null,
+        self_speaking: false,
       });
+      // As the engine does, the voice roster lists this person once in the channel joined.
+      const roster = c.voice?.find((v) => v.id === channelId);
+      if (roster && !roster.participants.some((p) => p.root_id === ME)) {
+        roster.participants.unshift({ root_id: ME, display_name: people[ME], muted: false, deafened: false, speaking: false });
+        emit({ kind: 'community_updated', community_id: communityId });
+      }
       return { ...calls.current };
     },
-    leave_call: () => { calls.current = null; return null; },
+    leave_call: () => {
+      calls.current = null;
+      for (const c of Object.values(servers)) {
+        for (const v of c.voice ?? []) {
+          const before = v.participants.length;
+          v.participants = v.participants.filter((p) => p.root_id !== ME);
+          if (v.participants.length !== before) emit({ kind: 'community_updated', community_id: c.id });
+        }
+      }
+      return null;
+    },
     call_state: () => (calls.current ? { ...calls.current } : null),
     // Ringing: the answer and decline commands. A ringing group call is the one the incoming board shows.
     accept_call: ({ callId }) => { if (callId === 'call-grp1') calls.current = callFor('grp1'); return null; },
@@ -1664,6 +1772,42 @@ if (!window.__TAURI__) {
       pickedDownloadDir = null;
       return transferSettings();
     },
+    begin_recovery: ({ old }) => {
+      const value = String(old ?? '').trim();
+      need(value.length > 0, 'Enter the account you lost');
+      need(value !== ME, 'This is the account on this device; recover a lost one');
+      if (!recovery) recovery = { old: value.startsWith('dissent://guardians/') ? id('mzlostaccount') : value, setKnown: value.startsWith('dissent://guardians/'), states: {}, invites: 0, at: Date.now() };
+      return recoveryView();
+    },
+    recovery_status: () => recoveryView(),
+    add_recovery_link: ({ link }) => {
+      need(recovery, 'No recovery is in progress');
+      const l = String(link ?? '').trim();
+      if (l.startsWith('dissent://approve/')) recovery.states[GRACE] = 'approved';
+      else if (l.startsWith('dissent://guardians/')) recovery.setKnown = true;
+      else if (l.startsWith('dissent://invite/')) recovery.invites += 1;
+      else need(false, 'Paste an approval, guardians or invite link');
+      return recoveryView();
+    },
+    finish_recovery: () => {
+      const view = recoveryView();
+      need(view?.ready, 'Not enough guardians approved yet');
+      recovery = null;
+      return 1;
+    },
+    cancel_recovery: () => {
+      recovery = null;
+      return null;
+    },
+    inspect_recovery_request: ({ link }) => {
+      need(String(link ?? '').startsWith('dissent://recover/'), 'expected a dissent://recover/ link');
+      return { old_root: GRACE, old_suffix: suffix(GRACE), old_name: people[GRACE], new_suffix: 'q7xk2m9p', listed: true, shared_servers: ['Riverside Makers'], reachable: String(link).includes('?via='), requested_ms: Date.now(), key_changed_ms: String(link).includes('changed') ? Date.now() - 86400000 : null, already_moved: false };
+    },
+    answer_recovery_request: ({ link, approve, code }) => {
+      if (approve) need(String(code ?? '').replace(/\D/g, '') === FRIEND_CODE.replace(/\D/g, ''), 'the code does not match. Ask them to read it again from their screen');
+      const delivered = String(link).includes('?via=');
+      return { approval_link: approve ? 'dissent://approve/mockapproval' : null, delivered, note: delivered ? null : 'The link does not name their device. Send them the approval link.' };
+    },
     list_guardians: () => ({ threshold: guardianState.threshold, guardians: guardianState.guardians.map((g) => ({ ...g })) }),
     sign_guardians: ({ guardians, threshold }) => {
       need(threshold >= 1 && threshold <= guardians.length, 'The threshold must be between 1 and the number of guardians');
@@ -1678,6 +1822,32 @@ if (!window.__TAURI__) {
       return devices.map((d) => ({ ...d }));
     },
     link_device_code: () => 'dissent://link/mock-device',
+    inbox_settings: () => ({
+      serving_own: inbox.servingOwn,
+      hosted: [...inbox.hosted].map((root) => ({ root, name: people[root] ?? root.slice(0, 8), envelopes: 0, bytes: 0 })),
+      envelopes: 0,
+      bytes: 0,
+      max_inboxes: 4,
+      max_hosted: 16,
+      notices: inbox.notices.map((n) => ({ ...n, chosen: inbox.chosen.includes(n.device) })),
+    }),
+    inbox_status: () => inbox.chosen.map(inboxView),
+    inbox_candidates: () => Object.keys(inbox.devices).filter((d) => !inbox.chosen.includes(d)).map(inboxView).filter((v) => v.serving),
+    set_inboxes: ({ devices }) => {
+      const list = [...new Set(devices)];
+      need(list.length <= 4, 'at most 4 inboxes');
+      inbox.chosen = list;
+      return null;
+    },
+    set_serve_inbox: ({ on }) => {
+      inbox.servingOwn = Boolean(on);
+      return null;
+    },
+    host_inbox_for: ({ root, on }) => {
+      if (on) inbox.hosted.add(root);
+      else inbox.hosted.delete(root);
+      return null;
+    },
     mark_safety_verified: () => null,
     approve_device: ({ link }) => { need(link.startsWith('dissent://'), 'Not a device link'); return 'dissent://grant/mock-' + suffix(ME); },
     finish_device_link: () => null,
@@ -1716,6 +1886,9 @@ if (!window.__TAURI__) {
     mark_unread: () => null,
     pin_conversation: ({ key, pinned }) => { if (pinned) mockPins.add(key); else mockPins.delete(key); return null; },
     mark_read: ({ key }) => { readAt[key] = Date.now(); return null; },
+    // The badge the app would draw (badge.rs): the last sources and viewed key, and how often notifications were cleared.
+    set_unread_badge: ({ sources, viewing }) => { window.__mockBadge = { sources, viewing }; window.__mockBadgeSets = (window.__mockBadgeSets ?? 0) + 1; return null; },
+    clear_message_notifications: () => { window.__mockNotificationClears = (window.__mockNotificationClears ?? 0) + 1; return null; },
   });
 
   Object.assign(dms, {
@@ -1801,6 +1974,8 @@ if (!window.__TAURI__) {
   };
   // A dissent:// link opened from outside the app, as the backend sends it.
   window.__mockDeepLink = (link) => emitTo('dissent://deep-link', [link]);
+  // The driver drops files from the desktop onto the window, as the app's drag and drop reports them.
+  window.__mockDropFiles = (files) => emitTo('dissent://files-dropped', files);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.
   window.__mockNetLatency = (dht_ms, relay_ms) => {
     Object.assign(mockNetLatency, { dht_ms, relay_ms });
@@ -1855,9 +2030,12 @@ if (!window.__TAURI__) {
 
   // Website handles. The mock's DNS maps a domain to its TXT values at _dissent.<domain>; omar.example publishes Omar's
   // key, so his handle verifies once it is @omar.example. window.__mockDns changes a record, window.__mockSetHandle
-  // anyone's server handle. A status answer is "not checked yet" at first, and the result follows as the event.
+  // anyone's server handle. A status answer is "not checked yet"; only a status call with verify looks the handle up,
+  // and its result follows as the event. window.__mockDnsLookups lists every domain looked up.
   const mockDns = { 'omar.example': [`dissent-root=${KEN}`] };
   const mockChecks = {};
+  const mockInFlight = new Set();
+  window.__mockDnsLookups = [];
   let mockWebsite = null;
   const webDomain = (text) => {
     const d = String(text).trim().replace(/^@/, '').replace(/\.$/, '').toLowerCase();
@@ -1877,10 +2055,12 @@ if (!window.__TAURI__) {
     const last = mockChecks[`${root}|${domain}`];
     return last
       ? { root_id: root, handle, state: last.state, checked_ms: last.checked_ms, reason: last.reason, checking: false }
-      : { root_id: root, handle, state: 'unchecked', checked_ms: null, reason: null, checking: true };
+      : { root_id: root, handle, state: 'unchecked', checked_ms: null, reason: null, checking: mockInFlight.has(`${root}|${domain}`) };
   };
   const webCheck = (root, handle) => {
     const domain = webDomain(handle);
+    window.__mockDnsLookups.push(domain);
+    mockInFlight.delete(`${root}|${domain}`);
     mockChecks[`${root}|${domain}`] = { ...webLookup(root, domain), checked_ms: Date.now() };
     const view = webView(root, handle);
     emitTo('dissent://website-handle', view);
@@ -1924,10 +2104,16 @@ if (!window.__TAURI__) {
       mockWebsite = null;
       return webSetup();
     },
-    website_handle_status: ({ items }) => items.map(({ root_id, handle }) => {
-      const view = webView(root_id, handle);
-      if (view.checking && !window.__mockDnsHold) setTimeout(() => webCheck(root_id, handle), 200);
-      return view;
+    website_handle_status: ({ items, verify }) => items.map(({ root_id, handle }) => {
+      const domain = webDomain(handle);
+      const key = `${root_id}|${domain}`;
+      const due = verify && domain && handle.includes('.') && !mockChecks[key] && !mockInFlight.has(key);
+      if (due) {
+        mockInFlight.add(key);
+        const run = () => (window.__mockDnsHold ? setTimeout(run, 100) : webCheck(root_id, handle));
+        setTimeout(run, 200);
+      }
+      return webView(root_id, handle);
     }),
   });
 

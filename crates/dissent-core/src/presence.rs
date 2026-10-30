@@ -8,7 +8,6 @@
 use crate::engine::{now_ms, Engine, Inner, MAX_CLOCK_SKEW_MS};
 use crate::error::{CoreError, Result};
 use crate::rpc::Request;
-use crate::store::{read_bin, write_bin};
 use crate::timings::millis;
 use crate::views::EngineEvent;
 use crate::wire::{encode_gossip, GossipMsg};
@@ -120,7 +119,7 @@ impl OwnStatus {
 
 /// Loads the stored status. A missing or unreadable file means online.
 pub(crate) fn load_own(paths: &crate::store::Paths) -> OwnStatus {
-    match read_bin(&paths.own_status()) {
+    match paths.read_bin(&paths.own_status()) {
         Ok(own) => own.unwrap_or_default(),
         Err(e) => {
             warn!(error = %e, "could not read the stored status; starting online");
@@ -220,7 +219,7 @@ impl Engine {
             until_ms: if status == Status::Online { None } else { until_ms },
         };
         self.change_status(|w| {
-            write_bin(&w.paths.own_status(), &own)?;
+            w.paths.write_bin(&w.paths.own_status(), &own)?;
             w.own = own;
             Ok(())
         })
@@ -281,7 +280,7 @@ impl Engine {
         let result = self.change_status(|w| {
             if w.own.until_ms.is_some_and(|until| until <= now_ms()) {
                 let own = OwnStatus::default();
-                write_bin(&w.paths.own_status(), &own)?;
+                w.paths.write_bin(&w.paths.own_status(), &own)?;
                 w.own = own;
             }
             Ok(())

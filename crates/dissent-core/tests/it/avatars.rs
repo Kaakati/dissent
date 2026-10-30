@@ -12,9 +12,13 @@ fn picture(tag: u8) -> Vec<u8> {
     bytes
 }
 
-/// The decrypted file the view points at must hold exactly the bytes that were set.
-fn read(path: &str) -> Vec<u8> {
-    std::fs::read(path).expect("the picture file exists")
+/// The picture the view points at must open to exactly the bytes that were set. Pictures are sealed at rest, so it
+/// is opened as the window opens it. On disk it is not the plain bytes.
+fn read(engine: &dissent_core::Engine, path: &str) -> Vec<u8> {
+    let raw = std::fs::read(path).expect("the picture file exists");
+    let (bytes, _) = engine.open_picture(std::path::Path::new(path)).expect("the picture opens");
+    assert_ne!(raw, bytes, "the picture is sealed at rest");
+    bytes
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -36,7 +40,7 @@ async fn my_picture_is_on_my_profile_and_survives_a_restart() {
         let bytes = picture(1);
         alice.engine.set_avatar(bytes.clone()).await.expect("alice sets a picture");
         let path = alice.engine.me().avatar.expect("the picture has a file");
-        assert_eq!(read(&path), bytes);
+        assert_eq!(read(&alice.engine, &path), bytes);
 
         let (identity, dir) = stop(alice).await;
         let again = start(identity, dir).await;
@@ -61,7 +65,7 @@ async fn a_contact_sees_a_new_picture_and_its_removal() {
             bob.engine.user_profile(alice_root).avatar
         })
         .await;
-        assert_eq!(read(&path), bytes);
+        assert_eq!(read(&bob.engine, &path), bytes);
 
         alice.engine.clear_avatar().await.expect("alice removes it");
         eventually("bob sees the picture removed", || {
@@ -116,7 +120,7 @@ async fn a_server_member_sees_the_icon_and_a_member_cannot_change_it() {
                 .and_then(|c| c.icon)
         };
         let path = eventually("bob fetches the icon", || icon_of(&bob.engine)).await;
-        assert_eq!(read(&path), bytes);
+        assert_eq!(read(&bob.engine, &path), bytes);
         assert!(alice.engine.community_view(id).unwrap().icon.is_some());
 
         alice

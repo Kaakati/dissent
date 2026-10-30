@@ -368,3 +368,15 @@ impl Engine {
         Response::ChannelKeys(keys)
     }
 }
+
+/// Seals the key file at `path` again from `from` to `to`, for a profile copy under a new vault. A missing file is
+/// nothing to do, and one that does not open under `from` is an error.
+pub(crate) fn reseal(path: &std::path::Path, from: &Vault, to: &Vault, id: &CommunityId) -> Result<()> {
+    let sealed = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let plain = from.subkey(PURPOSE).open_sealed(&aad(id), &sealed)?;
+    crate::store::write_bytes_atomic(path, &to.subkey(PURPOSE).seal(&aad(id), &plain))
+}

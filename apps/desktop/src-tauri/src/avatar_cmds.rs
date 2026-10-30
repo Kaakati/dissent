@@ -9,7 +9,7 @@ use base64::Engine as _;
 use dissent_core::{CommunityId, CropRect};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{Manager, State};
+use tauri::State;
 
 use crate::commands::{engine, err, parse, AppState};
 
@@ -87,8 +87,8 @@ pub async fn set_community_icon_animated(state: State<'_, AppState>, community_i
     engine(&state).await?.set_community_icon_animated(community, gif, poster).await.map_err(err)
 }
 
-/// Serialises a view for the UI. Under `avatar`, `icon` and `banner`, local picture paths become
-/// asset URLs.
+/// Serialises a view for the UI. Under `avatar`, `icon` and `banner`, local picture paths become `dimg` URLs, since the
+/// pictures are sealed at rest (see pictures.rs).
 pub fn for_ui<T: Serialize>(view: &T) -> Result<Value, String> {
     let mut value = serde_json::to_value(view).map_err(err)?;
     asset_urls(&mut value);
@@ -101,7 +101,7 @@ fn asset_urls(value: &mut Value) {
             for (key, field) in map.iter_mut() {
                 let url = match (key.as_str(), &*field) {
                     ("avatar" | "icon" | "icon_poster" | "banner" | "banner_poster", Value::String(path)) if Path::new(path).is_absolute() => {
-                        Some(asset_url(path))
+                        Some(crate::pictures::picture_url(path))
                     }
                     _ => None,
                 };
@@ -116,36 +116,13 @@ fn asset_urls(value: &mut Value) {
     }
 }
 
-/// The URL the webview loads a local file from. It matches Tauri's `convertFileSrc`.
-pub fn asset_url(path: &str) -> String {
-    let base = if cfg!(windows) { "http://asset.localhost/" } else { "asset://localhost/" };
-    let mut out = String::from(base);
-    for b in path.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-/// Lets the webview load the decrypted pictures under the data dir. Called once at startup.
-pub fn allow_avatars(app: &tauri::AppHandle, profile_dir: &Path) -> tauri::Result<()> {
-    let dir = profile_dir.join("avatars");
-    std::fs::create_dir_all(&dir)?;
-    app.asset_protocol_scope().allow_directory(&dir, true)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
-    fn local_pictures_become_asset_urls_and_nothing_else_changes() {
+    fn local_pictures_become_picture_urls_and_nothing_else_changes() {
         // Absolute paths as each platform writes them: a Unix path is relative on Windows.
         let (mine, theirs) = if cfg!(windows) {
             (r"C:\Users\ada\dissent\avatars\ab.webp", r"D:\data\avatars\cd.png")
@@ -160,11 +137,11 @@ mod tests {
         });
         let out = for_ui(&view).unwrap();
         let avatar = out["avatar"].as_str().unwrap();
-        assert_eq!(avatar, asset_url(mine));
+        assert_eq!(avatar, crate::pictures::picture_url(mine));
         assert!(avatar.ends_with("ab.webp"), "{avatar}");
-        assert!(avatar.starts_with(if cfg!(windows) { "http://asset.localhost/" } else { "asset://localhost/" }));
+        assert!(avatar.starts_with(if cfg!(windows) { "http://dimg.localhost/" } else { "dimg://localhost/" }));
         assert!(out["members"][0]["avatar"].is_null());
-        assert_eq!(out["members"][1]["avatar"].as_str().unwrap(), asset_url(theirs));
+        assert_eq!(out["members"][1]["avatar"].as_str().unwrap(), crate::pictures::picture_url(theirs));
         assert_eq!(out["display_name"], "Sami");
         assert!(out["icon"].is_null());
     }

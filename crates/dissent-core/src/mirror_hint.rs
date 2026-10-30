@@ -1,5 +1,5 @@
-//! Hints to seeders. A member that sends or fetches a message's thumbnails and preview pictures tells the community's
-//! seeders the hash and size of each blob. A seeder then keeps the ciphertext, within its `MirrorPolicy`, so a member
+//! Hints to seeders. The member that sends a message's thumbnails and preview pictures tells the community's seeders
+//! the hash and size of each blob; a member that fetches one does not, so seeders never learn who fetched what. A seeder then keeps the ciphertext, within its `MirrorPolicy`, so a member
 //! who joins later can fetch it while the sender is offline. A hint carries what a cleartext manifest already
 //! carries for attachments. A seeder never learns a key.
 

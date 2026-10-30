@@ -1,10 +1,10 @@
 // Embeds from the sender's sealed message. The client never fetches a URL: a link preview shows only the fields the sender
-// included, and an image only as a local path the backend wrote (see imageSrc). Ported from the old UI's views/chat.js.
+// included, and an image only as a local path the backend wrote (see pictureSrc). Ported from the old UI's views/chat.js.
 import type { CSSProperties } from 'react';
 import { Layers } from 'lucide-react';
 import type { Embed } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { imageSrc } from './attachments';
+import { pictureSrc } from './attachments';
 import { spoilerGuard } from './parts';
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -14,7 +14,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 // browser, as links in messages do.
 function LinkCard({ e }: { e: Embed }) {
   if (typeof e.url !== 'string' || !/^https:\/\//i.test(e.url)) return null;
-  const src = e.image ? imageSrc(e.image) : null;
+  const src = e.image ? pictureSrc(e.image) : null;
   const accent = e.theme && HEX.test(e.theme) ? e.theme : null;
   const ratio = e.image_w && e.image_h ? `${e.image_w} / ${e.image_h}` : undefined;
   return (

@@ -10,7 +10,7 @@ use crate::identity_watch;
 use crate::identity_watch::IdentityChange;
 use crate::messages::{event_for, private_notice};
 use crate::rpc::{Request, Response, decode};
-use crate::store::{append_records, append_records_deferred, Paths};
+use crate::store::{append_records_deferred, Paths};
 use crate::typing::TypingTarget;
 use crate::views::EngineEvent;
 use crate::wire::{GossipMsg, decode_gossip};
@@ -75,10 +75,9 @@ pub(crate) fn control_effects(
                 || identity_watch::messaged(dms, conv_book, &old)
             {
                 let key = format!("rot:{:?}", se.event.id);
-                let path = paths.identity_changes();
                 let reason = identity_watch::ROTATED;
                 if let Some(notice) =
-                    identity_watch::record(identity_changes, &path, new, key, reason, now)
+                    identity_watch::record(identity_changes, paths, new, key, reason, now)
                 {
                     fx.emitted.push(notice);
                 }
@@ -184,13 +183,12 @@ impl Engine {
                     }
                 }
             }
-            let path = paths.identity_changes();
             if let Some(ev) = identity_watch::learn_device(
                 directory,
                 dms,
                 conv_book,
                 identity_changes,
-                &path,
+                paths,
                 &se.cert,
                 now,
             ) {
@@ -461,8 +459,11 @@ impl Engine {
             Request::AckEnvelopes(ack) => self.receive_ack(*ack),
             Request::DepositKeyPackages(body) => self.receive_key_packages(*body),
             Request::TakeKeyPackage { root } => self.serve_inbox_key_package(conn_from, root),
+            Request::InboxProbe(probe) => self.receive_probe(*probe),
             Request::Call(msg) => Response::Call(self.handle_call(conn_from, *msg).await),
             Request::Guardians(set) => self.accept_guardians(*set),
+            Request::GuardianOf(set) => self.accept_guardian_of(*set),
+            Request::RecoveryAnswer(answer) => self.receive_recovery_answer(*answer),
             Request::Presence(sp) => match self.accept_presence(None, *sp) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid presence: {e}")),
@@ -536,7 +537,7 @@ impl Engine {
                 &w.dms,
                 &w.conv_book,
                 &mut w.identity_changes,
-                &w.paths.identity_changes(),
+                &w.paths,
                 &sd.cert,
                 now_ms(),
             );
@@ -551,7 +552,7 @@ impl Engine {
             if seen {
                 false
             } else {
-                if let Err(e) = append_records(&w.paths.dm_log(&peer), std::slice::from_ref(&sd)) {
+                if let Err(e) = w.paths.append_records(&w.paths.dm_log(&peer), std::slice::from_ref(&sd)) {
                     return Response::Error(format!("could not store message: {e}"));
                 }
                 w.dms.entry(peer).or_default().push(sd);

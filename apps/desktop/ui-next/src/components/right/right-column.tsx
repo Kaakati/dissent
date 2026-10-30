@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { Radio } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
-import { HandleMark } from '@/components/website-handle';
+import { MemberHandle } from '@/components/website-handle';
 import { addressOf, shortOf } from '@/lib/address';
 import { groupInviteLink, leaveGroup } from '@/lib/actions';
 import { confirm } from '@/lib/dialog';
@@ -94,12 +94,7 @@ function MemberRow({ member }: { member: Member }) {
           <Radio className="size-3" aria-hidden="true" />
         </span>
       ) : null}
-      {member.handle ? (
-        <span className="flex max-w-[40%] shrink-0 items-center gap-1 text-meta text-muted-foreground">
-          <span className="truncate">{`@${member.handle}`}</span>
-          <HandleMark root={member.root_id} handle={member.handle} />
-        </span>
-      ) : null}
+      {member.handle ? <MemberHandle root={member.root_id} handle={member.handle} /> : null}
     </button>
   );
 }

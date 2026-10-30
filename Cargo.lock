@@ -2421,6 +2421,7 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2440,6 +2441,7 @@ dependencies = [
  "dissent-discovery",
  "dissent-events",
  "dissent-identity",
+ "image",
  "mime_guess",
  "rand 0.10.3",
  "rfd",
@@ -2460,6 +2462,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows",
  "windows-sys 0.59.0",
 ]
 

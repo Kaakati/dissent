@@ -10,13 +10,15 @@ mod access;
 mod addr_record;
 mod blob_gate;
 mod blob_release;
+mod recovery_flow;
 mod announce;
 mod storage_grants;
 mod request_gates;
 mod invisible;
 mod avatars;
+mod at_rest;
 mod attachments;
-mod photo_metadata;
+pub mod scrub;
 mod call_layers;
 mod call_video;
 mod calls;
@@ -91,16 +93,18 @@ pub use calls::{
     CallQuality, CallRoute, CallScope, CallView, LiveCallView, LiveMember, LiveParticipant, LiveRoute,
     ParticipantView, PathView, Topology,
 };
-pub use attachments::{AttachmentView, Mentions, StoreStats, TransferSettings, TransferView};
+pub use attachments::{AttachmentView, FileInspection, Mentions, OutgoingFile, StoreStats, TransferSettings, TransferView};
 /// The limits `Engine::set_mirror_policy` takes: the largest file and the most ciphertext a device keeps for others.
 pub use dissent_files::MirrorPolicy;
+pub use recovery_flow::{RecoveryAnswerView, RecoveryGuardian, RecoveryRequestView, RecoveryView};
 pub use engine::Engine;
+pub use at_rest::harden as harden_folder;
 pub use calls::{EncodedSink, EncodedVideo};
 pub use store::{sealed_data_present, SEALED_WITHOUT_IDENTITY};
 pub use dissent_audio::SenderConfig;
 pub use local::{NoteKind, CAPABILITIES};
 pub use groups::{ConvId, MAX_GROUP_MEMBERS, MAX_GROUP_NAME_CHARS, MIN_GROUP_MEMBERS};
-pub use inbox::{InboxStats, MAX_INBOXES};
+pub use inbox::{HostNoticeView, HostedView, InboxStats, InboxView, MAX_HOSTED, MAX_INBOXES};
 pub use friends::FriendView;
 pub use saved::{Bookmark, MessageRef, Reminder};
 pub use server_prefs::{Notify, ServerPrefs, MUTED_FOREVER};

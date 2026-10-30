@@ -70,6 +70,25 @@ fn to_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
 
+/// The files with each one's "Remove identifying details" choice. `scrub` is one choice per path, in order; without it
+/// (an older window) every file follows the default for its kind.
+fn to_files(paths: Vec<String>, scrub: Option<Vec<bool>>) -> Result<Vec<dissent_core::OutgoingFile>, String> {
+    if let Some(choices) = &scrub {
+        if choices.len() != paths.len() {
+            return Err("each file needs its own choice".into());
+        }
+    }
+    let choices = scrub.map(|c| c.into_iter().map(Some).collect()).unwrap_or_else(|| vec![None; paths.len()]);
+    Ok(paths.into_iter().zip(choices).map(|(p, scrub)| dissent_core::OutgoingFile { path: PathBuf::from(p), scrub }).collect())
+}
+
+/// What the Share dialog and the staged files show for each file: its kind, whether "Remove identifying details" starts
+/// on, and whether its details can be removed.
+#[tauri::command]
+pub async fn inspect_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<dissent_core::FileInspection>, String> {
+    Ok(engine(&state).await?.inspect_files(to_paths(paths)).await)
+}
+
 // The sender's message shows its own files from where they were shared, so the webview may read them before the
 // message comes back.
 fn allow_shared(app: &AppHandle, engine: &dissent_core::Engine) {
@@ -88,13 +107,15 @@ pub async fn send_files(
     text: Option<String>,
     seed: Option<bool>,
     mentions: Option<MentionsArg>,
+    scrub: Option<Vec<bool>>,
 ) -> Result<MessageItem, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let channel = parse("channel id", &channel_id)?;
     let mentions = mentions_of_arg(mentions)?;
+    let files = to_files(paths, scrub)?;
     let engine = engine(&state).await?;
     let item = engine
-        .send_files_with(community, channel, to_paths(paths), text.unwrap_or_default(), seed.unwrap_or(true), mentions)
+        .send_files_with_options(community, channel, files, text.unwrap_or_default(), seed.unwrap_or(true), mentions)
         .await
         .map_err(err)?;
     allow_shared(&app, &engine);
@@ -108,10 +129,12 @@ pub async fn send_dm_files(
     peer: String,
     paths: Vec<String>,
     text: Option<String>,
+    scrub: Option<Vec<bool>>,
 ) -> Result<DmItem, String> {
     let peer: RootId = parse("peer id", &peer)?;
+    let files = to_files(paths, scrub)?;
     let engine = engine(&state).await?;
-    let item = engine.send_dm_files(peer, to_paths(paths), text.unwrap_or_default()).await.map_err(err)?;
+    let item = engine.send_dm_files_with(peer, files, text.unwrap_or_default()).await.map_err(err)?;
     allow_shared(&app, &engine);
     Ok(item)
 }

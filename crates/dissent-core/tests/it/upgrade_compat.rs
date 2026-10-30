@@ -214,3 +214,112 @@ async fn v0111_profile_loads_and_views_match() {
     })
     .await;
 }
+
+const PASSPHRASE_V0120: &str = "dissent fixture v0.1.20";
+const SALT_V0120: [u8; 16] = *b"dissent-fixture3";
+
+fn fixture_v0120() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/profile-v0.1.20")
+}
+
+/// Text the v0.1.20 fixture holds in plaintext files. None of it may be on disk once the current engine has started.
+const SECRETS: [&str; 6] = [
+    "secret dm from alice",
+    "secret dm from bob",
+    "secret group hello",
+    "secret note about bob",
+    "secret channel text",
+    "secret crew",
+];
+
+/// Every file under `dir`, but the blob store, whose bytes are ciphertext.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            if entry.file_name() != "files" {
+                files_under(&entry.path(), out);
+            }
+        } else {
+            out.push(entry.path());
+        }
+    }
+}
+
+fn holds_a_secret(file: &Path) -> Option<&'static str> {
+    let bytes = fs::read(file).unwrap();
+    SECRETS.into_iter().find(|s| bytes.windows(s.len()).any(|w| w == s.as_bytes()))
+}
+
+/// A profile written by v0.1.20, from before the store was sealed: DMs, a group, a server with a picture, an avatar,
+/// a bookmark, a reminder, a note and a nickname, all in plaintext files. The first start seals every one of them,
+/// and each start after shows the same contents.
+#[tokio::test(flavor = "multi_thread")]
+async fn v0120_profile_is_sealed_on_first_start_and_reads_back() {
+    use dissent_identity::RootId;
+    bounded(async {
+        let work = scratch("upgrade-compat-v0120");
+        copy_dir(&fixture_v0120().join("engine"), &work.join("engine"));
+        fs::copy(fixture_v0120().join("identity.bin"), work.join("identity.bin")).unwrap();
+        let mut before = Vec::new();
+        files_under(&work.join("engine"), &mut before);
+        let plain = before.iter().filter(|f| holds_a_secret(f).is_some()).count();
+        assert!(plain >= 4, "the fixture holds its secrets in plaintext, in {plain} files");
+
+        let vault = Arc::new(Vault::from_passphrase(PASSPHRASE_V0120, &SALT_V0120).unwrap());
+        let identity = keystore::load(&work.join("identity.bin"), &vault).expect("the v0.1.20 identity opens");
+        let bob: RootId = "dgdqn7eoqkned7muhu5zuei66h2m2oejyhfjilw3yilqqjtmdo2q".parse().unwrap();
+        let carol: RootId = "2f5st7z4tck62fgmwhsdu635kgbf65soytdjrqsign4yx7x2upfq".parse().unwrap();
+        let group: ConvId = "kpsqinvdx6tmfma7zqb6tayybhamc27do5ahngigr5m5tklqggqq".parse().unwrap();
+
+        for run in 1..=3 {
+            let engine = start(&identity, &work.join("engine"), &vault).await;
+            let mut dm: Vec<String> = engine.dm_messages(bob, 20).into_iter().map(|m| m.text).collect();
+            dm.sort();
+            assert_eq!(dm, ["secret dm from alice, edited", "secret dm from bob"], "run {run}: the DMs and the edit read");
+            let group_texts: Vec<String> = engine.conversation_messages(group, 10).into_iter().map(|m| m.text).collect();
+            assert_eq!(group_texts, ["secret group hello"], "run {run}: the group reads");
+            assert!(engine.conversations().iter().any(|c| c.kind == "group" && c.name == "secret crew"));
+
+            let communities = engine.communities();
+            assert_eq!(communities.len(), 1, "run {run}: one server");
+            let id: CommunityId = communities[0].id.parse().unwrap();
+            let view = engine.community_view(id).expect("the server opens");
+            let general = view.channels.iter().find(|c| c.name == "general").unwrap().id.parse().unwrap();
+            let messages = engine.channel_messages(id, general, 10);
+            assert!(messages.iter().any(|m| m.text == "secret channel text"), "run {run}: the channel reads");
+            let picture = messages.iter().find(|m| m.text == "a picture").expect("the picture message");
+            let thumb = picture.attachments[0].thumb.as_ref().expect("the picture keeps its thumbnail");
+            let thumb_path = thumb.path.as_ref().expect("the thumbnail is on this device");
+            let (jpeg, mime) = engine.open_picture(Path::new(thumb_path)).expect("the thumbnail opens");
+            assert_eq!(mime, "image/jpeg");
+            assert!(image::load_from_memory(&jpeg).is_ok(), "run {run}: the thumbnail decodes");
+            let avatar = engine.me().avatar.expect("alice's picture is on this device");
+            let (png, _) = engine.open_picture(Path::new(&avatar)).expect("the avatar opens");
+            assert!(image::load_from_memory(&png).is_ok(), "run {run}: the avatar decodes");
+
+            let bookmarks = engine.list_bookmarks();
+            assert_eq!(bookmarks.len(), 1);
+            assert_eq!(bookmarks[0].message.text, "secret channel text");
+            let reminders = engine.list_reminders();
+            assert_eq!(reminders.len(), 1);
+            assert_eq!(reminders[0].message.text, "secret dm from alice");
+            assert_eq!(engine.user_profile(bob).note.as_deref(), Some("secret note about bob"));
+            assert_eq!(engine.user_profile(carol).nickname.as_deref(), Some("Caz"));
+            let mut contacts: Vec<String> = engine.list_contacts().contacts.into_iter().map(|c| c.display_name).collect();
+            contacts.sort();
+            assert_eq!(contacts, ["bob", "carol"], "run {run}: the contacts");
+            engine.shutdown().await.unwrap_or_else(|e| panic!("clean shutdown after run {run}: {e}"));
+
+            // Nothing of it is left in plaintext, and the migration's backup is gone.
+            let mut after = Vec::new();
+            files_under(&work.join("engine"), &mut after);
+            for file in &after {
+                assert_eq!(holds_a_secret(file), None, "run {run}: {} holds plaintext", file.display());
+            }
+            assert!(!work.join("engine").join("unsealed-backup").exists(), "run {run}: the backup is removed");
+        }
+        let _ = fs::remove_dir_all(&work);
+    })
+    .await;
+}

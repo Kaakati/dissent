@@ -87,8 +87,7 @@ fn invalid(msg: impl Into<String>) -> DiscoveryError {
 /// True if `domain` has a TXT record at `_dissent.<domain>` whose text is
 /// [`dns_record_value`]`(root)`. NXDOMAIN and "no records" return `Ok(false)`.
 ///
-/// Uses the system resolver, falling back to Cloudflare if that fails to answer.
-/// The whole check gives up after 5 seconds with an error.
+/// Asks only the system resolver. The whole check gives up after 5 seconds with an error.
 pub async fn verify_dns_handle(domain: &str, root: &RootId) -> Result<bool> {
     Ok(check_dns_handle(domain, root).await? == DnsHandleCheck::Verified)
 }
@@ -106,10 +105,21 @@ pub enum DnsHandleCheck {
 }
 
 /// [`verify_dns_handle`], with the reason when the handle does not verify. Errors are the same:
-/// an invalid domain, or a lookup that failed or timed out.
+/// an invalid domain, or a lookup that failed or timed out. Asks only the system resolver.
 pub async fn check_dns_handle(domain: &str, root: &RootId) -> Result<DnsHandleCheck> {
+    check_dns_handle_using(domain, root, false).await
+}
+
+/// [`check_dns_handle`]. With `public_fallback`, a lookup the system resolver fails to answer
+/// is asked again of Cloudflare's public resolver, which then learns the domain too. Callers
+/// pass it only when the user turned that on.
+pub async fn check_dns_handle_using(
+    domain: &str,
+    root: &RootId,
+    public_fallback: bool,
+) -> Result<DnsHandleCheck> {
     let name = dns_record_name(domain)?;
-    let strings = tokio::time::timeout(LOOKUP_TIMEOUT, txt_with_fallback(&name))
+    let strings = tokio::time::timeout(LOOKUP_TIMEOUT, txt_records(&name, public_fallback))
         .await
         .map_err(|_| DiscoveryError::Dns(format!("lookup of {name} timed out")))?
         .map_err(|e| DiscoveryError::Dns(e.to_string()))?;
@@ -133,16 +143,25 @@ fn classify(strings: &[String], root: &RootId) -> DnsHandleCheck {
     }
 }
 
-/// Looks up TXT records. Each record's character-strings are concatenated, as RFC 7208 does.
-async fn txt_with_fallback(name: &str) -> std::result::Result<Vec<String>, ResolveError> {
-    if let Ok(builder) = TokioResolver::builder_tokio() {
-        let mut builder = builder;
-        builder.options_mut().timeout = LOOKUP_TIMEOUT;
-        builder.options_mut().attempts = 1;
-        match txt_strings(&builder.build(), name).await {
-            Ok(strings) => return Ok(strings),
-            Err(e) => debug!(error = %e, "system resolver failed; trying public resolver"),
+/// Looks up TXT records with the system resolver, and with Cloudflare only if `public_fallback`
+/// is set and the system resolver failed. Each record's character-strings are concatenated, as
+/// RFC 7208 does.
+async fn txt_records(
+    name: &str,
+    public_fallback: bool,
+) -> std::result::Result<Vec<String>, ResolveError> {
+    let system = match TokioResolver::builder_tokio() {
+        Ok(mut builder) => {
+            builder.options_mut().timeout = LOOKUP_TIMEOUT;
+            builder.options_mut().attempts = 1;
+            txt_strings(&builder.build(), name).await
         }
+        Err(e) => Err(e),
+    };
+    match system {
+        Ok(strings) => return Ok(strings),
+        Err(e) if !public_fallback => return Err(e),
+        Err(e) => debug!(error = %e, "system resolver failed; trying public resolver"),
     }
     let public = TokioResolver::builder_with_config(
         ResolverConfig::cloudflare(),

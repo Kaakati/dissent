@@ -1,6 +1,7 @@
 // File attachments: the cards in a message, the pictures once they are on this device, and the chips above the composer.
 // Nothing here renders user-supplied markup. Names are text, and the only image source is the backend's local path
-// converted by Tauri's asset protocol, never a URL taken from a message. Ported from the old UI's views/attachments.js.
+// as a URL (the asset protocol for a download, `dimg` for a sealed picture), never a URL taken from a message. Ported
+// from the old UI's views/attachments.js.
 import { useState, type ComponentType } from 'react';
 import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, Play, RotateCcw, X } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
@@ -9,6 +10,7 @@ import { ProgressBar } from '@/components/transfers/progress';
 import { MAX_FILE_LABEL, extOf, formatSize, iconFor, isExecutable, isImage, isOverLimit, isVideo, transferText, type FileIconName } from '@/lib/attachments';
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
+import { pictureSrc } from '@/lib/pictures';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
 import type { Attachment, Id, ThumbView } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -45,6 +47,9 @@ export function imageSrc(path: string | null | undefined): string | null {
   const src = window.__TAURI__?.core.convertFileSrc?.(path);
   return typeof src === 'string' ? src : null;
 }
+
+// Sealed pictures load through the `dimg` scheme (see lib/pictures.ts).
+export { pictureSrc };
 
 // Transfer state, as the card's meta line says it. A failure's reason goes on its own line, under the meta.
 function StateNode({ a, unshown }: { a: Attachment; unshown: boolean }) {
@@ -217,12 +222,12 @@ export function AttachmentView({ a, communityId, messageId }: { a: Attachment; c
       </figure>
     );
   }
-  const thumbSrc = isImage(a) && a.state !== 'downloaded' && a.thumb?.state === 'downloaded' ? imageSrc(a.thumb.path) : null;
+  const thumbSrc = isImage(a) && a.state !== 'downloaded' && a.thumb?.state === 'downloaded' ? pictureSrc(a.thumb.path) : null;
   if (thumbSrc && a.thumb && !broken.has(thumbSrc)) {
     return <ThumbPreview a={a} thumb={a.thumb} src={thumbSrc} onBroken={() => markBroken(thumbSrc)} communityId={communityId} messageId={messageId} />;
   }
   // A video keeps its first frame as its picture, downloaded or not. Without a thumbnail it is a plain file card.
-  const videoSrc = isVideo(a) && a.thumb?.state === 'downloaded' ? imageSrc(a.thumb.path) : null;
+  const videoSrc = isVideo(a) && a.thumb?.state === 'downloaded' ? pictureSrc(a.thumb.path) : null;
   if (videoSrc && a.thumb && !broken.has(videoSrc)) {
     return <ThumbPreview video a={a} thumb={a.thumb} src={videoSrc} onBroken={() => markBroken(videoSrc)} communityId={communityId} messageId={messageId} />;
   }

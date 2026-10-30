@@ -1,5 +1,6 @@
 import { noteImages } from './images';
-import type {
+import { pictureUrls } from './pictures';
+import type { FileInspection,
   AudioDevices,
   Bookmark,
   Capabilities,
@@ -11,12 +12,18 @@ import type {
   ContactsView,
   ConversationSummary,
   LayoutEntry,
+  MemberOnlyStatus,
   DeviceView,
   ShellSettings,
   EngineEvent,
   GuardianList,
+  RecoveryAnswerView,
+  RecoveryRequestView,
+  RecoveryView,
   HandleCheck,
   Id,
+  InboxSettings,
+  InboxView,
   InvitePreview,
   MessageRef,
   Me,
@@ -54,9 +61,11 @@ const invoke = <T = unknown>(cmd: string, args?: Record<string, unknown>): Promi
   return tauri.core.invoke<T>(cmd, args);
 };
 
-// Every response passes through noteImages, so avatars and server icons reach the components that show them.
+// Every response passes through pictureUrls, so its pictures are URLs the window loads, then through noteImages, so
+// avatars and server icons reach the components that show them.
 const call = async <T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
   const out = await invoke<T>(cmd, args);
+  pictureUrls(out);
   noteImages(out);
   return out;
 };
@@ -76,6 +85,8 @@ export interface ChannelPatch {
 export interface SendFileOptions {
   seed?: boolean;
   mentions?: { users: Id[]; everyone: boolean };
+  // One "Remove identifying details" choice per path, in order. Absent: each file follows the engine's default.
+  scrub?: boolean[];
 }
 
 export const api = {
@@ -202,8 +213,10 @@ export const api = {
     call<{ path: string; name: string; size: number; mime: string }>('stage_pasted_file', { name, bytes }),
   // `seed` keeps an encrypted copy on the community seeder (servers only). Defaults to true on the engine side.
   sendFiles: (communityId: Id, channelId: Id, paths: string[], text: string, opts: SendFileOptions = {}) =>
-    call<unknown>('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true, ...(opts.mentions ? { mentions: opts.mentions } : {}) }),
-  sendDmFiles: (peer: Id, paths: string[], text: string) => call<unknown>('send_dm_files', { peer, paths, text }),
+    call<unknown>('send_files', { communityId, channelId, paths, text, seed: opts.seed ?? true, ...(opts.mentions ? { mentions: opts.mentions } : {}), ...(opts.scrub ? { scrub: opts.scrub } : {}) }),
+  sendDmFiles: (peer: Id, paths: string[], text: string, scrub?: boolean[]) => call<unknown>('send_dm_files', { peer, paths, text, ...(scrub ? { scrub } : {}) }),
+  // What each file is, whether "Remove identifying details" starts on for it, and whether its details can be removed.
+  inspectFiles: (paths: string[]) => call<FileInspection[]>('inspect_files', { paths }),
   downloadAttachment: (communityId: Id | null, messageId: Id, attachmentId: Id) =>
     call<unknown>('download_attachment', { communityId, messageId, attachmentId }),
   // Both accept only a file Dissent saved, in whichever download folder it used.
@@ -212,7 +225,7 @@ export const api = {
 
   // ---- moderation and server settings ----
   moderate: (communityId: Id, action: string, user: Id) => call<void>('moderate', { communityId, action, user }),
-  memberOnlyStatus: (communityId: Id) => call<unknown>('member_only_status', { communityId }),
+  memberOnlyStatus: (communityId: Id) => call<MemberOnlyStatus>('member_only_status', { communityId }),
   setMemberOnly: (communityId: Id, on: boolean) => call<void>('set_member_only', { communityId, on }),
   setHistoryVisibility: (communityId: Id, setting: string) => call<void>('set_history_visibility', { communityId, setting }),
   channelAccess: (communityId: Id, channelId: Id) => call<ChannelAccess>('channel_access', { communityId, channelId }),
@@ -344,15 +357,36 @@ export const api = {
   // ---- recovery guardians and devices ----
   listGuardians: () => call<GuardianList>('list_guardians'),
   signGuardians: (guardians: Id[], threshold: number) => call<GuardianList>('sign_guardians', { guardians, threshold }),
+  // Guardian recovery: the recovering device's side, then the guardian's.
+  beginRecovery: (old: string) => call<RecoveryView>('begin_recovery', { old }),
+  recoveryStatus: () => call<RecoveryView | null>('recovery_status'),
+  addRecoveryLink: (link: string) => call<RecoveryView>('add_recovery_link', { link }),
+  finishRecovery: () => call<number>('finish_recovery'),
+  cancelRecovery: () => call<void>('cancel_recovery'),
+  inspectRecoveryRequest: (link: string) => call<RecoveryRequestView>('inspect_recovery_request', { link }),
+  answerRecoveryRequest: (link: string, approve: boolean, code: string | null, sendInvites: boolean) =>
+    call<RecoveryAnswerView>('answer_recovery_request', { link, approve, code, sendInvites }),
   listDevices: () => call<DeviceView[]>('list_devices'),
   revokeDevice: (deviceId: Id) => call<void>('revoke_device', { deviceId }),
   linkDeviceCode: () => call<string>('link_device_code'),
+
+  // ---- offline delivery ----
+  inboxSettings: () => call<InboxSettings>('inbox_settings'),
+  inboxStatus: () => call<InboxView[]>('inbox_status'),
+  inboxCandidates: () => call<InboxView[]>('inbox_candidates'),
+  setInboxes: (devices: Id[]) => call<void>('set_inboxes', { devices }),
+  setServeInbox: (on: boolean) => call<void>('set_serve_inbox', { on }),
+  hostInboxFor: (root: Id, on: boolean) => call<void>('host_inbox_for', { root, on }),
 
   // ---- safety numbers, pins and read markers ----
   markSafetyVerified: (user: Id) => call<void>('mark_safety_verified', { user }),
   pinnedMessages: (communityId: Id, channelId: Id) => call<unknown[]>('pinned_messages', { communityId, channelId }),
   pinConversation: (key: string, pinned: boolean) => call<void>('pin_conversation', { key, pinned }),
   markRead: (key: string) => call<void>('mark_read', { key }),
+  // The taskbar or dock badge (see badge.ts), and clearing the message notifications the OS still shows.
+  setUnreadBadge: (sources: { key: string; unread: number; mentions: number; muted: boolean }[], viewing: string | null) =>
+    call<void>('set_unread_badge', { sources, viewing }),
+  clearMessageNotifications: () => call<void>('clear_message_notifications'),
   completeFirstRun: () => call<void>('complete_first_run'),
   // The disclaimer: the "Last updated" date this profile accepted (null when none), saving a new one, and Quit.
   disclaimerAccepted: () => call<string | null>('disclaimer_accepted'),
@@ -388,7 +422,9 @@ export const api = {
   setWebsiteHandle: (domain: string) => call<WebsiteHandleSetup>('set_website_handle', { domain }),
   checkWebsiteHandle: () => call<HandleCheck>('check_website_handle'),
   removeWebsiteHandle: () => call<WebsiteHandleSetup>('remove_website_handle'),
-  websiteHandleStatus: (items: { root_id: Id; handle: string }[]) => call<HandleCheck[]>('website_handle_status', { items }),
+  // Only `verify` may start a DNS lookup; without it the answer is what the app already knows.
+  websiteHandleStatus: (items: { root_id: Id; handle: string }[], verify = false) =>
+    call<HandleCheck[]>('website_handle_status', { items, verify }),
 };
 
 // Calls handler with each EngineEvent payload. Resolves to the unlisten function.

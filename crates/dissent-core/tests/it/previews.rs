@@ -49,7 +49,7 @@ async fn a_link_to_a_private_address_gets_no_preview() {
 }
 
 /// The picture a test site serves: 800 by 400, so the preview's picture is 640 by 320.
-fn a_picture_png() -> Vec<u8> {
+pub(crate) fn a_picture_png() -> Vec<u8> {
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(800, 400, image::Rgba([10, 200, 30, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -58,7 +58,7 @@ fn a_picture_png() -> Vec<u8> {
 }
 
 /// A site on loopback. Its page links a picture, and it counts every request it serves.
-async fn a_site(hits: Arc<AtomicUsize>) -> SocketAddr {
+pub(crate) async fn a_site(hits: Arc<AtomicUsize>) -> SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -142,7 +142,8 @@ async fn a_preview_picture_reaches_the_recipient_and_the_site_sees_only_the_send
     let preview = &copy.embeds[0];
     assert_eq!(preview.embed.title, "A test page");
     assert_eq!((preview.image_w, preview.image_h), (Some(640), Some(320)));
-    let picture = image::open(preview.image.as_ref().expect("the picture path")).expect("the picture decodes");
+    let opened = bob.engine.open_picture(std::path::Path::new(preview.image.as_ref().expect("the picture path"))).expect("the picture opens");
+    let picture = image::load_from_memory(&opened.0).expect("the picture decodes");
     assert_eq!((picture.width(), picture.height()), (640, 320));
     assert_eq!(hits.load(Ordering::SeqCst), 2, "bob never contacted the site");
 

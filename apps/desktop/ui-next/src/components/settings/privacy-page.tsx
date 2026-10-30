@@ -114,16 +114,41 @@ function PhotoDetailsBlock() {
       <CheckRow>
         <input
           type="checkbox"
-          aria-label="Remove location and camera details from photos"
+          aria-label="Remove identifying details from photos and videos by default"
           checked={strip}
           onChange={(e) => void setShellPrefs({ keep_photo_metadata: !e.target.checked })}
           className={CHECK_CLASS}
           data-strip-photo-metadata
         />
-        <span>Remove location and camera details from photos</span>
+        <span>Remove identifying details from photos and videos by default</span>
       </CheckRow>
       <Hint>
-        Phones and cameras write where and with what a photo or video was taken into the file. Dissent removes it from the copy it sends, without touching the picture. The file on your computer stays as it is. Applies to JPEG, PNG and WebP pictures and MP4 and MOV videos.
+        Phones and cameras write where, when and with what a photo or video was made into the file, and editors add names. With this on, each photo, and each video that names the device it was recorded with, starts with "Remove details" on when you attach it: it goes as a copy without them, called photo.jpg or video.mp4. You can change it for each file before sending. The file on your computer stays as it is.
+      </Hint>
+    </Block>
+  );
+}
+
+// Where website handle checks go. Saved with the desktop settings; off by default, so only the system resolver is asked.
+function HandleChecksBlock() {
+  const publicFallback = useShellPrefs((s) => s.dnsPublicFallback);
+  return (
+    <Block title="Website handles">
+      <CheckRow>
+        <input
+          type="checkbox"
+          aria-label="Ask a public DNS resolver when mine does not answer"
+          checked={publicFallback}
+          onChange={(e) => void setShellPrefs({ dns_public_fallback: e.target.checked })}
+          className={CHECK_CLASS}
+          data-dns-public-fallback
+        />
+        <span>Ask a public DNS resolver when mine does not answer</span>
+      </CheckRow>
+      <Hint>
+        A handle like @example.com is checked only when you open that person's profile or point at the handle. Checking
+        it asks your DNS resolver about example.com, and whoever runs that domain can see the lookup. With this on, a
+        lookup your resolver cannot answer also goes to Cloudflare's public resolver (1.1.1.1).
       </Hint>
     </Block>
   );
@@ -169,6 +194,7 @@ export function PrivacyPage() {
         </Hint>
       </Block>
       <PhotoDetailsBlock />
+      <HandleChecksBlock />
       <LinkPreviewsBlock />
       <FriendsBlock />
       <Block>
