@@ -24,6 +24,7 @@ use crate::tally::{Observer, SourceCount};
 use crate::error::{FilesError, Result};
 use crate::file_ref::FileRef;
 use crate::name::{sanitize_mime, sanitize_name};
+use crate::received::mark_or_log;
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -898,7 +899,7 @@ impl DecryptJob {
             if self.cancelled.load(Ordering::SeqCst) {
                 return Err(FilesError::Fetch("fetch was cancelled".to_owned()));
             }
-            place(&self.partial, &self.dest_dir, &self.name)
+            place(&self.partial, &self.dest_dir, &self.name).inspect(|path| mark_or_log(path))
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&self.partial);

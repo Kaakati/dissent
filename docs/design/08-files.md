@@ -91,6 +91,38 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
   host's Downloads. The app opens and reveals only files the engine recorded as saved, in any
   download folder it has used, never the rest of a folder.
 
+## Received files: what the app will not do
+
+**This is not malware detection.** Nothing here scans a file or says one is safe. It answers one question, "can this
+kind of file run code when opened?", and treats a sender's name and MIME type as claims. Code: `dissent-files/src/received.rs`.
+
+- **Nothing runs or downloads without a click.** Opening is only ever a click on a card. The one automatic download
+  of a full file is the size-limited setting, off by default, and it skips any file whose name or claimed type says
+  it can run code. Pictures fetched on arrival (thumbnails, avatars, banners, link previews) stay sealed in the
+  profile and are only drawn as images.
+- **What is flagged.** `AttachmentView.danger` is `program`, `installer`, `script`, `shortcut`, `macro`, `disk_image`
+  or `unchecked`. Before the download it comes from the name's real extension and the claimed MIME type. Once the file
+  is here, the content counts too: PE, ELF and Mach-O headers, Java and Android bytecode, shebangs, `@echo off`, `.reg`
+  and shortcut headers, `.deb`, `.rpm`, xar, ISO, DMG, VHD; a zip holding `vbaProject.bin`, macro sheets, a jar
+  manifest, an Android manifest or an app bundle; an OLE file with a macro project or an installer class id. A
+  container that claims to be a zip or OLE file and cannot be walked is `unchecked`, and so is a file that cannot be read.
+- **What the card does.** A flagged file is always a plain card with a warning, never a picture or a video, and it has
+  Show in folder and no Open. `open_attachment` checks the file again as it is on disk and refuses, so the UI is not
+  the only guard. The webview's own opener permissions are gone: only the checked commands can open or reveal a file.
+  Inline display stays images and video, and SVG is never treated as an image.
+- **Mark of the Web.** Every file `Files::fetch` writes to a download folder gets the `Zone.Identifier` stream with
+  `ZoneId=3` on Windows and the `com.apple.quarantine` attribute on macOS, so SmartScreen and Gatekeeper check it on
+  open. There is no other path that writes a received file to the user's disk: pictures stay sealed and pasted files
+  are the user's own. A folder that cannot hold the mark (FAT, some network shares) keeps the file, and a warning is
+  logged. Linux has no equivalent. Files downloaded by earlier versions are not marked afterwards, and files this
+  device shared are never touched.
+
+What still gets through: a harmful PDF, picture or media file that attacks its viewer; a program inside a plain zip or
+other archive, since archives are not opened; HTML, which is not flagged; a script with no shebang under a harmless
+name, which an OS would not run as a script under that name anyway; macros in a binary Excel 4 sheet or inside a `.ppt`
+stream, or under an unusual part name in a zip; and anything a user starts from their file manager. The extension list
+is finite too, and an unknown type gets no warning.
+
 ## Thumbnails
 
 For a PNG, JPEG, WebP or GIF (first frame), the sender makes a JPEG of at most 320 pixels on its long

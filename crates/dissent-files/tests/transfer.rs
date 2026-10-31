@@ -444,6 +444,26 @@ async fn seeder_serves_ciphertext_it_cannot_read() {
     assert_eq!(fs::read(out).unwrap(), plain);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn a_fetched_file_carries_the_mark_of_the_web() {
+    let sender = Peer::new().await;
+    let receiver = Peer::new().await;
+    let fref = sender
+        .files
+        .add(Input::Bytes { name: "a.txt".into(), mime: "text/plain".into(), data: sample(1024) })
+        .await
+        .unwrap();
+    let path = receiver
+        .files
+        .fetch(&receiver.endpoint, &[sender.addr()], &fref, &receiver.downloads(), |_, _| {})
+        .await
+        .unwrap();
+    let stream = std::fs::read_to_string(format!("{}:Zone.Identifier", path.display())).unwrap();
+    assert!(stream.contains("ZoneId=3"), "{stream}");
+    assert_eq!(std::fs::read(&path).unwrap(), sample(1024));
+}
+
 #[tokio::test]
 async fn fetch_falls_back_to_the_next_provider() {
     let alice = Peer::new().await;

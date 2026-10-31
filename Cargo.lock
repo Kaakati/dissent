@@ -2514,17 +2514,23 @@ dependencies = [
  "aes-gcm 0.10.3",
  "blake3",
  "bytes",
+ "cfb",
  "fs4",
  "futures-lite",
  "image",
+ "infer",
  "iroh",
  "iroh-blobs",
  "irpc",
  "postcard",
  "rand 0.10.3",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "uuid",
+ "xattr",
 ]
 
 [[package]]

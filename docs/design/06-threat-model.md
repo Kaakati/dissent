@@ -396,6 +396,24 @@ holds other photos from it; and traits of the compression and of the processing 
 (more than one APP2 chunk, rare) and a compressed PNG `iCCP` profile keep their text. The exact file size, and the
 message's own time, stay visible to anyone who can read the message.
 
+## Received files: what a sender can make this device do
+
+A member can send any bytes under any name and MIME type, inside a message that decrypts properly. End-to-end
+encryption says who sent a file, not that it is harmless, and a member's account can be stolen.
+
+Holds: nothing runs without a click, and the automatic-download setting (off by default) skips a file that says it can
+run code. A file that can run code, by its name, its claimed type or its content, gets a warning and no Open, and the
+backend refuses to open it, so a renamed `.exe` is not started from the app. A saved file is marked as coming from the
+internet on Windows and macOS. A name cannot leave the download folder: it is cut to its last path segment, characters
+Windows forbids are replaced, device names (including `COM¹`, `LPT0`, `CONIN$` and `NUL .txt`) are prefixed, trailing
+dots and spaces go, so `evil.exe. .` and `x.exe:stream` cannot hide an extension or reach a stream, and an existing file
+is never overwritten.
+
+Does not hold: **this is not malware detection.** A file with no warning is not a safe file. A user can still start a
+flagged file from their file manager, where only the OS checks stand. A viewer bug can be attacked through a PDF or a
+picture, an archive's contents are not inspected, and Linux has no mark. See `08-files.md`, "Received files", for
+the full list.
+
 ## Image thumbnails: what a preview reveals
 
 A sender may attach a thumbnail to an image: a JPEG of at most 320 pixels on its long side, under

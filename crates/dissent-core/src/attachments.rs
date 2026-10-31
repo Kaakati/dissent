@@ -344,6 +344,9 @@ pub struct AttachmentView {
     /// True until the file is on this device.
     pub needed: bool,
     pub seed: bool,
+    /// Set when the file can run code, from its name and claimed type and, once it is here, its content. The card warns
+    /// and offers no Open. Nothing here says a file with no flag is safe.
+    pub danger: Option<dissent_files::Danger>,
     /// The preview, for an image that has one.
     pub thumb: Option<ThumbView>,
     /// The download's id, while this device has a transfer for the file.
@@ -489,6 +492,9 @@ pub(crate) struct AttachBook {
     pub default_download_dir: Option<PathBuf>,
     /// Finished downloads: attachment id to local path.
     pub downloads: BTreeMap<String, PathBuf>,
+    /// What each file on disk turned out to be, by attachment id, so a file is read once a run.
+    #[serde(skip)]
+    pub content_checks: std::sync::Mutex<BTreeMap<String, Option<dissent_files::Danger>>>,
     pub transfers: BTreeMap<String, Transfer>,
     /// Mirrored ciphertext: attachment id to its size.
     pub mirrored: BTreeMap<String, u64>,
@@ -725,9 +731,13 @@ impl World {
                     .and_then(|t| t.local_path.as_ref())
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned());
+                let name = own_name.unwrap_or_else(|| a.file.safe_name());
+                let danger = dissent_files::danger_of_name(&name, &a.file.mime)
+                    .or_else(|| local_path.as_deref().and_then(|path| self.content_danger(&id, path)));
                 AttachmentView {
                     id: id.clone(),
-                    name: own_name.unwrap_or_else(|| a.file.safe_name()),
+                    danger,
+                    name,
                     size: a.file.size,
                     mime: a.file.mime.clone(),
                     needed: state != "downloaded",
@@ -743,6 +753,12 @@ impl World {
                 }
             })
             .collect()
+    }
+
+    /// What a file on this device is, by its content. Read once and remembered until the file is downloaded again.
+    fn content_danger(&self, id: &str, path: &Path) -> Option<dissent_files::Danger> {
+        let mut checks = self.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *checks.entry(id.to_string()).or_insert_with(|| dissent_files::danger_of_path(path))
     }
 
     /// Where one attachment stands on this device. A file this device shared shows from the path it was shared
@@ -1379,6 +1395,7 @@ impl Engine {
                 {
                     let mut guard = self.write();
                     guard.attach.downloads.insert(id.to_string(), path.clone());
+                    guard.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
                     if let Some(t) = guard.attach.transfers.get_mut(id) {
                         t.state = "done".into();
                         t.progress = 1.0;
@@ -2193,7 +2210,9 @@ impl Engine {
             None => return,
         };
         let (_, files) = unpack(plain);
-        for a in files.into_iter().filter(|a| a.file.size <= limit) {
+        // A file that says it can run code always waits for a click, whatever its size.
+        let wanted = files.into_iter().filter(|a| a.file.size <= limit && dissent_files::danger_of_name(&a.file.safe_name(), &a.file.mime).is_none());
+        for a in wanted {
             let id = attachment_id(&a.file);
             {
                 let w = self.read();

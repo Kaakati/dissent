@@ -8,6 +8,7 @@ mod crypt;
 mod error;
 mod file_ref;
 mod name;
+mod received;
 mod store;
 mod tally;
 mod thumbnail;
@@ -17,6 +18,7 @@ pub use error::{FilesError, Result};
 pub use file_ref::FileRef;
 pub use iroh_blobs::BlobsProtocol;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
+pub use received::{danger_of_content, danger_of_name, danger_of_path, mark_received, Danger};
 pub use tally::{pieces_of, SourceCount, PIECE_BYTES};
 pub use thumbnail::{
     is_preview_image, is_thumbnail, make_preview_image, make_thumbnail, make_thumbnail_rgb, Thumbnail, PREVIEW_IMAGE_MAX_BYTES,

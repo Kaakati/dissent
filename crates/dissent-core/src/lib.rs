@@ -96,6 +96,8 @@ pub use calls::{
 pub use attachments::{AttachmentView, FileInspection, Mentions, OutgoingFile, StoreStats, TransferSettings, TransferView};
 /// The limits `Engine::set_mirror_policy` takes: the largest file and the most ciphertext a device keeps for others.
 pub use dissent_files::MirrorPolicy;
+/// Why a received file is not opened from the app, and how to tell.
+pub use dissent_files::{danger_of_path, Danger};
 pub use recovery_flow::{RecoveryAnswerView, RecoveryGuardian, RecoveryRequestView, RecoveryView};
 pub use engine::Engine;
 pub use at_rest::harden as harden_folder;
