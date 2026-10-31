@@ -10,6 +10,7 @@ import { setSwitcherOpen } from '@/components/dialogs/quick-switcher';
 import { openAddContactDialog } from '@/components/dialogs/small-dialogs';
 import { NewConversationMenu, openConversationMenu } from '@/components/menus/conversation-menu';
 import { ServerMenu } from '@/components/menus/server-menu';
+import { openChannelListMenu } from '@/components/menus/server-rail-menu';
 import { Button } from '@/components/ui/button';
 import { Tip } from '@/components/ui/tip';
 import { Separator } from '@/components/ui/separator';
@@ -356,6 +357,8 @@ export function Sidebar() {
         data-sidebar-list
         className="dissent-scroll mb-[calc(var(--user-panel-h,60px)+var(--s-2)*2)] flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2"
         onScroll={route.kind === 'server' ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
+        // Only the list's empty space: rows and headers have their own menu, or none.
+        onContextMenu={route.kind === 'server' && community ? (e) => { if (!e.defaultPrevented && !(e.target as HTMLElement).closest('button, a')) void openChannelListMenu(e, community.id); } : undefined}
       >
         {route.kind === 'home' ? <HomeList /> : null}
         {route.kind === 'server' && community ? <ServerList community={community} /> : null}
