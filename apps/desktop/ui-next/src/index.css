@@ -107,6 +107,7 @@
   --titlebar-h: 30px; --header-h: 56px; --card-head-h: 48px; --panel-h: 58px; --hit: 32px; --btn-h: 40px; --btn-sm-h: 36px; --input-h: 40px;
   --row-channel: 36px; --row-link: 40px; --row-dm: 42px; --row-member: 44px; --row-menu: 32px;
   --rail-w: 72px; --rail-item: 48px; --rail-gap: 8px; --sidebar-w: 250px; --right-w: 300px; --right-wide-w: 340px;
+  --banner-h: calc(var(--sidebar-w) * 9 / 16); /* a server's banner at the top of the channel list; profile banners match it */
   --icon-sm: 16px; --icon: 20px; --icon-lg: 24px;
   --avatar-xs: 16px; --avatar-sm: 24px; --avatar: 32px; --avatar-msg: 40px; --avatar-card: 88px; --avatar-xl: 80px;
   --msg-gutter: 72px; --msg-group-gap: 17px; --msg-pad: 2px; --msg-right: 48px;

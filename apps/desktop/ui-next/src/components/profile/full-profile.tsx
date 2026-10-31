@@ -77,7 +77,7 @@ function FullProfileBody({ peer, view, close }: { peer: string; view: UserProfil
   };
   return (
     <div className="-mx-s-5 -mt-s-5 flex flex-col">
-      <div data-profile-banner className="h-[120px] w-full" style={{ background: bannerBackground(peer, view) }} />
+      <div data-profile-banner className="h-[var(--banner-h)] w-full" style={{ background: bannerBackground(peer, view) }} />
       <div className="relative px-s-5 pb-s-2">
         <UserAvatar
           name={view.display_name}

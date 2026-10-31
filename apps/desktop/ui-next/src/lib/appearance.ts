@@ -1,5 +1,5 @@
 // Message density and font scale. Stored in localStorage (guarded) and applied through the root element: the density
-// is a data attribute that index.css turns into tokens, and the scale is --ui-zoom. Ported from appearance.js.
+// is a data attribute that index.css turns into tokens, and the scale is the webview's own zoom. Ported from appearance.js.
 const KEY = 'dissent.appearance.v1';
 
 export type Density = 'cozy' | 'compact';
@@ -21,11 +21,12 @@ export function getAppearance(): Appearance {
   }
 }
 
-// Zoom on the body scales every size, including px values, which CSS variables alone cannot do (shell.css).
+// The webview's zoom scales every size, px included, and keeps viewport coordinates true. CSS zoom on the body did not:
+// anything placed by a measured position (menus, popovers) landed away from its anchor.
 export function applyAppearance(a: Appearance = getAppearance()): void {
-  const root = document.documentElement;
-  root.dataset.density = a.density === 'compact' ? 'compact' : 'cozy';
-  root.style.setProperty('--ui-zoom', String([90, 100, 110].includes(a.scale) ? a.scale / 100 : 1));
+  document.documentElement.dataset.density = a.density === 'compact' ? 'compact' : 'cozy';
+  const scale = [90, 100, 110].includes(a.scale) ? a.scale / 100 : 1;
+  void window.__TAURI__?.core.invoke('set_ui_zoom', { scale }).catch(() => {});
 }
 
 export function setAppearance(next: Partial<Appearance>): Appearance {

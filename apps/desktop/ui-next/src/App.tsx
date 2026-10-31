@@ -49,7 +49,7 @@ export default function App() {
   const right = useRightColumn();
   return (
     <TipProvider>
-      <div className="flex h-[calc(100vh/var(--ui-zoom,1))] flex-col overflow-hidden bg-chat text-text">
+      <div className="flex h-screen flex-col overflow-hidden bg-chat text-text">
         <Titlebar />
         <div className="app-shell" data-right={transfers ? 'members' : right.mode}>
           <ServerRail />
