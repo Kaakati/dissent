@@ -212,7 +212,23 @@ async fn the_roster_lists_each_person_once_and_shows_who_speaks() {
         let bob = peer("bob").await;
         let (community, channel) = voice_community(&alice, &[&bob]).await;
         let (alice_root, bob_root) = (alice.identity.root_id().to_string(), bob.identity.root_id().to_string());
+        // Counted as they arrive: the event buffer is bounded, and on a slow machine a read at the end has lost them.
+        let speaking_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut events = alice.engine.subscribe();
+        let counter = {
+            let speaking_events = speaking_events.clone();
+            tokio::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(dissent_core::EngineEvent::CallSpeaking) => {
+                            speaking_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
+        };
         alice.engine.join_call(community, channel).await.expect("alice joins");
         bob.engine.join_call(community, channel).await.expect("bob joins");
 
@@ -259,16 +275,11 @@ async fn the_roster_lists_each_person_once_and_shows_who_speaks() {
         eventually("alice no longer speaks", || alice.engine.call_state().filter(|v| !v.self_speaking)).await;
 
         // The window heard of each change through `CallSpeaking`, within a check or two.
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let mut speaking_events = 0;
-        loop {
-            match events.try_recv() {
-                Ok(dissent_core::EngineEvent::CallSpeaking) => speaking_events += 1,
-                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
-                Err(_) => break,
-            }
-        }
-        assert!(speaking_events >= 2, "speaking changes are announced: {speaking_events}");
+        eventually("speaking changes are announced", || {
+            (speaking_events.load(std::sync::atomic::Ordering::Relaxed) >= 2).then_some(())
+        })
+        .await;
+        counter.abort();
         finish(vec![alice, bob]).await;
     })
     .await;
