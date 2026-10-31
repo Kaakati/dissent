@@ -256,7 +256,7 @@ impl Engine {
                 &w.dms,
                 &w.conv_book,
                 &mut w.identity_changes,
-                &w.paths.identity_changes(),
+                &w.paths,
                 &record.cert,
                 now,
             );
@@ -335,7 +335,7 @@ impl Engine {
         };
         let record = found.filter(|r| r.expires_ms > now && visible_to(&w, &root, r));
         let seeder = self.inner.node.get().is_some_and(|n| n.serves_lookups());
-        Response::AddrLookup { record, seeder }
+        Response::AddrLookup { record: record.map(Box::new), seeder }
     }
 
     /// The devices a live lookup for `device` may ask: gossip neighbours we are connected to, that
@@ -393,7 +393,7 @@ impl Engine {
             let info = iroh::address_lookup::EndpointInfo::from(addr);
             let _ = tx.send(Ok(iroh::address_lookup::Item::new(info, provenance, None)));
         }
-        if let Err(e) = self.learn_record(record) {
+        if let Err(e) = self.learn_record(*record) {
             debug!(device = %device, error = %e, "looked-up record not kept");
         }
     }

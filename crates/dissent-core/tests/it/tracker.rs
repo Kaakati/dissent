@@ -37,7 +37,7 @@ fn sample(n: usize, salt: u8) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_owner_makes_a_category_lists_files_and_a_second_copy_dedupes() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("tracker-alone").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
         let id: CommunityId = server.id.parse().unwrap();
@@ -100,7 +100,7 @@ async fn an_owner_makes_a_category_lists_files_and_a_second_copy_dedupes() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("tracker-alice").await;
         let bob = peer("tracker-bob").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
@@ -144,7 +144,7 @@ async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_second_downloader_fetches_from_both_holders_and_receipts_credit_them() {
-    bounded(async {
+    heavy(3, async {
         let alice = peer("swarm-alice").await;
         let bob = peer("swarm-bob").await;
         let carol = peer("swarm-carol").await;
@@ -206,7 +206,7 @@ async fn a_second_downloader_fetches_from_both_holders_and_receipts_credit_them(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_linked_folder_is_scanned_listed_in_place_and_downloaded_from_there() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("linked-alice").await;
         let bob = peer("linked-bob").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
@@ -250,7 +250,7 @@ async fn a_linked_folder_is_scanned_listed_in_place_and_downloaded_from_there() 
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_restricted_category_is_read_and_downloaded_by_its_readers_only() {
     use dissent_core::tracker::catalog::ReaderSpecView;
-    bounded(async {
+    heavy(3, async {
         let alice = peer("restricted-alice").await;
         let bob = peer("restricted-bob").await;
         let carol = peer("restricted-carol").await;
@@ -321,7 +321,7 @@ async fn only_picked_or_scanned_files_can_be_listed() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_lying_listing_is_not_saved_cannot_squat_its_fingerprint_and_planted_keys_are_refused() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("liar-alice").await;
         let bob = peer("liar-bob").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
@@ -373,7 +373,7 @@ async fn a_lying_listing_is_not_saved_cannot_squat_its_fingerprint_and_planted_k
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn seeded_listings_survive_the_restart_sweep_and_count_their_uploads() {
-    bounded(async {
+    heavy(3, async {
         let alice = peer("sweep-alice").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
         let id: CommunityId = server.id.parse().unwrap();
@@ -426,6 +426,56 @@ async fn seeded_listings_survive_the_restart_sweep_and_count_their_uploads() {
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&folder);
         finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+/// Every file the tracker keeps is sealed: the linked folder's path and the settings are not readable on disk, and
+/// all of it is there after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_trackers_files_are_sealed_and_survive_a_restart() {
+    bounded(async {
+        let alice = peer("tracker-sealed").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let folder = scratch("tracker-sealed-folder-marker");
+        alice.engine.set_category_folder(id, cat, Some(folder.clone())).unwrap();
+        let mut settings = alice.engine.seeding_settings();
+        settings.max_active = 7;
+        alice.engine.set_seeding_settings(settings).unwrap();
+
+        let dir = alice.dir.clone();
+        let identity = alice.identity.clone();
+        alice.engine.shutdown().await.expect("stops");
+
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    walk(&entry.path(), out);
+                } else {
+                    out.push(entry.path());
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&dir, &mut files);
+        for name in ["tracker.bin", "files_keys.bin", "seeding.bin"] {
+            let file = files.iter().find(|f| f.ends_with(name)).unwrap_or_else(|| panic!("{name} is written"));
+            let raw = std::fs::read(file).unwrap();
+            assert!(raw.starts_with(b"DSF\x01"), "{name} is sealed");
+        }
+        let marker = folder.file_name().unwrap().to_string_lossy().into_owned();
+        for file in &files {
+            let raw = std::fs::read(file).unwrap();
+            assert!(!raw.windows(marker.len()).any(|w| w == marker.as_bytes()), "{} holds the folder path", file.display());
+        }
+
+        let alice = start(identity, dir).await;
+        assert_eq!(alice.engine.seeding_settings().max_active, 7);
+        let view = alice.engine.files_view(id).unwrap();
+        assert!(view.categories[0].readable, "the files key came back");
+        assert_eq!(view.categories[0].name, "Releases");
     })
     .await;
 }

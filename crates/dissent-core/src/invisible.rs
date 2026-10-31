@@ -12,6 +12,10 @@
 //!   the connection is closed, as when a device goes away. This device's own other devices are always
 //!   answered, and so is a device it dialled itself within `CONTACTED_WITHIN`, which already knows it
 //!   is online: a call it joined, a server it is syncing with, a message it sent.
+//! - **Except hosted mail.** A device that holds offline mail for a person (`host_inbox_for`, or its own
+//!   inbox switch) still answers deposits, collects and the other inbox requests for that person: hosting
+//!   is consent. Anyone who writes to that person, or knows their root and this device's id, can therefore
+//!   tell this device is up. See `inbox::hosted_inbox_request`.
 //!
 //! What still goes out: messages this person sends, and whatever this device asks of others. Those
 //! show that it is online to whoever receives them, as they must.

@@ -7,7 +7,7 @@ use dissent_identity::RootId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::store::{read_bin, write_bin, Paths};
+use crate::store::Paths;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct ContactTimes {
@@ -20,11 +20,11 @@ pub(crate) struct ContactTimes {
 
 impl ContactTimes {
     pub fn load(paths: &Paths) -> Result<Self> {
-        Ok(read_bin(&paths.contact_times())?.unwrap_or_default())
+        Ok(paths.read_bin(&paths.contact_times())?.unwrap_or_default())
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_bin(&paths.contact_times(), self)
+        paths.write_bin(&paths.contact_times(), self)
     }
 
     /// Records that `root` became a contact at `ms`. Adding them again restarts the date.

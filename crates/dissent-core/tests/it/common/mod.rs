@@ -139,18 +139,18 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Polls `check` every 50 ms for up to 60 s. Panics with `what` on timeout.
+/// Polls `check` every 50 ms for up to 60 s (scaled, see `bounded::scaled`). Panics with `what` on timeout.
 pub async fn eventually<T>(what: &str, check: impl FnMut() -> Option<T>) -> T {
     eventually_within(Duration::from_secs(60), what, check).await
 }
 
-/// Polls `check` every 50 ms for up to `limit`. Panics with `what` on timeout.
+/// Polls `check` every 50 ms for up to `limit` (scaled). Panics with `what` on timeout.
 pub async fn eventually_within<T>(
     limit: Duration,
     what: &str,
     mut check: impl FnMut() -> Option<T>,
 ) -> T {
-    let deadline = Instant::now() + limit;
+    let deadline = Instant::now() + scaled(limit);
     loop {
         if let Some(value) = check() {
             return value;
@@ -170,7 +170,7 @@ pub async fn until_event<T>(
     mut check: impl FnMut() -> Option<T>,
 ) -> T {
     let mut events = engine.subscribe();
-    let deadline = tokio::time::Instant::now() + limit;
+    let deadline = tokio::time::Instant::now() + scaled(limit);
     let mut open = true;
     loop {
         if let Some(value) = check() {
@@ -282,6 +282,15 @@ pub fn count_prefixed(
         .count()
 }
 
+/// The bytes of a picture the engine keeps, as the window reads them. Pictures are sealed at rest, so the file itself
+/// is never the picture's bytes.
+pub fn picture(engine: &Engine, path: impl AsRef<std::path::Path>) -> Vec<u8> {
+    let path = path.as_ref();
+    let (bytes, _) = engine.open_picture(path).expect("the picture opens");
+    assert_ne!(std::fs::read(path).expect("the picture file exists"), bytes, "the picture is sealed at rest");
+    bytes
+}
+
 pub fn dm_has(engine: &Engine, peer: RootId, text: &str) -> bool {
     engine
         .dm_messages(peer, 100_000)
@@ -323,7 +332,7 @@ pub async fn finish(peers: Vec<Peer>) {
 
 /// Waits for the next incoming direct call on `rx`. Returns its call id.
 pub async fn next_incoming(rx: &mut broadcast::Receiver<EngineEvent>) -> String {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(scaled(Duration::from_secs(10)), async {
         loop {
             match rx.recv().await {
                 Ok(EngineEvent::IncomingCall { call_id, .. }) => return call_id,
@@ -341,11 +350,4 @@ pub async fn accept_incoming(engine: &Engine, rx: &mut broadcast::Receiver<Engin
     let id = next_incoming(rx).await;
     engine.accept_call(id.clone()).await.expect("call accepted");
     id
-}
-
-/// Serializes the heavy call tests. They each run many engines on this machine, and on a small CI
-/// runner running them together makes their waits time out.
-pub async fn heavy_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
 }

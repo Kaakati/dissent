@@ -166,6 +166,13 @@ Invisible is meant to look like being offline. While it is on (`invisible.rs`):
   the members of a call you joined, the peer of a sync you started, the recipient of a message you
   sent. A request that is not answered is retried by its sender as for an offline device: a direct
   message goes to your inbox, which your device collects as usual.
+- **Except mail this device holds for others.** A device that holds offline mail for a person (a friend
+  it hosts, or its own inbox switch) still answers the inbox requests for that person while invisible:
+  deposits, collects, acks, key packages and probes. Hosting is consent to that.
+  - **The cost:** anyone who writes to a hosted person, or knows their root and this device's id, can
+    tell this device is up.
+  - **What it does not show:** other requests stay unanswered, including inbox requests for people
+    this device does not host (`inbox::hosted_inbox_request`).
 
 What still shows you are online, by design or because the app cannot hide it:
 
@@ -177,6 +184,37 @@ What still shows you are online, by design or because the app cannot hide it:
 - **The network.** A device that dials yours by id still completes a connection with it, and so learns
   it is reachable and its address (`P-05` in the privacy audit), even though no request is answered.
 - **Community records.** A server's DHT record is republished by its members as before.
+
+## Hide my IP address: who still sees it
+
+With "Hide my IP address" on (Settings › Network, `NetworkSettings::hide_ip`), the node runs with
+`NodeConfig::relay_only`: it binds no IP socket at all, so every connection goes through one of its
+relays, and no direct path can form. A peer that dials this device, by its id or from a link, reaches
+the relay, and learns the relay's address, never this device's. Signed addresses and peer-exchange
+records list only the relay URL, so a co-member's or contact's cache holds no IP either.
+
+It also turns off what would talk to strangers from this device's own socket:
+
+- **The Mainline DHT.** Both iroh's address lookup and the engine's own client (community records, the
+  user record, short links) are off, since a DHT query shows the asker's IP to the nodes it asks, next
+  to the keys it looks up. Short invite links and address links therefore don't open; full links do.
+  This device publishes no community or user record, so other members keep those current.
+- **LAN discovery.** Off, since its beacons go out on the local network.
+
+Who still sees the IP:
+
+- **The relay.** It sees the IP of each device that uses it, and which devices exchange traffic, when
+  and how much (see "Relay for my servers"). It never sees content, which is end-to-end encrypted.
+  Every relay in the list is measured from this device, so each one sees the IP; pinning or turning off
+  relays shortens that list.
+- **number0's directory**, while "Find devices through number0's directory" is on, as for any device
+  that uses number0's relays.
+
+The cost is latency and throughput: calls, file transfers and syncs all go through a relay hop. The
+setting is off by default and applies when the engine restarts, which the app asks about first since
+it ends a call in progress. Tested by `tests/it/hide_ip.rs` (two relay-only engines join a server,
+exchange channel and direct messages, and hold no IP address for each other) and
+`tests/it/relay_calls.rs` (calls over the relay).
 
 ## Who learns what from a device's answers
 
@@ -222,16 +260,26 @@ with the token every community request carries. The answer shows, and only to th
 
 - the community name, its creation date, and a reference to its icon
 - the member count and the online count, as numbers only
-- whether the named invite is live, revoked, expired, or unknown to the answering member
+- whether the named invite is live, or unknown to the answering member (a fresh invite whose event
+  has not reached it yet)
+
+A **revoked or expired** invite id gets no preview: the member answers "access denied", the same reply
+a wrong secret gets, so the holder of a dead invite learns neither the counts nor that the server
+still exists (privacy audit P-16). Members from before this change still answer such an invite with
+its status.
 
 It shows no member name, device id, channel, or message. The answer carries the community's own
-genesis, so the name and date check against the community key, and it is signed by the answering
-device, whose cert is root-signed. Each requester gets ten previews a minute from one device, and a
-requester reuses a preview for 60 seconds.
+genesis, so the name and date check against the community key (the genesis names the owner's root,
+as the community's own record does). It is signed by a key made for that one answer and certified by
+a root made for it, then thrown away, so the answer names neither the answering member's root nor its
+device cert, and two answers cannot be linked by their key (P-16). Released clients check that cert
+and signature as before, and both hold. The requester still dials the answering device, so it learns
+that device's id and address from the connection, as anyone who dials a device does. Each requester
+gets ten previews a minute from one device, and a requester reuses a preview for 60 seconds.
 
 Who learns what:
 
-- **Invite holders:** the name, icon, counts and invite status above.
+- **Invite holders:** the name, icon, counts and invite status above, while the invite is live.
 - **Strangers who know only the community id:** nothing. The request has no valid token, so it is
   refused.
 - **A banned device:** refused, as for every community request.
@@ -239,7 +287,17 @@ Who learns what:
 - **The answering member:** learns the requester's device id and address, as it does when joining.
 
 The online count comes from presence beacons. It is a count, not a list, is shown to invite holders
-only, and can be stale by up to the presence window.
+only, and can be stale by up to the presence window. It is not coarsened: a holder of a live invite
+can poll it about once a minute per answering device.
+
+**Who is in a voice channel (privacy audit P-30).** Each device in a call re-sends its roster to the
+server's members, and a roster lists everyone that device sees in the call. A member could list
+people who are not there, to fake a crowd or to make a channel with a user limit look full. Now a
+person is shown in a voice channel, and counted against its user limit, only from their own device's
+report (`Heard::own_entry`), and only while they are a member who is not banned. The same rule builds
+the roster of a live DM or group call shown in its lobby, where a person must also be in the group. A
+participant whose device cannot reach a viewer directly is not shown to that viewer until it can: the
+cost of trusting only first-hand reports. A member can still claim to be in a channel themselves.
 
 **Addresses in links that leave the members (privacy audit P-03).** A long invite, a contact link (the
 form used when adding by address is off), the card in a contact request or accept, a contact link
@@ -284,32 +342,59 @@ since replay keys it by author and the direct form is device-signed.
 
 ## Photo and video metadata: what a sent file carries
 
-Audit finding P-28. A photo went out with its EXIF block, the GPS position where it was taken included, and a phone
-video with its recorded location, so anyone who could read the message could learn where it was taken and with what
-camera.
+Audit finding P-28. A photo went out with its EXIF block (the GPS position where it was taken, the camera and its
+serial number, the owner's name, dates), and a phone video with its recorded location and device, so anyone who could
+read the message could learn where, when and with what it was made, and often by whom. The file name said as much
+("IMG_20261029_1530.jpg", "Maya's birthday.jpg").
 
-**Now removed by default.** Before a file is encrypted, Dissent removes its location and camera details into a copy
-in the data folder's `staging` folder, sends the copy, and deletes it (`dissent-core/src/photo_metadata.rs`, called
-from `add_files`). The file on disk is never changed, and the sender's own message shows it. Every change is
-lossless, and no pixel or sample is re-encoded:
+**A per-file choice.** Before a file is sent, the Share dialog and each staged file in the composer show "Remove
+identifying details (location, device, dates, names)". It starts on for photos and for videos that name the device or
+place they were recorded with, and off for music and audio (their artist and album tags stay), for other videos, and
+for documents and every other file. Settings › Contacts & privacy › "Remove identifying details from photos and videos
+by default" sets the starting state for photos and videos; the user can change it for each file. The engine decides
+the defaults (`inspect_files`, `attachments.rs`), so they are the same in every window.
 
-- **JPEG:** the Exif (GPS, camera, times), XMP, IPTC, MPF and comment segments go, along with any other
-  application segment except JFIF, an ICC colour profile and Adobe's colour transform. A rotation the Exif block
-  asked for stays, in a new Exif block that holds the Orientation tag alone.
-- **PNG:** the text chunks, `eXIf` and `tIME` go.
-- **WebP:** the `EXIF` and `XMP ` chunks go, and their flags in `VP8X` are cleared.
-- **MP4 and MOV:** the `©xyz` location, `©mak` and `©mod`, and Apple's `com.apple.quicktime` location, make and model
-  keys are overwritten in place as `free` boxes of the same size, so no offset in the file moves. The copy is a full
-  copy of the video with those bytes changed, so a large video needs its size again free on disk while it is sent.
+**What "on" does.** The file is sent as a copy, written to the data folder's `staging` folder and deleted once it is
+encrypted, under a generic name: `photo.jpg`, `video.mp4`, `audio.m4a` or `file`, with a short random suffix when one
+send has several. The file on disk never changes, and the sender's own message shows it under its own name. The copy
+keeps what a viewer needs: the pixels and samples (never re-encoded), dimensions, rotation and colour
+(`dissent-core/src/scrub/`). Per format:
 
-It applies to every way a file is attached: the picker, drag and drop, and paste. Settings › Contacts & privacy ›
-"Remove location and camera details from photos" turns it off; the choice is kept in the desktop app's `shell.json`
-and is on unless the user turns it off. A copy that cannot be made fails the send, rather than sending the details.
+- **JPEG:** Exif, XMP, IPTC and Photoshop data, MPF and JFXX previews, comments and every other application segment
+  are dropped. JFIF is kept without its thumbnail, and a rotation the Exif block asked for is kept in a new Exif
+  block that holds the Orientation tag alone.
+- **PNG:** only the chunks a viewer needs are kept (image, palette, transparency, gamma, colour, density, animation);
+  text, `eXIf`, `tIME` and unknown chunks such as C2PA go.
+- **WebP:** `EXIF`, `XMP ` and unknown chunks go, and their flags are cleared.
+- **GIF:** comment extensions and application extensions (XMP among them) go, except the two that make it loop.
+- **TIFF and DNG:** in place. In the image directories the make and model, software, dates, artist, host computer,
+  copyright, description, document name, XMP, IPTC, Photoshop data and DNG's camera names, serial number, original
+  file name and private data are zeroed; the Exif, GPS and interoperability directories are zeroed whole, MakerNote,
+  serial numbers, owner name and unique id included.
+- **HEIC, HEIF and AVIF:** in place. The Exif and XMP items, found through `iinf` and `iloc`, are zeroed, and a
+  top-level XMP box becomes a zeroed `free` box. Rotation is in item properties and stays.
+- **MP4, MOV, M4V and M4A:** in place, so no chunk offset moves. Every `udta` and `meta` box becomes a zeroed `free`
+  box (location, make, model, software, dates, author, and every Apple and Android key with them); creation and
+  modification times in `mvhd`, `tkhd` and `mdhd` become 0; handler names and each video sample entry's compressor
+  name and vendor are zeroed; a top-level XMP box becomes `free`.
+- **Matroska and WebM:** in place. The title, date, muxing and writing applications, every track's name, all tags and
+  all attachments become zeroed `Void` elements.
+- **Colour profiles** (in JPEG, WebP and TIFF): the colour data stays; the description, copyright, device maker and
+  model text, the header's device and creator fields, date and profile id are cleared, since a calibration profile is
+  often named after the display or its owner.
 
-**Still carried.** HEIC, AVIF, TIFF and GIF files, and Matroska and WebM videos, are sent as they are. So is a
-picture over 64 MB, which is not read whole. An MP4's other metadata (creation and modification times in `mvhd`,
-the encoder name, a title) stays, and so does an XMP packet in a `uuid` box. The file name is sent as it is, and the
-exact size stays visible to anyone who can read the message.
+**When the details cannot be removed.** A photo in a format not handled here, or whose structure is not one these
+readers accept, is decoded and sent as a PNG of its pixels alone when the image crate can decode it (JPEG, PNG, GIF and
+WebP). Anything else, such as a BMP or SVG picture, an AVI or a live WebM recording of unknown size, an MP3, or a
+document, cannot be cleaned: when "on" was chosen for it, sending asks "Couldn't remove details from X. Send as is /
+Cancel". The engine refuses the send itself if the copy cannot be made, so nothing goes out with details the user asked
+to remove.
+
+**What this cannot remove.** What is in the picture or the recording itself (faces, places, a voice, a reflection,
+a screen); the camera sensor's noise pattern (PRNU), which can tie a photo to the camera that took it when someone
+holds other photos from it; and traits of the compression and of the processing a phone applies. A split ICC profile
+(more than one APP2 chunk, rare) and a compressed PNG `iCCP` profile keep their text. The exact file size, and the
+message's own time, stay visible to anyone who can read the message.
 
 ## Image thumbnails: what a preview reveals
 
@@ -412,12 +497,18 @@ Sender generations of the MLS ratchet are durable the same way: a sender reserve
 
 ## Seeder hints: what a seeder learns about thumbnails and previews
 
-A member that posts a picture, or fetches a message's thumbnail or preview picture, sends the community's seeders
-the hash and ciphertext size of each blob. A seeder then keeps that ciphertext, within its `MirrorPolicy`, so a
-member who joins later can fetch it while the sender is offline.
+The member that posts a picture sends the community's seeders the hash and ciphertext size of each thumbnail and
+preview picture in that message. A seeder then keeps that ciphertext, within its `MirrorPolicy`, so a member who joins
+later can fetch it while the sender is offline.
 
-- **A seeder learns** the hash and size of the blob, and that a member of the community shared it. The manifest
-  already gives a seeder the same for attachments, so this adds no new kind of leak.
+Audit finding P-12. Every member that fetched a thumbnail or preview picture used to hint it too, so a seeder learned
+which member device fetched which media, and when. **Now only the sender hints**, once, as it posts. A fetch tells the
+seeders nothing. A thumbnail is hinted only when its file is marked `seed` (the sender let seeders keep a copy), so a
+file kept off the seeders keeps its thumbnail off them too. Preview pictures carry no such mark and are hinted by the
+sender. A private channel's media is never hinted, as before.
+
+- **A seeder learns** the hash and size of the blob, and that the sender shared it. The manifest already gives a
+  seeder the same for attachments, so this adds no new kind of leak. It no longer learns who else fetched it.
 - **A seeder does not learn** the thumbnail's content, its key, its name, the message's text, or which of the
   community's members will read it. It cannot open the blob, and it holds no key for it.
 - **Only members can hint.** A seeder answers a hint only from a device whose root is a member of the community,
@@ -473,6 +564,14 @@ Signalling already showed it to the call's devices. What limits the exposure:
 - **Opt-in, and separate.** Volunteering is per server and off by default. Hosting a relay for the
   server does not turn it on. A seeder forwards only while the owner's "Seeder may forward calls" is
   on, which is off by default and only the owner can change.
+
+**What a seeder hears of calls (P-12).** A seeder is in no call. It used to get every voice channel's roster
+(people, mute and deafen state, start time) and every join, which carries the joiner's addresses, because calls went
+to every member device, storage members included. Now a join never goes to a seeder, and a seeder that sends one is
+refused. A call's roster goes to a seeder only while the owner's "Seeder may forward calls" is on and the call has
+enough people to need a forwarder (six), since a seeder hears a call only to offer to forward it. That roster names
+who is in that one call, without mute, deafen or start time. With the setting off, or for a smaller call, a seeder
+hears of no call at all.
 
 **A seeder that forwards** learns the same: the call's roster, who speaks, and the participants'
 addresses, which it otherwise never sees, since it is in no call. It holds no MLS epoch key, so
@@ -598,6 +697,63 @@ then removes the bytes on its next hourly run.
   on its way out keeps its file. A message deleted in that window has its file unpinned by the delete itself, or by
   the sweep a day later.
 
+## Offline inboxes: what a host learns
+
+A person picks inboxes in Settings > Offline delivery: another device of their own, a seeder they run, or a friend's
+always-on device. A device holds mail only for people its owner chose: the inbox switch for its own root, a tick per
+friend, or a seeder's `--inbox-for`. Details are in `10-dm-delivery.md`, "Choosing an inbox".
+
+The host cannot read the mail. It learns:
+
+- the person's root and the ids of their collecting devices;
+- the sending device and root of each envelope, with its size and its time, so it learns whom the person hears from
+  while away;
+- when the person goes offline and comes back;
+- each packet's clear fields: its kind, its conversation id, and for a welcome the group's name, its creator and every
+  member's root.
+
+It can drop, delay or refuse mail, but it cannot forge it.
+
+These rules limit who learns what:
+- **Probes.** A probe (`InboxProbe`) is signed by the asking device. A device that does not serve the asker
+  answers exactly as one that serves no one, so the answer shows a stranger nothing.
+- **Refusals (fixes audit L1).**
+  - A deposit or key packages for a person this device does not hold mail for get one refusal, `NOT_SERVED`,
+    whether this device is no inbox at all or an inbox for other people.
+  - A collect on such a device gets an empty list.
+  - A take finds "no key package for that user", whether the person is not served or their packages ran out.
+  - A sender can see that this device holds nothing for that person, but not whether it is an inbox.
+- **Start and stop notices.** When a device starts or stops holding a person's mail, it tells them with a signed
+  contact message (`ContactMsg::InboxHost`). The notice reveals nothing new: the person learns that their
+  host agreed or stopped, which they would see in its probe answer anyway.
+- Looking for inboxes probes the asker's own devices, contacts and community seeders, so each of them learns the
+  person looked. Settings says so, and lists what an inbox learns, next to the picker.
+
+## Website handles: who learns who looks at a handle
+
+Audit finding P-11. A server handle shaped like a domain, such as `@example.com`, is checked by looking up the TXT
+record at `_dissent.example.com`. Each lookup reaches the viewer's DNS resolver and, through it, the domain's own name
+servers. The app used to look up every such handle whenever it was drawn, in the member list and in message headers,
+and asked again every few minutes. A lookup the system resolver failed to answer went to Cloudflare without asking. So
+whoever runs a domain, or Cloudflare, could see roughly when someone in a server was looking at that person.
+
+**Now checked on request only.** Drawing a handle never looks it up: the member list and message headers show only a
+result this app already has (`website_handle_status` without `verify`). A lookup runs when the user opens that person's
+profile card or full profile, or points at the handle in the member list. A result is reused for hours: a pass shows
+the mark for 24 hours and is looked up again, on the next request, after 6; a failure after 1 hour; a lookup that could
+not finish after 10 minutes. Every place a check can start says "Checking this asks your DNS resolver about
+<domain>".
+
+**Public resolver is a setting.** Only the system resolver is asked by default. Settings › Contacts & privacy › "Ask a
+public DNS resolver when mine does not answer" (`dns_public_fallback` in `shell.json`, off by default) sends a lookup
+the system resolver failed on to Cloudflare as well, and the hint then says so.
+
+**Still visible.** A check still tells the user's resolver, and the domain's name servers, that this network asked
+about that domain at that time. A domain owner who shares few servers with the viewer can still guess who opened
+their profile. Results are kept for this run only, so the first profile opened after a restart looks the handle up
+again. The resolver itself is whatever the system uses, often the ISP's, and the lookup is plain DNS unless the
+system is set up for encrypted DNS.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
@@ -691,10 +847,56 @@ then removes the bytes on its next hourly run.
    bytes, and any other file that doesn't open is refused and left as it is. A wrong key refuses to start the engine
    rather than overwrite the state. A portable copy re-seals all of these under its own passphrase, so the USB copy
    doesn't depend on this machine's keychain. Malware running as the user is out of scope.
+
+   **The rest of the store (P-06, P-15).** Every other file of a profile is sealed too, under the store subkey
+   (`at_rest.rs`), with XChaCha20-Poly1305 and a label naming the file's place in the profile. So a file copied over
+   another doesn't open. This covers DMs and group DMs (texts, edits, reactions, members, the outbox), saved
+   messages and reminders, community secrets (`access.bin`), file keys, names and types (`attachments.bin`),
+   contacts, requests and blocks, notes and nicknames, read times, server and rail preferences, guardians and
+   devices, and the decrypted pictures: avatars, icons, banners, thumbnails and link-preview pictures.
+
+   - **Format.** A `.bin` file is a 4-byte header and one sealed value. A log is a header and length-prefixed
+     sealed records. A sealed file that doesn't open is an error, never read as plaintext.
+   - **Migration.** The first start of this version seals every plaintext file of a profile before anything
+     reads it. Each file is replaced atomically, and a copy of each waits in `unsealed-backup/` until all are
+     sealed. That copy is then removed and the marker `store-sealed.v1` is written. A start that is interrupted
+     runs again: sealed files are skipped, and readers accept either form. `tests/it/upgrade_compat.rs` checks
+     this on a v0.1.20 profile and asserts that none of its text is left on disk.
+   - **No plaintext copies.** Writes go through a temp file that holds the sealed bytes. Pictures are decrypted
+     in memory (`Files::fetch_bytes`), never through a plaintext file. The window can't read a sealed picture,
+     so the desktop app serves it through its own `dimg` scheme. That scheme opens only the picture folders and
+     answers with `Cache-Control: no-store`.
+   - **Permissions.** On Unix the data folder and the profile are kept to their owner: folders 0700, files 0600,
+     on every start and for every new file.
+
+   **What stays readable on disk:**
+   - **Ciphertext others relay anyway.** These are the events log and the MLS commit log, and the blob store,
+     which holds ciphertext.
+   - **The store's shape.** Every file's name, size and times are visible. So are the folder names, which are
+     community, conversation and peer ids, and the attachment ids of thumbnails.
+   - **Downloads.** Files the user downloads are plaintext, in the folder they chose.
+   - **Short-lived copies.** A photo whose metadata is being removed has a plaintext copy in `staging/` until it
+     is encrypted. The original is on the disk anyway.
+   - **The desktop app's own settings.** `network.json` (relay choices) and `website-handle.json` (the user's
+     handle, which is public) stay plaintext.
+   - **The window's storage.** The window keeps read markers, mutes and layout choices in localStorage, keyed
+     by server, channel and conversation ids. It is in the WebView2 or WebKit profile, outside the data folder,
+     so a portable profile leaves it on the host PC. The portable unlock screen says so. That profile also holds
+     the webview's HTTP and GPU caches. Pictures are served `no-store`, so they shouldn't land there, but that
+     isn't verified on every platform.
+   - **SSD remnants.** On an SSD, the plaintext of a migrated file can survive in freed blocks until they are
+     reused. Sealing doesn't wipe them.
 8. **Fixed, with what remains documented: blob fetch and retention (P-13).** Blobs are served to members only, per
    scope and per request, and a deleted message's blobs are unpinned wherever the delete arrives. What remains is
    listed in "Blob fetch: who gets a file's ciphertext": public server art, shared pictures, ciphertext sizes visible
    to members, and devices the delete has not reached.
+9. **Fixed, with what remains documented: website handle lookups (P-11).** A handle is looked up only when the user
+   opens a profile or points at it, results are reused for hours, and the public resolver fallback is an opt-in
+   setting. What remains is listed in "Website handles: who learns who looks at a handle".
+10. **Fixed: what seeders learn of calls and media fetches (P-12).** A seeder gets no join, and a call's roster only
+   while the owner lets seeders forward and the call is big enough to need a forwarder; the roster then carries no
+   mute, deafen or start time. Only a message's sender hints its media to seeders, and a thumbnail only for a file
+   marked `seed`. See "Seeder hints" and "What a seeder hears of calls".
 
 ## How the fixes are verified
 
@@ -703,6 +905,14 @@ Each fix lands with an adversarial test:
   fresh joiner is served on its retry (`tests/it/blob_gate.rs`).
 - A deleted message's file is unpinned on the sender and on a seeder that mirrored it, and a live message's file
   stays pinned (`tests/it/attachments.rs`).
+- A website handle status call without `verify` starts no lookup, and a recent result is reused rather than looked up
+  again (`website_handle_cmds.rs` unit tests). Drawing the member list and messages looks nothing up, and pointing at
+  a handle looks it up once (driver section `websitehandles`).
+- A seeder hears no call while forwarding is off, nor a call too small to forward once it is on
+  (`tests/it/voice_presence.rs`), and still forwards a call of seven once the owner allows it
+  (`tests/it/volunteers.rs`). A picture kept off the seeders leaves nothing on the seeder, even after a member
+  fetched its thumbnail, while a seeded picture's thumbnail still reaches a later joiner from the seeder
+  (`tests/it/mirror_hints.rs`).
 - A malicious member commits an outsider's device, and every honest peer rejects it.
 - A welcome into a group with a non-member is refused.
 - A peer without the invite secret can't sync or read control events.

@@ -4,9 +4,10 @@
 import { useEffect, useLayoutEffect, useRef, type KeyboardEvent, type MutableRefObject, type ReactNode } from 'react';
 import { Hash, Loader2, MessageCircle, Search } from 'lucide-react';
 import { has } from '@/lib/features';
-import { loadOlder, useChat } from '@/lib/chat';
+import { catchUpOpen, loadOlder, useChat } from '@/lib/chat';
 import { dayKey, dayLabel } from '@/lib/time';
 import { useShell } from '@/lib/store';
+import { setAtLatest } from '@/lib/viewing';
 import { EmptyNode, SkeletonRows } from './parts';
 import { AgeGate, EmptyPane, KeyChangeBanner, Welcome } from './chat-notices';
 import { MessageRow, SystemRow } from './message-row';
@@ -146,6 +147,7 @@ export function MessageList({ view, gated }: { view: ChatView | null; gated: boo
     lastKey.current = key;
     if (switched) atBottom.current = true;
     if (switched || atBottom.current) el.scrollTop = el.scrollHeight;
+    setAtLatest(atBottom.current);
   });
 
   // Content that grows after it renders (an image, an invite card, a preview) changes the list's height without a render.
@@ -225,7 +227,11 @@ export function MessageList({ view, gated }: { view: ChatView | null; gated: boo
       }}
       onScroll={(e) => {
         const el = e.currentTarget;
+        const was = atBottom.current;
         atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+        setAtLatest(atBottom.current);
+        // Back at the end: what arrived while the list was scrolled up is read now.
+        if (atBottom.current && !was) catchUpOpen();
         if (el.scrollTop < NEAR_TOP_PX) void loadKeepingPlace(el, anchor);
       }}
       onKeyDown={(e) => listKey(e, list.current, items, view)}

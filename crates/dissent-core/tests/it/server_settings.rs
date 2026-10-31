@@ -50,9 +50,9 @@ async fn a_rename_and_a_banner_are_checked_and_survive_a_restart() {
         assert!(alice.engine.set_community_icon(id, banner(2)).await.is_err(), "an icon stays under 256 KB");
         alice.engine.set_community_banner(id, banner(3)).await.expect("set banner");
         let path = alice.engine.community_view(id).unwrap().banner.expect("the banner has a file");
-        assert_eq!(std::fs::read(&path).unwrap(), banner(3));
-        // The file is in `<profile>/avatars`, the one folder the desktop app opens to the webview
-        // (`avatar_cmds::allow_avatars`), and its extension gives the asset protocol its MIME type.
+        assert_eq!(picture(&alice.engine, &path), banner(3));
+        // The file is in `<profile>/avatars`, one of the two folders the desktop app's picture scheme opens to the
+        // webview (`pictures.rs`), and its extension matches its type.
         let file = std::path::Path::new(&path);
         assert_eq!(file.parent(), Some(alice.dir.join("avatars").as_path()), "{path}");
         assert_eq!(file.extension().and_then(|e| e.to_str()), Some("webp"));
@@ -111,7 +111,7 @@ async fn a_member_sees_the_new_name_and_banner_and_cannot_change_them() {
         })
         .await;
         let path = eventually("bob fetches the banner", || bob.engine.community_view(id).ok()?.banner).await;
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(picture(&bob.engine, &path), bytes);
 
         // Someone holding an invite, not yet a member, sees the new name and the banner on the card.
         let invite = alice.engine.create_invite(id).await.expect("invite");
@@ -119,7 +119,7 @@ async fn a_member_sees_the_new_name_and_banner_and_cannot_change_them() {
         assert!(!card.already_member);
         assert_eq!(card.name, "Crustaceans", "the owner's rename proves the name");
         let card_banner = card.banner.expect("the card carries the banner");
-        assert_eq!(std::fs::read(card_banner).unwrap(), bytes);
+        assert_eq!(picture(&carol.engine, &card_banner), bytes);
 
         // The profile and a preset banner reach the member and a fresh card.
         alice
@@ -261,16 +261,16 @@ async fn an_animated_banner_reaches_a_member_still_looping() {
             Some((v.banner?, v.banner_poster?))
         })
         .await;
-        let bytes = std::fs::read(&gif).unwrap();
+        let bytes = picture(&bob.engine, &gif);
         assert_eq!(bytes, prepared.gif);
         assert!(gif.ends_with(".gif"), "{gif}");
         assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"), "it still loops");
-        assert_eq!(std::fs::read(&poster).unwrap(), prepared.poster);
+        assert_eq!(picture(&bob.engine, &poster), prepared.poster);
         // The same works for a personal banner, which bob sees on alice's profile.
         alice.engine.set_profile_banner_animated(prepared.gif.clone(), prepared.poster).await.expect("profile");
         let alice_root = alice.identity.root_id();
         let path = eventually("bob sees alice's animated profile banner", || bob.engine.user_profile(alice_root).banner).await;
-        assert_eq!(std::fs::read(path).unwrap(), prepared.gif);
+        assert_eq!(picture(&bob.engine, &path), prepared.gif);
         finish(vec![alice, bob]).await;
     })
     .await;
@@ -297,14 +297,14 @@ async fn an_animated_icon_reaches_a_member_as_a_square_with_its_poster() {
             Some((v.icon?, v.icon_poster?))
         })
         .await;
-        let bytes = std::fs::read(&gif).unwrap();
+        let bytes = picture(&bob.engine, &gif);
         assert_eq!(bytes, prepared.gif);
         assert!(gif.ends_with(".gif"), "{gif}");
         assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"), "it still loops");
         let (w, h) = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&bytes)).unwrap().dimensions();
         assert_eq!(w, h, "the icon is square");
         assert!(w <= 256, "{w}");
-        assert_eq!(std::fs::read(&poster).unwrap(), prepared.poster);
+        assert_eq!(picture(&bob.engine, &poster), prepared.poster);
 
         // A later still icon replaces the animated one, so bob shows no poster and the still icon.
         alice.engine.clear_community_icon(id).await.expect("the owner removes the icon");

@@ -338,13 +338,14 @@ export const sendDm = (peer: Id, text: string) =>
 // The place a shared file goes: a channel (with the seeder's choice) or a direct conversation.
 export type FileTarget = { kind: 'channel'; communityId: Id; channelId: Id; seed: boolean } | { kind: 'dm'; peer: Id };
 
-export const sendFiles = (paths: string[], text: string | null, target: FileTarget) =>
+// `scrub` is one "Remove identifying details" choice per path (lib/scrub.ts).
+export const sendFiles = (paths: string[], text: string | null, target: FileTarget, scrub?: boolean[]) =>
   guarded(async () => {
     if (target.kind === 'dm') {
-      await api.sendDmFiles(target.peer, paths, text ?? '');
+      await api.sendDmFiles(target.peer, paths, text ?? '', scrub);
       await shell().loadConversations();
     } else {
-      await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: target.seed });
+      await api.sendFiles(target.communityId, target.channelId, paths, text ?? '', { seed: target.seed, scrub });
     }
     if (has('transfers')) await shell().loadTransfers();
     return true;

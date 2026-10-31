@@ -54,7 +54,7 @@ async fn an_image_thumbnail_arrives_and_decodes_without_a_click() {
     assert_eq!(sent.attachments[0].thumb.as_ref().map(|t| (t.width, t.height)), Some((320, 160)));
 
     let thumb_path = thumbnail_of(&bob, alice_root, &message_id).await;
-    let decoded = image::open(&thumb_path).expect("the thumbnail decodes");
+    let decoded = image::load_from_memory(&bob.engine.open_picture(&thumb_path).expect("the thumbnail opens").0).expect("the thumbnail decodes");
     assert_eq!((decoded.width(), decoded.height()), (320, 160));
 
     // The full picture was not asked for, so it still waits.
@@ -131,7 +131,7 @@ async fn a_video_gets_its_first_frame_as_a_thumbnail_and_vp9_goes_without_one() 
     assert_eq!(sent.attachments[0].mime, "video/mp4");
     assert_eq!(sent.attachments[0].thumb.as_ref().map(|t| (t.width, t.height)), Some((160, 90)));
     let thumb_path = thumbnail_of(&bob, alice_root, &sent.id).await;
-    let decoded = image::open(&thumb_path).expect("the thumbnail decodes").to_rgb8();
+    let decoded = image::load_from_memory(&bob.engine.open_picture(&thumb_path).expect("the thumbnail opens").0).expect("the thumbnail decodes").to_rgb8();
     assert_eq!(decoded.dimensions(), (160, 90));
     let top = decoded.get_pixel(80, 20).0;
     assert!(top[2] > 200 && top[0] < 60, "the first frame is blue over red, got {top:?} at the top");

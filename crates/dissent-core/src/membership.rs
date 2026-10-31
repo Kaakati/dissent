@@ -25,7 +25,7 @@ use tracing::debug;
 use crate::community::Community;
 use crate::engine::Engine;
 use crate::rpc::{Request, Response};
-use crate::store::{append_records, read_records};
+use crate::store::{append_records_plain, read_records_plain};
 use crate::wire::{encode_gossip, GossipMsg, SignedCommit};
 
 mod join;
@@ -194,7 +194,7 @@ impl Engine {
     /// Records an applied commit so others can catch up from us.
     fn log_commit(&self, community: CommunityId, epoch: u64, bytes: Vec<u8>) {
         let path = self.read().paths.commit_log(&community);
-        if let Err(e) = append_records(&path, &[CommitRecord { epoch, bytes }]) {
+        if let Err(e) = append_records_plain(&path, &[CommitRecord { epoch, bytes }]) {
             tracing::warn!(community = %community, error = %e, "could not log MLS commit");
         }
     }
@@ -218,7 +218,7 @@ impl Engine {
 
     fn commit_records(&self, community: CommunityId) -> Vec<CommitRecord> {
         let path = self.read().paths.commit_log(&community);
-        read_records(&path).unwrap_or_default()
+        read_records_plain(&path).unwrap_or_default()
     }
 
     /// Keeps a refused commit, to retry once the events behind it have arrived.

@@ -1,7 +1,9 @@
 //! Invite previews: what a community looks like before its invite is used. A member answers with
-//! the community's name, icon and counts, signed by its device, to anyone who proves the invite
-//! secret. The preview reveals name, icon and counts only. It never names a member or shows an id.
-//! See `docs/design/06-threat-model.md`.
+//! the community's name, icon and counts to anyone who proves the invite secret. The preview reveals
+//! name, icon and counts only. It never names a member or shows an id: each answer is signed by a key
+//! made for that answer, certified by a root made for it, so it carries neither the answering member's
+//! root nor its device cert (privacy audit P-16). A revoked or expired invite id gets the refusal a
+//! wrong secret gets. See `docs/design/06-threat-model.md`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
@@ -11,7 +13,7 @@ use dissent_discovery::InviteLink;
 use dissent_events::state::valid_community_name;
 use dissent_events::state::{valid_profile, CommunityProfile};
 use dissent_events::{AnimatedIcon, Banner, ChannelId, Payload, Picture, SealKey, SignedEvent, Trait};
-use dissent_identity::{CommunityId, DeviceCert, DeviceId, Genesis, Signature};
+use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, Genesis, RootKey, Signature};
 use dissent_net::PeerAddr;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -67,8 +69,10 @@ pub enum InviteStatus {
     Unknown,
 }
 
-/// A preview signed by the answering device. The genesis is the community's own, signed by its key,
-/// so the name and creation time check against the community id and not only against the device.
+/// A preview signed for one answer. The genesis is the community's own, signed by its key, so the
+/// name and creation time check against the community id. `cert` certifies the answer's own key under
+/// a root made for it, not the answering member's: older clients check that the cert verifies and that
+/// its device signed the preview, and both hold, while the answer names nobody.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignedPreview {
     pub preview: InvitePreview,
@@ -381,20 +385,38 @@ impl Engine {
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
     ) -> Response {
+        match self.preview_answer(from, community, token, invite_id) {
+            Ok((signed, _)) => Response::InvitePreview(Box::new(signed)),
+            Err(refusal) => *refusal,
+        }
+    }
+
+    /// The base preview for a request, with the key made for this answer, which signs its other parts too. Refused,
+    /// with the same "access denied" whatever the reason, unless `token` proves the invite secret, the sending device
+    /// is not banned there, and the invite it names is neither revoked nor expired. So a dead invite tells its holder
+    /// no more than a wrong secret does. Requests from the same device are rate-limited.
+    fn preview_answer(
+        &self,
+        from: DeviceId,
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    ) -> std::result::Result<(SignedPreview, DeviceKey), Box<Response>> {
         let now = now_ms();
         let proven = self
             .access_keys(community)
             .is_some_and(|keys| keys.accepts(&community, Some(token), now));
-        if !proven || self.device_banned_in(from, community) {
-            return Response::Error("access denied".into());
+        let dead = matches!(
+            self.read().communities.get(&community).map(|c| invite_status(c, invite_id, now)),
+            Some(InviteStatus::Revoked | InviteStatus::Expired)
+        );
+        if !proven || dead || self.device_banned_in(from, community) {
+            return Err(Box::new(Response::Error("access denied".into())));
         }
         if !self.inner.previews.admit(from, Instant::now()) {
-            return Response::Refused("too many invite previews; try again in a minute".into());
+            return Err(Box::new(Response::Refused("too many invite previews; try again in a minute".into())));
         }
-        match self.signed_preview(community, invite_id, now) {
-            Ok(signed) => Response::InvitePreview(Box::new(signed)),
-            Err(e) => Response::Error(e.to_string()),
-        }
+        self.signed_preview(community, invite_id, now).map_err(|e| Box::new(Response::Error(e.to_string())))
     }
 
     /// Answers a full preview request: the preview, with the extra signed beside it. Gated as
@@ -406,14 +428,25 @@ impl Engine {
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
     ) -> Response {
-        let base = match self.answer_invite_preview(from, community, token, invite_id) {
-            Response::InvitePreview(base) => *base,
-            other => return other,
-        };
+        match self.full_answer(from, community, token, invite_id) {
+            Ok((full, _)) => Response::InvitePreviewFull(Box::new(full)),
+            Err(refusal) => *refusal,
+        }
+    }
+
+    /// The full preview for a request, with the key made for this answer.
+    fn full_answer(
+        &self,
+        from: DeviceId,
+        community: CommunityId,
+        token: [u8; 32],
+        invite_id: Option<[u8; 16]>,
+    ) -> std::result::Result<(SignedPreviewFull, DeviceKey), Box<Response>> {
+        let (base, key) = self.preview_answer(from, community, token, invite_id)?;
         let extra = {
             let w = self.read();
             let Some(c) = w.communities.get(&community) else {
-                return Response::Error(not_found(&community).to_string());
+                return Err(Box::new(Response::Error(not_found(&community).to_string())));
             };
             PreviewExtra {
                 rename: c.latest_rename(),
@@ -421,12 +454,9 @@ impl Engine {
                 profile: c.state().profile.as_ref().map(|(_, p)| p.clone()),
             }
         };
-        let bytes = match extra_signing_bytes(&community, &base.sig, &extra) {
-            Ok(bytes) => bytes,
-            Err(e) => return Response::Error(e.to_string()),
-        };
-        let sig = self.inner.identity.device.sign(&bytes);
-        Response::InvitePreviewFull(Box::new(SignedPreviewFull { base, extra, sig }))
+        let bytes = extra_signing_bytes(&community, &base.sig, &extra).map_err(|e| Box::new(Response::Error(e.to_string())))?;
+        let sig = key.sign(&bytes);
+        Ok((SignedPreviewFull { base, extra, sig }, key))
     }
 
     /// Answers `InvitePreviewMore`: the full preview, and the more part signed beside it.
@@ -437,9 +467,9 @@ impl Engine {
         token: [u8; 32],
         invite_id: Option<[u8; 16]>,
     ) -> Response {
-        let full = match self.answer_invite_preview_full(from, community, token, invite_id) {
-            Response::InvitePreviewFull(full) => *full,
-            other => return other,
+        let (full, key) = match self.full_answer(from, community, token, invite_id) {
+            Ok(answer) => answer,
+            Err(refusal) => return *refusal,
         };
         let more = {
             let w = self.read();
@@ -461,12 +491,13 @@ impl Engine {
             Ok(bytes) => bytes,
             Err(e) => return Response::Error(e.to_string()),
         };
-        let sig = self.inner.identity.device.sign(&bytes);
+        let sig = key.sign(&bytes);
         Response::InvitePreviewMore(Box::new(SignedPreviewMore { full, more, sig }))
     }
 
-    /// This device's signed preview of `community`.
-    fn signed_preview(&self, community: CommunityId, invite_id: Option<[u8; 16]>, now: u64) -> Result<SignedPreview> {
+    /// A signed preview of `community`, and the key made to sign it. The key and the root that certifies it are made for
+    /// this answer and dropped after it, so the answer cannot be tied to this member's identity.
+    fn signed_preview(&self, community: CommunityId, invite_id: Option<[u8; 16]>, now: u64) -> Result<(SignedPreview, DeviceKey)> {
         let (genesis, preview) = {
             let w = self.read();
             let c = w.communities.get(&community).ok_or_else(|| not_found(&community))?;
@@ -481,13 +512,10 @@ impl Engine {
             };
             (c.genesis.clone(), preview)
         };
-        let sig = self.inner.identity.device.sign(&signing_bytes(&community, &preview)?);
-        Ok(SignedPreview {
-            preview,
-            genesis,
-            cert: self.inner.identity.cert.clone(),
-            sig,
-        })
+        let key = DeviceKey::generate();
+        let cert = RootKey::generate().certify(key.id(), genesis.created_ms);
+        let sig = key.sign(&signing_bytes(&community, &preview)?);
+        Ok((SignedPreview { preview, genesis, cert, sig }, key))
     }
 
     /// The preview of an invite. Either form works. Joining is a separate step.

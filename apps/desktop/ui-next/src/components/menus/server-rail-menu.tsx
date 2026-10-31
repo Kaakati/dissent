@@ -169,6 +169,7 @@ export async function openServerMenu(communityId: Id, x: number, y: number): Pro
           submenu: [
             // Every section of the page, in the page's order.
             { label: 'Server Profile', onPick: () => void openSettingsAt(view.id, 'profile') },
+            has('member_only') ? { label: 'Privacy', onPick: () => void openSettingsAt(view.id, 'privacy') } : null,
             { label: 'Boosts', onPick: () => void openSettingsAt(view.id, 'boosts') },
             { label: 'Members', sub: asks || undefined, onPick: () => void openSettingsAt(view.id, 'members') },
             { label: 'Invites', onPick: () => void openSettingsAt(view.id, 'invites') },

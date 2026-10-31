@@ -1,7 +1,9 @@
 // Settings > Recovery: the guardians who can vouch for a new key, and how many of them must agree. Saving signs the list.
 // Cancel drops unsaved edits and closes Settings, as the current UI does. Ported from views/guardians.js.
 import { useEffect, useState } from 'react';
-import { KeyRound, UserPlus, X } from 'lucide-react';
+import { KeyRound, LifeBuoy, UserPlus, X } from 'lucide-react';
+import { openRecoverDialog, openRecoveryLink } from '@/components/recovery/recovery-dialogs';
+import { Input } from '@/components/ui/input';
 import { Block } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
@@ -23,6 +25,8 @@ interface Candidate {
 }
 
 const plural = (n: number) => `${n} shared server${n === 1 ? '' : 's'}`;
+// The engine names the shared servers; a count is taken as it is.
+const countOf = (shared: number | string[]) => (Array.isArray(shared) ? shared.length : shared);
 
 export function RecoveryPage() {
   const closeSettings = useShell((s) => s.closeSettings);
@@ -35,6 +39,7 @@ export function RecoveryPage() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [pickerError, setPickerError] = useState('');
+  const [friendLink, setFriendLink] = useState('');
 
   useEffect(() => {
     api
@@ -140,7 +145,7 @@ export function RecoveryPage() {
               <span className="text-body text-text-strong">{g.display_name}</span>
               <span className="font-mono text-meta text-muted-foreground">·{shortOf('user', g.root_id)}</span>
             </span>
-            <span className="text-ui text-muted-foreground">{g.shared_servers ? plural(g.shared_servers) : 'Contact'}</span>
+            <span className="text-ui text-muted-foreground">{countOf(g.shared_servers) ? plural(countOf(g.shared_servers)) : 'Contact'}</span>
             <Button variant="ghost" size="icon" aria-label={`Remove ${g.display_name}`} onClick={() => remove(g.root_id)}>
               <X />
             </Button>
@@ -175,6 +180,34 @@ export function RecoveryPage() {
           Saving signs this list with your key and shares it with your devices. To recover, open Recover account on a new device and send the link it shows to your guardians.
         </span>
       </div>
+
+      <Block title="Help a friend recover" className="mt-s-2">
+        <p className="text-muted-foreground">
+          If you are someone&apos;s guardian and they sent you a recovery link, open it here. You approve only after they read you the code on their screen.
+        </p>
+        <form
+          className="flex gap-s-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (friendLink.trim()) openRecoveryLink(friendLink);
+          }}
+        >
+          <Input value={friendLink} onChange={(e) => setFriendLink(e.target.value)} placeholder="dissent://recover/…" aria-label="A friend's recovery link" />
+          <Button type="submit" variant="outline" disabled={!friendLink.trim()}>Open</Button>
+        </form>
+      </Block>
+
+      <Block title="Recover a lost account" className="mt-s-2">
+        <p className="text-muted-foreground">
+          Lost the device that held your account? On this new device, ask your guardians to approve this device&apos;s key in its place.
+        </p>
+        <div>
+          <Button variant="outline" onClick={() => openRecoverDialog()}>
+            <LifeBuoy />
+            Recover with guardians
+          </Button>
+        </div>
+      </Block>
 
       <div className="mt-auto flex justify-end gap-s-2 pt-s-2">
         <Button variant="outline" onClick={cancel}>

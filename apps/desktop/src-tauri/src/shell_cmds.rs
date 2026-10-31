@@ -64,6 +64,7 @@ pub struct ShellView {
     pub notifications_muted: bool,
     pub emoticons_as_text: bool,
     pub keep_photo_metadata: bool,
+    pub dns_public_fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +78,9 @@ pub struct ShellSettingsInput {
     /// Absent from a window older than this setting, which leaves it as it was.
     #[serde(default)]
     pub keep_photo_metadata: Option<bool>,
+    /// Absent from a window older than this setting, which leaves it as it was.
+    #[serde(default)]
+    pub dns_public_fallback: Option<bool>,
 }
 
 fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
@@ -88,6 +92,7 @@ fn view(state: &ShellState, settings: ShellSettings) -> ShellView {
         notifications_muted: settings.notifications_muted,
         emoticons_as_text: settings.emoticons_as_text,
         keep_photo_metadata: settings.keep_photo_metadata,
+        dns_public_fallback: settings.dns_public_fallback,
     }
 }
 
@@ -117,6 +122,9 @@ fn apply(app: &AppHandle, state: &ShellState, input: ShellSettingsInput) -> Resu
         if let Some(keep) = input.keep_photo_metadata {
             s.keep_photo_metadata = keep;
         }
+        if let Some(public) = input.dns_public_fallback {
+            s.dns_public_fallback = public;
+        }
     })?;
     apply_photo_metadata(app, saved.keep_photo_metadata);
     tray::sync_mute(app, saved.notifications_muted);
@@ -131,7 +139,8 @@ fn apply(app: &AppHandle, state: &ShellState, input: ShellSettingsInput) -> Resu
 /// this runs on every start and on every change.
 pub fn apply_photo_metadata(app: &AppHandle, keep: bool) {
     let state = app.state::<crate::commands::AppState>();
-    let guard = tauri::async_runtime::block_on(state.engine.read());
+    // try_read, not block_on: this can run inside the async runtime, where blocking on it panics.
+    let Ok(guard) = state.engine.try_read() else { return };
     if let Some(engine) = guard.as_ref() {
         engine.set_keep_photo_metadata(keep);
     }
@@ -150,6 +159,7 @@ pub fn set_muted(app: &AppHandle, muted: bool) -> Result<(), String> {
             notifications_muted: muted,
             emoticons_as_text: None,
             keep_photo_metadata: None,
+            dns_public_fallback: None,
         },
     )
     .map(|_| ())

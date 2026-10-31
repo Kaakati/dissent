@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use super::{SeedLimit, SeedRecord};
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, write_bin};
 use crate::views::EngineEvent;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -225,7 +224,8 @@ fn settings_path(engine: &Engine) -> PathBuf {
 impl Engine {
     /// This device's seeding settings.
     pub fn seeding_settings(&self) -> SeedingSettings {
-        read_bin(&settings_path(self)).ok().flatten().unwrap_or_default()
+        let paths = self.read().paths.clone();
+        paths.read_bin(&settings_path(self)).ok().flatten().unwrap_or_default()
     }
 
     pub fn set_seeding_settings(&self, settings: SeedingSettings) -> Result<()> {
@@ -237,7 +237,8 @@ impl Engine {
                 return Err(CoreError::Invalid("the schedule's times and days are out of range".into()));
             }
         }
-        write_bin(&settings_path(self), &settings)?;
+        let paths = self.read().paths.clone();
+        paths.write_bin(&settings_path(self), &settings)?;
         self.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).settings = Some(settings.clone());
         self.inner.files.set_download_cap(caps(&settings, now_ms(), self.utc_offset_min()).1);
         self.emit(EngineEvent::TransfersChanged);

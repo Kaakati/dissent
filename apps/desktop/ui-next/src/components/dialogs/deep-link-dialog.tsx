@@ -2,7 +2,7 @@
 // when its button is pressed. The server dialog's join and the add-friend flow do the work.
 import { useEffect, useState } from 'react';
 import { ServerCard } from '@/components/server-card';
-import { imageSrc } from '@/components/chat/attachments';
+import { pictureSrc } from '@/components/chat/attachments';
 import { UserAvatar } from '@/components/user-avatar';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
@@ -45,9 +45,9 @@ function InviteBody({ link, close }: { link: string; close: () => void }) {
   if (!preview) return <p role="status" className="text-sm text-muted-foreground">Looking up the server…</p>;
 
   const banner = bannerOf(
-    preview.banner ? imageSrc(preview.banner) : null,
+    preview.banner ? pictureSrc(preview.banner) : null,
     preview.banner_preset,
-    preview.banner_poster ? imageSrc(preview.banner_poster) : null,
+    preview.banner_poster ? pictureSrc(preview.banner_poster) : null,
   );
   const open = () => {
     void useShell.getState().openServer(preview.community);
@@ -67,8 +67,8 @@ function InviteBody({ link, close }: { link: string; close: () => void }) {
         variant="invite"
         id={preview.community}
         name={preview.name}
-        icon={preview.icon ? imageSrc(preview.icon) : null}
-        iconPoster={preview.icon_poster ? imageSrc(preview.icon_poster) : null}
+        icon={preview.icon ? pictureSrc(preview.icon) : null}
+        iconPoster={preview.icon_poster ? pictureSrc(preview.icon_poster) : null}
         banner={banner}
         memberCount={preview.member_count}
         onlineCount={preview.online_count}

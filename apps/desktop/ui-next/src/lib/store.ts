@@ -108,7 +108,7 @@ async function travel(direction: 'back' | 'forward'): Promise<void> {
   }
 }
 
-export type SettingsSection = 'account' | 'recovery' | 'devices' | 'profile' | 'appearance' | 'sounds' | 'voice' | 'network' | 'updates' | 'about';
+export type SettingsSection = 'account' | 'recovery' | 'devices' | 'profile' | 'inbox' | 'appearance' | 'sounds' | 'voice' | 'network' | 'updates' | 'about';
 
 export interface ShellState {
   me: Me | null;

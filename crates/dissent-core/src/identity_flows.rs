@@ -10,7 +10,6 @@ use crate::error::{CoreError, Result};
 
 use crate::rpc::{Request, Response};
 use crate::views::EngineEvent;
-use crate::store::{read_bin, write_bin};
 use dissent_events::{ChannelId, Payload};
 use dissent_identity::{
     CommunityId, DeviceCert, DeviceId, DeviceKey, GuardianApproval, GuardianSet, Identity,
@@ -95,7 +94,7 @@ impl PendingDevice {
 }
 
 impl Engine {
-    fn root_key(&self) -> Result<&RootKey> {
+    pub(crate) fn root_key(&self) -> Result<&RootKey> {
         self.inner
             .identity
             .root
@@ -104,18 +103,21 @@ impl Engine {
     }
 
     pub(crate) fn load_devices(&self) -> Result<Vec<DeviceRecord>> {
-        let path = self.read().paths.devices();
-        Ok(read_bin(&path)?.unwrap_or_default())
+        let paths = self.paths();
+        let path = paths.devices();
+        Ok(paths.read_bin(&path)?.unwrap_or_default())
     }
 
     fn save_devices(&self, devices: &[DeviceRecord]) -> Result<()> {
-        let path = self.read().paths.devices();
-        write_bin(&path, &devices.to_vec())
+        let paths = self.paths();
+        let path = paths.devices();
+        paths.write_bin(&path, &devices.to_vec())
     }
 
     fn load_guardians(&self) -> Result<Option<GuardianSet>> {
-        let path = self.read().paths.guardians();
-        read_bin(&path)
+        let paths = self.paths();
+        let path = paths.guardians();
+        paths.read_bin(&path)
     }
 
     /// Our guardians. Before any are set, `set` is false.
@@ -160,9 +162,12 @@ impl Engine {
     /// Signs a guardian list with the root key, saves it, and shares it with our other devices.
     pub async fn set_guardians(&self, guardians: Vec<RootId>, threshold: u8) -> Result<GuardianView> {
         let set = GuardianSet::create(self.root_key()?, guardians, threshold, now_ms())?;
-        let path = self.read().paths.guardians();
-        write_bin(&path, &set)?;
+        let paths = self.paths();
+        let path = paths.guardians();
+        paths.write_bin(&path, &set)?;
         self.share_guardians(&set).await;
+        // Each guardian keeps the list, so it can hand it to our new device if we lose this one.
+        self.tell_guardians(&set).await;
         self.guardian_view(&set)
     }
 
@@ -198,8 +203,9 @@ impl Engine {
         if set.owner != ours || set.verify().is_err() {
             return Response::Error("guardian list is not signed by our root".into());
         }
-        let path = self.read().paths.guardians();
-        match write_bin(&path, &set) {
+        let paths = self.paths();
+        let path = paths.guardians();
+        match paths.write_bin(&path, &set) {
             Ok(()) => Response::Ack,
             Err(e) => Response::Error(format!("could not store guardians: {e}")),
         }

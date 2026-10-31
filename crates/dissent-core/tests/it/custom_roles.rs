@@ -49,7 +49,7 @@ async fn an_owner_alone_makes_edits_and_deletes_a_role() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_role_grants_bits_once_every_device_knows_custom_roles() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("roles-alice").await;
         let bob = peer("roles-bob").await;
         let id = rustaceans(&alice, &bob).await;
@@ -92,7 +92,7 @@ async fn a_role_grants_bits_once_every_device_knows_custom_roles() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_bot_made_from_a_token_joins_with_its_role() {
-    bounded(async {
+    heavy(2, async {
         let alice = peer("bot-owner").await;
         let server = alice.engine.create_community("Builds".into()).await.expect("create");
         let id: CommunityId = server.id.parse().unwrap();

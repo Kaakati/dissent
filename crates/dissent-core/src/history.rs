@@ -88,7 +88,7 @@ type ReadyFile = BTreeMap<CommunityId, (Vec<DeviceId>, bool)>;
 /// Loads the last readiness answers, so a restart starts from them rather than from "unknown". A missing or unreadable
 /// file starts empty, which is the older form until a check runs.
 pub(crate) fn load_ready(paths: &Paths) -> BTreeMap<CommunityId, ReadyAnswer> {
-    let saved: ReadyFile = crate::store::read_bin(&paths.history_ready()).ok().flatten().unwrap_or_default();
+    let saved: ReadyFile = paths.read_bin(&paths.history_ready()).ok().flatten().unwrap_or_default();
     saved
         .into_iter()
         .map(|(community, (devices, ready))| (community, (Instant::now(), devices, ready)))
@@ -233,9 +233,24 @@ impl Engine {
         self.with_keys(&paths, community, |keys| keys.get(&epoch).copied()).ok().flatten()
     }
 
+    /// As `history_key`, but for the group's current epoch a missing key is derived now. A commit moves the group
+    /// to its new epoch before `note_epoch` records that epoch's keys, and saving and replaying in between take a
+    /// while on a slow machine. Without this, a message sent or received in that window would find no key: a send
+    /// would fall back to the older form, which later joiners cannot read.
+    fn history_key_now(&self, community: CommunityId, epoch: u64) -> Option<[u8; 32]> {
+        if let Some(key) = self.history_key(community, epoch) {
+            return Some(key);
+        }
+        if self.mls_epoch(community) != Some(epoch) {
+            return None;
+        }
+        self.record_history_key(community);
+        self.history_key(community, epoch)
+    }
+
     /// Opens a history message's ciphertext (without its manifest), as the plaintext encoding of the text.
     pub(crate) fn open_history_text(&self, community: CommunityId, epoch: u64, data: &[u8]) -> Option<Vec<u8>> {
-        let key = self.history_key(community, epoch)?;
+        let key = self.history_key_now(community, epoch)?;
         open_text(&key, &msg_aad(&community, epoch), data)
     }
 
@@ -244,7 +259,7 @@ impl Engine {
     /// It never waits on a member. The answer is read from a flag that the background check keeps.
     pub(crate) fn history_seal(&self, community: CommunityId, text: &str) -> Option<(u64, Vec<u8>)> {
         let epoch = self.mls_epoch(community)?;
-        let key = self.history_key(community, epoch)?;
+        let key = self.history_key_now(community, epoch)?;
         if !self.history_ready_now(community) {
             return None;
         }
@@ -478,7 +493,7 @@ impl Engine {
             .map(|(community, (_, devices, ready))| (*community, (devices.clone(), *ready)))
             .collect();
         let paths = self.read().paths.clone();
-        if let Err(e) = crate::store::write_bin(&paths.history_ready(), &snapshot) {
+        if let Err(e) = paths.write_bin(&paths.history_ready(), &snapshot) {
             warn!(error = %e, "could not save the history readiness");
         }
     }
@@ -641,6 +656,18 @@ impl Engine {
             wait = (wait * 2).min(RETRY_CAP);
         }
     }
+}
+
+/// Seals the key file at `path` again from `from` to `to`, for a profile copy under a new vault. A missing file is
+/// nothing to do, and one that does not open under `from` is an error.
+pub(crate) fn reseal(path: &std::path::Path, from: &Vault, to: &Vault, id: &CommunityId) -> Result<()> {
+    let sealed = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let plain = from.subkey(STORE_PURPOSE).open_sealed(&store_aad(id), &sealed)?;
+    crate::store::write_bytes_atomic(path, &to.subkey(STORE_PURPOSE).seal(&store_aad(id), &plain))
 }
 
 #[cfg(test)]

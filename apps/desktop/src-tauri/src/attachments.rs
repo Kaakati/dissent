@@ -180,15 +180,6 @@ pub fn install(app: &AppHandle) {
     });
 }
 
-/// Creates the thumbnails folder and allows the asset protocol to read it. Thumbnails are the previews of pictures in
-/// messages. They live under the data dir, apart from the downloads.
-pub fn allow_thumbnails(app: &AppHandle, data_dir: &Path) -> tauri::Result<()> {
-    let thumbnails = data_dir.join("thumbnails");
-    std::fs::create_dir_all(&thumbnails)?;
-    app.asset_protocol_scope().allow_directory(&thumbnails, true)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Semaphore;
 
 use crate::commands::{err, now_ms, parse, AppState};
+use crate::shell_cmds::ShellState;
 use crate::website_handles::{self, CheckView, Checks, OwnHandle, Outcome};
 
 /// A finished check, so every badge showing that handle updates. Payload: a `CheckView`.
@@ -81,7 +82,9 @@ async fn run_check(app: &AppHandle, root: RootId, handle: String, domain: String
     let outcome = {
         let _permit = checks.lookups.acquire().await.map_err(err)?;
         let record_name = dissent_discovery::dns_record_name(&domain).unwrap_or_else(|_| format!("_dissent.{domain}"));
-        website_handles::outcome_of(dissent_discovery::check_dns_handle(&domain, &root).await, &record_name)
+        let public_fallback = app.state::<ShellState>().get().dns_public_fallback;
+        let result = dissent_discovery::check_dns_handle_using(&domain, &root, public_fallback).await;
+        website_handles::outcome_of(result, &record_name)
     };
     if let Outcome::Error(why) = &outcome {
         tracing::debug!(%domain, %why, "website handle check did not finish");
@@ -133,29 +136,43 @@ pub fn remove_website_handle(state: State<'_, AppState>, checks: State<'_, Handl
     setup_view(&own, root, &checks.checks)
 }
 
-/// The state of each handle as this app last checked it. Handles that are due are checked in the background, and each
-/// result arrives as the `dissent://website-handle` event. A handle that is not a domain comes back `not_domain`.
+/// A check [`statuses`] wants started: root, handle as asked, normalized domain.
+type Start = (RootId, String, String);
+
+/// The views for `items`, and the checks to start. Only `verify` starts checks, and only for handles that are due.
+fn statuses(checks: &Checks, items: Vec<HandleItem>, now: u64, verify: bool) -> Result<(Vec<CheckView>, Vec<Start>), String> {
+    let mut out = Vec::with_capacity(items.len().min(MAX_ITEMS));
+    let mut starts = Vec::new();
+    for item in items.into_iter().take(MAX_ITEMS) {
+        let root: RootId = parse("user", &item.root_id)?;
+        let (view, start) = checks.view(root, &item.handle, now, verify);
+        if let Some(domain) = start {
+            starts.push((root, item.handle, domain));
+        }
+        out.push(view);
+    }
+    Ok((out, starts))
+}
+
+/// The state of each handle as this app last checked it. Drawing a handle never looks it up: a lookup tells the
+/// resolver and the domain's owner that someone is viewing it. With `verify`, sent when the user opens a profile or
+/// points at a handle, handles that are due are checked in the background and each result arrives as the
+/// `dissent://website-handle` event. A handle that is not a domain comes back `not_domain`.
 #[tauri::command]
 pub fn website_handle_status(
     app: AppHandle,
     checks: State<'_, HandleChecks>,
     items: Vec<HandleItem>,
+    verify: Option<bool>,
 ) -> Result<Vec<CheckView>, String> {
-    let now = now_ms()?;
-    let mut out = Vec::with_capacity(items.len().min(MAX_ITEMS));
-    for item in items.into_iter().take(MAX_ITEMS) {
-        let root: RootId = parse("user", &item.root_id)?;
-        let (view, start) = checks.checks.view(root, &item.handle, now, true);
-        if let Some(domain) = start {
-            let app = app.clone();
-            let handle = item.handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = run_check(&app, root, handle, domain).await {
-                    tracing::warn!(error = %e, "website handle check failed to run");
-                }
-            });
-        }
-        out.push(view);
+    let (out, starts) = statuses(&checks.checks, items, now_ms()?, verify == Some(true))?;
+    for (root, handle, domain) in starts {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = run_check(&app, root, handle, domain).await {
+                tracing::warn!(error = %e, "website handle check failed to run");
+            }
+        });
     }
     Ok(out)
 }
@@ -170,6 +187,37 @@ mod tests {
         assert_eq!(handle_for("@example.com").unwrap().1, "example.com");
         let (domain, handle) = handle_for("bücher.example").unwrap();
         assert_eq!((domain.as_str(), handle.as_str()), ("xn--bcher-kva.example", "bücher.example"));
+    }
+
+    fn item(root: RootId, handle: &str) -> HandleItem {
+        HandleItem { root_id: root.to_string(), handle: handle.into() }
+    }
+
+    #[test]
+    fn drawing_a_handle_never_looks_it_up() {
+        let checks = Checks::default();
+        let root = dissent_identity::RootKey::generate().id();
+        for _ in 0..3 {
+            let (views, starts) = statuses(&checks, vec![item(root, "example.com")], 1_000, false).unwrap();
+            assert!(starts.is_empty(), "a status call without verify starts no lookup");
+            assert_eq!(views[0].state, website_handles::State::Unchecked);
+            assert!(!views[0].checking, "nothing is shown as checking when nothing runs");
+        }
+    }
+
+    #[test]
+    fn verifying_starts_one_lookup_and_reuses_its_result() {
+        let checks = Checks::default();
+        let root = dissent_identity::RootKey::generate().id();
+        let (views, starts) = statuses(&checks, vec![item(root, "Example.com"), item(root, "maya")], 1_000, true).unwrap();
+        assert_eq!(starts, vec![(root, "Example.com".to_string(), "example.com".to_string())]);
+        assert!(views[0].checking);
+        assert_eq!(views[1].state, website_handles::State::NotDomain);
+        checks.finish(root, "example.com", Outcome::Verified, 2_000);
+        let later = 2_000 + website_handles::RECHECK_AFTER_MS - 1;
+        let (views, starts) = statuses(&checks, vec![item(root, "example.com")], later, true).unwrap();
+        assert!(starts.is_empty(), "a recent result is reused, not looked up again");
+        assert_eq!(views[0].state, website_handles::State::Verified);
     }
 
     #[test]

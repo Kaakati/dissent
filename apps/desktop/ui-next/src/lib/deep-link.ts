@@ -1,9 +1,11 @@
-// Links that open Dissent: dissent://invite/…, dissent://contact/…, dissent://message/… and dissent://link/…. The backend
+// Links that open Dissent: dissent://invite/…, dissent://contact/…, dissent://message/…, dissent://link/… and the recovery
+// links dissent://recover/…, dissent://approve/… and dissent://guardians/…. The backend
 // queues each one (src-tauri deep_link.rs) and sends it here. A link only chooses what to show. Joining, adding a contact
 // and approving a device happen only when the person presses the button in the dialog. A message link moves the view.
 import { refOfLink } from '@/components/chat/message-link';
 import { openMessage } from '@/components/chat/jump';
 import { openContactDialog, openInviteDialog } from '@/components/dialogs/deep-link-dialog';
+import { openRecoveryLink } from '@/components/recovery/recovery-dialogs';
 import { parseAddressInput } from './address';
 import { useShell } from './store';
 import { toast } from './toasts';
@@ -42,6 +44,12 @@ export function handleDeepLink(link: string): void {
       return;
     }
     void openMessage(ref, MESSAGE_MISSING);
+    return;
+  }
+  if (/^dissent:\/\/(recover|approve|guardians)\//i.test(link)) {
+    // A friend's recovery request opens the guardian's checks; an approval or a guardian list goes to the recovery on
+    // this device. Approving still takes the code and the button.
+    openRecoveryLink(link);
     return;
   }
   if (/^dissent:\/\/link\//i.test(link)) {

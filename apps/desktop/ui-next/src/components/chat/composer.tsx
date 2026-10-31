@@ -25,6 +25,8 @@ import { openEmojiPicker } from './emoji-picker';
 import { IconBtn } from './parts';
 import { MentionList } from './mention-list';
 import { StagedChip } from './attachments';
+import { ScrubToggle } from './scrub-toggle';
+import { resolveScrub } from '@/lib/scrub';
 import type { CommunityView, GroupSummary, Id, Member } from '@/lib/types';
 import type { ChatView } from './use-chat-view';
 
@@ -144,12 +146,18 @@ export function Composer({ view }: { view: ChatView }) {
       toast(`Remove files over ${MAX_FILE_LABEL} before sending.`);
       return;
     }
+    // A file whose details were to be removed but cannot be: ask before it goes as it is.
     sending.current = true;
+    const scrub = files.length ? await resolveScrub(files) : undefined;
+    if (scrub === null) {
+      sending.current = false;
+      return;
+    }
     setText('');
     let ok: boolean;
     try {
       const mentions = pool ? mentionArg(picksInText(trimmed, picks)) : undefined;
-      if (files.length) ok = await sendFiles(view.target, files.map((f) => f.path), trimmed || null, mentions);
+      if (files.length) ok = await sendFiles(view.target, files.map((f) => f.path), trimmed || null, mentions, scrub);
       else if (reply) ok = await sendReply(view.target, reply.id, trimmed, mentions);
       else ok = await sendMessage(view.target, trimmed, mentions);
     } finally {
@@ -315,14 +323,16 @@ export function Composer({ view }: { view: ChatView }) {
         </div>
         <div className="staged" role="list" aria-label="Files to send" hidden={staged.length === 0}>
           {staged.map((f) => (
-            <StagedChip
-              key={f.path}
-              file={f}
-              onRemove={() => {
-                useChat.getState().unstage(f.path);
-                input.current?.focus();
-              }}
-            />
+            <div key={f.path} className="staged-file">
+              <StagedChip
+                file={f}
+                onRemove={() => {
+                  useChat.getState().unstage(f.path);
+                  input.current?.focus();
+                }}
+              />
+              <ScrubToggle name={f.name} choice={f} onChange={(on) => useChat.getState().setScrub(f.path, on)} />
+            </div>
           ))}
         </div>
         {askPreviews ? (

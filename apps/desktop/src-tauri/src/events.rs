@@ -107,6 +107,8 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                         }
                     }
                     let call_changed = matches!(event, EngineEvent::CallUpdated);
+                    // Speaking changes redraw the call, without the device work a call change does.
+                    let speaking = matches!(event, EngineEvent::CallSpeaking);
                     let payload = ui_payload(&app, &event).await;
                     if let Err(e) = app.emit(EVENT, payload) {
                         warn!(error = %e, "could not emit engine event");
@@ -114,6 +116,8 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                     if call_changed {
                         crate::part6::emit_call_state(&app).await;
                         crate::voice::sync(&app).await;
+                    } else if speaking {
+                        crate::part6::emit_call_state(&app).await;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {

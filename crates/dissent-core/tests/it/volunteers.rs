@@ -54,8 +54,7 @@ async fn all_still_hear(everyone: &[Peer], what: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
 
@@ -98,8 +97,7 @@ async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_volunteer_who_leaves_hands_the_call_to_a_participant() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
 
@@ -126,8 +124,7 @@ async fn a_volunteer_who_leaves_hands_the_call_to_a_participant() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_banned_or_outside_volunteer_is_refused() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(8, async {
     let (mut everyone, community, channel) = boosted_call(8, 0, 5_000).await;
     let banned = everyone.pop().expect("eight members");
     banned.engine.set_capacity_override(None);
@@ -181,8 +178,7 @@ async fn a_banned_or_outside_volunteer_is_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn an_old_client_in_the_call_keeps_volunteers_out() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     // Device 6 runs a released build, which cannot decode an offer or link to a volunteer.
     let (everyone, volunteer, _, _) = volunteer_call(&[6]).await;
     // The new devices hold the volunteer's offer...
@@ -211,8 +207,7 @@ async fn an_old_client_in_the_call_keeps_volunteers_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_volunteer_that_drops_everything_is_excluded_and_the_call_fails_over() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
 
@@ -264,8 +259,7 @@ async fn a_volunteer_that_drops_everything_is_excluded_and_the_call_fails_over()
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
-    let _serial = crate::common::heavy_test_lock().await;
-    bounded(async {
+    heavy(8, async {
     let (everyone, community, channel) = boosted_call(7, 0, 5_000).await;
     let invite = everyone[0].engine.create_invite(community).await.expect("invite");
     let seeder = peer("seeder").await;
@@ -308,7 +302,7 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
         })
         .await;
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + scaled(Duration::from_secs(30));
     while relay_downlinks(&seeder.engine).await != everyone.len() {
         assert!(Instant::now() < deadline, "the seeder's relay carries every participant");
         tokio::time::sleep(Duration::from_millis(100)).await;

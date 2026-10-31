@@ -3,7 +3,7 @@
 // closed state stays on their device. People who may arrange channels drag a channel into, out of and within a
 // category, drag a category by its header, and do the same from the keyboard with Alt+Shift+Up and Down or from the
 // menus. The drag uses pointer events, as the server rail's does, with a line or a highlighted header where it lands.
-import { Fragment, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from 'react';
+import { Fragment, useMemo, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent } from 'react';
 import { ArrowDown, ArrowUp, ChevronDown, FolderInput, FolderPlus, Hash, Headphones, Lock, MicOff, Pencil, Plus, Settings, Trash2, UserPlus, Volume2 } from 'lucide-react';
 import { openChannelSettings } from '@/components/channel-settings/channel-settings';
 import { deleteCategoryAsked, openCreateCategoryDialog, openRenameCategoryDialog } from '@/components/dialogs/category-dialogs';
@@ -499,11 +499,24 @@ function VoiceRow({ community, ch, canManage, lifted, style, rowRef, handlers, c
   const call = useShell((s) => s.call);
   const active = voiceChannelId === ch.id;
   const connected = connection?.channelId === ch.id;
-  const others: VoiceParticipant[] = (community.voice_channels ?? []).find((v) => v.id === ch.id)?.participants ?? [];
-  // The engine lists everyone but this device; the channel you are connected to lists you first.
-  const participants: VoiceParticipant[] = connected && me && call
-    ? [{ root_id: me.root_id, display_name: me.display_name, muted: call.muted, deafened: call.deafened, speaking: false }, ...others]
-    : others;
+  const voiceChannels = community.voice_channels;
+  // The engine lists everyone in the channel once per person, you included. In the channel you are connected to, you
+  // come first (added if the list has not caught up yet), and the call's live state says who speaks and your mute.
+  const participants: VoiceParticipant[] = useMemo(() => {
+    const listed: VoiceParticipant[] = (voiceChannels ?? []).find((v) => v.id === ch.id)?.participants ?? [];
+    if (!(connected && me && call)) return listed;
+    const live = new Map(call.participants.map((p) => [p.root_id, p.speaking]));
+    const listedMe = listed.find((p) => p.root_id === me.root_id);
+    const you: VoiceParticipant = {
+      root_id: me.root_id,
+      display_name: listedMe?.display_name ?? me.display_name,
+      muted: call.muted,
+      deafened: call.deafened,
+      speaking: Boolean(call.self_speaking),
+    };
+    const others = listed.filter((p) => p.root_id !== me.root_id).map((p) => ({ ...p, speaking: live.get(p.root_id) ?? p.speaking }));
+    return [you, ...others];
+  }, [voiceChannels, ch.id, connected, me, call]);
   return (
     <div ref={rowRef} style={style} className={cn('group relative flex flex-col gap-0.5', lifted && 'z-[3] opacity-80')}>
       <button
@@ -535,7 +548,7 @@ function VoiceRow({ community, ch, canManage, lifted, style, rowRef, handlers, c
 // One person in a voice channel: avatar, name, and mute and deafen flags.
 function VoiceMember({ person }: { person: VoiceParticipant }) {
   return (
-    <div role="listitem" className="flex h-[30px] shrink-0 items-center gap-s-2 pr-s-2 pl-9 text-sm font-medium text-muted-foreground">
+    <div role="listitem" data-voice-member={person.root_id} data-speaking={person.speaking || undefined} className="flex h-[30px] shrink-0 items-center gap-s-2 pr-s-2 pl-9 text-sm font-medium text-muted-foreground">
       <UserAvatar name={person.display_name} seed={person.root_id} size="xs" className="size-[22px] text-[8px]" speaking={person.speaking} />
       <span className="min-w-0 flex-1 truncate" title={person.display_name}>{person.display_name}</span>
       {person.muted ? (

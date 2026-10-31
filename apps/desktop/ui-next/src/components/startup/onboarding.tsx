@@ -6,6 +6,8 @@ import { Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Callout } from '@/components/startup/gate';
+import { openRecoverDialog } from '@/components/recovery/recovery-dialogs';
+import { has } from '@/lib/features';
 import { OwlMark } from '@/components/owl-mark';
 import { UserAvatar } from '@/components/user-avatar';
 import { openDialog } from '@/lib/dialog';
@@ -113,6 +115,11 @@ function FirstRun() {
     await finishFirstRun();
     setBusy(false);
   };
+  // This key becomes the account once the guardians approve, so its words are saved first, then the recovery opens.
+  const contAndRecover = async () => {
+    await cont();
+    openRecoverDialog();
+  };
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Welcome to Dissent" className="fixed inset-x-0 top-[30px] bottom-0 z-[80] grid grid-cols-[640px_minmax(0,1fr)] gap-s-2 bg-rail p-s-2">
@@ -174,6 +181,11 @@ function FirstRun() {
               <Copy />
               Copy
             </Button>
+            {has('guardians') ? (
+              <Button variant="outline" className="h-11" disabled={!saved || busy} onClick={() => void contAndRecover()}>
+                Continue and recover with guardians
+              </Button>
+            ) : null}
             <Button className="h-11 px-6" disabled={!saved || busy} onClick={() => void cont()}>
               Continue
             </Button>

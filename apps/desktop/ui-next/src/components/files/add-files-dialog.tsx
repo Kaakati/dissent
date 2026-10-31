@@ -123,7 +123,7 @@ function AddFiles({ community, view, category, found, close }: { community: Comm
         </span>
       </label>
       <div className="flex items-center gap-s-2">
-        <span className="mr-auto text-sm text-muted-foreground">The listing is signed by you and shared with members only.</span>
+        <span className="mr-auto text-sm text-muted-foreground">The listing is signed by you and shared with members only. Files go exactly as they are, photo details included, so their fingerprint matches.</span>
         <Button variant="ghost" onClick={close}>Cancel</Button>
         <Button disabled={busy || chosen.length === 0} onClick={() => void add()}>{cta}</Button>
       </div>

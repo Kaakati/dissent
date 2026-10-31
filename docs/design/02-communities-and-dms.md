@@ -43,7 +43,7 @@ skips it, and so does a reader whose body does not decode, so older clients show
 ## Server settings
 
 The owner opens **Server Settings** from the server menu. It is a full-page view with a left nav:
-Server Profile and Boosts, then People (Members, Invites, Bans). There is no Roles page and no Delete Server,
+Server Profile, Privacy and Boosts, then People (Members, Invites, Bans). There is no Roles page and no Delete Server,
 because the engine has neither yet. Members who are not the owner do not see the entry.
 
 Server Profile is a form beside a live preview card. The card is the same component the invite card

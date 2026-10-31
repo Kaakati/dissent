@@ -114,6 +114,9 @@ jobs:
       # A hung test fails the run in minutes rather than holding the release for hours.
       - name: Tests (networked tests stay ignored)
         timeout-minutes: 30
+        # The runners are about half as fast as a developer machine: every test wait and limit doubles.
+        env:
+          DISSENT_TEST_SCALE: "2"
         run: cargo test --workspace
       # Loopback-only tests that are #[ignore]d locally so Windows Firewall doesn't prompt for every
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
@@ -121,6 +124,8 @@ jobs:
       # matches a substring, so `internet` skips both.
       - name: Loopback networked tests
         timeout-minutes: 40
+        env:
+          DISSENT_TEST_SCALE: "2"
         run: "cargo test -p dissent-core --test it -- --ignored --skip internet && cargo test -p dissent-relay --test ban_disconnect -- --ignored"
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.

@@ -72,17 +72,38 @@ async fn a_new_member_gets_the_thumbnail_from_the_seeder_while_the_sender_is_off
             .expect("alice warms up");
         tokio::time::sleep(Duration::from_secs(3)).await;
         let dir = scratch("thumb-hints");
+        // A picture its sender keeps off the seeders: the seeder is told nothing about it, and Bob's fetch of its
+        // thumbnail tells the seeder nothing either.
+        let kept_off = dir.join("private.png");
+        a_picture(&kept_off);
+        alice
+            .engine
+            .send_files(id, channel, vec![kept_off], "kept off".into(), false)
+            .await
+            .expect("alice sends a picture kept off the seeders");
+        eventually("bob has the thumbnail of the picture kept off the seeders", || {
+            read_message(&bob.engine, id, channel, "kept off").filter(has_thumbnail).map(|_| ())
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            seeder.engine.store_stats().await.expect("the seeder's stats").files,
+            0,
+            "the seeder keeps nothing of a file its sender kept off the seeders"
+        );
+
         let path = dir.join("holiday.png");
         a_picture(&path);
         alice
             .engine
-            .send_files(id, channel, vec![path], "look".into(), false)
+            .send_files(id, channel, vec![path], "look".into(), true)
             .await
             .expect("alice sends the picture");
 
-        // The seeder keeps the thumbnail blob, which the sender's hint named, before alice leaves.
+        // The seeder keeps the thumbnail blob, which the sender's hint named, and the picture, which it may seed,
+        // before alice leaves.
         let started = std::time::Instant::now();
-        while seeder.engine.store_stats().await.expect("the seeder's stats").files < 1 {
+        while seeder.engine.store_stats().await.expect("the seeder's stats").files < 2 {
             assert!(started.elapsed() < Duration::from_secs(60), "the seeder never kept the thumbnail");
             tokio::time::sleep(Duration::from_millis(500)).await;
         }

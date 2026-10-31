@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{clean_text, now_ms, Engine};
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, write_bin};
 use crate::views::InviteView;
 use crate::world::World;
 
@@ -45,7 +44,7 @@ fn invites_path(w: &World) -> PathBuf {
 }
 
 fn local_invites(w: &World) -> LocalInvites {
-    read_bin(&invites_path(w)).ok().flatten().unwrap_or_default()
+    w.paths.read_bin(&invites_path(w)).ok().flatten().unwrap_or_default()
 }
 
 fn owner_or_admin(role: &str) -> bool {
@@ -269,11 +268,11 @@ impl Engine {
     /// Remembers an invite this device made, so it can be listed later.
     pub(crate) fn record_invite(&self, community: CommunityId, id: [u8; 16], link: String, created_ms: u64) -> Result<()> {
         let w = self.read();
-        let path = invites_path(&w);
+        let (paths, path) = (w.paths.clone(), invites_path(&w));
         let mut all = local_invites(&w);
         drop(w);
         all.entry(community).or_default().push(LocalInvite { id, link, created_ms });
-        write_bin(&path, &all)?;
+        paths.write_bin(&path, &all)?;
         Ok(())
     }
 

@@ -13,7 +13,7 @@ use dissent_mls::{MlsClient, MlsError, Reservation};
 
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
-use crate::store::{append_sealed_records, content_vault, read_bin, write_bin, write_bytes_atomic, write_bytes_unsynced};
+use crate::store::{append_sealed_records, content_vault, write_bytes_atomic, write_bytes_unsynced};
 use crate::world::ContentRecord;
 
 /// Ratchet steps before the MLS state is flushed regardless of time.
@@ -31,8 +31,8 @@ pub(crate) fn reserve_path(mls_path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The sender reservations persisted at `path`.
-pub(crate) fn read_reservations(path: &std::path::Path) -> Result<Vec<([u8; 32], Reservation)>> {
-    let marks: Option<std::collections::BTreeMap<[u8; 32], Reservation>> = read_bin(path)?;
+pub(crate) fn read_reservations(paths: &crate::store::Paths, path: &std::path::Path) -> Result<Vec<([u8; 32], Reservation)>> {
+    let marks: Option<std::collections::BTreeMap<[u8; 32], Reservation>> = paths.read_bin(path)?;
     Ok(marks.unwrap_or_default().into_iter().collect())
 }
 
@@ -53,9 +53,10 @@ impl Engine {
         plaintext: &[u8],
     ) -> dissent_mls::Result<Vec<u8>> {
         let path = reserve_path(&self.inner.mls_path);
+        let store = &self.inner.store;
         mls.encrypt_reserving(group, plaintext, &mut |marks| {
             let map: std::collections::BTreeMap<[u8; 32], Reservation> = marks.iter().copied().collect();
-            write_bin(&path, &map).map_err(|_| MlsError::Rejected("could not persist a sender reservation"))
+            store.write_bin(&path, &map).map_err(|_| MlsError::Rejected("could not persist a sender reservation"))
         })
     }
 

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, write_bin};
 use crate::world::World;
 
 /// A mute that lasts until it is turned back on. It is 2^63 rather than `u64::MAX` because the UI
@@ -77,13 +76,13 @@ fn path(w: &World) -> PathBuf {
 }
 
 /// Every saved server. A missing or unreadable file saves nothing, so the defaults are used.
-fn read_all(path: &Path) -> BTreeMap<CommunityId, ServerPrefs> {
-    read_bin(path).ok().flatten().unwrap_or_default()
+fn read_all(paths: &crate::store::Paths, path: &Path) -> BTreeMap<CommunityId, ServerPrefs> {
+    paths.read_bin(path).ok().flatten().unwrap_or_default()
 }
 
 /// The preferences of `community` as of now, for the alert and count logic.
 pub(crate) fn of(w: &World, community: CommunityId) -> ServerPrefs {
-    read_all(&path(w)).get(&community).copied().unwrap_or_default().at(now_ms())
+    read_all(&w.paths, &path(w)).get(&community).copied().unwrap_or_default().at(now_ms())
 }
 
 impl Engine {
@@ -97,11 +96,11 @@ impl Engine {
         if !self.read().communities.contains_key(&community) {
             return Err(CoreError::NotFound(format!("community {community}")));
         }
-        let path = path(&self.read());
+        let (paths, path) = (self.paths(), path(&self.read()));
         let _serial = self.write();
-        let mut all = read_all(&path);
+        let mut all = read_all(&paths, &path);
         all.insert(community, prefs);
-        write_bin(&path, &all)
+        paths.write_bin(&path, &all)
     }
 
     /// Whether a new message in a server alerts this device, as of now. See [`ServerPrefs::alerts`].
@@ -171,13 +170,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dissent-server-prefs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("server_prefs.bin");
-        assert!(read_all(&file).is_empty(), "a missing file saves nothing");
+        let paths = crate::store::Paths::for_test(dir.clone());
+        assert!(read_all(&paths, &file).is_empty(), "a missing file saves nothing");
         std::fs::write(&file, [0xff, 0xff, 0xff]).unwrap();
-        assert!(read_all(&file).is_empty(), "a corrupt file saves nothing");
+        assert!(read_all(&paths, &file).is_empty(), "a corrupt file saves nothing");
         let saved = ServerPrefs { notify: Notify::Nothing, hide_muted_channels: true, ..Default::default() };
-        write_bin(&file, &BTreeMap::from([(id(3), saved)])).unwrap();
-        assert_eq!(read_all(&file).get(&id(3)), Some(&saved));
-        assert_eq!(read_all(&file).get(&id(4)), None, "an unsaved server takes the defaults");
+        crate::store::write_bin_plain(&file, &BTreeMap::from([(id(3), saved)])).unwrap();
+        assert_eq!(read_all(&paths, &file).get(&id(3)), Some(&saved));
+        assert_eq!(read_all(&paths, &file).get(&id(4)), None, "an unsaved server takes the defaults");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -632,13 +632,41 @@ async fn a_photo_goes_out_without_its_location_unless_the_sender_keeps_it() {
     assert!(got.starts_with(&[0xFF, 0xD8]) && got.ends_with(&[0xFF, 0xD9]), "it is still the picture");
     assert_eq!(std::fs::read(&path).expect("read the original"), original, "alice's file is untouched");
     assert_eq!(own_view(&alice, bob_root, &sent.id).local_path.as_deref(), Some(path.to_string_lossy().as_ref()), "alice's message shows her original");
+    assert_eq!(own_view(&bob, alice_root, &sent.id).name, "photo.jpg", "bob gets it under a generic name");
+    assert_eq!(own_view(&alice, bob_root, &sent.id).name, "beach.jpg", "alice still sees her own name for it");
 
-    // With the switch off, the photo goes as it is.
+    // With the default turned to keep, the photo goes as it is, under its own name.
     alice.engine.set_keep_photo_metadata(true);
     let kept = dir.join("kept.jpg");
     tagged_photo(&kept);
     let sent = alice.engine.send_dm_files(bob_root, vec![kept.clone()], String::new()).await.expect("send the photo");
     assert_eq!(received(&sent.id).await, original, "the photo arrives exactly as it was");
+    assert_eq!(own_view(&bob, alice_root, &sent.id).name, "kept.jpg");
+
+    // A file's own choice wins over the default: on here, although the default is now keep.
+    let chosen = dir.join("IMG_20261029_1530.jpg");
+    tagged_photo(&chosen);
+    let sent = alice
+        .engine
+        .send_dm_files_with(bob_root, vec![dissent_core::OutgoingFile { path: chosen.clone(), scrub: Some(true) }], String::new())
+        .await
+        .expect("send with details removed");
+    let got = received(&sent.id).await;
+    assert!(!has(&got, b"37.3349") && own_view(&bob, alice_root, &sent.id).name == "photo.jpg", "the file's own choice is followed");
+
+    // A file whose details cannot be removed is not sent when removing them was asked for.
+    let notes = dir.join("notes.txt");
+    std::fs::write(&notes, "by Maya Doe").expect("write notes");
+    let refused = alice
+        .engine
+        .send_dm_files_with(bob_root, vec![dissent_core::OutgoingFile { path: notes.clone(), scrub: Some(true) }], String::new())
+        .await;
+    assert!(matches!(&refused, Err(e) if e.to_string().contains("Couldn't remove details from notes.txt")), "{refused:?}");
+
+    // What each file starts with: a photo on, a document off.
+    let found = bob.engine.inspect_files(vec![chosen.clone(), notes.clone()]).await;
+    assert!(found[0].scrub_default && found[0].scrubbable, "{found:?}");
+    assert!(!found[1].scrub_default && !found[1].scrubbable, "{found:?}");
 
     finish(vec![alice, bob]).await;
 }

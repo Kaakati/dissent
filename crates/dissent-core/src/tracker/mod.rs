@@ -19,12 +19,12 @@ pub mod seeding;
 pub mod swarm;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use dissent_events::{CategoryId, EventId};
-use dissent_identity::{CommunityId, DeviceId, Vault};
+use dissent_identity::{CommunityId, DeviceId};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -32,11 +32,8 @@ use crate::engine::Engine;
 use crate::error::{CoreError, Result};
 use crate::membership::CommitRules;
 use crate::rpc::{Request, Response};
-use crate::store::{write_bytes_atomic, Paths};
+use crate::store::Paths;
 
-const KEYS_PURPOSE: &[u8] = b"dissent/files-keys/v1";
-const BOOK_PURPOSE: &[u8] = b"dissent/tracker-book/v1";
-const AAD_DOMAIN: &[u8] = b"dissent/tracker-local-aad/v1";
 /// How long after one key fetch for a community the next may start.
 const FETCH_GAP: Duration = Duration::from_secs(20);
 /// How long one device has to answer `FilesKeys`.
@@ -129,10 +126,6 @@ pub(crate) struct TrackerState {
     pub(crate) settings: Option<seeding::SeedingSettings>,
 }
 
-fn aad(id: &CommunityId, what: &[u8]) -> Vec<u8> {
-    [AAD_DOMAIN, what, id.as_bytes()].concat()
-}
-
 fn keys_path(paths: &Paths, id: &CommunityId) -> PathBuf {
     paths.community_dir(id).join("files_keys.bin")
 }
@@ -141,34 +134,16 @@ fn book_path(paths: &Paths, id: &CommunityId) -> PathBuf {
     paths.community_dir(id).join("tracker.bin")
 }
 
-fn read_sealed<T: for<'a> Deserialize<'a>>(vault: &Vault, path: &Path, aad: &[u8]) -> Result<Option<T>> {
-    match std::fs::read(path) {
-        Ok(sealed) => {
-            let plain = vault.open_sealed(aad, &sealed)?;
-            Ok(Some(postcard::from_bytes(&plain).map_err(|e| CoreError::Encoding(e.to_string()))?))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn write_sealed<T: Serialize>(vault: &Vault, path: &Path, aad: &[u8], value: &T) -> Result<()> {
-    let plain = postcard::to_allocvec(value).map_err(|e| CoreError::Encoding(e.to_string()))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    write_bytes_atomic(path, &vault.seal(aad, &plain))
-}
-
 impl Local {
-    fn load(paths: &Paths, vault: &Vault, id: &CommunityId) -> Self {
+    fn load(paths: &Paths, id: &CommunityId) -> Self {
         let keys: Vec<(u64, [u8; 32], Option<CategoryId>)> =
-            read_sealed(&vault.subkey(KEYS_PURPOSE), &keys_path(paths, id), &aad(id, b"keys")).unwrap_or_else(|e| {
+            paths.read_bin(&keys_path(paths, id)).unwrap_or_else(|e| {
                 warn!(community = %id, error = %e, "could not read the files keys");
                 None
             }).unwrap_or_default();
         let scopes = keys.iter().filter_map(|(g, _, s)| s.map(|c| (*g, c))).collect();
-        let book = read_sealed(&vault.subkey(BOOK_PURPOSE), &book_path(paths, id), &aad(id, b"book"))
+        let book = paths
+            .read_bin(&book_path(paths, id))
             .unwrap_or_else(|e| {
                 warn!(community = %id, error = %e, "could not read the tracker book");
                 None
@@ -200,7 +175,7 @@ impl Engine {
         let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
         let local = state.communities.entry(community).or_default();
         if !local.loaded {
-            *local = Local::load(&paths, &self.inner.vault, &community);
+            *local = Local::load(&paths, &community);
         }
         f(local)
     }
@@ -209,8 +184,7 @@ impl Engine {
         let paths = self.read().paths.clone();
         let keys: Vec<(u64, [u8; 32], Option<CategoryId>)> =
             self.with_tracker(community, |l| l.keys.iter().map(|(g, k)| (*g, *k, l.scopes.get(g).copied())).collect());
-        let vault = self.inner.vault.subkey(KEYS_PURPOSE);
-        if let Err(e) = write_sealed(&vault, &keys_path(&paths, &community), &aad(&community, b"keys"), &keys) {
+        if let Err(e) = paths.write_bin(&keys_path(&paths, &community), &keys) {
             warn!(community = %community, error = %e, "could not save the files keys");
         }
     }
@@ -218,8 +192,7 @@ impl Engine {
     pub(crate) fn save_tracker_book(&self, community: CommunityId) {
         let paths = self.read().paths.clone();
         let book = self.with_tracker(community, |l| l.book.clone());
-        let vault = self.inner.vault.subkey(BOOK_PURPOSE);
-        if let Err(e) = write_sealed(&vault, &book_path(&paths, &community), &aad(&community, b"book"), &book) {
+        if let Err(e) = paths.write_bin(&book_path(&paths, &community), &book) {
             warn!(community = %community, error = %e, "could not save the tracker book");
         }
     }
@@ -387,5 +360,65 @@ impl Engine {
             let _ = tokio::time::timeout(ASK_WAIT, self.call(device, &push)).await;
         }
         self.rotate_category_keys(community).await;
+    }
+}
+
+#[cfg(test)]
+mod sealing_tests {
+    use super::*;
+    use dissent_identity::Vault;
+
+    fn profile(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dissent-tracker-sealing-{tag}-{}-{}", std::process::id(), crate::engine::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn book() -> LocalBook {
+        let folders = BTreeMap::from([(CategoryId([1; 32]), PathBuf::from("/home/me/secret-folder"))]);
+        LocalBook { receipt_secret: [7; 32], folders, ..LocalBook::default() }
+    }
+
+    fn holds(raw: &[u8], needle: &[u8]) -> bool {
+        raw.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// The local book and keys are written as sealed store files, and open again.
+    #[test]
+    fn the_book_and_the_keys_are_sealed_and_read_back() {
+        let dir = profile("write");
+        let paths = Paths::for_test(dir);
+        let id = CommunityId([2; 32]);
+        let keys: Vec<(u64, [u8; 32], Option<CategoryId>)> = vec![(1, [9; 32], None)];
+        paths.write_bin(&keys_path(&paths, &id), &keys).unwrap();
+        paths.write_bin(&book_path(&paths, &id), &book()).unwrap();
+        let raw = std::fs::read(book_path(&paths, &id)).unwrap();
+        assert!(raw.starts_with(crate::at_rest::FILE_MAGIC));
+        assert!(!holds(&raw, b"secret-folder"));
+        let raw = std::fs::read(keys_path(&paths, &id)).unwrap();
+        assert!(raw.starts_with(crate::at_rest::FILE_MAGIC));
+        assert!(!holds(&raw, &[9; 32]));
+        let local = Local::load(&paths, &id);
+        assert_eq!(local.keys.get(&1), Some(&[9; 32]));
+        assert_eq!(local.book.receipt_secret, [7; 32]);
+        assert!(local.book.folders.values().any(|p| p.ends_with("secret-folder")));
+    }
+
+    /// A migration seals a plaintext book, and a profile copy under a new vault carries it over.
+    #[test]
+    fn the_migration_and_a_profile_copy_cover_the_book() {
+        let dir = profile("migrate");
+        let id = CommunityId([2; 32]);
+        let old = Vault::from_passphrase("old", &[3u8; 16]).unwrap();
+        let new = Vault::from_passphrase("new", &[3u8; 16]).unwrap();
+        let paths = Paths::sealed_by(dir.clone(), &old);
+        let path = book_path(&paths, &id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, postcard::to_allocvec(&book()).unwrap()).unwrap();
+        assert_eq!(paths.migrate().unwrap(), 1);
+        assert!(!holds(&std::fs::read(&path).unwrap(), b"secret-folder"));
+        crate::at_rest::reseal_tree(&dir, &old, &new).unwrap();
+        let copied = Paths::sealed_by(dir, &new);
+        assert_eq!(copied.read_bin::<LocalBook>(&path).unwrap().unwrap().receipt_secret, [7; 32]);
     }
 }

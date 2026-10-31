@@ -6,7 +6,7 @@
 // saved with set_server_order; Home and "+" stay where they are.
 import { has } from '@/lib/features';
 import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent, type ReactElement } from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, Volume2 } from 'lucide-react';
 import { OwlMark } from '@/components/owl-mark';
 import { GroupAvatar } from '@/components/shell/sidebar';
 import { UserAvatar } from '@/components/user-avatar';
@@ -20,6 +20,7 @@ import { openServerRailMenu } from '@/components/menus/server-rail-menu';
 import { useMutes } from '@/lib/mutes';
 import { DEFAULT_PREFS, isServerMuted, loadServerPrefs, useServerPrefs } from '@/lib/server-prefs';
 import { convKey, useShell } from '@/lib/store';
+import { openedTarget } from '@/lib/target';
 import type { ConversationSummary, Id } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -79,6 +80,7 @@ export function ServerRail() {
   const justDragged = useRef(false);
 
   const onHome = route.kind === 'home';
+  const voice = useVoiceBadge();
   // Unread conversations (direct and group) make the Home badge; the number is the count of them.
   const dmUnread = [...unread].filter((k) => k.startsWith('dm:') || k.startsWith('group:')).length;
   const dragFrom = drag ? communities.findIndex((c) => c.id === drag.id) : -1;
@@ -168,6 +170,7 @@ export function ServerRail() {
           </Button>
         </Labelled>
         {dmUnread > 0 ? <Badge count={dmUnread} label={`${dmUnread} unread conversations`} /> : null}
+        {voice?.home ? <SpeakerBadge label={voice.label} /> : null}
       </div>
 
       <UnreadDms />
@@ -228,6 +231,7 @@ export function ServerRail() {
                 </button>
               </Labelled>
               {has('mentions') && typeof c.mentions === 'number' && c.mentions > 0 ? <Badge count={c.mentions} label={`${c.mentions} mentions`} /> : null}
+              {voice && !voice.home && voice.communityId === c.id ? <SpeakerBadge label={voice.label} /> : null}
             </div>
           </Fragment>
         );
@@ -270,7 +274,9 @@ function usePresentDms(items: ConversationSummary[]): { conv: ConversationSummar
     previous.current = items;
     if (gone.length === 0) return;
     const goneKeys = new Set(gone.map(convKey));
-    setLeaving((l) => [...l.filter((c) => !keep.has(convKey(c))), ...gone]);
+    // A conversation that leaves again before its last exit ended replaces that entry: two with one key would leave
+    // React's duplicate nodes behind on the rail.
+    setLeaving((l) => [...l.filter((c) => !keep.has(convKey(c)) && !goneKeys.has(convKey(c))), ...gone]);
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     setTimeout(() => setLeaving((l) => l.filter((c) => !goneKeys.has(convKey(c)))), reduced ? 0 : LEAVE_MS);
   }, [items]);
@@ -286,9 +292,12 @@ function UnreadDms() {
   const mutes = useMutes((s) => s.mutes);
   const openConversation = useShell((s) => s.openConversation);
   const openHome = useShell((s) => s.openHome);
+  // The open conversation is never on the rail: a message in it is counted for a moment, until the view reads it, and
+  // its avatar would flash in and out.
+  const openKey = useShell((s) => openedTarget(s)?.key ?? null);
   const unread = useMemo(
-    () => conversations.filter((c) => (c.unread ?? 0) > 0 && !(convKey(c) in mutes)),
-    [conversations, mutes],
+    () => conversations.filter((c) => (c.unread ?? 0) > 0 && !(convKey(c) in mutes) && convKey(c) !== openKey),
+    [conversations, mutes, openKey],
   );
   const shown = usePresentDms(unread);
   if (shown.length === 0) return null;
@@ -335,6 +344,42 @@ function UnreadDms() {
         </Labelled>
       ) : null}
     </div>
+  );
+}
+
+// Where this device is in a call, for the rail's speaker badge: a server's voice channel, or a direct or group call
+// on Home. `label` is the tooltip, "Connected to #lounge".
+function useVoiceBadge(): { home: boolean; communityId?: Id; label: string } | null {
+  const call = useShell((s) => s.call);
+  const connection = useShell((s) => s.voiceConnection);
+  const openName = useShell((s) =>
+    s.voiceConnection && s.community?.id === s.voiceConnection.communityId
+      ? s.community.channels.find((c) => c.id === s.voiceConnection?.channelId)?.name
+      : undefined,
+  );
+  if (!call) return null;
+  if (call.scope === 'channel') {
+    if (!connection) return null;
+    const name = openName ?? call.channel_name;
+    return { home: false, communityId: connection.communityId, label: name ? `Connected to #${name}` : 'Connected to voice' };
+  }
+  const people = call.participants.map((p) => p.display_name).join(', ');
+  return { home: true, label: people ? `Connected to a call with ${people}` : 'Connected to a call' };
+}
+
+// The speaker on a rail icon while you are connected there: bottom left, clear of the count badge on the right.
+function SpeakerBadge({ label }: { label: string }) {
+  return (
+    <Tip label={label} side="right">
+      <span
+        role="img"
+        aria-label={label}
+        data-speaker-badge
+        className="absolute left-2 -bottom-0.5 z-[2] grid size-5 place-items-center rounded-full bg-ink text-success shadow-[0_0_0_2px_var(--rail)]"
+      >
+        <Volume2 className="size-3" aria-hidden="true" />
+      </span>
+    </Tip>
   );
 }
 

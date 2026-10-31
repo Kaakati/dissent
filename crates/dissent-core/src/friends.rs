@@ -17,7 +17,6 @@ use tracing::debug;
 use crate::engine::Engine;
 use crate::error::Result;
 use crate::rpc::{Request, Response};
-use crate::store::{read_bin, write_bin};
 
 /// How long a contact's list is reused before it is asked for again. Adds, removals and turning the
 /// setting off show within this. Two minutes keeps the asks few, and a withdrawal short-lived.
@@ -111,14 +110,14 @@ impl Engine {
     /// Whether this device shows its friends list to its friends. On unless turned off.
     pub fn friends_shared(&self) -> bool {
         let paths = self.read().paths.clone();
-        !read_bin::<bool>(&paths.friends_hidden()).ok().flatten().unwrap_or_default()
+        !paths.read_bin::<bool>(&paths.friends_hidden()).ok().flatten().unwrap_or_default()
     }
 
     /// Turns "Show my friends list to my friends" on or off. Off sends nothing, and profiles show no
     /// mutual friends from this device.
     pub fn set_friends_shared(&self, on: bool) -> Result<()> {
         let paths = self.read().paths.clone();
-        write_bin(&paths.friends_hidden(), &!on)
+        paths.write_bin(&paths.friends_hidden(), &!on)
     }
 
     /// Answers `Request::Friends`. The list is our accepted contacts, and only for a device whose root

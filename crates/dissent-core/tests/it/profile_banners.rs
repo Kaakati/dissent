@@ -19,7 +19,7 @@ async fn my_banner_is_on_my_profile_and_survives_a_restart() {
         assert!(alice.engine.set_profile_banner_preset(10).await.is_err());
         alice.engine.set_profile_banner(banner(1)).await.expect("set banner");
         let path = alice.engine.me().banner.expect("the banner has a file");
-        assert_eq!(std::fs::read(&path).unwrap(), banner(1));
+        assert_eq!(picture(&alice.engine, &path), banner(1));
         assert_eq!(std::path::Path::new(&path).parent(), Some(alice.dir.join("avatars").as_path()));
         let me = alice.identity.root_id();
         assert_eq!(alice.engine.user_profile(me).banner.as_deref(), Some(path.as_str()));
@@ -54,7 +54,7 @@ async fn a_server_member_and_a_contact_see_a_new_banner() {
         alice.engine.set_profile_banner(bytes.clone()).await.expect("alice sets a banner");
         for (who, engine) in [("bob, in the server", &bob.engine), ("carol, a contact", &carol.engine)] {
             let path = eventually(&format!("{who} fetches alice's banner"), || engine.user_profile(alice_root).banner).await;
-            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{who}");
+            assert_eq!(picture(engine, &path), bytes, "{who}");
         }
 
         alice.engine.set_profile_banner_preset(5).await.expect("preset");

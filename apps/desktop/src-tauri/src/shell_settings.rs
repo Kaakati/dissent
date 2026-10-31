@@ -29,6 +29,9 @@ pub struct ShellSettings {
     pub emoticons_as_text: bool,
     /// Photos and videos are sent with their location and camera details. Off by default, so they are removed.
     pub keep_photo_metadata: bool,
+    /// A website handle check the system resolver cannot answer is asked again of Cloudflare's public resolver.
+    /// Off by default, so only the resolver the user already uses learns which domains are checked.
+    pub dns_public_fallback: bool,
 }
 
 /// Why "start at login" is not offered in `mode`, for the settings page. `None` when it is offered. A portable build
@@ -81,6 +84,7 @@ mod tests {
         let dir = scratch("defaults");
         assert_eq!(load(&dir), ShellSettings::default());
         assert!(!load(&dir).keep_photo_metadata, "photo details are removed unless the user keeps them");
+        assert!(!load(&dir).dns_public_fallback, "handle checks ask only the system resolver unless turned on");
         assert!(!load(&dir).keep_running && !load(&dir).start_at_login && !load(&dir).notifications_muted);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -91,6 +95,7 @@ mod tests {
         std::fs::write(dir.join(FILE), br#"{"keep_running":true,"emoticons_as_text":true}"#).unwrap();
         let loaded = load(&dir);
         assert!(loaded.keep_running && loaded.emoticons_as_text && !loaded.keep_photo_metadata);
+        assert!(!loaded.dns_public_fallback);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -104,6 +109,7 @@ mod tests {
             tray_notice_shown: true,
             emoticons_as_text: true,
             keep_photo_metadata: true,
+            dns_public_fallback: true,
         };
         save(&dir, &saved).unwrap();
         assert_eq!(load(&dir), saved);

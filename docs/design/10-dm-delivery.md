@@ -7,8 +7,13 @@ conversations in `crates/dissent-core/src/groups.rs`.
 
 A direct message or a group DM reaches a person only while one of their devices is online and
 reachable. Sender and recipient often are not online together. An inbox is an always-on device that
-holds sealed messages until the recipient collects them. Inboxes are typically the user's own seeder
-(see `apps/seeder`). An inbox can read only ciphertext and the recipient's root id.
+holds sealed messages until the recipient collects them. It can be:
+
+- another device of the user's own;
+- a seeder the user runs (`apps/seeder --inbox-for <address>`);
+- a friend's always-on computer that agreed to hold the user's mail.
+
+An inbox cannot read the messages. What it does learn is in "What an inbox learns".
 
 ## Inbox list
 
@@ -51,9 +56,10 @@ pub struct Envelope {
 
 Inbox rules:
 
-- An inbox accepts an envelope only for a root that lists it in its `InboxList`, and only when the
-  inbox has seen that list.
-- It caps storage at 50 MB per recipient root. A deposit that would exceed the cap is refused.
+- An inbox accepts an envelope only for a root it serves: its own root while its inbox switch is on,
+  and each root its owner chose to host (see "Choosing an inbox").
+- It caps storage at 50 MB per recipient root, and at 200 MB for everyone it serves together. A deposit
+  that would exceed either cap is refused.
 - It keeps an envelope for at most 30 days, and drops it at `expires_ms`.
 - It rate-limits each sender device to 60 deposits an hour. A refusal tells the sender the cap was hit,
   so the sender's queue can mark the packet `failed`.
@@ -94,10 +100,108 @@ that would stall a message whenever the lower root was offline. If both sides cr
 lower root's group wins. The other side drops its own group, and its unsent messages are sealed again
 in the winning group.
 
+## Choosing an inbox
+
+Built in `inbox.rs` and Settings > Offline delivery (`ui-next/src/components/settings/inbox-page.tsx`).
+
+**Consent comes from the host.** A device holds mail only for the people its owner chose:
+
+- `set_serve_inbox(true)` holds mail for the device's own root, for the other devices of the same person.
+- `host_inbox_for(root, true)` holds mail for another person, for at most `MAX_HOSTED` (16) people.
+  - In the app it is a tick per contact under "Hold messages for others".
+  - A seeder takes `--inbox-for <address>`, which can be repeated, and applies exactly that list on every
+    start.
+  - Turning a person off drops what is held for them.
+  - The list is kept in `inbox_hosts.bin`, apart from `inbox.bin`, so older files still load.
+
+Listing a device as an inbox does not make it one. A device that does not serve the person refuses
+their deposits and key packages.
+
+**Refusals look the same.** The refusal does not show whether the device is an inbox for anyone:
+- A deposit or key packages for a person the device does not serve get `NOT_SERVED` ("this device does
+  not hold mail for that person"), on a device that is no inbox as on an inbox for other people.
+- A collect gets an empty list.
+- A key-package take gets "no key package for that user", also when the person's packages ran out.
+- The other reasons (invalid, expired, rate limited, full) come only after the person is known to be served.
+
+**Notices.** A change to a device's hosting list sends the person a signed notice, `ContactMsg::InboxHost {
+from_card, on, ts }`.
+- It is appended to `ContactMsg` and travels through the contact outbox, retried until the person's device
+  answers. A device from before this cannot decode it and refuses it, and the notice then leaves the outbox.
+  Setting what is already set sends nothing, so a seeder that applies its flags on each start notifies
+  only on a real change.
+- The receiver keeps the newest notice per device, at most 20, in `inbox_notices.bin`.
+- The app shows an in-app notice (`EngineEvent::InboxHostChanged`). Settings > Offline delivery lists the
+  notices, with "Use as inbox" for a device that started and is not yet chosen.
+- A notice reaches the person only when the host knows their devices: from a shared server, a contact, or
+  the key packages they deposited there.
+
+**Invisible hosts.** A device that holds mail for a person keeps answering that person's inbox requests
+while invisible (see `06-threat-model.md`, "Invisible mode"), so their mail is not held up by the host's
+status.
+
+**Probe.** `Request::InboxProbe(Probe { cert, ts_ms, sig })` is appended to the requests.
+- **The request.** The asking device signs `(root, device, ts_ms)` under `dissent/inbox-probe/v1`. The
+  timestamp must be within five minutes.
+- **The answer.** `Response::InboxProbe(ProbeAnswer { serving, envelopes, key_packages, bytes })` counts
+  what is held for the cert's root.
+- **Strangers.** A device that does not serve that root, or a probe that does not verify, gets the default
+  answer: not serving, nothing held. So the answer tells a stranger nothing, not even whether the device
+  hosts anyone else.
+
+**Picking.** Settings asks for the devices that offer (`inbox_candidates`):
+- The candidates are our own other devices, our contacts' devices and the devices of our communities'
+  storage members (seeders), up to 32.
+- Each is probed at the same time, with a 5 s limit, and only those that answer `serving` are shown.
+- A device can also be added by its id.
+- `set_inboxes` saves the list (at most 4), announces it to every contact in the contact messages, and
+  deposits key packages with each inbox.
+
+**Status.** `inbox_status` probes each chosen inbox. Settings shows one line per inbox, which says one of:
+- what it holds for us: messages waiting, bytes, and key packages left for new conversations;
+- that it does not hold our mail, because its owner has not agreed or has stopped;
+- that it is not answering.
+
+**Reaching a friend's inbox.** The sender dials the inbox by device id.
+- A sender who shares a server with the inbox, or is its contact, gets its address through peer exchange.
+- Otherwise the dial relies on the node's address lookups: the device's DHT and number0 records. So a
+  friend's computer that is in no group with the sender is reached only when those lookups are on.
+
+## What an inbox learns
+
+An inbox holds MLS ciphertext and cannot read it. Its host does learn, for each person it serves:
+
+- **Who the person is,** and the ids of the devices that collect. Each collect and probe is signed by the
+  collecting device, and a probe carries its cert.
+- **Who writes to them.** Each envelope carries the sender's `DeviceCert`, so the host learns the sending
+  device and its root, the size of each packet and when it arrived. The host can build the person's
+  correspondence graph for the time they are offline.
+- **When the person is offline and when they come back,** from the deposits and the collects. Collects run
+  on every maintenance pass.
+- **Each packet's clear fields.** The packet is a `ConvPacket` in postcard, and only the MLS parts are
+  sealed:
+  - its kind (welcome, commit, message, receipt);
+  - its conversation id, which groups the packets of one conversation;
+  - for a welcome, the conversation's name, its creator and every member's root.
+
+  So an inbox learns who is in each group DM that someone adds the person to while they are away.
+
+It does not learn the text of messages, or the person's contacts.
+
+It can drop or delay mail, which shows as `queued_inbox` that never becomes `delivered`, and it can
+refuse. It cannot forge mail, because every packet is signed and sealed by its sender.
+
+A friend's computer is therefore a trust choice: the friend learns whom the person talks to while they
+are away. Settings says so next to the picker ("What an inbox learns"). Looking for inboxes probes every
+candidate, so each of them learns that the person looked.
+
 ## Deviations
 
 - Key packages are not sent in the first message. The creator takes one from the other side's devices
   or inbox, which is the rule above.
+- There is no signed `InboxList`. The list is an unsigned `Vec<DeviceId>` inside the signed contact
+  messages (request, accept, and the `Inboxes` update). It is as authentic as the contact message that
+  carries it. There is no separate `seq`: the newest contact message wins.
 
 ## Delivery status
 
@@ -123,6 +227,8 @@ The UI contract in `07-visual-system.md` Part 6.8 also wants a `queued` boolean 
 | Limit | Value |
 |---|---|
 | Storage per recipient root at an inbox | 50 MB |
+| Storage at an inbox for everyone it serves | 200 MB |
+| People one device hosts an inbox for, besides itself | 16 |
 | Envelope lifetime | 30 days |
 | Deposits per sender device per hour | 60 |
 | Key packages per device at an inbox | 5 |
@@ -202,5 +308,6 @@ when linking.
 
 ## Open questions
 
-- Inbox trust. A user's inbox sees envelope sizes, timing and the recipient root. It does not see
-  plaintext. The design accepts that leak for offline delivery.
+- Inbox trust. An inbox sees the sender of each envelope, its size and timing, and the recipient root
+  (see "What an inbox learns"). It does not see plaintext. The design accepts that leak for offline
+  delivery. A sealed-sender envelope, which would hide the sending device from the inbox, is not built.

@@ -180,6 +180,12 @@ pub fn received_layer(engine: &crate::Engine, sender_root: &str, screen: bool) -
     engine.received_layer_now(sender_root, screen)
 }
 
+/// On the forwarder `engine`: the layer it plans to send `viewer_root` of `sender_root`'s camera (or
+/// screen) now. `None` while that stream is paused for the viewer, or has no layer table.
+pub async fn planned_layer(engine: &crate::Engine, viewer_root: &str, sender_root: &str, screen: bool) -> Option<u8> {
+    engine.planned_layer_now(viewer_root, sender_root, screen).await
+}
+
 /// On the forwarder `engine`: the root id of the active speaker, whom a tight budget keeps sharp.
 pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
     engine.active_speaker_now().await
@@ -283,4 +289,17 @@ pub async fn push_files_keys(
 /// The newest files-key generation `engine` would seal under, if it holds one.
 pub fn newest_files_generation(engine: &crate::Engine, community: dissent_identity::CommunityId) -> Option<u64> {
     engine.with_tracker(community, |l| l.newest().map(|(g, _)| g))
+}
+
+/// The direct IP addresses `engine` holds for `device`, from the signed addresses it has learned. A
+/// device that hides its IP should have none.
+pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::DeviceId) -> usize {
+    engine
+        .read()
+        .addresses
+        .all()
+        .into_iter()
+        .filter(|stored| stored.addr.id == device)
+        .map(|stored| stored.addr.direct.len())
+        .sum()
 }

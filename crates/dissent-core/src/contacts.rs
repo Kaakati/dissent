@@ -18,7 +18,7 @@ use crate::communities::{public_addr, DHT_LOOKUP_WAIT};
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
 use crate::rpc::{decode, encode, Request, Response};
-use crate::store::{read_bin, write_bin, Paths};
+use crate::store::Paths;
 use crate::groups::dm_conv_id;
 use crate::views::{EngineEvent, UserView};
 use crate::world::World;
@@ -75,6 +75,14 @@ pub enum ContactMsg {
         devices: Vec<DeviceId>,
         ts: u64,
     },
+    /// The sending device started (`on`) or stopped holding the recipient's offline mail. Sent to the
+    /// person it hosts, so they learn of it without looking. Appended; an older device refuses it, and the
+    /// notice leaves the outbox. See `inbox::host_inbox_for`.
+    InboxHost {
+        from_card: ContactCard,
+        on: bool,
+        ts: u64,
+    },
 }
 
 /// A contact message with the sender device's signature over it.
@@ -100,7 +108,9 @@ impl SignedContact {
     pub fn card(&self) -> &ContactCard {
         match &self.msg {
             ContactMsg::Request(r) => &r.from_card,
-            ContactMsg::Accept { from_card, .. } | ContactMsg::Inboxes { from_card, .. } => from_card,
+            ContactMsg::Accept { from_card, .. }
+            | ContactMsg::Inboxes { from_card, .. }
+            | ContactMsg::InboxHost { from_card, .. } => from_card,
         }
     }
 
@@ -160,16 +170,16 @@ pub(crate) struct ContactBook {
 
 /// Whether "Let people add me by address" is off. Missing or unreadable means on.
 fn hide_address(paths: &Paths) -> bool {
-    read_bin::<bool>(&paths.address_privacy()).ok().flatten().unwrap_or_default()
+    paths.read_bin::<bool>(&paths.address_privacy()).ok().flatten().unwrap_or_default()
 }
 
 impl ContactBook {
     pub fn load(paths: &Paths) -> Result<Self> {
-        Ok(read_bin(&paths.contact_book())?.unwrap_or_default())
+        Ok(paths.read_bin(&paths.contact_book())?.unwrap_or_default())
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        write_bin(&paths.contact_book(), self)
+        paths.write_bin(&paths.contact_book(), self)
     }
 
     /// Replaces any request we already have queued for `to`.
@@ -399,7 +409,7 @@ impl Engine {
             .iter()
             .filter_map(|o| match &o.msg.msg {
                 ContactMsg::Request(r) => Some(view(&w, &o.to, r.note.clone(), r.ts, o.delivered)),
-                ContactMsg::Accept { .. } | ContactMsg::Inboxes { .. } => None,
+                ContactMsg::Accept { .. } | ContactMsg::Inboxes { .. } | ContactMsg::InboxHost { .. } => None,
             })
             .collect();
         out.sort_by_key(|v| v.ms);
@@ -473,7 +483,7 @@ impl Engine {
     pub fn set_address_discovery(&self, on: bool) -> Result<()> {
         {
             let guard = self.write();
-            write_bin(&guard.paths.address_privacy(), &!on)?;
+            guard.paths.write_bin(&guard.paths.address_privacy(), &!on)?;
         }
         self.spawn_publish_user_record();
         Ok(())
@@ -660,8 +670,31 @@ impl Engine {
         }
     }
 
+    /// Queues a notice to `to` that this device started (`on`) or stopped holding their mail, replacing a
+    /// notice still waiting. Their outbox delivers it.
+    pub(crate) fn queue_inbox_host_notice(&self, w: &mut World, to: RootId, on: bool) {
+        let Ok(mine) = self.my_card(w) else {
+            return;
+        };
+        let msg = ContactMsg::InboxHost { from_card: mine, on, ts: now_ms() };
+        let Ok(signed) = SignedContact::sign(msg, &self.inner.identity.device) else {
+            return;
+        };
+        w.contact_book
+            .outbox
+            .retain(|o| !(o.to == to && matches!(o.msg.msg, ContactMsg::InboxHost { .. })));
+        w.contact_book.outbox.push(Outbound {
+            to,
+            msg: signed,
+            delivered: false,
+        });
+        if let Err(e) = w.contact_book.save(&w.paths) {
+            warn!(error = %e, "could not save an inbox notice");
+        }
+    }
+
     /// Retries contact messages in the background. See `Engine::kick_conv_flush`.
-    fn kick_contact_outbox(&self) {
+    pub(crate) fn kick_contact_outbox(&self) {
         let engine = Engine {
             inner: self.inner.clone(),
         };
@@ -669,11 +702,12 @@ impl Engine {
     }
 
     /// The inbox devices a contact message announces.
-fn announced_inboxes(msg: &ContactMsg) -> Vec<DeviceId> {
+fn announced_inboxes(msg: &ContactMsg) -> Option<Vec<DeviceId>> {
     match msg {
-        ContactMsg::Request(r) => r.inboxes.clone(),
-        ContactMsg::Accept { inboxes, .. } => inboxes.clone(),
-        ContactMsg::Inboxes { devices, .. } => devices.clone(),
+        ContactMsg::Request(r) => Some(r.inboxes.clone()),
+        ContactMsg::Accept { inboxes, .. } => Some(inboxes.clone()),
+        ContactMsg::Inboxes { devices, .. } => Some(devices.clone()),
+        ContactMsg::InboxHost { .. } => None,
     }
 }
 
@@ -687,9 +721,9 @@ fn announced_inboxes(msg: &ContactMsg) -> Vec<DeviceId> {
         let w = guard;
         let card = signed.card().clone();
         let from = card.cert.root;
-        w.contact_book
-            .known_inboxes
-            .insert(from, Self::announced_inboxes(&signed.msg));
+        if let Some(inboxes) = Self::announced_inboxes(&signed.msg) {
+            w.contact_book.known_inboxes.insert(from, inboxes);
+        }
         w.directory.learn(&card.cert);
         for peer in card.peers.iter().filter_map(|p| p.parse::<PeerAddr>().ok()) {
             self.learn_address(w, peer);
@@ -704,6 +738,17 @@ fn announced_inboxes(msg: &ContactMsg) -> Vec<DeviceId> {
                 }
             }
             ContactMsg::Inboxes { .. } => {}
+            ContactMsg::InboxHost { on, ts, .. } => {
+                if w.inbox.record_notice(from, card.cert.device, on, ts) {
+                    w.inbox.save(&w.paths)?;
+                    events.push(EngineEvent::InboxHostChanged {
+                        root_id: from.to_string(),
+                        display_name: w.display_name(&from),
+                        device_id: card.cert.device.to_string(),
+                        on,
+                    });
+                }
+            }
             ContactMsg::Request(request) => {
                 if w.is_contact(&from) || w.contact_book.declined.contains(&from) {
                     // Already settled, or declined. Ack without storing, so the sender stops.
@@ -948,7 +993,7 @@ mod layout_tests {
 
     fn scratch_paths(name: &str) -> Paths {
         let root = std::env::temp_dir().join(format!("dissent-{name}-{}", now_ms()));
-        Paths::new(root)
+        Paths::for_test(root)
     }
 
     #[test]
@@ -966,7 +1011,7 @@ mod layout_tests {
             blocked: BTreeSet::from([blocked]),
             last_refusal: BTreeMap::new(),
         };
-        write_bin(&paths.contact_book(), &old).unwrap();
+        crate::store::write_bin_plain(&paths.contact_book(), &old).unwrap();
         let book = ContactBook::load(&paths).expect("an older contact book loads");
         assert_eq!(book.policy, DmPolicy::ContactsOnly);
         assert!(book.blocked.contains(&blocked));
@@ -977,7 +1022,7 @@ mod layout_tests {
     fn the_address_setting_defaults_to_on_and_is_stored_apart() {
         let paths = scratch_paths("address-privacy");
         assert!(!hide_address(&paths), "missing means discoverable");
-        write_bin(&paths.address_privacy(), &true).unwrap();
+        crate::store::write_bin_plain(&paths.address_privacy(), &true).unwrap();
         assert!(hide_address(&paths));
         assert!(!paths.contact_book().exists(), "the contact book is not touched by the setting");
         let _ = std::fs::remove_dir_all(paths.address_privacy().parent().unwrap());

@@ -7,6 +7,7 @@ import { Block, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settin
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api } from '@/lib/api';
+import { confirm } from '@/lib/dialog';
 import { formatDials } from '@/lib/dials';
 import { toast } from '@/lib/toasts';
 import { useShell } from '@/lib/store';
@@ -195,6 +196,16 @@ export function NetworkPage() {
         <NetTable />
       </Block>
 
+      <HideIpBlock key={`hide-${version}`} settings={settings} saving={saving || !loaded} onSave={async (next) => {
+        setSaving(true);
+        const saved = await setNetworkSettings(next);
+        setSaving(false);
+        if (saved) {
+          setSettings(saved);
+          setVersion((v) => v + 1);
+        }
+      }} />
+
       <Block title="Relays">
         <CheckRow>
           <input
@@ -290,6 +301,59 @@ export function NetworkPage() {
         </Hint>
       </Block>
     </div>
+  );
+}
+
+// Hide my IP address: every connection goes through a relay, so people you talk to see the relay's address, never yours. It costs
+// latency, and the relay sees your IP and the traffic's metadata (who you connect to, when, how much), never its content. It applies
+// when the connection restarts, so it asks first and saves at once. While on, the status names the relay that carries the traffic.
+function HideIpBlock({ settings, saving, onSave }: { settings: NetworkSettings; saving: boolean; onSave: (next: NetworkSettings) => Promise<void> }) {
+  const on = Boolean(settings.hide_ip);
+  const [home, setHome] = useState<string | null>(null);
+  useEffect(() => {
+    if (!on) return;
+    let live = true;
+    const read = () => api.relayStatus().then((r) => live && setHome(r.home ?? null), () => {});
+    void read();
+    const timer = setInterval(read, 5000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [on]);
+  const change = async (next: boolean) => {
+    const ok = await confirm({
+      message: next
+        ? 'Hide your IP address? Everything will go through a relay. Calls and file transfers get slower, and the relay sees your IP address and when and with whom you connect, but not what you send. Your connection restarts now, which ends a call you are in.'
+        : 'Show your IP address again? Direct connections come back, which are faster. Your connection restarts now, which ends a call you are in.',
+      okLabel: next ? 'Hide my IP address' : 'Show my IP address',
+    });
+    if (ok) await onSave({ ...settings, hide_ip: next });
+  };
+  return (
+    <Block title="Privacy">
+      <CheckRow>
+        <input
+          type="checkbox"
+          aria-label="Hide my IP address"
+          checked={on}
+          disabled={saving}
+          onChange={(e) => void change(e.target.checked)}
+          className={CHECK_CLASS}
+        />
+        <span>Hide my IP address</span>
+      </CheckRow>
+      <Hint>
+        Everything goes through a relay, so the people you talk to never see your IP address. The relay sees it, and when and with whom you
+        connect, but not what you send. Calls and transfers are slower, finding people on the local network is off, and short invite and address
+        links that need the DHT do not open; use full links instead.
+      </Hint>
+      {on ? (
+        <Hint role="status" data-hide-ip-status>
+          {home ? `Connected through relay ${home}. Peers can’t see your IP address; the relay can.` : 'Connecting through a relay…'}
+        </Hint>
+      ) : null}
+    </Block>
   );
 }
 

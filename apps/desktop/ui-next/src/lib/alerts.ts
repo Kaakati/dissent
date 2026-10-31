@@ -7,7 +7,7 @@ import { isMuted } from './mutes';
 import { showOsNotification } from './osnotify';
 import { playNotification } from './sounds';
 import { convKey, useShell } from './store';
-import { openedTarget } from './target';
+import { viewing } from './viewing';
 import type { ChannelMessage, DirectSummary, GroupSummary, Id } from './types';
 
 interface AlertMessage {
@@ -35,13 +35,6 @@ function shouldAlert(msg: AlertMessage): boolean {
   return s.conversations.some((c) => convKey(c) === msg.key); // a closed conversation is no longer listed
 }
 
-// A new message in the conversation the user is reading, in a focused window, needs no sound. The desktop notification
-// waits for the window to be minimized or unfocused (showOsNotification checks that).
-function reading(key: string): boolean {
-  const s = useShell.getState();
-  return openedTarget(s)?.key === key && !s.page && document.hasFocus();
-}
-
 // The messages already alerted on, oldest first. An event can name a message that already alerted (an edit, a
 // reaction, or the same message announced again), and that must not sound or notify twice. Bounded, so the oldest
 // id is forgotten past NOTIFIED_MAX.
@@ -59,7 +52,9 @@ function firstAlert(key: string, id: Id): boolean {
 
 function alertFor(msg: AlertMessage): void {
   if (!shouldAlert(msg) || !firstAlert(msg.key, msg.id)) return;
-  if (!reading(msg.key)) playNotification();
+  // A message the user watches arrive (see viewing.ts) needs no sound. The desktop notification shows only while the
+  // window is minimized or unfocused (showOsNotification checks that), so it does not show for one either.
+  if (!viewing(msg.key)) playNotification();
   void showOsNotification(msg);
 }
 

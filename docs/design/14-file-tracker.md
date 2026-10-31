@@ -191,7 +191,7 @@ blob hash. Two members who add the same file, even at the same moment, make the 
 - A new generation starts when the community secret rotates. The rotating admin makes it and offers it to the
   persons who remain (`Request::PushFilesKeys`), as the author of a `ChannelAccess` offers channel keys. Until a
   device holds the newest generation it lists under the newest it has.
-- Kept in `files_keys.bin` in the community's folder, sealed with the vault.
+- Kept in `files_keys.bin` in the community's folder, sealed like every store file (`at_rest`).
 - A category visible only to some members (artboard: "Visible to Testers") has its own key per generation
   (`tracker::restricted`). Its spec, its listings' fields and its files are sealed and encrypted under that key, and
   its listings carry no blob in clear (replay refuses one that does). Category keys share the ring with the files
@@ -276,6 +276,12 @@ Not events, and not gossip: each device asks (built in phase 3, `tracker::swarm`
   Listings add `Scope::Category(c, cat)` through `Engine::add_blob_scope`, checked with `may_see_files` (storage
   members only for a category everyone sees). Linked files are served through the same gate: `FilesProtocol` passes every GET, GET_MANY and observe through the gate's `EventSender`.
 
+## Photo details
+
+Attachments lose identifying details by default (`scrub`). A listing never does: its fingerprint names the file on
+disk, and a linked file is served in place, so a scrubbed copy would not match and could not be seeded from the folder.
+The Add files dialog says so; a member who wants a photo cleaned sends it as an attachment or cleans it first.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).
@@ -331,7 +337,7 @@ colluding members within the per-receipt bounds; the server-key leakage above.
 Every type below is postcard, so its field order and variant order are its wire format. They freeze at the merge.
 Until then they may change, and this list is reviewed at the merge.
 
-### `Payload` variants, appended after `StorageGrant` (carried, so a released client shows them as locked)
+### `Payload` variants, appended after `ChannelLayout` (carried, so a released client shows them as locked)
 
 | Variant | Fields | Why each field is final |
 | --- | --- | --- |
@@ -366,7 +372,7 @@ ciphertext: Vec<u8> }` leaves room for any body format inside.
 `FileType` is appended to, never reordered. A body that does not decode is shown as locked, so a later body format
 needs a new kind byte in the associated data (`BodyKind`), not a changed struct.
 
-### RPCs, appended after `StorageGrantAsk` / `RotationSupport`
+### RPCs, appended after `InboxProbe`
 
 | Request → Response | Fields | Why each field is final |
 | --- | --- | --- |
@@ -377,7 +383,7 @@ needs a new kind byte in the associated data (`BodyKind`), not a changed struct.
 | `CategoryKeys { community, category }` → `CategoryKeys(Vec<(u64, [u8; 32])>)` | A restricted category's generations. | A reader gets them all, as with the files key. |
 | `PushCategoryKeys { community, category, pairs }` → `Ack` | A new generation for the readers. | The same pairs as `CategoryKeys`. |
 
-### Local files (this device only, sealed with the vault)
+### Local files (this device only, sealed like every store file, see `at_rest`)
 
 `files_keys.bin`: `Vec<(generation, key, Option<CategoryId>)>`. `tracker.bin`: `LocalBook { receipt_secret, folders,
 auto_import, seeds: BTreeMap<blob, SeedRecord { listing, path, limit, paused, stopped, linked, modified_ms, uploaded,

@@ -238,6 +238,11 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .chip-file.danger { border-color: var(--danger-text); background: var(--danger-tint); }
 .chip-file.danger > svg, .chip-file.danger .chip-size { color: var(--danger-text); }
 .chip-file .icon-btn { width: var(--hit); height: var(--hit); }
+/* A staged file with its "Remove details" switch under it. */
+.staged-file { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.scrub-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 0 var(--s-1); color: var(--muted-foreground); font: var(--fs-meta) / var(--lh-meta) var(--font); cursor: pointer; user-select: none; }
+.scrub-toggle input { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+.scrub-toggle.on { color: var(--text); }
 .attachments { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-2); margin-top: 6px; max-width: 100%; }
 .att-image { position: relative; width: fit-content; max-width: 100%; }
 .att-image-btn { display: inline-block; padding: 0; border: 0; border-radius: var(--r-2); background: var(--rail); overflow: hidden; vertical-align: top; cursor: pointer; }

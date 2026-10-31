@@ -13,15 +13,39 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-/// Locations of everything under the data directory.
-#[derive(Clone, Debug)]
+/// Locations of everything under the data directory, and the key its files are sealed under (`at_rest`).
+#[derive(Clone)]
 pub(crate) struct Paths {
     root: PathBuf,
+    seal: std::sync::Arc<Vault>,
+}
+
+impl std::fmt::Debug for Paths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Paths").field("root", &self.root).finish_non_exhaustive()
+    }
 }
 
 impl Paths {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    /// The profile at `root`, whose files are sealed under a subkey of `vault`.
+    pub fn new(root: PathBuf, vault: std::sync::Arc<Vault>) -> Self {
+        let seal = std::sync::Arc::new(vault.subkey(crate::at_rest::STORE_PURPOSE));
+        Self { root, seal }
+    }
+    /// A profile at `root` sealed under a fixed test key.
+    #[cfg(test)]
+    pub(crate) fn for_test(root: PathBuf) -> Self {
+        Self::new(root, std::sync::Arc::new(Vault::from_passphrase("test paths", &[1u8; 16]).expect("vault")))
+    }
+    /// The profile at `root` whose files are sealed under `vault`'s store subkey, for a copy that re-seals them.
+    pub(crate) fn sealed_by(root: PathBuf, vault: &Vault) -> Self {
+        Self { root, seal: std::sync::Arc::new(vault.subkey(crate::at_rest::STORE_PURPOSE)) }
+    }
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+    pub(crate) fn store_seal(&self) -> &Vault {
+        &self.seal
     }
     pub fn profile(&self) -> PathBuf {
         self.root.join("profile.bin")
@@ -57,6 +81,14 @@ impl Paths {
     /// Inbox service state.
     pub fn inbox(&self) -> PathBuf {
         self.root.join("inbox.bin")
+    }
+    /// The other people this device hosts an inbox for.
+    pub fn inbox_hosts(&self) -> PathBuf {
+        self.root.join("inbox_hosts.bin")
+    }
+    /// Notices from devices that started or stopped holding our offline mail.
+    pub fn inbox_notices(&self) -> PathBuf {
+        self.root.join("inbox_notices.bin")
     }
     /// Conversations: kinds, members, queued packets and pending text.
     pub fn conv_book(&self) -> PathBuf {
@@ -168,6 +200,14 @@ impl Paths {
         self.dms_dir().join("outbox.bin")
     }
     /// The root's guardian list, signed by the root key.
+    /// The recovery this device started, while it runs. See `recovery_flow`.
+    pub fn recovery(&self) -> PathBuf {
+        self.root.join("recovery.bin")
+    }
+    /// The guardian lists that name us, by owner. See `recovery_flow`.
+    pub fn guarded(&self) -> PathBuf {
+        self.root.join("guarded.bin")
+    }
     pub fn guardians(&self) -> PathBuf {
         self.root.join("guardians.bin")
     }
@@ -200,12 +240,13 @@ fn encoding(e: postcard::Error) -> CoreError {
 }
 
 /// Appends one record to a log, creating the file and its directory when needed.
-pub(crate) fn append_record<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    append_records(path, std::slice::from_ref(value))
+#[cfg(test)]
+pub(crate) fn append_record_plain<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    append_records_plain(path, std::slice::from_ref(value))
 }
 
 /// Appends several records with one write and one sync. Does nothing for an empty slice.
-pub(crate) fn append_records<T: Serialize>(path: &Path, values: &[T]) -> Result<()> {
+pub(crate) fn append_records_plain<T: Serialize>(path: &Path, values: &[T]) -> Result<()> {
     if values.is_empty() {
         return Ok(());
     }
@@ -286,16 +327,6 @@ pub(crate) async fn log_flush_loop(weak: std::sync::Weak<crate::engine::Inner>) 
     }
 }
 
-/// Replaces every record of a log with `values`, atomically. Used when a stored record must lose
-/// its content, such as a deleted message's text.
-pub(crate) fn rewrite_records<T: Serialize>(path: &Path, values: &[T]) -> Result<()> {
-    let framed = frame_records(values)?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    write_bytes_atomic(path, &framed)
-}
-
 /// The length-prefixed bytes of each record, in order.
 fn frame_records<T: Serialize>(values: &[T]) -> Result<Vec<u8>> {
     let mut framed = Vec::new();
@@ -312,7 +343,7 @@ fn frame_records<T: Serialize>(values: &[T]) -> Result<Vec<u8>> {
 /// Reads every record of a log that this build can decode. A record it cannot decode, as one a newer
 /// build wrote, is logged and skipped, and its bytes stay in the file. A partly written tail is cut
 /// as in `read_records`.
-pub(crate) fn read_records_skipping<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+pub(crate) fn read_records_skipping_plain<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     let frames = read_frames(path)?;
     Ok(frames
         .iter()
@@ -328,7 +359,7 @@ pub(crate) fn read_records_skipping<T: DeserializeOwned>(path: &Path) -> Result<
 
 /// Reads every complete record from a log. A partly written tail is ignored and cut
 /// from the file, so later appends stay aligned with the record framing.
-pub(crate) fn read_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
+pub(crate) fn read_records_plain<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     read_frames(path)?
         .iter()
         .map(|frame| postcard::from_bytes(frame).map_err(encoding))
@@ -361,7 +392,8 @@ fn read_frames(path: &Path) -> Result<Vec<Vec<u8>>> {
 }
 
 /// Serialises `value` and replaces the file at `path` atomically.
-pub(crate) fn write_bin<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+#[cfg(test)]
+pub(crate) fn write_bin_plain<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = postcard::to_allocvec(value).map_err(encoding)?;
     write_bytes_atomic(path, &bytes)
 }
@@ -407,7 +439,8 @@ fn holds_a_file(dir: &Path) -> bool {
     })
 }
 
-pub(crate) fn read_bin<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+#[cfg(test)]
+pub(crate) fn read_bin_plain<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     match fs::read(path) {
         Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(encoding),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -544,7 +577,7 @@ pub(crate) fn migrate_plain_log<T: Serialize + DeserializeOwned>(
     if !plain.exists() {
         return Ok(());
     }
-    let records: Vec<T> = read_records(plain)?;
+    let records: Vec<T> = read_records_plain(plain)?;
     append_sealed_records(sealed, vault, &records)?;
     fs::remove_file(plain)?;
     Ok(())
@@ -683,7 +716,7 @@ mod tests {
         let dir = scratch("migrate-log");
         let plain = dir.join("content.log");
         let sealed = dir.join("content.sealed");
-        append_records(&plain, &[("old text".to_string(), 7u32)]).unwrap();
+        append_records_plain(&plain, &[("old text".to_string(), 7u32)]).unwrap();
         let vault = Vault::ephemeral_for_tests();
         let key = content_vault(&vault, &CommunityId([3u8; 32]));
 
@@ -719,11 +752,11 @@ mod tests {
         let dir = scratch("roundtrip");
         let log = dir.join("events.log");
         for s in ["one", "two", "three"] {
-            append_record(&log, &s.to_string()).unwrap();
+            append_record_plain(&log, &s.to_string()).unwrap();
         }
-        let back: Vec<String> = read_records(&log).unwrap();
+        let back: Vec<String> = read_records_plain(&log).unwrap();
         assert_eq!(back, ["one", "two", "three"]);
-        let missing: Vec<String> = read_records(&dir.join("nope.log")).unwrap();
+        let missing: Vec<String> = read_records_plain(&dir.join("nope.log")).unwrap();
         assert!(missing.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -732,7 +765,7 @@ mod tests {
     fn torn_tail_is_ignored_and_cut() {
         let dir = scratch("torn");
         let log = dir.join("events.log");
-        append_record(&log, &"kept".to_string()).unwrap();
+        append_record_plain(&log, &"kept".to_string()).unwrap();
         let good_len = fs::metadata(&log).unwrap().len();
 
         // A length header promising 20 bytes, with only 3 of them written.
@@ -740,13 +773,13 @@ mod tests {
         f.write_all(&[0, 0, 0, 20, 1, 2, 3]).unwrap();
         drop(f);
 
-        let back: Vec<String> = read_records(&log).unwrap();
+        let back: Vec<String> = read_records_plain(&log).unwrap();
         assert_eq!(back, ["kept"]);
         assert_eq!(fs::metadata(&log).unwrap().len(), good_len);
 
         // Appends after the repair are still readable.
-        append_record(&log, &"after".to_string()).unwrap();
-        let back: Vec<String> = read_records(&log).unwrap();
+        append_record_plain(&log, &"after".to_string()).unwrap();
+        let back: Vec<String> = read_records_plain(&log).unwrap();
         assert_eq!(back, ["kept", "after"]);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -755,11 +788,11 @@ mod tests {
     fn partial_length_header_is_ignored() {
         let dir = scratch("header");
         let log = dir.join("events.log");
-        append_record(&log, &7u32).unwrap();
+        append_record_plain(&log, &7u32).unwrap();
         let mut f = OpenOptions::new().append(true).open(&log).unwrap();
         f.write_all(&[0, 0]).unwrap();
         drop(f);
-        let back: Vec<u32> = read_records(&log).unwrap();
+        let back: Vec<u32> = read_records_plain(&log).unwrap();
         assert_eq!(back, [7]);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -768,11 +801,11 @@ mod tests {
     fn bin_replace_is_atomic_and_reads_back() {
         let dir = scratch("bin");
         let path = dir.join("profile.bin");
-        assert_eq!(read_bin::<String>(&path).unwrap(), None);
-        write_bin(&path, &"first".to_string()).unwrap();
-        write_bin(&path, &"second".to_string()).unwrap();
+        assert_eq!(read_bin_plain::<String>(&path).unwrap(), None);
+        write_bin_plain(&path, &"first".to_string()).unwrap();
+        write_bin_plain(&path, &"second".to_string()).unwrap();
         assert_eq!(
-            read_bin::<String>(&path).unwrap().as_deref(),
+            read_bin_plain::<String>(&path).unwrap().as_deref(),
             Some("second")
         );
         assert!(!dir.join("profile.tmp").exists());
@@ -802,12 +835,12 @@ mod skipping_tests {
         bytes.extend(frame(&[3, 4]));
         fs::write(&path, &bytes).unwrap();
 
-        let good: Vec<(u8, u8)> = read_records_skipping(&path).unwrap();
+        let good: Vec<(u8, u8)> = read_records_skipping_plain(&path).unwrap();
         assert_eq!(good, vec![(1, 2), (3, 4)]);
         // The skipped record is still in the file, so a later version can read it.
         assert_eq!(fs::read(&path).unwrap(), bytes);
         // The strict reader still refuses the file, as before.
-        assert!(read_records::<(u8, u8)>(&path).is_err());
+        assert!(read_records_plain::<(u8, u8)>(&path).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }
@@ -833,11 +866,11 @@ mod group_commit_tests {
         // A crash partway through the last record: its last bytes never reached the disk.
         let len = fs::metadata(&path).unwrap().len();
         OpenOptions::new().write(true).open(&path).unwrap().set_len(len - 3).unwrap();
-        assert_eq!(read_records::<String>(&path).unwrap(), vec!["one".to_string()]);
+        assert_eq!(read_records_plain::<String>(&path).unwrap(), vec!["one".to_string()]);
         // The next append lands after the cut, aligned with the framing.
         append_records_deferred(&path, &["three".to_string()], &dirty).unwrap();
         dirty.flush();
-        assert_eq!(read_records::<String>(&path).unwrap(), vec!["one".to_string(), "three".to_string()]);
+        assert_eq!(read_records_plain::<String>(&path).unwrap(), vec!["one".to_string(), "three".to_string()]);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -847,7 +880,7 @@ mod group_commit_tests {
         let path = d.join("events.log");
         let dirty = DirtyLogs::default();
         append_records_deferred(&path, &[7u32, 8u32], &dirty).unwrap();
-        assert_eq!(read_records::<u32>(&path).unwrap(), vec![7, 8]);
+        assert_eq!(read_records_plain::<u32>(&path).unwrap(), vec![7, 8]);
         dirty.flush();
         let _ = fs::remove_dir_all(&d);
     }
@@ -862,7 +895,7 @@ mod group_commit_tests {
 
         let start = std::time::Instant::now();
         for r in &records {
-            append_records(&d.join("synced.log"), std::slice::from_ref(r)).unwrap();
+            append_records_plain(&d.join("synced.log"), std::slice::from_ref(r)).unwrap();
         }
         let synced = start.elapsed();
 
@@ -880,7 +913,7 @@ mod group_commit_tests {
         let grouped = start.elapsed();
 
         println!("6000 appends: synced each {synced:?}, grouped {grouped:?}");
-        assert_eq!(read_records::<String>(&d.join("grouped.log")).unwrap().len(), 6000);
+        assert_eq!(read_records_plain::<String>(&d.join("grouped.log")).unwrap().len(), 6000);
         let _ = fs::remove_dir_all(&d);
     }
 }

@@ -14,6 +14,7 @@ interface ShellPrefs {
   notificationsMuted: boolean;
   convertEmoticons: boolean; // the composer turns :D and the like into emoji
   stripPhotoMetadata: boolean; // photos and videos go out without their location and camera details
+  dnsPublicFallback: boolean; // a website handle check the system resolver cannot answer goes to Cloudflare too
   apply: (s: ShellSettings) => void;
   load: () => Promise<void>;
 }
@@ -26,6 +27,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   notificationsMuted: false,
   convertEmoticons: true,
   stripPhotoMetadata: true,
+  dnsPublicFallback: false,
   apply: (s) =>
     set({
       keepRunning: s.keep_running,
@@ -35,6 +37,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
       notificationsMuted: s.notifications_muted,
       convertEmoticons: s.emoticons_as_text !== true,
       stripPhotoMetadata: s.keep_photo_metadata !== true,
+      dnsPublicFallback: s.dns_public_fallback === true,
     }),
   load: async () => {
     try {
@@ -45,7 +48,7 @@ export const useShellPrefs = create<ShellPrefs>()((set) => ({
   },
 }));
 
-type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted' | 'emoticons_as_text' | 'keep_photo_metadata'>>;
+type Change = Partial<Pick<ShellSettings, 'keep_running' | 'start_at_login' | 'notifications_muted' | 'emoticons_as_text' | 'keep_photo_metadata' | 'dns_public_fallback'>>;
 
 // Saves one change with the rest of the settings. The backend answers with what it saved, which is what the page shows.
 export async function setShellPrefs(change: Change): Promise<void> {
@@ -56,6 +59,7 @@ export async function setShellPrefs(change: Change): Promise<void> {
     notifications_muted: current.notificationsMuted,
     emoticons_as_text: !current.convertEmoticons,
     keep_photo_metadata: !current.stripPhotoMetadata,
+    dns_public_fallback: current.dnsPublicFallback,
     ...change,
   };
   try {

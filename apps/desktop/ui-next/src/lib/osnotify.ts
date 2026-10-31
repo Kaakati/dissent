@@ -5,21 +5,23 @@ import { markdownPlain } from './markdown';
 import { useShellPrefs } from './shell-prefs';
 import { useSoundSettings } from './sound-settings';
 import { currentWindow } from './tauri';
+import { pageFocused } from './viewing';
 
 const BODY_MAX = 140; // characters
 const GAP_MS = 5000; // one notification per conversation every 5 s: a burst shows its first message only
 const lastShown = new Map<string, number>(); // conversation key -> time of the last notification
 
-// The window counts as in the background when it is minimized or lacks focus. Without the window API (the browser
-// preview), focus is the document's.
+// The window counts as in the background when it is minimized or hidden, or neither it nor the page has focus. The page's
+// focus counts on its own: on Windows the native window reports no focus while the webview inside it has it, which used
+// to notify (and badge the taskbar) for messages the user was reading.
 async function windowInBackground(): Promise<boolean> {
   const win = currentWindow();
-  if (!win) return !document.hasFocus();
+  if (!win) return !pageFocused();
   try {
     const [minimized, focused] = await Promise.all([win.isMinimized(), win.isFocused()]);
-    return minimized || !focused;
+    return minimized || document.visibilityState === 'hidden' || !(focused || pageFocused());
   } catch {
-    return !document.hasFocus();
+    return !pageFocused();
   }
 }
 

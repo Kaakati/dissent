@@ -43,6 +43,10 @@ pub(crate) struct LayerSignals {
     pub busy: bool,
     /// The layer of the last frame received of each (sender id, screen) stream.
     pub received: BTreeMap<(u64, bool), u8>,
+    /// On a forwarder: the paused streams last sent to each viewer, by viewer sender id.
+    pub told_paused: BTreeMap<u64, Vec<(u64, bool)>>,
+    /// The streams this device's forwarder pauses for it, as (sender id, screen).
+    pub paused_here: Vec<(u64, bool)>,
 }
 
 impl Engine {
@@ -78,6 +82,7 @@ impl Engine {
         // A volunteer's relay has no window and no capture: it only asks its senders for layers.
         if forwarding.is_volunteer_relay() {
             self.tell_wanted(room, me).await;
+            self.tell_paused(room, me).await;
             return;
         }
         // A capture turned on after the forwarder asked starts on one stream. It takes the mask
@@ -99,6 +104,7 @@ impl Engine {
         }
         if forwarding.role() != Role::Leaf {
             self.tell_wanted(room, me).await;
+            self.tell_paused(room, me).await;
         }
     }
 
@@ -202,6 +208,45 @@ impl Engine {
             }
             room.with_layers(|l| {
                 l.told_wanted.insert((sid, screen), mask);
+            });
+        }
+    }
+
+    /// On a forwarder: tells each viewer which streams it is not sent now, because its budget cannot
+    /// fit them (see `Sfu::paused_for`), when that set changed. Only a viewer that announced
+    /// `FEATURE_PAUSED_VIDEO` is told. A released one keeps the last frame it got, as before.
+    async fn tell_paused(&self, room: &Arc<Room>, me: u64) {
+        let sets: Vec<(u64, Vec<(u64, bool)>)> = {
+            let Some(forwarding) = room.forwarding() else {
+                return;
+            };
+            let sfu = forwarding.sfu().lock().await;
+            let Some(sfu) = sfu.as_ref() else {
+                return;
+            };
+            sfu.downlinks().into_iter().map(|viewer| (viewer, sfu.paused_for(viewer))).collect()
+        };
+        for (viewer, streams) in sets {
+            let changed = room.with_layers(|l| l.told_paused.get(&viewer).map_or(!streams.is_empty(), |told| *told != streams));
+            if !changed {
+                continue;
+            }
+            if viewer == me {
+                room.with_layers(|l| l.paused_here = streams.clone());
+            } else {
+                if !room.peer_supports(viewer, crate::calls::FEATURE_PAUSED_VIDEO) {
+                    continue;
+                }
+                let Some(device) = room.signal_device(viewer) else {
+                    continue;
+                };
+                let msg = CallMsg::PausedVideo { room: room.id(), streams: streams.clone() };
+                if !self.send_layer_msg(device, msg).await {
+                    continue;
+                }
+            }
+            room.with_layers(|l| {
+                l.told_paused.insert(viewer, streams);
             });
         }
     }
@@ -360,6 +405,32 @@ impl Engine {
         } else {
             CallReply::Refused("this device does not forward this call".into())
         }
+    }
+
+    /// Answers `PausedVideo` from `from`, which must be this device's forwarder.
+    pub(crate) fn on_paused_video(&self, from: DeviceId, id: RoomId, streams: Vec<(u64, bool)>) -> CallReply {
+        let Some(room) = self.current_room(&id) else {
+            return CallReply::Refused("not in this call".into());
+        };
+        if room.forwarding().is_none() {
+            return CallReply::Refused("this call is not forwarded".into());
+        }
+        // The forwarder may be a volunteer, which is not live.
+        if !room.is_forwarder_device(&from) {
+            return CallReply::Refused("only the forwarder pauses video".into());
+        }
+        room.with_layers(|l| l.paused_here = streams);
+        self.emit(crate::views::EngineEvent::CallUpdated);
+        CallReply::Ack
+    }
+
+    /// For tests: on the forwarder, the layer `viewer_root` is planned of `sender_root`'s camera
+    /// or screen now. `None` when that stream is paused for the viewer, or has no layers.
+    pub(crate) async fn planned_layer_now(&self, viewer_root: &str, sender_root: &str, screen: bool) -> Option<u8> {
+        let room = crate::calls::lock(&self.inner.calls.current).clone()?;
+        let (viewer, sender) = (room.sid_of_root(viewer_root)?, room.sid_of_root(sender_root)?);
+        let sfu = room.forwarding()?.sfu().lock().await;
+        sfu.as_ref()?.planned_layer(viewer, sender, screen)
     }
 
     /// Answers `WantedLayers` from `from`, which must be this device's forwarder.

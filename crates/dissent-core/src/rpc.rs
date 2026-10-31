@@ -170,6 +170,15 @@ pub(crate) enum Request {
     /// A seeder asks an owner or admin device for a `StorageGrant` in `community`. Answered with `Ack`.
     /// Appended, see `storage_grants`.
     StorageGrantAsk { community: CommunityId },
+    /// The owner's signed guardian list, sent to each guardian it names. The guardian keeps it, to give to the
+    /// owner's new device in a recovery. Answered with `Ack`. Appended, see `recovery_flow`.
+    GuardianOf(Box<dissent_identity::GuardianSet>),
+    /// A guardian's signed approval or decline of a recovery, sent to the recovering device. Answered with `Ack`.
+    /// Appended, see `recovery_flow`.
+    RecoveryAnswer(Box<crate::recovery_flow::RecoveryAnswer>),
+    /// Whether the responder holds mail for the asker's root, and how much. Signed by the asking device.
+    /// Answered with `Response::InboxProbe`. Appended, see `inbox`.
+    InboxProbe(Box<crate::inbox::Probe>),
     /// Which features the responder supports, as bits. A device from before this answers with an error, which reads
     /// as none. Appended, see `custom_roles::FEATURES`.
     Features,
@@ -238,7 +247,7 @@ pub(crate) enum Response {
     /// The record for `Request::AddrLookup`, if the responder holds one it may share. `seeder` is set
     /// when the responder runs as a seeder, so the requester can label the answer. Appended.
     AddrLookup {
-        record: Option<crate::addr_record::AddrRecord>,
+        record: Option<Box<crate::addr_record::AddrRecord>>,
         seeder: bool,
     },
     /// `(epoch, enc, write)` for each epoch the responder holds. See `Request::EpochHistory`. Appended.
@@ -276,6 +285,8 @@ pub(crate) enum Response {
     RelayCheck(std::result::Result<u64, String>),
     /// Whether the responder accepts a leave rotation. See `Request::RotationSupport`. Appended.
     RotationSupport(bool),
+    /// The answer to `Request::InboxProbe`. Appended, see `inbox`.
+    InboxProbe(Box<crate::inbox::ProbeAnswer>),
     /// The answer to `Request::Features`. Appended.
     Features(u64),
     /// The answer to `Request::FilesKeys`: `(generation, key)` pairs. Appended.
@@ -340,8 +351,9 @@ impl RpcHandler for Handler {
             let resp = match weak.upgrade() {
                 Some(inner) => {
                     let engine = crate::engine::Engine { inner };
-                    // While invisible, a device that did not hear from us lately gets no reply at all.
-                    if engine.hidden_from(&from) {
+                    // While invisible, a device that did not hear from us lately gets no reply at all, except
+                    // for inbox requests for a person this device agreed to hold mail for.
+                    if engine.hidden_from(&from) && !engine.hosted_inbox_request(&req) {
                         return Vec::new();
                     }
                     engine.handle_request(from, &req).await
@@ -449,10 +461,10 @@ mod wire_order_tests {
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_REQUEST: &[&str] =
-        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys"];
+        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "Features", "FilesKeys", "Holdings", "CategoryKeys"];
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys"];
 
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[

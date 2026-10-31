@@ -2,8 +2,10 @@
 //! sealed again under the new one. The copy is checked before it is put in place, and the source is only
 //! read. See [`copy_profile`].
 //!
-//! Sealed files: `identity.bin`, `profiles/<id>/mls.bin`, `avatar.bin`, `peer_avatars.bin`, `banners.bin`, and each
-//! `communities/<id>/content.sealed` record log. Everything else in a profile is plain data.
+//! Sealed files: `identity.bin`, `profiles/<id>/mls.bin`, `avatar.bin`, `peer_avatars.bin`, `banners.bin`, each
+//! community's `content.sealed` log, `community.key`, `epoch-keys.bin`, `private-keys.bin` and `history-keys.bin`, and every
+//! other store file and log, sealed under the store subkey (`at_rest`). Only the events and commit logs and the blob store
+//! are not sealed: they hold what peers relay anyway.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -140,8 +142,12 @@ fn reseal_profile(profile: &Path, from: &Vault, to: &Vault) -> Result<()> {
     for (id, dir) in community_dirs(profile)? {
         reseal_records(&dir.join(CONTENT_FILE), &content_vault(from, &id), &content_vault(to, &id))?;
         reseal_community_key(&dir.join(COMMUNITY_KEY_FILE), from, to, &id)?;
+        crate::epoch_keys::reseal(&dir.join("epoch-keys.bin"), from, to, &id)?;
+        crate::private_keys::reseal(&dir.join("private-keys.bin"), from, to, &id)?;
+        crate::history::reseal(&dir.join("history-keys.bin"), from, to, &id)?;
     }
-    Ok(())
+    // Everything else in the profile is sealed under the store subkey (`at_rest`).
+    crate::at_rest::reseal_tree(profile, from, to)
 }
 
 /// Re-seals one file written by `write_sealed`. A file that does not open under `old` is an error, so a

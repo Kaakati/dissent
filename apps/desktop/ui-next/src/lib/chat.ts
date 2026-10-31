@@ -6,10 +6,12 @@ import { create } from 'zustand';
 import { has } from './features';
 import { api, listenTo } from './api';
 import { baseName, guessMime } from './attachments';
+import { choiceOf, inspectFiles, type ScrubChoice } from './scrub';
 import { markSeen, seenMs } from './unread';
 import { toast } from './toasts';
 import { openedTarget } from './target';
 import { typingTarget } from './typing';
+import { viewing } from './viewing';
 import { convKey, typingKey, useShell } from './store';
 import type {
   Attachment,
@@ -23,7 +25,7 @@ import type {
 export const MSG_LIMIT = 200;
 const PENDING_RETRY_MS = 5000; // pending DMs are retried by the engine outbox, so the open one is read again
 
-export interface StagedFile {
+export interface StagedFile extends ScrubChoice {
   path: string;
   name: string;
   size: number | null;
@@ -79,6 +81,7 @@ interface ChatState {
   cancelReply: () => void;
   beginEdit: (id: Id | null) => void;
   stageFiles: (files: StagedFile[]) => void;
+  setScrub: (path: string, on: boolean) => void;
   unstage: (path: string) => void;
   clearStaged: () => void;
   setDropping: (on: boolean) => void;
@@ -116,8 +119,15 @@ export const useChat = create<ChatState>()((set, get) => ({
   beginEdit: (id) => set({ editingId: id }),
   stageFiles: (files) => {
     const known = new Set(get().staged.map((f) => f.path));
-    set({ staged: [...get().staged, ...files.filter((f) => f.path && !known.has(f.path))] });
+    const added = files.filter((f) => f.path && !known.has(f.path));
+    set({ staged: [...get().staged, ...added] });
+    // Each new file's "Remove identifying details" default, once the engine has looked at it.
+    void inspectFiles(added.filter((f) => f.scrub === undefined).map((f) => f.path)).then((found) => {
+      if (found.size === 0) return;
+      set({ staged: get().staged.map((f) => (f.scrub === undefined && found.has(f.path) ? { ...f, ...choiceOf(found.get(f.path)) } : f)) });
+    });
   },
+  setScrub: (path, on) => set({ staged: get().staged.map((f) => (f.path === path ? { ...f, scrub: on } : f)) }),
   unstage: (path) => set({ staged: get().staged.filter((f) => f.path !== path) }),
   clearStaged: () => set({ staged: [] }),
   setDropping: (on) => set({ dropping: on }),
@@ -310,6 +320,19 @@ export function markOpenRead(): void {
   markLatestRead(target.key, target.kind === 'channel' ? messages : dmMessages);
 }
 
+// A message that lands in the open conversation is read at once while the user watches it (see viewing.ts). Otherwise
+// it stays unread, with its marker and on the badge, until catchUpOpen finds the user watching.
+function readIfViewing(key: string): void {
+  if (viewing(key)) markOpenRead();
+  else useShell.setState((s) => (s.unread.has(key) ? {} : { unread: new Set([...s.unread, key]) }));
+}
+
+// The window gained focus or the list reached its end: the open conversation is read if the user watches it now.
+export function catchUpOpen(): void {
+  const { target } = useChat.getState();
+  if (target && viewing(target.key)) markOpenRead();
+}
+
 // Engine events for the open conversation. The shell store handles the lists and unread markers; this reads messages.
 export async function reloadForEvent(ev: EngineEvent): Promise<void> {
   const { target } = useChat.getState();
@@ -327,15 +350,15 @@ export async function reloadForEvent(ev: EngineEvent): Promise<void> {
   if (ev.kind === 'transfers_changed') return;
   if ((ev.kind === 'message' || ev.kind === 'messages_changed') && target.kind === 'channel' && target.communityId === ev.community_id && target.channelId === ev.channel_id) {
     await reloadOpen();
-    markOpenRead();
+    readIfViewing(target.key);
   }
   if ((ev.kind === 'dm' || ev.kind === 'dm_changed') && target.kind === 'dm' && target.peer === ev.peer) {
     await reloadOpen();
-    markOpenRead();
+    readIfViewing(target.key);
   }
   if (ev.kind === 'group' && target.kind === 'group' && target.groupId === ev.group_id) {
     await reloadOpen();
-    markOpenRead();
+    readIfViewing(target.key);
   }
 }
 

@@ -44,3 +44,4 @@ dissent-core = { path = ".", features = ["test-hooks"] }
 iroh-relay = { workspace = true, features = ["test-utils"] }
 noq-proto.workspace = true
 image.workspace = true
+serde_json.workspace = true

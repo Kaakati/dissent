@@ -114,9 +114,9 @@ pub(crate) fn general(engine: &Engine, id: CommunityId) -> ChannelId {
 }
 
 pub(crate) async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    // 120 s: CI's runners take about twice as long as a developer machine. A passing check returns at
-    // once, so only a failing one waits this long.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // 120 s, times `DISSENT_TEST_SCALE` (see `testutil::scale`): CI's runners take about twice as long
+    // as a developer machine. A passing check returns at once, so only a failing one waits this long.
+    let deadline = Instant::now() + crate::testutil::scaled(Duration::from_secs(120));
     while !check() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;

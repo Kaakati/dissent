@@ -4,7 +4,6 @@
 
 use crate::engine::{now_ms, Engine};
 use crate::error::{CoreError, Result};
-use crate::store::{read_bin, write_bin};
 use crate::views::{ConversationSummary, MessageItem};
 use crate::world::World;
 use dissent_events::{ChannelId, EventId};
@@ -45,6 +44,7 @@ pub const CAPABILITIES: &[&str] = &[
     "channel_order",
     "channel_categories",
     "dm_mentions",
+    "offline_delivery",
 ];
 
 /// Which text a user note stores.
@@ -79,7 +79,7 @@ pub(crate) struct UserFields {
 }
 
 fn load(w: &World) -> LocalState {
-    match read_bin(&w.paths.local_state()) {
+    match w.paths.read_bin(&w.paths.local_state()) {
         Ok(state) => state.unwrap_or_default(),
         Err(_) => LocalState::default(),
     }
@@ -95,7 +95,7 @@ fn verified_path(w: &World) -> PathBuf {
 }
 
 fn verified(w: &World) -> BTreeMap<RootId, u64> {
-    read_bin(&verified_path(w)).ok().flatten().unwrap_or_default()
+    w.paths.read_bin(&verified_path(w)).ok().flatten().unwrap_or_default()
 }
 
 /// True until the recovery phrase has been shown, on a device with no communities or contacts.
@@ -144,11 +144,12 @@ impl Engine {
 
     /// Runs one read-modify-write of the local state under the world lock.
     fn update_local<T>(&self, f: impl FnOnce(&mut LocalState) -> T) -> Result<T> {
-        let path = self.read().paths.local_state();
+        let paths = self.paths();
+        let path = paths.local_state();
         let _serial = self.write();
-        let mut state: LocalState = read_bin(&path)?.unwrap_or_default();
+        let mut state: LocalState = paths.read_bin(&path)?.unwrap_or_default();
         let out = f(&mut state);
-        write_bin(&path, &state)?;
+        paths.write_bin(&path, &state)?;
         Ok(out)
     }
 
@@ -246,11 +247,11 @@ impl Engine {
     /// Records that the safety number for `user` was compared now. This clears any key change
     /// that happened before now.
     pub fn mark_safety_verified(&self, user: RootId) -> Result<()> {
-        let (path, now) = (verified_path(&self.read()), now_ms());
+        let (paths, path, now) = (self.paths(), verified_path(&self.read()), now_ms());
         let _serial = self.write();
-        let mut map: BTreeMap<RootId, u64> = read_bin(&path)?.unwrap_or_default();
+        let mut map: BTreeMap<RootId, u64> = paths.read_bin(&path)?.unwrap_or_default();
         map.insert(user, now);
-        write_bin(&path, &map)
+        paths.write_bin(&path, &map)
     }
 }
 
@@ -274,7 +275,7 @@ fn view_path(w: &World) -> PathBuf {
 }
 
 fn load_view(w: &World) -> ViewState {
-    read_bin(&view_path(w)).ok().flatten().unwrap_or_default()
+    w.paths.read_bin(&view_path(w)).ok().flatten().unwrap_or_default()
 }
 
 /// The key a conversation is closed under, the same key the UI uses: `dm:<peer>` or `group:<id>`.
@@ -313,8 +314,8 @@ fn arrivals_path(w: &World) -> PathBuf {
 /// The arrivals on disk. A file that does not decode is copied to `<name>.bad` (the first such copy is kept), with a
 /// warning, and the map starts empty, so one bad file cannot stop every later arrival from being recorded. The next
 /// write replaces it. Other read errors still fail.
-fn load_arrivals(path: &Path) -> Result<BTreeMap<String, u64>> {
-    match read_bin(path) {
+fn load_arrivals(paths: &crate::store::Paths, path: &Path) -> Result<BTreeMap<String, u64>> {
+    match paths.read_bin(path) {
         Ok(found) => Ok(found.unwrap_or_default()),
         Err(CoreError::Encoding(reason)) => {
             let bad = path.with_extension("bin.bad");
@@ -336,16 +337,17 @@ impl Engine {
         if !records_arrival(closed.get(&key).copied(), sent_ms) {
             return Ok(());
         }
-        let path = arrivals_path(&self.read());
+        let (paths, path) = (self.paths(), arrivals_path(&self.read()));
         let _serial = self.write();
-        let mut arrivals = load_arrivals(&path)?;
+        let mut arrivals = load_arrivals(&paths, &path)?;
         arrivals.insert(key, now_ms());
-        write_bin(&path, &arrivals)
+        paths.write_bin(&path, &arrivals)
     }
 
     /// The local arrival time of the newest counted message in each conversation.
     pub(crate) fn arrivals(&self) -> BTreeMap<String, u64> {
-        read_bin(&arrivals_path(&self.read())).ok().flatten().unwrap_or_default()
+        let w = self.read();
+        w.paths.read_bin(&arrivals_path(&w)).ok().flatten().unwrap_or_default()
     }
 }
 
@@ -396,11 +398,11 @@ impl Engine {
     }
 
     fn update_view<T>(&self, f: impl FnOnce(&mut ViewState) -> T) -> Result<T> {
-        let path = view_path(&self.read());
+        let (paths, path) = (self.paths(), view_path(&self.read()));
         let _serial = self.write();
-        let mut state: ViewState = read_bin(&path)?.unwrap_or_default();
+        let mut state: ViewState = paths.read_bin(&path)?.unwrap_or_default();
         let out = f(&mut state);
-        write_bin(&path, &state)?;
+        paths.write_bin(&path, &state)?;
         Ok(out)
     }
 }
@@ -417,20 +419,21 @@ mod tests {
         let path = dir.join("local_arrivals.bin");
         let garbage: &[u8] = b"\xff\xff not postcard";
         fs::write(&path, garbage).unwrap();
-        assert!(read_bin::<BTreeMap<String, u64>>(&path).is_err(), "the fixture must not decode");
+        let paths = crate::store::Paths::for_test(dir.clone());
+        assert!(paths.read_bin::<BTreeMap<String, u64>>(&path).is_err(), "the fixture must not decode");
 
-        assert!(load_arrivals(&path).unwrap().is_empty(), "a bad file reads as empty");
+        assert!(load_arrivals(&paths, &path).unwrap().is_empty(), "a bad file reads as empty");
         assert_eq!(fs::read(dir.join("local_arrivals.bin.bad")).unwrap(), garbage, "the bad copy keeps the bytes");
 
         // Recording an arrival writes the file again, and the next load reads it back.
-        let mut arrivals = load_arrivals(&path).unwrap();
+        let mut arrivals = load_arrivals(&paths, &path).unwrap();
         arrivals.insert("dm:peer".into(), 7);
-        write_bin(&path, &arrivals).unwrap();
-        assert_eq!(load_arrivals(&path).unwrap().get("dm:peer"), Some(&7));
+        paths.write_bin(&path, &arrivals).unwrap();
+        assert_eq!(load_arrivals(&paths, &path).unwrap().get("dm:peer"), Some(&7));
 
         // A second bad file does not replace the first bad copy.
         fs::write(&path, b"\xfe\xfe").unwrap();
-        load_arrivals(&path).unwrap();
+        load_arrivals(&paths, &path).unwrap();
         assert_eq!(fs::read(dir.join("local_arrivals.bin.bad")).unwrap(), garbage);
         fs::remove_dir_all(&dir).ok();
     }

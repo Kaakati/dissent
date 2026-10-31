@@ -608,3 +608,37 @@ async fn a_relay_set_in_a_member_only_server_is_adopted_by_members() {
     })
     .await;
 }
+
+/// The switch the owner uses in Server Settings › Privacy: only the owner may flip it, an admin is refused, and the
+/// status and the view follow each change, on and back off.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn only_the_owner_flips_member_only_and_the_status_follows() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        alice
+            .engine
+            .moderate(id, dissent_core::ModAction::GrantAdmin, bob.identity.root_id())
+            .await
+            .expect("alice makes bob an admin");
+        eventually("bob is an admin", || {
+            bob.engine.community_view(id).ok().filter(|v| v.my_role == "admin")
+        })
+        .await;
+        assert!(bob.engine.set_member_only(id, true).await.is_err(), "an admin cannot flip the switch");
+        assert!(!alice.engine.member_only_status(id).await.expect("status").on);
+
+        alice.engine.set_member_only(id, true).await.expect("the owner turns it on");
+        assert!(alice.engine.member_only_status(id).await.expect("status").on);
+        assert!(alice.engine.community_view(id).expect("view").member_only);
+        eventually("bob's view shows it on", || bob.engine.community_view(id).ok().filter(|v| v.member_only)).await;
+
+        alice.engine.set_member_only(id, false).await.expect("the owner turns it off");
+        assert!(!alice.engine.member_only_status(id).await.expect("status").on);
+        eventually("bob's view shows it off", || bob.engine.community_view(id).ok().filter(|v| !v.member_only)).await;
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}

@@ -1,12 +1,14 @@
 // Share a file (the FileSend board). Opens after the native picker; the targets are the open channel (with the seeder
 // choice) and the open direct conversation or another member, peer to peer. The copy is honest: files stay with the
 // people who receive them, and the limit is 10 GB. Ported from openFileSendDialog in the old UI's views/dialogs.js.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CircleAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { ScrubToggle } from '@/components/chat/scrub-toggle';
 import { sendFiles, type FileTarget } from '@/lib/actions';
+import { choiceOf, inspectFiles, resolveScrub, type ScrubChoice } from '@/lib/scrub';
 import { openDialog } from '@/lib/dialog';
 import { useShell } from '@/lib/store';
 import { cn } from '@/lib/utils';
@@ -103,6 +105,17 @@ function ShareBody({ files, close }: { files: ShareFile[]; close: () => void }) 
   const [seed, setSeed] = useState(true);
   const [note, setNote] = useState('');
   const [sending, setSending] = useState(false);
+  // Each file's "Remove identifying details" choice, from the engine's defaults once it has looked at the files.
+  const [choices, setChoices] = useState<Record<string, ScrubChoice>>({});
+  useEffect(() => {
+    let live = true;
+    void inspectFiles(files.map((f) => f.path)).then((found) => {
+      if (live) setChoices(Object.fromEntries(files.map((f) => [f.path, choiceOf(found.get(f.path))])));
+    });
+    return () => {
+      live = false;
+    };
+  }, [files]);
   const total = files.reduce((n, f) => n + (Number(f.size) || 0), 0);
   const over = files.some((f) => Number(f.size) > MAX_SHARE_BYTES);
   if (!current) return null;
@@ -112,7 +125,13 @@ function ShareBody({ files, close }: { files: ShareFile[]; close: () => void }) 
   const send = async () => {
     setSending(true);
     const target: FileTarget = current.target.kind === 'channel' ? { ...current.target, seed } : current.target;
-    const ok = await sendFiles(files.map((f) => f.path), note.trim() || null, target);
+    // A file whose details were to be removed but cannot be: ask before it goes as it is.
+    const scrub = await resolveScrub(files.map((f) => ({ name: f.name, ...choices[f.path] })));
+    if (scrub === null) {
+      setSending(false);
+      return;
+    }
+    const ok = await sendFiles(files.map((f) => f.path), note.trim() || null, target, scrub);
     if (ok) close();
     else setSending(false);
   };
@@ -136,6 +155,20 @@ function ShareBody({ files, close }: { files: ShareFile[]; close: () => void }) 
           {over ? 'Over the 10 GB limit' : 'Under the 10 GB limit'}
         </span>
       </div>
+      {files.some((f) => choices[f.path]?.scrub !== undefined) ? (
+        <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Files and their details" data-share-files>
+          {files.map((f) => (
+            <li key={f.path} className="flex min-w-0 items-center gap-s-2 text-sm">
+              <span className="min-w-0 flex-1 truncate text-text">{f.name}</span>
+              <ScrubToggle
+                name={f.name}
+                choice={choices[f.path] ?? {}}
+                onChange={(on) => setChoices((c) => ({ ...c, [f.path]: { ...c[f.path], scrub: on } }))}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <span className="text-sm font-semibold tracking-[.02em] text-muted-foreground uppercase">Send to</span>
       <div role="radiogroup" aria-label="Send to" className="grid grid-cols-2 gap-s-2">
         {targets.map((t) => {
