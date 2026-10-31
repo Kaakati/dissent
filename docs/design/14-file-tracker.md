@@ -99,7 +99,7 @@ rules are requests each app keeps for its own member); no streaming playback; no
 - `RoleCreate { spec }`, `RoleUpdate { role, spec }`, `RoleDelete { role }`: control channel; the actor needs
   `MANAGE_ROLES`, `spec.position` must be below the actor's standing (any for Admin and Owner), and `spec.perms`
   must be a subset of the actor's bits. Update and delete also need the role itself below the actor. Name 1 to 32
-  characters, trimmed. At most 64 live custom roles.
+  characters, trimmed. At most 250 live custom roles.
 - `RoleAssign { user, role, on }`: control; `MANAGE_ROLES`; the role below the actor; the user a member who is not
   above or equal to the actor (assigning to oneself is allowed only for roles below one's standing). A deleted role
   is refused.
@@ -341,7 +341,7 @@ Until then they may change, and this list is reviewed at the merge.
 
 | Variant | Fields | Why each field is final |
 | --- | --- | --- |
-| `RoleCreate` | `spec: RoleSpec { name: String, color: u32, perms: Perms(u64), position: u16 }` | The id is the event id, so no id field. `perms` is a 64-bit set: there is room for 53 more permissions, and unknown bits are kept, so new permissions need no wire change. `color` 0 means none, so it needs no `Option`. 65 536 positions is far beyond the 64-role cap. |
+| `RoleCreate` | `spec: RoleSpec { name: String, color: u32, perms: Perms(u64), position: u16 }` | The id is the event id, so no id field. `perms` is a 64-bit set: there is room for 53 more permissions, and unknown bits are kept, so new permissions need no wire change. `color` 0 means none, so it needs no `Option`. 65 536 positions is far beyond the 250-role cap. |
 | `RoleUpdate` | `role: RoleId, spec: RoleSpec` | It replaces the whole spec, latest by HLC. Partial patches would need a new variant per field. |
 | `RoleDelete` | `role: RoleId` | Deletion is permanent, so a role needs no generation. |
 | `RoleAssign` | `user: RootId, role: RoleId, on: bool` | The latest by HLC per (user, role) wins. One event both gives and takes a role. |

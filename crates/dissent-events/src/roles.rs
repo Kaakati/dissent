@@ -81,7 +81,7 @@ pub struct RoleSpec {
 /// Longest role or bot name, in characters.
 pub const MAX_ROLE_NAME_CHARS: usize = 32;
 /// Most live custom roles a community may have.
-pub const MAX_CUSTOM_ROLES: usize = 64;
+pub const MAX_CUSTOM_ROLES: usize = 250;
 
 /// Whether `name` is a role or bot name: trimmed, not empty, at most `MAX_ROLE_NAME_CHARS` characters.
 pub fn valid_role_name(name: &str) -> bool {
