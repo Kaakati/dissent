@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use dissent_core::tracker::adding::PickedView;
 use dissent_core::tracker::catalog::{AddItem, CategoryInput, FilesView};
+use dissent_core::tracker::drops::DropPlan;
 use dissent_core::tracker::swarm::SwarmView;
 use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
 use dissent_core::{CommunityId, RootId, TransferView};
@@ -120,6 +121,15 @@ pub async fn start_file_check(state: State<'_, AppState>, community_id: String, 
 pub async fn cancel_file_check(state: State<'_, AppState>, job: u64) -> Result<(), String> {
     engine(&state).await?.cancel_file_check(job);
     Ok(())
+}
+
+/// What a drop on the Files page will do with `paths`. A server with no category gets them here, when this person may make
+/// them.
+#[tauri::command]
+pub async fn plan_file_drop(state: State<'_, AppState>, community_id: String, paths: Vec<PathBuf>, filter: Option<String>) -> Result<DropPlan, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let filter: Option<CategoryId> = filter.map(|f| parse("category id", &f)).transpose()?;
+    engine(&state).await?.plan_file_drop(community, paths, filter).await.map_err(err)
 }
 
 /// `limit` is `forever`, `ratio:<thousandths>`, `hours:<n>` or `until:<ms>`.

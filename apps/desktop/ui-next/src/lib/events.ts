@@ -4,6 +4,7 @@ import { api, listenTo, onEngineEvent } from './api';
 import { openReminderMessage, reminderFired } from '@/components/chat/jump';
 import { alertForChannelMessage, alertForDm, alertForGroup, openNotifiedConversation } from './alerts';
 import { startBadge } from './badge';
+import { dropOnFiles, useFileAdds } from '@/components/files/file-adds';
 import { clearMentions, reloadForEvent, startChat, useChat } from './chat';
 import { handleDeepLinks } from './deep-link';
 import { has } from './features';
@@ -74,6 +75,14 @@ export function startShellEvents(): void {
     onStorageAskEvent(ev);
     onRecoveryEvent(ev);
     onInboxEvent(ev);
+  }).catch(() => {});
+  const onFilesPage = () => shell().page === 'files';
+  listenTo('dissent://drag-over', () => {
+    if (onFilesPage()) useFileAdds.setState({ dropOver: true });
+  }).catch(() => {});
+  listenTo('dissent://drag-leave', () => useFileAdds.setState({ dropOver: false })).catch(() => {});
+  listenTo<string[]>('dissent://paths-dropped', (paths) => {
+    if (onFilesPage() && Array.isArray(paths) && paths.length) void dropOnFiles(paths);
   }).catch(() => {});
   listenTo<{ conv?: string } | null>('dissent://notification-click', (p) => {
     const conv = p?.conv;

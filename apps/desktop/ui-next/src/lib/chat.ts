@@ -422,13 +422,15 @@ let started = false;
 export function startChat(): void {
   if (started) return;
   started = true;
+  // The Files page takes its own drops. See files/file-adds.tsx.
+  const onFilesPage = () => useShell.getState().page === 'files';
   listenTo('dissent://drag-over', () => {
-    if (canAttachNow()) useChat.getState().setDropping(true);
+    if (!onFilesPage() && canAttachNow()) useChat.getState().setDropping(true);
   }).catch(() => {});
   listenTo('dissent://drag-leave', () => useChat.getState().setDropping(false)).catch(() => {});
   listenTo<{ path?: string; name?: string; size?: number | null; mime?: string }[]>('dissent://files-dropped', (files) => {
     useChat.getState().setDropping(false);
-    if (!canAttachNow() || !Array.isArray(files)) return;
+    if (onFilesPage() || !canAttachNow() || !Array.isArray(files)) return;
     useChat.getState().stageFiles(files.filter((f) => f && typeof f.path === 'string').map((f) => {
       const name = f.name ?? baseName(f.path ?? '');
       return { path: f.path ?? '', name, size: f.size ?? null, mime: f.mime ?? guessMime(name) };

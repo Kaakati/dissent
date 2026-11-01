@@ -971,6 +971,41 @@ if (!window.__TAURI__) {
       need(Boolean(cat?.folder), 'this category is not linked to a folder here');
       return handlers.pick_listing_files().filter((p) => !f.listings.some((l) => l.name === p.name));
     },
+    plan_file_drop: ({ communityId, paths, filter }) => {
+      const c = servers[communityId];
+      handlers.files_view({ communityId });
+      const f = c.files;
+      const manage = ['owner', 'admin'].includes(myRole(c));
+      const none = f.categories.length === 0;
+      const picks = paths.map((path) => mockPicks().find((p) => p.path === path)).filter(Boolean);
+      const secret = (name) => /^\.env|^id_rsa$|\.(pem|key)$/i.test(name);
+      const created = [];
+      if (none && manage) {
+        const NAMES = { Installer: 'Installers', Archive: 'Archives', Document: 'Documents', Image: 'Images', Audio: 'Audio', Video: 'Videos', Other: 'Other files' };
+        for (const kind of [...new Set(picks.filter((p) => !p.is_dir && !secret(p.name) && p.size <= 10 * 1024 ** 3).map((p) => p.kind))]) {
+          handlers.create_category({ communityId, category: { name: NAMES[kind], icon: 'folder', types: [kind], default_tags: [], rules: {}, add: { min_rank: 'member', roles: [], members: [], min_level: 0 }, visible: null } });
+          created.push(NAMES[kind]);
+        }
+      }
+      const addable = handlers.files_view({ communityId }).categories.filter((x) => x.can_add && x.readable);
+      const choose = (kind) => {
+        const accepts = (x) => !x.types.length || x.types.includes(kind);
+        const chosen = addable.find((x) => x.id === filter && accepts(x));
+        if (chosen) return chosen;
+        const named = addable.filter((x) => x.types.includes(kind)).sort((a, b) => a.types.length - b.types.length)[0];
+        return named ?? addable.find((x) => !x.types.length) ?? null;
+      };
+      return {
+        items: picks.filter((p) => !p.is_dir).map((p) => {
+          const cat = choose(p.kind);
+          const skip = p.link ? 'link' : p.size > 10 * 1024 ** 3 ? 'too_large' : secret(p.name) ? 'credentials' : cat ? null : 'no_category';
+          return { path: p.path, name: p.name, ext: p.ext, kind: p.kind, size: p.size, category: skip ? null : cat.id, category_name: skip ? null : cat.name, skip };
+        }),
+        folders: picks.filter((p) => p.is_dir).map((p) => p.path),
+        created,
+        no_categories: none && !manage,
+      };
+    },
     start_file_check: ({ communityId, paths }) => {
       const f = servers[communityId].files;
       const job = ++mockCheckJob;
@@ -1010,6 +1045,7 @@ if (!window.__TAURI__) {
       return null;
     },
     list_files: ({ communityId, categoryId, items }) => {
+      if (window.__mockListFails) throw window.__mockListFails;
       const f = servers[communityId].files;
       const picks = mockPicks();
       return items.map((item) => {
@@ -2322,6 +2358,19 @@ if (!window.__TAURI__) {
   window.__mockDeepLink = (link) => emitTo('dissent://deep-link', [link]);
   // The driver drops files from the desktop onto the window, as the app's drag and drop reports them.
   window.__mockDropFiles = (files) => emitTo('dissent://files-dropped', files);
+  // A native drop: the paths, for the Files page, as the desktop backend sends them. See `mockPicks` for what they are.
+  window.__mockDropPaths = (paths) => {
+    emitTo('dissent://drag-leave', null);
+    emitTo('dissent://files-dropped', paths.map((path) => ({ path, name: path.split(/[\\/]/).pop(), size: 1, mime: 'application/octet-stream' })));
+    emitTo('dissent://paths-dropped', paths);
+  };
+  // Makes a listing someone else's, which this device does not hold.
+  window.__mockListedByOther = (communityId, name) => {
+    const l = servers[communityId].files.listings.find((x) => x.name === name);
+    Object.assign(l, { lister: LINUS, lister_name: people[LINUS], mine: false, local: 'none', local_path: null, progress: 0 });
+  };
+  window.__mockDragOver = () => emitTo('dissent://drag-over', null);
+  window.__mockDragLeave = () => emitTo('dissent://drag-leave', null);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.
   window.__mockNetLatency = (dht_ms, relay_ms) => {
     Object.assign(mockNetLatency, { dht_ms, relay_ms });

@@ -5195,6 +5195,144 @@ await b.close();
 // ---- Q. Server Settings › Privacy: the owner's member-only switch. Off by default, it explains what it hides and from
 // whom; it turns on and off; it waits while a member device has not confirmed support, with Check again; an admin sees
 // it but cannot change it. ----
+// Dropping files on the Files page: no dialog, each file in the category its type fits, with Undo.
+async function section_filedrop() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9833, profile: `${SCRATCH}/filedrop-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const openFilesOf = async (server) => {
+  await ev(`document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(server)}) + ']').click()`);
+  await sleep(600);
+  await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => b.textContent.trim() === 'Files').click()`);
+  await until(async () => (await ev(`!!document.querySelector('[data-files]')`)) === true, 5000);
+};
+const picks = (names) => names.map(([name, kind, size, extra]) => ({ name, kind, size: size ?? 1000, ext: name.split('.').pop().toUpperCase(), path: `C:\\drop\\${name}`, ...(extra ?? {}) }));
+const setPicks = (list) => ev(`window.__mockPickFiles = ${JSON.stringify(list)}`);
+const drop = (list) => ev(`window.__mockDropPaths(${JSON.stringify(list.map((p) => p.path))})`);
+const toastText = () => ev(`[...document.querySelectorAll('[aria-live="polite"] [role="status"]')].map((t) => t.textContent).join(' || ')`);
+const toastHas = (text, ms = 5000) => until(async () => (await toastText()).includes(text), ms);
+const clickToast = (label) => ev(`[...document.querySelectorAll('[aria-live="polite"] button')].reverse().find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+const listed = () => ev(`JSON.stringify([...document.querySelectorAll('[data-files] [data-listing]')].map((r) => r.querySelector('[role="cell"]').textContent.trim() + '@' + r.querySelectorAll('[role="cell"]')[1].textContent.trim()).sort())`);
+const member = { min_rank: 'member', roles: [], members: [], min_level: 0 };
+const makeCategory = (id, name, types) => ev(`window.__TAURI__.core.invoke('create_category', { communityId: ${JSON.stringify(id)}, category: ${JSON.stringify({ name, icon: 'folder', types, default_tags: [], rules: {}, add: member, visible: null })} })`);
+
+await openFilesOf('Open Source Arabic');
+// The overlay names the rule and the photo details.
+await ev(`window.__mockDragOver()`);
+await sleep(100);
+const overlay = await ev(`document.querySelector('[data-files-drop]')?.textContent ?? ''`);
+check('FD1 dragging over the Files page shows the rule', overlay.includes('category that fits its type') && overlay.includes('photo details included'), overlay);
+check('FD1 the chat overlay stays away', (await ev(`!document.querySelector('.drop-overlay:not([data-files-drop])')`)) === true);
+await ev(`window.__mockDragLeave()`);
+await sleep(100);
+check('FD1 it leaves with the drag', (await ev(`!document.querySelector('[data-files-drop]')`)) === true);
+
+// No categories: a file manager gets one from the type.
+const first = picks([['cat.png', 'Image'], ['notes.pdf', 'Document'], ['key.pem', 'Other'], ['big.zip', 'Archive', 11 * 1024 ** 3]]);
+await setPicks(first);
+await drop(first);
+await toastHas('Made categories for your files');
+check('FD2 a file manager gets categories made from the types, not for what is left out', (await toastText()).includes('Images') && (await toastText()).includes('Documents') && !(await toastText()).includes('Archives'), await toastText());
+await toastHas('added to');
+await until(async () => JSON.parse(await listed()).length === 2, 3000);
+check('FD3 each file is listed in its type\'s category with no dialog', (await listed()) === JSON.stringify(['PDFnotes.pdf@Documents', 'PNGcat.png@Images']) && (await ev(`!document.querySelector('[role="dialog"]')`)) === true, await listed());
+const summary = await toastText();
+check('FD3 the toast says what went where', summary.includes('1 file added to Images, 1 to Documents'), summary);
+check('FD4 the rest are not listed, and the toast says why', summary.includes('1 looks like a key or password file') && summary.includes('1 over 10 GB') && summary.includes('Undo') && summary.includes('Add files'), summary);
+
+// Undo takes the batch back.
+await clickToast('Undo');
+await until(async () => JSON.parse(await listed()).length === 0, 3000);
+check('FD5 Undo removes those listings', (await listed()) === '[]');
+
+// Progress starts at once, per file, and does not block the page.
+await makeCategory('c2', 'Anything', []);
+const three = picks([['a.png', 'Image'], ['b.png', 'Image'], ['c.png', 'Image'], ['d.pdf', 'Document']]);
+await setPicks(three);
+await ev(`window.__mockCheckMs = 700`);
+await drop(three);
+await until(async () => (await ev(`!!document.querySelector('[data-file-adds]')`)) === true, 2000);
+check('FD6 the tray shows each file at once', (await ev(`document.querySelectorAll('[data-file-adds] [data-add-row]').length`)) === 4);
+check('FD6 nothing covers the page', (await ev(`!document.querySelector('[role="dialog"]') && !document.querySelector('[data-files-drop]')`)) === true);
+await ev(`document.querySelector('input[aria-label="Search files"]').focus()`);
+check('FD6 the page stays usable', (await ev(`document.activeElement?.getAttribute('aria-label')`)) === 'Search files');
+await ev(`window.__mockCheckMs = 60`);
+await toastHas('3 files added to Images, 1 to Documents', 6000);
+check('FD7 the toast counts by category', true);
+await until(async () => (await ev(`!document.querySelector('[data-file-adds]')`)) === true, 2000);
+check('FD7 the tray leaves when it is done', true);
+
+// A filter that accepts the file wins. Dropping again what this device seeds leaves it alone.
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] button')].find((n) => n.textContent.includes('Anything')).click()`);
+await sleep(200);
+const one = picks([['e.png', 'Image']]);
+await setPicks(one);
+await drop(one);
+await toastHas('1 file added to Anything');
+check('FD8 the page\'s filter wins when it accepts the file', true);
+check('FD9 a single-file drop offers Add tags', (await toastText()).includes('Add tags'));
+await clickToast('Add tags');
+await until(async () => (await ev(`!!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+await ev(`(() => { const n = document.querySelector('[data-edit-listing] input'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(n, '#kitten #cute'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await until(async () => (await ev(`!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+check('FD9 the tags are saved', (await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('e.png')).textContent.includes('#kitten')`)) === true);
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] button')].find((n) => n.textContent.includes('All files')).click()`);
+await sleep(200);
+await drop(one);
+await toastHas('1 already seeded by you');
+check('FD10 a file this device seeds is left alone', JSON.parse(await listed()).filter((x) => x.includes('e.png')).length === 1, await listed());
+
+// Listed by someone else: seeded, not listed again.
+await ev(`window.__mockListedByOther('c2', 'e.png')`);
+await sleep(100);
+await drop(one);
+await toastHas('Seeding 1 file already listed');
+check('FD11 a file someone else listed is seeded', JSON.parse(await listed()).filter((x) => x.includes('e.png')).length === 1, await listed());
+
+// A failure is reported per file.
+const bad = picks([['f.png', 'Image']]);
+await setPicks(bad);
+await ev(`window.__mockListFails = 'the disk is full'`);
+await drop(bad);
+await toastHas('1 file could not be added');
+await ev(`window.__mockListFails = null`);
+check('FD12 a file that fails to list says so', true);
+
+// Cancel stops what is waiting.
+const slow = picks([['g.png', 'Image'], ['h.png', 'Image']]);
+await setPicks(slow);
+await ev(`window.__mockCheckMs = 900`);
+await drop(slow);
+await until(async () => (await ev(`!!document.querySelector('[data-file-adds]')`)) === true, 2000);
+await ev(`document.querySelector('button[aria-label="Cancel adding files"]').click()`);
+await sleep(1200);
+check('FD13 Cancel stops the check and lists nothing', (await ev(`window.__mockChecks.at(-1).cancelled`)) === true && !(await listed()).includes('g.png'), await listed());
+await ev(`window.__mockCheckMs = 60`);
+
+// Someone who cannot make categories is told so.
+await ev(`window.__mockSetMyRole('c1', 'member')`);
+await openFilesOf('Riverside Makers');
+const none = picks([['z.png', 'Image']]);
+await setPicks(none);
+await drop(none);
+await toastHas('no file categories yet');
+check('FD14 a member on a server with no category gets a clear message', (await ev(`document.querySelectorAll('[data-files] [data-listing]').length`)) === 0);
+
+// Off the Files page a drop still attaches to the chat.
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => /general/i.test(b.textContent))?.click()`);
+await sleep(500);
+await ev(`window.__mockDragOver()`);
+await sleep(100);
+check('FD15 the Files overlay is not shown in chat', (await ev(`!document.querySelector('[data-files-drop]')`)) === true);
+await ev(`window.__mockDropPaths(['C:\\\\drop\\\\z.png'])`);
+await sleep(500);
+check('FD15 a drop on a chat stays an attachment', (await ev(`document.querySelector('.staged')?.textContent.includes('z.png') ?? false`)) === true);
+check('FD16 no console errors', (await b.errors?.() ?? []).length === 0);
+b.close?.();
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -5744,6 +5882,7 @@ const SECTIONS = [
   ['activebadge', section_activebadge],
   ['channelorder', section_channelorder],
   ['memberonly', section_memberonly],
+  ['filedrop', section_filedrop],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],

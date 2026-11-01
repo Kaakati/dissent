@@ -157,6 +157,25 @@ export interface PickedView {
   is_dir: boolean;
 }
 
+// A dropped file, and where it goes or why it does not (`DropItem` in dissent-core).
+export interface DropItem {
+  path: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  category: Id | null;
+  category_name: string | null;
+  skip: string | null;
+}
+
+export interface DropPlan {
+  items: DropItem[];
+  folders: string[];
+  created: string[];
+  no_categories: boolean;
+}
+
 export interface AddItem {
   path: string;
   tags: string[];
@@ -181,7 +200,8 @@ export const filesApi = {
   scanFolder: (communityId: Id, categoryId: Id) => invoke<PickedView[]>('scan_category_folder', { communityId, categoryId }),
   startCheck: (communityId: Id, paths: string[]) => invoke<number>('start_file_check', { communityId, paths }),
   cancelCheck: (job: number) => invoke<void>('cancel_file_check', { job }),
-  list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit }),
+  planDrop: (communityId: Id, paths: string[], filter: Id | null) => invoke<DropPlan>('plan_file_drop', { communityId, paths, filter }),
+  list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string, inPlace = false) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit, inPlace }),
   updateListing: (communityId: Id, listingId: Id, tags: string[], description: string) =>
     invoke<void>('update_listing', { communityId, listingId, tags, description }),
   removeListing: (communityId: Id, listingId: Id) => invoke<void>('remove_listing', { communityId, listingId }),

@@ -198,6 +198,95 @@ async fn a_background_check_reports_each_file_and_only_for_chosen_paths() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_drop_sends_each_file_to_the_category_its_type_fits() {
+    heavy(1, async {
+        let alice = peer("tracker-drop").await;
+        let server = alice.engine.create_community("Drops".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let dir = scratch("tracker-drop-src");
+        let png = write(&dir, "cat.png", b"png");
+        let pdf = write(&dir, "book.pdf", b"pdf");
+        let key = write(&dir, "server.pem", b"secret");
+        let all = vec![png.clone(), pdf.clone(), key.clone()];
+
+        // A page cannot name a path nobody chose.
+        assert!(alice.engine.plan_file_drop(id, all.clone(), None).await.is_err());
+        alice.engine.allow_paths(all.iter().cloned());
+
+        // A server with no category gets one per type, and never one for a key file, which is not listed.
+        let plan = alice.engine.plan_file_drop(id, all.clone(), None).await.expect("plan");
+        assert_eq!(plan.created, vec!["Images", "Documents"]);
+        let by_name = |plan: &dissent_core::tracker::drops::DropPlan, name: &str| plan.items.iter().find(|i| i.name == name).cloned().unwrap();
+        assert_eq!(by_name(&plan, "cat.png").category_name.as_deref(), Some("Images"));
+        assert_eq!(by_name(&plan, "book.pdf").category_name.as_deref(), Some("Documents"));
+        let secret = by_name(&plan, "server.pem");
+        assert_eq!((secret.skip.as_deref(), secret.category), (Some("credentials"), None));
+
+        // With categories, nothing more is made. The narrowest wins, and a filter that accepts the file wins over it.
+        let view = alice.engine.files_view(id).unwrap();
+        let images: dissent_events::CategoryId = view.categories.iter().find(|c| c.name == "Images").unwrap().id.parse().unwrap();
+        let mut any = releases();
+        any.name = "Everything".into();
+        any.types = vec![];
+        let everything = alice.engine.create_category(id, any).await.unwrap();
+        let plan = alice.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(plan.created.is_empty());
+        assert_eq!(plan.items[0].category.as_deref(), Some(images.to_string().as_str()));
+        let plan = alice.engine.plan_file_drop(id, vec![png.clone()], Some(everything)).await.unwrap();
+        assert_eq!(plan.items[0].category.as_deref(), Some(everything.to_string().as_str()));
+        let zip = write(&dir, "a.zip", b"zip");
+        alice.engine.allow_paths([zip.clone()]);
+        let plan = alice.engine.plan_file_drop(id, vec![zip.clone()], Some(images)).await.unwrap();
+        assert_eq!(plan.items[0].category.as_deref(), Some(everything.to_string().as_str()), "the filter refuses a zip");
+
+        // A folder is reported, not listed.
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        alice.engine.allow_paths([sub.clone()]);
+        let plan = alice.engine.plan_file_drop(id, vec![sub.clone()], None).await.unwrap();
+        assert_eq!((plan.items.len(), plan.folders.len()), (0, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_drop_respects_who_may_add_and_who_may_make_categories() {
+    heavy(2, async {
+        let alice = peer("tracker-drop-owner").await;
+        let bob = peer("tracker-drop-member").await;
+        let id = rustaceans(&alice, &bob).await;
+        let dir = scratch("tracker-drop-member-src");
+        let png = write(&dir, "cat.png", b"png");
+        bob.engine.allow_paths([png.clone()]);
+
+        // A member may not make the first category: nothing is listed, and the plan says why.
+        let plan = bob.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(plan.no_categories && plan.created.is_empty());
+        assert_eq!(plan.items[0].skip.as_deref(), Some("no_category"));
+
+        // A category only admins may add to is not offered to a member.
+        let mut staff = releases();
+        staff.name = "Staff only".into();
+        staff.types = vec![];
+        staff.add.min_rank = "admin".into();
+        alice.engine.create_category(id, staff).await.unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob sees the category", || {
+            bob.engine.files_view(id).ok().filter(|v| v.categories.iter().any(|c| c.readable)).map(|_| ())
+        })
+        .await;
+        let plan = bob.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(!plan.no_categories);
+        assert_eq!(plan.items[0].skip.as_deref(), Some("no_category"), "{:?}", plan.items[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
     heavy(2, async {

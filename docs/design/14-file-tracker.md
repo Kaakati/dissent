@@ -329,6 +329,26 @@ waited for. Closing the dialog cancels the job at the next read of each file.
 `Engine::allow_paths`, and `start_file_check` refuses anything else. A file reaches `offered`, which `list_files` requires, only
 when its check says it can be added, so a tricked page cannot publish a file nobody chose, as before.
 
+**Dropping on the Files page** lists with no dialog (`tracker::drops`). Tauri's native drag-drop event gives the paths
+(`WindowEvent::DragDrop`, which reports paths on Windows, macOS and Linux; the webview's HTML5 drop has no paths, and Tauri
+does not fire it for files while its own handler is on). A drop anywhere else still attaches to the open chat.
+
+- **Category.** `FileType::of_name`, then among the categories this person may add to (`may_add_files`): the page's filter
+  if it accepts the file; the narrowest category that names the type; then one allowing any type. Ties go to the first in
+  server order.
+- **No category.** Someone with `MANAGE_FILES` gets one per type dropped (Images, Documents, ...), open to members. Anyone
+  else is told someone has to make one.
+- **Left out, with the reason in the toast**: fits no category, over `MAX_FILE_SIZE`, a link, unreadable, and any name that
+  looks like a key or password file (`looks_like_credentials`), since a drop asks nothing first and goes to the whole server.
+  Add files can still list such a file on purpose.
+- **Already listed.** By someone else: this device seeds that listing, as the dialog does. By this device: left alone, so
+  its counters stay.
+- **Progress** is a tray above the toasts, per file, that blocks nothing. Files are listed one at a time, so a batch can be
+  cancelled between files. The bytes of one file being encrypted show no progress yet.
+- **Undo** on the toast removes the batch's new listings and stops seeding what it only joined, since an accidental drop
+  publishes to the whole server. A single-file drop also offers Add tags.
+- Listings stay unscrubbed ("Photo details"). The drop overlay says so once.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).

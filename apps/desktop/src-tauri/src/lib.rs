@@ -294,6 +294,7 @@ pub fn run() {
             tracker_cmds::set_category_auto_import,
             tracker_cmds::pick_listing_files,
             tracker_cmds::start_file_check,
+            tracker_cmds::plan_file_drop,
             tracker_cmds::cancel_file_check,
             tracker_cmds::scan_category_folder,
             tracker_cmds::list_files,

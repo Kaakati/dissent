@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 import { DangerNote } from '@/components/chat/attachments';
 import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
+import { FilesDropOverlay } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
 import { SwarmPanel } from './swarm-panel';
 
@@ -101,13 +102,20 @@ export function FilesBody() {
   if (!community) return null;
   if (!view) return <p className="p-s-6 text-body text-muted-foreground">Loading files…</p>;
   const open = ui.open ? view.listings.find((l) => l.id === ui.open) : undefined;
-  if (open) return <FilePage community={community} view={view} listing={open} />;
-  if (ui.tab === 'seeding') return <SeedingPanel communityId={community.id} trigger={view} />;
   return (
-    <div data-files className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)_260px]">
-      <Filters view={view} />
-      <Listings community={community} view={view} />
-      <Standing view={view} />
+    <div className="relative grid min-h-0">
+      {open ? (
+        <FilePage community={community} view={view} listing={open} />
+      ) : ui.tab === 'seeding' ? (
+        <SeedingPanel communityId={community.id} trigger={view} />
+      ) : (
+        <div data-files className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)_260px]">
+          <Filters view={view} />
+          <Listings community={community} view={view} />
+          <Standing view={view} />
+        </div>
+      )}
+      <FilesDropOverlay />
     </div>
   );
 }
@@ -320,7 +328,7 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
             <span role="cell" className="truncate text-right">{l.lister_name}</span>
           </div>
         ))}
-        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet.'}</p> : null}
+        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet. Drop files here to add them.'}</p> : null}
         {view.locked ? <p className="text-sm text-muted-foreground">{view.locked} more are locked until a member shares this server’s files key.</p> : null}
       </div>
     </section>

@@ -13,6 +13,7 @@
 pub(crate) mod bodies;
 pub mod adding;
 pub mod catalog;
+pub mod drops;
 pub(crate) mod gate;
 pub(crate) mod restricted;
 pub(crate) mod scan;
