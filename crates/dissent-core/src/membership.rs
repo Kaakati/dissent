@@ -80,6 +80,9 @@ pub(crate) struct CommitRules {
     departed: BTreeSet<RootId>,
     /// Current members who are people, not storage. Only these commit, and only these join the group.
     persons: BTreeSet<RootId>,
+    /// People who were members and have since been banned. A commit made before the ban may still add one, so a
+    /// device that hears of the ban first can follow the group. See `allows_commit`.
+    banned_persons: BTreeSet<RootId>,
 }
 
 impl CommitRules {
@@ -104,14 +107,25 @@ impl CommitRules {
             .map(|(root, _)| *root)
             .chain(state.banned.iter().copied())
             .collect();
-        Self { active, departed, persons }
+        let banned_persons = state
+            .members
+            .iter()
+            .filter(|(root, m)| !m.storage && state.banned.contains(root))
+            .map(|(root, _)| *root)
+            .collect();
+        Self { active, departed, persons, banned_persons }
     }
 
-    /// The author must be a current member. Added devices must belong to current members.
+    /// The author must be a current member. Added devices must belong to current members, or to people since banned.
     /// Removed devices must belong to departed members, or to the author.
+    ///
+    /// The rules are this device's replay now, not when the commit was made. A device that hears of a ban before the
+    /// commit that added that member could otherwise never pass that commit, and would stay on its epoch for good. Such
+    /// a device takes the commit, keeps sealing nothing until the member is out (`banned_device_in_group`), and removes
+    /// them. See `docs/design/06-threat-model.md`, "A banned device added back".
     pub(crate) fn allows_commit(&self, info: &CommitInfo) -> bool {
         self.persons.contains(&info.committer.root)
-            && info.adds.iter().all(|d| self.persons.contains(&d.root))
+            && info.adds.iter().all(|d| self.persons.contains(&d.root) || self.banned_persons.contains(&d.root))
             && info
                 .removes
                 .iter()
@@ -129,6 +143,10 @@ impl CommitRules {
 
     pub(crate) fn is_person(&self, root: &RootId) -> bool {
         self.persons.contains(root)
+    }
+
+    pub(crate) fn is_banned_person(&self, root: &RootId) -> bool {
+        self.banned_persons.contains(root)
     }
 
     pub(crate) fn is_departed(&self, root: &RootId) -> bool {
@@ -332,9 +350,11 @@ impl Engine {
         let group = community.0;
         let rules = self.commit_rules(community);
         let mut added = Vec::new();
+        let mut adds_banned = false;
         let processed = self.with_mls(|mls| {
             mls.process_commit_with_policy(&group, bytes, |info| {
                 added = info.adds.iter().map(|d| d.device).collect();
+                adds_banned = info.adds.iter().any(|d| rules.is_banned_person(&d.root));
                 let ok = rules.allows_commit(info);
                 if !ok {
                     tracing::warn!(
@@ -353,6 +373,9 @@ impl Engine {
             Some(epoch) => {
                 self.log_commit(community, epoch, bytes.to_vec());
                 self.note_epoch(community, &added);
+                if adds_banned {
+                    self.follow_a_banned_add(community);
+                }
                 Ok(true)
             }
             // The commit removed this device, so there is no group left to follow.

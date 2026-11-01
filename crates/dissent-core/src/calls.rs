@@ -2026,6 +2026,10 @@ impl Engine {
         if limit > 0 && self.voice_headcount(community, channel) >= limit as usize {
             return Err(CoreError::Rejected("This voice channel is full".into()));
         }
+        self.wait_until_sealable(community).await;
+        if self.banned_device_in_group(community) {
+            return Err(CoreError::Invalid("a banned member could not be removed from this server yet, so the call did not start: try again in a moment".into()));
+        }
         let (key, epoch) = self.channel_key(community)?;
         let indexed = self.indexed_members(community)?;
         let my_device = self.inner.identity.device_id();
@@ -3422,7 +3426,8 @@ impl Engine {
         }
         let current = self.with_mls_read(|mls| mls.epoch(&group)).ok();
         if let Some(epoch) = current {
-            if epoch != room.epoch.load(Ordering::Relaxed) {
+            // A banned device still in the group holds this epoch's key: stay on the last one until it is out.
+            if epoch != room.epoch.load(Ordering::Relaxed) && !self.banned_device_in_group(CommunityId(group)) {
                 match self.group_key_of(group) {
                     Ok((key, epoch)) => {
                         let mut result = mesh.set_key(key.clone(), epoch).map_err(call_err);

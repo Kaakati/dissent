@@ -1229,14 +1229,41 @@ pub(crate) async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Pee
 
 /// Waits until every peer in `peers` sees a call of `peers.len()` at `topology`, with audio.
 pub(crate) async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
-    for p in peers {
-        eventually_within(Duration::from_secs(150), what, || {
-            p.engine.call_state().filter(|v| {
-                v.participants.len() == peers.len() - 1 && v.topology == topology && v.frames_received > 0
-            })
+    let seen = |p: &Peer| {
+        p.engine.call_state().is_some_and(|v| {
+            v.participants.len() == peers.len() - 1 && v.topology == topology && v.frames_received > 0
         })
-        .await;
+    };
+    for p in peers {
+        let deadline = std::time::Instant::now() + scaled(Duration::from_secs(150));
+        while !seen(p) {
+            if std::time::Instant::now() >= deadline {
+                let lines: Vec<String> = peers.iter().map(|p| format!("{} {}", if seen(p) { "  " } else { "!!" }, call_summary(p))).collect();
+                panic!("timed out waiting for {what}. Each device, marked if it is not there yet:\n{}", lines.join("\n"));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
+}
+
+/// One line on where a device's call stands, for a test that timed out.
+pub(crate) fn call_summary(p: &Peer) -> String {
+    let name = p.engine.me().display_name;
+    let Some(v) = p.engine.call_state() else {
+        return format!("{name}: not in a call");
+    };
+    let forwarders = v.participants.iter().filter(|m| m.forwarder).map(|m| m.root_id[..8].to_string()).collect::<Vec<_>>();
+    format!(
+        "{name} ({}): {:?} participants={} frames={} key_epoch={} forwarded_by={:?} forwarders={forwarders:?} route={:?} / {:?}",
+        &p.identity.root_id().to_string()[..8],
+        v.topology,
+        v.participants.len(),
+        v.frames_received,
+        v.key_epoch,
+        v.forwarded_by,
+        v.route.title,
+        v.route.detail,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]

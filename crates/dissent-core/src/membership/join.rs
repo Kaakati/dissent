@@ -10,6 +10,10 @@ use crate::error::{CoreError, Result};
 use crate::rpc::{Request, Response};
 use crate::sealed::mls_err;
 
+/// How long a send waits for a banned device to leave the group, in polls: past the longest turn (`COMMIT_DELAY_CAP`).
+const SEALABLE_TRIES: u32 = 200;
+const SEALABLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl Engine {
     /// Answers a joiner's `MlsJoin`. Adds the joiner's device to the group and returns the
     /// welcome. Refuses unless the joiner is a current member.
@@ -184,6 +188,56 @@ impl Engine {
                 tracing::warn!(community = %community, error = %e, "could not remove departed devices")
             }
         }
+    }
+
+    /// Whether a banned person's device is in the group now. It holds this epoch's keys, so nothing new is sealed under
+    /// them until it is removed.
+    pub(crate) fn banned_device_in_group(&self, community: CommunityId) -> bool {
+        let rules = self.commit_rules(community);
+        let members = self.with_mls_read(|mls| mls.members(&community.0).ok()).unwrap_or_default();
+        let w = self.read();
+        members
+            .iter()
+            .any(|cert| rules.is_banned_person(&cert.root) || w.directory.root_of(&cert.device).is_some_and(|root| rules.is_banned_person(&root)))
+    }
+
+    /// Holds a send while a banned device is in the group, and removes it in this device's turn if nobody else has, so a
+    /// message sent right after a ban goes out under the next epoch. If it is still there after that, `seal` refuses, the
+    /// send fails with that reason, and the composer gets its text back.
+    pub(crate) async fn wait_until_sealable(&self, community: CommunityId) {
+        if !self.banned_device_in_group(community) {
+            return;
+        }
+        let engine = self.clone();
+        self.spawn_task(async move { engine.mls_reconcile(community).await });
+        for _ in 0..SEALABLE_TRIES {
+            if !self.banned_device_in_group(community) {
+                return;
+            }
+            tokio::time::sleep(SEALABLE_POLL).await;
+        }
+    }
+
+    /// After taking a commit that added someone since banned: the group has usually moved on, so this device asks for
+    /// the commits that followed at once. If nobody has removed the device, `mls_maintenance` does in this device's turn.
+    pub(crate) fn follow_a_banned_add(&self, community: CommunityId) {
+        let engine = self.clone();
+        self.spawn_task(async move {
+            let neighbours: Vec<DeviceId> = engine
+                .inner
+                .neighbours
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&community)
+                .map(|set| set.iter().copied().collect())
+                .unwrap_or_default();
+            for peer in neighbours {
+                engine.mls_commit_check(community, peer).await;
+                if !engine.banned_device_in_group(community) {
+                    return;
+                }
+            }
+        });
     }
 
     /// Devices in the group that belong to banned or departed members.

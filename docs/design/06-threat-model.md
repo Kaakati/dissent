@@ -847,6 +847,28 @@ A screen's sound is encrypted by the sender's video key, so it gets video's repl
 
 A member holding the key can name any sender or key id, so state from those is capped: 64 senders with no certificate per link, 1024 senders for video, and 4 key ids taken under the current key until the next rekey. A frame costs at most two decrypt attempts.
 
+## A banned device added back: what a late commit allows
+
+A device applies MLS commits by its replay now, not as things stood when the commit was made. So a device that heard of a
+ban before the commit that had added that member used to refuse that commit, and stayed on its old epoch for good: no new
+sealed message, and no call audio, in that server. It now takes such a commit, when a current person made it and the
+added device belongs to someone who really was a member and was banned. Commits from a banned or departed committer, and
+adds of anyone else, stay refused. While a banned device is in the group a device seals nothing under the epoch's keys and
+keeps its last call key, and it removes the device if nobody has. A send is held for up to 20 s for that. If the device is
+still there, the send fails with that reason and the composer keeps the text.
+
+What remains:
+
+- **A current member can add a banned friend's device for a moment.** The other devices remove it, and they seal nothing
+  meanwhile, so it learns the epoch's secrets and no message. A current member could hand over those secrets anyway.
+- **Clients from before this refuse that commit.** Against a malicious member who does this on purpose, they stop on that
+  epoch until they update. Before this change every client refused and nothing happened, so a mixed group is worse off in
+  that one case. In the honest race they are as they were.
+- **The banned committer's wedge is open.** A device that hears of a ban before a commit that member made before it is
+  still stuck, since such commits must stay refused. So is one that hears a member left before the commit that added them.
+- **The community secret is separate.** A banned device holds it until the rotation, as before, so control events sealed
+  under it outside member-only control are not covered by this guard.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

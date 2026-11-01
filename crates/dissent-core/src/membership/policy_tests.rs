@@ -186,3 +186,149 @@ async fn seeder_admits_a_joiner_while_the_owner_is_offline() {
     }).await;
 }
 
+// ---- A commit that added someone since banned: see `CommitRules::allows_commit` ----
+
+mod banned_add {
+    use std::collections::BTreeSet;
+
+    use dissent_identity::{DeviceCert, Identity};
+    use dissent_mls::CommitInfo;
+
+    use super::super::tests::{eventually, general, readable, three_members, Node};
+    use super::super::CommitRules;
+    use crate::{CommunityId, ModAction};
+
+    fn person() -> DeviceCert {
+        Identity::create(1).cert
+    }
+
+    fn info(committer: &DeviceCert, adds: &[&DeviceCert]) -> CommitInfo {
+        CommitInfo { committer: committer.clone(), adds: adds.iter().map(|c| (*c).clone()).collect(), removes: Vec::new(), epoch_after: 2 }
+    }
+
+    #[test]
+    fn only_a_current_person_may_add_only_a_real_member_since_banned() {
+        let (current, banned, left, stranger) = (person(), person(), person(), person());
+        let rules = CommitRules {
+            active: BTreeSet::from([current.root]),
+            departed: BTreeSet::from([banned.root, left.root]),
+            persons: BTreeSet::from([current.root]),
+            banned_persons: BTreeSet::from([banned.root]),
+        };
+        assert!(rules.allows_commit(&info(&current, &[&current])), "a current person, as ever");
+        assert!(rules.allows_commit(&info(&current, &[&banned])), "someone since banned, from a current person");
+        assert!(!rules.allows_commit(&info(&banned, &[&current])), "a banned committer is refused");
+        assert!(!rules.allows_commit(&info(&left, &[&current])), "a committer who left is refused");
+        assert!(!rules.allows_commit(&info(&stranger, &[&current])), "a committer who was never a member is refused");
+        assert!(!rules.allows_commit(&info(&current, &[&stranger])), "a device of no member is refused");
+        assert!(!rules.allows_commit(&info(&current, &[&left])), "someone who left is not let back this way");
+        assert!(!rules.allows_commit(&info(&current, &[&current, &stranger])), "one bad add refuses the commit");
+    }
+
+    /// The group's three, and dave, who joined and was banned and is out of the group. Returns the fourth as well.
+    async fn after_a_ban() -> (Node, Node, Node, Node, CommunityId) {
+        let (alice, bob, carol, id, invite) = three_members().await;
+        let dave = Node::named("dave").await;
+        dave.engine.join_community(&invite).await.expect("dave joins");
+        let dave_device = dave.identity.device_id();
+        let in_groups = |want: bool| {
+            [&alice, &bob, &carol].iter().all(|n| {
+                n.engine.with_mls_read(|mls| mls.members(&id.0)).is_ok_and(|m| m.iter().any(|c| c.device == dave_device) == want)
+            })
+        };
+        eventually("dave is in the group", || in_groups(true)).await;
+        alice.engine.moderate(id, ModAction::Ban, dave.root()).await.expect("ban");
+        eventually("dave is out of the group", || in_groups(false)).await;
+        eventually("everyone is on one epoch", || {
+            let epoch = alice.engine.mls_epoch(id);
+            bob.engine.mls_epoch(id) == epoch && carol.engine.mls_epoch(id) == epoch
+        })
+        .await;
+        (alice, bob, carol, dave, id)
+    }
+
+    fn add_commit(bob: &Node, dave: &Node, id: CommunityId) -> Vec<u8> {
+        let package = dave.engine.with_mls(|mls| mls.take_key_packages(1)).expect("key package").remove(0);
+        bob.engine.with_mls(|mls| mls.add_members(&id.0, &[package])).expect("bob builds the add").commit
+    }
+
+    /// Whether all three hold one group: the same epoch and the same secrets.
+    fn one_group(nodes: [&Node; 3], id: CommunityId, dave: &Node) -> bool {
+        let state = |n: &Node| (n.engine.mls_epoch(id), n.engine.with_mls_read(|m| m.export_secret(&id.0, "check", 16)).ok());
+        let first = state(nodes[0]);
+        let device = dave.identity.device_id();
+        nodes.iter().all(|n| {
+            state(n) == first && n.engine.with_mls_read(|m| m.members(&id.0)).is_ok_and(|m| m.iter().all(|c| c.device != device))
+        })
+    }
+
+    /// As it happens for real: the add and the removal both exist, and carol reaches them after the ban.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_that_heard_of_the_ban_first_takes_the_add_and_the_removal() {
+        crate::testutil::bounded(async {
+            let (alice, bob, carol, dave, id) = after_a_ban().await;
+            let channel = general(&alice.engine, id);
+            let add = add_commit(&bob, &dave, id);
+            bob.engine.publish_commit(id, add).await;
+            let removal = bob.engine.with_mls(|mls| mls.remove_members(&id.0, &[dave.identity.device_id()])).expect("bob removes dave");
+            bob.engine.publish_commit(id, removal).await;
+            eventually("everyone converges with dave out", || one_group([&alice, &bob, &carol], id, &dave)).await;
+            carol.engine.send_message(id, channel, "after the add".into()).await.expect("carol sends");
+            eventually("alice reads it", || readable(&alice.engine, id, channel, "after the add")).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            assert!(!readable(&dave.engine, id, channel, "after the add"), "dave reads nothing new");
+        })
+        .await;
+    }
+
+    /// The add stands alone: a current member made it on purpose, or whoever would have removed the device is gone.
+    /// The devices remove it in their turn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_add_nobody_followed_is_undone_by_reconcile() {
+        crate::testutil::bounded(async {
+            let (alice, bob, carol, dave, id) = after_a_ban().await;
+            let add = add_commit(&bob, &dave, id);
+            bob.engine.publish_commit(id, add).await;
+            eventually("everyone converges with dave out", || one_group([&alice, &bob, &carol], id, &dave)).await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nothing_is_sealed_while_a_banned_device_is_in_the_group() {
+        crate::testutil::bounded(async {
+            let (alice, bob, carol, dave, id) = after_a_ban().await;
+            let channel = general(&alice.engine, id);
+            let commit = add_commit(&bob, &dave, id);
+            // Taken without the follow-up, so the window stays open for the checks.
+            carol.engine.with_mls(|mls| mls.process_commit_with_policy(&id.0, &commit, |_| true)).expect("carol takes it");
+            assert!(carol.engine.banned_device_in_group(id));
+            assert!(carol.engine.seal(id, "secret").is_err(), "no sealed message");
+            assert!(carol.engine.history_seal(id, "secret").is_none(), "no history message");
+            // A send holds, removes the device in carol's turn, and then goes out.
+            carol.engine.send_message(id, channel, "sealed again".into()).await.expect("carol's send waits for the removal");
+            assert!(!carol.engine.banned_device_in_group(id));
+        })
+        .await;
+    }
+
+    /// A device that refuses the add, as a client from before this does, is modelled by one that is off. The rest go on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_others_go_on_without_a_device_that_does_not_take_the_add() {
+        crate::testutil::bounded(async {
+            let (alice, bob, carol, dave, id) = after_a_ban().await;
+            let channel = general(&alice.engine, id);
+            let _ = carol.stop().await;
+            let commit = add_commit(&bob, &dave, id);
+            assert!(matches!(alice.engine.apply_commit(id, &commit), Ok(true)));
+            eventually("alice and bob converge", || {
+                let same = alice.engine.mls_epoch(id) == bob.engine.mls_epoch(id);
+                same && !alice.engine.banned_device_in_group(id) && !bob.engine.banned_device_in_group(id)
+            })
+            .await;
+            alice.engine.send_message(id, channel, "still talking".into()).await.expect("alice sends");
+            eventually("bob reads it", || readable(&bob.engine, id, channel, "still talking")).await;
+        })
+        .await;
+    }
+}

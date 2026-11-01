@@ -258,6 +258,9 @@ impl Engine {
     /// not every other member device supports history messages, or this device has no key for the current epoch.
     /// It never waits on a member. The answer is read from a flag that the background check keeps.
     pub(crate) fn history_seal(&self, community: CommunityId, text: &str) -> Option<(u64, Vec<u8>)> {
+        if self.banned_device_in_group(community) {
+            return None;
+        }
         let epoch = self.mls_epoch(community)?;
         let key = self.history_key_now(community, epoch)?;
         if !self.history_ready_now(community) {

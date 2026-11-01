@@ -93,6 +93,7 @@ impl Engine {
         let payload = if private {
             self.private_payload(community, channel, SealedKind::Message, &plain).await?
         } else {
+            self.wait_until_sealable(community).await;
             let (kind, epoch, ciphertext) = match self.history_seal(community, &plain) {
                 Some((epoch, ciphertext)) => (SealedKind::HistoryMessage, epoch, ciphertext),
                 None => {
@@ -166,6 +167,7 @@ impl Engine {
         let payload = if self.is_private_channel(community, channel) {
             self.private_payload(community, channel, kind, &text).await?
         } else {
+            self.wait_until_sealable(community).await;
             let (epoch, ciphertext) = self.seal(community, &text)?;
             Payload::Sealed { epoch, kind, ciphertext }
         };
@@ -253,6 +255,11 @@ impl Engine {
         } else {
             None
         };
+        // The epoch key is held by a banned device still in the group. A ban or unban hides nothing from them.
+        let moderation = matches!(payload, Payload::Ban { .. } | Payload::Unban { .. });
+        if member.is_some() && !moderation && self.banned_device_in_group(community) {
+            return Err(crate::error::CoreError::Invalid("a banned member could not be removed from this server yet, so this was not sent: try again in a moment".into()));
+        }
         let mut guard = self.write();
         let World {
             paths,

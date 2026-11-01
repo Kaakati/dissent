@@ -171,6 +171,9 @@ impl Engine {
     /// Encrypts `text` for a community's group. Returns the epoch and the ciphertext. Written to
     /// disk at once: a crash that lost the sender ratchet could reuse a key for the next message.
     pub(crate) fn seal(&self, community: CommunityId, text: &str) -> Result<(u64, Vec<u8>)> {
+        if self.banned_device_in_group(community) {
+            return Err(CoreError::Invalid("a banned member could not be removed from this server yet, so this was not sent: try again in a moment".into()));
+        }
         let plaintext = postcard::to_allocvec(&text.to_string())
             .map_err(|e| CoreError::Encoding(e.to_string()))?;
         self.with_mls(|mls| {

@@ -45,6 +45,7 @@ impl Engine {
         let payload = if self.is_private_channel(community, channel) {
             self.private_payload(community, channel, kind, &text).await?
         } else {
+            self.wait_until_sealable(community).await;
             let (epoch, ciphertext) = self.seal(community, &text)?;
             Payload::Sealed { epoch, kind, ciphertext }
         };
@@ -98,6 +99,7 @@ impl Engine {
         let payload = if self.is_private_channel(community, channel) {
             self.private_payload(community, channel, kind, &emoji).await?
         } else {
+            self.wait_until_sealable(community).await;
             let (epoch, ciphertext) = self.seal(community, &emoji)?;
             Payload::Sealed { epoch, kind, ciphertext }
         };
