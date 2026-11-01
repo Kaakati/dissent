@@ -77,6 +77,7 @@ impl Engine {
                         debug!(device = %device, error = %e, "synced banner not taken");
                     }
                 }
+                self.exchange_decorations(device).await;
                 true
             }
             Ok(_) => {

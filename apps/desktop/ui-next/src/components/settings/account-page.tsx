@@ -6,6 +6,7 @@ import { AtSign, Copy, Image as ImageIcon, KeyRound, RefreshCw, Trash2 } from 'l
 import { AddressCard } from '@/components/address-card';
 import { BannerPicker } from '@/components/banner-picker';
 import { chooseImage } from '@/components/settings/avatar-editor';
+import { DecorationSection } from '@/components/settings/decoration-picker';
 import { Block, Hint, ROW } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -317,6 +318,7 @@ export function AccountPage() {
   return (
     <div className="flex flex-col">
       {has('avatars') ? <AvatarSection /> : null}
+      {has('avatars') ? <DecorationSection /> : null}
       {has('avatars') ? <BannerSection /> : null}
       <DisplayName />
       <Block title="Identity">

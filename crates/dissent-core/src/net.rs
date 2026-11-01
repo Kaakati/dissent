@@ -286,6 +286,10 @@ impl Engine {
         }
         self.release_blobs(fx.released);
         for fetch in fx.pictures {
+            if let Some(decoration) = fetch.decoration {
+                self.fetch_decoration(fetch.owner, decoration, fetch.roots);
+                continue;
+            }
             if let Some(poster) = fetch.poster {
                 self.fetch_picture(fetch.owner, poster, fetch.roots.clone());
             }
@@ -485,6 +489,7 @@ impl Engine {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile banner: {e}")),
             },
+            Request::AvatarDecoration(sd) => self.answer_decoration(conn_from, sd.map(|sd| *sd)),
             Request::Typing(st) => match self.accept_typing(None, *st) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid typing: {e}")),

@@ -115,11 +115,13 @@ fn picture_hashes(w: &World) -> Vec<([u8; 32], Scope)> {
     people.extend(w.own_avatar.map(|p| p.hash));
     people.extend(w.banners.own.iter().flat_map(|b| b.pictures()).map(|p| p.hash));
     people.extend(w.peer_avatars.values().filter_map(|(_, p)| p.map(|p| p.hash)));
+    people.extend(w.decorations.pictures().map(|p| p.hash));
     people.extend(w.banners.peers.values().flat_map(|(_, b)| b.iter().flat_map(|b| b.pictures())).map(|p| p.hash));
     for c in w.communities.values() {
         let s = c.state();
         people.extend(s.avatars.values().filter_map(|(_, p)| p.map(|p| p.hash)));
         people.extend(s.profile_banners.values().flat_map(|(_, b)| b.iter().flat_map(|b| b.pictures())).map(|p| p.hash));
+        people.extend(s.avatar_decorations.values().filter_map(|(_, d)| d.as_ref()?.picture()).map(|p| p.hash));
         servers.extend(s.icon.and_then(|(_, p)| p).map(|p| p.hash));
         servers.extend(s.animated_icon.and_then(|(_, i)| i).into_iter().flat_map(|i| [i.image.hash, i.poster.hash]));
         servers.extend(s.banner.and_then(|(_, b)| b).iter().flat_map(|b| b.pictures()).map(|p| p.hash));

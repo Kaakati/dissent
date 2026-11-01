@@ -108,6 +108,9 @@ pub struct CommunityState {
     /// Each member's profile banner, from their latest accepted `ProfileBannerSet`, with its HLC. A
     /// `None` banner is a removed one. A newer HLC wins, as for `avatars`.
     pub profile_banners: BTreeMap<RootId, (Hlc, Option<crate::picture::Banner>)>,
+    /// Each member's avatar decoration, from their latest accepted `AvatarDecorationSet`, with its HLC. A `None` is
+    /// a removed one. A newer HLC wins, as for `avatars`.
+    pub avatar_decorations: BTreeMap<RootId, (Hlc, Option<crate::picture::Decoration>)>,
     /// The relays each member says they host for this community, from their latest accepted
     /// `RelayHostSet`, with its HLC. Apps verify them before counting a host. See `boosts`.
     pub relay_hosts: BTreeMap<RootId, (Hlc, Vec<String>)>,
@@ -473,6 +476,7 @@ impl CommunityState {
             banner: None,
             profile: None,
             profile_banners: BTreeMap::new(),
+            avatar_decorations: BTreeMap::new(),
             relay_hosts: BTreeMap::new(),
             storage_grants: BTreeMap::new(),
             history_support: BTreeMap::new(),
@@ -1067,6 +1071,12 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::AvatarDecorationSet { decoration } => {
+                require_control(chan)?;
+                if decoration.as_ref().is_some_and(|d| !d.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
             Payload::RelayHostSet { relays } => {
                 require_control(chan)?;
                 if rank < Rank::Admin && !self.members_host_relays {
@@ -1506,6 +1516,11 @@ impl CommunityState {
             Payload::ProfileBannerSet { banner } => {
                 if self.profile_banners.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.profile_banners.insert(actor, (ev.body.hlc, *banner));
+                }
+            }
+            Payload::AvatarDecorationSet { decoration } => {
+                if self.avatar_decorations.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.avatar_decorations.insert(actor, (ev.body.hlc, decoration.clone()));
                 }
             }
             Payload::RelayHostSet { relays } => {

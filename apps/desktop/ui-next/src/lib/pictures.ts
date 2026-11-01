@@ -16,7 +16,7 @@ export function isLocalPath(value: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\') || (value.startsWith('/') && !value.startsWith('//'));
 }
 
-const PICTURE_KEYS = new Set(['avatar', 'icon', 'icon_poster', 'banner', 'banner_poster']);
+const PICTURE_KEYS = new Set(['avatar', 'icon', 'icon_poster', 'banner', 'banner_poster', 'decoration_image', 'decoration_poster']);
 
 // Turns the local picture paths in a response into `dimg` URLs, under the keys the backend's `for_ui` converts. Most
 // commands convert already; this covers the ones that return an engine view as it is (adding a contact, creating or

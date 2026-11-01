@@ -1,3 +1,5 @@
+import type { DecorationField } from './decorations';
+
 // Wire types for the Tauri commands and events. Shapes are read from the current UI (apps/desktop/ui) and the engine
 // it talks to. Ids are lowercase base32 strings. Times are epoch milliseconds. Payloads that no ported view reads yet
 // are typed as `unknown` in api.ts; the batch that ports a view narrows them here.
@@ -25,6 +27,7 @@ export interface Me {
   banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
   banner_preset?: number | null; // the preset gradient (0-9), when it is one
   banner_poster?: string | null; // an animated banner's still frame
+  decoration?: DecorationField | null; // the avatar decoration, as the engine names it
 }
 
 export interface CommunitySummary {

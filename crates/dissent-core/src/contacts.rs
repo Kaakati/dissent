@@ -803,6 +803,7 @@ pub struct ContactEntry {
     pub shared_servers: Vec<String>,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    pub decoration: Option<crate::decorations::DecorationView>,
     /// When this person was added as a contact, in milliseconds. `None` if they are not one.
     pub contact_since_ms: Option<u64>,
     /// When this device first saw this person, in milliseconds.
@@ -838,6 +839,7 @@ impl Engine {
                 .map(|c| c.name().to_string())
                 .collect(),
             avatar: w.avatar_of(&root),
+            decoration: w.decoration_view(&root),
             contact_since_ms: w.contact_times.since.get(&root).copied(),
             first_seen_ms: w.contact_times.first_seen.get(&root).copied(),
             }

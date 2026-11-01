@@ -296,6 +296,7 @@ impl Engine {
                     | Payload::StorageGrant { .. }
                     | Payload::HistorySupport { .. }
                     | Payload::ChannelLayout { .. }
+                    | Payload::AvatarDecorationSet { .. }
             );
             body.payload = match &member {
                 Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,

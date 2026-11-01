@@ -366,7 +366,7 @@ if (!window.__TAURI__) {
         const since = readMs(`dm:${peer}`);
         // Like the engine's count: messages from others after the marker, not deleted, up to 100.
         const unread = items.filter((m) => m.from !== ME && m.ms > since && !m.deleted).length;
-        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100), mentions: unreadMentions(items, since) };
+        return { peer, display_name: people[peer], avatar: pictures[peer] ?? null, decoration: decorations[peer] ?? null, last_text: last.text, last_ms: last.ms, unread: Math.min(unread, 100), mentions: unreadMentions(items, since) };
       })
       .sort((a, b) => b.last_ms - a.last_ms);
   // A server's channel layout, resolved as the engine does it: ids that are not live channels or come again are skipped,
@@ -420,6 +420,7 @@ if (!window.__TAURI__) {
       suffix: suffix(r),
       display_name: people[r],
       avatar: pictures[r] ?? null,
+      decoration: decorations[r] ?? null,
       handle: handles[r] ?? null,
       role: c.roles[r],
       banned: c.banned.has(r),
@@ -601,6 +602,10 @@ if (!window.__TAURI__) {
     const canPublish = Boolean(c.membersHostRelays) || ['owner', 'admin'].includes(myRole(c));
     return { level, hosts, next_level_hosts: LEVEL_HOSTS[level + 1] ?? null, ...CEILINGS[level], members_can_host: Boolean(c.membersHostRelays), can_publish: canPublish };
   }
+  // Avatar decorations by root, as the engine names them: a built-in's id, or an upload's two URLs. The UI driver's
+  // fixture art includes this id, and an app without it draws nothing, as for any id it does not ship.
+  const decorations = { [GRACE]: { builtin: 'fixture_ring' } };
+  const recentDecorations = [];
   const pictureFrom = (bytes) => {
     need(atob(bytes).length <= MAX_PICTURE, 'That picture is over 256 KB');
     return `data:image/webp;base64,${bytes}`;
@@ -689,7 +694,7 @@ if (!window.__TAURI__) {
       return null;
     },
     open_release_page: () => null,
-    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, banner: profileBanners[ME]?.banner ?? null, banner_preset: profileBanners[ME]?.preset ?? null, banner_poster: profileBanners[ME]?.poster ?? null, first_run: firstRunPending }),
+    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, decoration: decorations[ME] ?? null, banner: profileBanners[ME]?.banner ?? null, banner_preset: profileBanners[ME]?.preset ?? null, banner_poster: profileBanners[ME]?.poster ?? null, first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
       return null;
@@ -718,6 +723,36 @@ if (!window.__TAURI__) {
     },
     clear_profile_banner: () => {
       delete profileBanners[ME];
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    set_avatar_decoration_builtin: ({ id: art }) => {
+      decorations[ME] = { builtin: art };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    // The engine decodes the file; here its type comes from its first bytes, under the same size cap.
+    set_avatar_decoration: ({ bytes }) => {
+      const raw = atob(bytes);
+      need(raw.length <= 2 * 1024 * 1024, 'avatar decoration: it must be at most 2 MB');
+      const type = raw.startsWith('GIF8') ? 'image/gif' : raw.startsWith('\x89PNG') ? 'image/png' : raw.startsWith('RIFF') ? 'image/webp' : null;
+      need(type, 'avatar decoration: it must be a WebP, GIF or PNG');
+      const url = `data:${type};base64,${bytes}`;
+      decorations[ME] = { decoration_image: url, decoration_poster: url };
+      recentDecorations.unshift({ id: `recent${recentDecorations.length}`, decoration_image: url, decoration_poster: url });
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    avatar_decoration_recents: () => recentDecorations.map((r) => ({ ...r })),
+    set_avatar_decoration_recent: ({ id: art }) => {
+      const r = recentDecorations.find((x) => x.id === art);
+      need(r, 'recent decoration not found');
+      decorations[ME] = { decoration_image: r.decoration_image, decoration_poster: r.decoration_poster };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    clear_avatar_decoration: () => {
+      delete decorations[ME];
       emitTo('dissent://avatar-changed', { root_id: ME });
       return null;
     },
@@ -1236,6 +1271,7 @@ if (!window.__TAURI__) {
         suffix: suffix(user),
         display_name: people[user] ?? `anon·${suffix(user)}`,
         avatar: pictures[user] ?? null,
+        decoration: decorations[user] ?? null,
         banner: profileBanners[user]?.banner ?? null,
         banner_poster: profileBanners[user]?.poster ?? null,
         banner_preset: profileBanners[user]?.preset ?? null,
@@ -1494,7 +1530,7 @@ if (!window.__TAURI__) {
     members: cpeers(g.members).map((m) => ({ ...m, online: ONLINE.has(m.root_id) })),
     last_text: g.items.at(-1)?.text ?? '', last_ms: g.items.at(-1)?.ms ?? 0, mentions: unreadMentions(g.items, readMs(`group:${g.id}`)), live_call: new URLSearchParams(location.search).has('nolive') ? null : (g.live_call ?? null),
   });
-  const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], avatar: pictures[r] ?? null, suffix: suffix(r) }));
+  const cpeers = (list) => list.map((r) => ({ root_id: r, display_name: people[r], avatar: pictures[r] ?? null, decoration: decorations[r] ?? null, suffix: suffix(r) }));
   const findTransfer = (transferId) => transfers.find((x) => x.id === transferId);
 
   servers.c4 = { id: 'c4', hue: 350, name: 'Kinnly', owner: LINUS, channels: [{ id: 'ch9', name: 'general' }], roles: { [LINUS]: 'owner', [ME]: 'member' }, banned: new Set(), msgs: { ch9: [] } };

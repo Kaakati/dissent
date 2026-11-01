@@ -320,6 +320,10 @@ pub enum Payload {
     /// live channels and channels left out are handled, and `state::valid_layout` for the caps. Carried: see
     /// `control::carry_sealed`. Appended. See `docs/design/02-communities-and-dms.md`, "Channel categories".
     ChannelLayout { entries: Vec<LayoutEntry> },
+    /// Sets or clears the author's avatar decoration: a built-in id or an uploaded picture. Only the author sets
+    /// their own, as for `ProfileBannerSet`. The latest by HLC wins. Carried: see `control::carry_sealed`, so an older
+    /// client shows it as locked and draws no decoration. Appended, see `picture::Decoration`.
+    AvatarDecorationSet { decoration: Option<crate::picture::Decoration> },
 }
 
 /// One entry of a channel layout: a channel outside any category, or a category. Appended only: the variant

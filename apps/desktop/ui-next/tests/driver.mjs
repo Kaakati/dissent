@@ -1130,6 +1130,72 @@ noConsoleErrors('core', consoleErrors);
 await b.close();
 }
 
+// Avatar decorations: the picker, the live preview, the overlay in lists, and an upload refused when too large. The
+// runner builds with its own fixture art (tests/run.mjs).
+async function section_decorations() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9877, profile: `${SCRATCH}/deco-profile` });
+await sleep(2600);
+const ev = b.ev;
+const TILE = (id) => `document.querySelector('[data-decoration-tile="${id}"]')`;
+const PREVIEW = `document.querySelector('[data-decoration-preview] [data-decoration]')`;
+await ev(`document.querySelector('[aria-label="User settings"], [aria-label="Settings"]')?.click()`);
+await sleep(800);
+await ev(`[...document.querySelectorAll('button, a, [role="tab"]')].find((n) => n.textContent.trim() === 'My identity')?.click()`);
+await sleep(500);
+check('D1 the picker offers None, the shipped built-ins and Upload, and leaves out art that is absent', (await ev(`[...document.querySelectorAll('[data-decoration-tile]')].map((t) => t.dataset.decorationTile).join()`)) === 'none,fixture_ring,fixture_small,upload', String(await ev(`[...document.querySelectorAll('[data-decoration-tile]')].map((t) => t.dataset.decorationTile).join()`)));
+check('D2 None is chosen at first, and the preview has no overlay', (await ev(`${TILE('none')}.getAttribute('aria-checked') === 'true' && !${PREVIEW}`)) === true);
+await ev(`${TILE('fixture_ring')}.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))`);
+await sleep(200);
+check('D3 pointing at a tile previews it without choosing it', (await ev(`!!${PREVIEW} && ${TILE('none')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(`${TILE('fixture_ring')}.click()`);
+await sleep(500);
+const overlay = await ev(`(() => { const i = ${PREVIEW}; const a = i.parentElement.getBoundingClientRect(); const r = i.getBoundingClientRect(); const cs = getComputedStyle(i); return { state: i.dataset.decoration, events: cs.pointerEvents, ratio: Math.round((r.width / a.width) * 100), dx: Math.round(r.left + r.width / 2 - a.left - a.width / 2), dy: Math.round(r.top + r.height / 2 - a.top - a.height / 2), hidden: i.getAttribute('aria-hidden'), loaded: i.complete && i.naturalWidth > 0, under: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) !== i }; })()`);
+check('D4 a pick is chosen and loops over the avatar, larger and centred', overlay.state === 'moving' && overlay.ratio === 120 && overlay.dx === 0 && overlay.dy === 0 && overlay.loaded && (await ev(`${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true, JSON.stringify(overlay));
+check('D5 the overlay takes no clicks and is hidden from assistive tech', overlay.events === 'none' && overlay.hidden === 'true' && overlay.under, JSON.stringify(overlay));
+await ev(`${TILE('fixture_ring')}.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }))`);
+await sleep(200);
+await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+await sleep(500);
+check('D6 under reduced motion it holds still, on its first frame', (await ev(`${PREVIEW}.dataset.decoration === 'still' && ${PREVIEW}.src.startsWith('blob:')`)) === true);
+await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+await sleep(300);
+// Too large, and refused before it is sent anywhere. Then a good upload, which the engine would have checked.
+const pick = (name, type, size, head) => `(() => { const input = document.querySelector('[data-decoration-input]'); const bytes = new Uint8Array(${size}); const head = ${JSON.stringify(head)}; head.forEach((v, i) => { bytes[i] = v; }); const dt = new DataTransfer(); dt.items.add(new File([bytes], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} })); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`;
+await ev(pick('big.gif', 'image/gif', 2 * 1024 * 1024 + 1, [71, 73, 70, 56]));
+await sleep(500);
+check('D7 an upload over 2 MB is refused with a message, and changes nothing', (await ev(`document.body.textContent.includes('A decoration must be at most 2 MB') && ${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(pick('art.svg', 'image/svg+xml', 64, [60, 115, 118, 103]));
+await sleep(400);
+check('D8 an SVG is refused', (await ev(`document.body.textContent.includes('Pick a WebP, GIF or PNG image') && ${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(`(async () => { const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='; const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0)); const input = document.querySelector('[data-decoration-input]'); const dt = new DataTransfer(); dt.items.add(new File([bytes], 'mine.png', { type: 'image/png' })); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await sleep(700);
+check('D9 a good upload is chosen, shown and offered as a recent one', (await ev(`${TILE('recent-0')}?.getAttribute('aria-checked') === 'true' && ${PREVIEW}?.src.startsWith('data:image/png')`)) === true);
+check('D9a the upload control says whose art it should be', (await ev(`document.body.textContent.includes('Use only art you have the right to share.')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/decoration-picker.png`);
+await ev(`${TILE('none')}.click()`);
+await sleep(500);
+check('D10 None removes it, and the upload stays on offer', (await ev(`${TILE('none')}.getAttribute('aria-checked') === 'true' && !${PREVIEW} && !!${TILE('recent-0')}`)) === true);
+await ev(`${TILE('recent-0')}.click()`);
+await sleep(500);
+check('D10a a recent upload can be picked again', (await ev(`${TILE('recent-0')}.getAttribute('aria-checked') === 'true' && ${PREVIEW}?.src.startsWith('data:image/png')`)) === true);
+await ev(`${TILE('none')}.click()`);
+await sleep(500);
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(500);
+// Grace's mock decoration, in the lists: still until the row is hovered, and not in the way of the row.
+await ev(`[...document.querySelectorAll('nav button, nav a, button')].find((n) => n.getAttribute('aria-label') === 'Direct messages' || n.getAttribute('aria-label') === 'Home')?.click()`);
+await sleep(600);
+const row = await ev(`(() => { const i = [...document.querySelectorAll('[data-decoration]')].find((n) => n.closest('button, a, li')); if (!i) return null; const r = i.closest('button, a, li'); r.dataset.decoRow = '1'; const box = r.getBoundingClientRect(); const a = i.getBoundingClientRect(); return { state: i.dataset.decoration, src: !!i.getAttribute('src'), inRow: a.left >= 0, cx: Math.round(a.left + a.width / 2), cy: Math.round(a.top + a.height / 2), hit: !!document.elementFromPoint(a.left + a.width / 2, a.top + a.height / 2)?.closest('[data-deco-row]'), box: Math.round(box.height) }; })()`);
+check('D11 a list row shows a still overlay, and the row still takes the click', row?.state === 'still' && row?.src === true && row?.hit === true, JSON.stringify(row));
+await ev(`document.querySelector('[data-deco-row]').dispatchEvent(new PointerEvent('pointerenter'))`);
+await sleep(200);
+check('D12 hovering the row makes it move', (await ev(`document.querySelector('[data-deco-row] [data-decoration]').dataset.decoration`)) === 'moving');
+await ev(`document.querySelector('[data-deco-row]').dispatchEvent(new PointerEvent('pointerleave'))`);
+await sleep(200);
+check('D13 leaving the row holds it still again', (await ev(`document.querySelector('[data-deco-row] [data-decoration]').dataset.decoration`)) === 'still');
+await b.close();
+}
+
 // Friends, the DM profile panel, the profile card and addresses (batch B).
 async function section_friends() {
 // the DM profile panel, the full profile, the profile card, the conversation menu's Profile item, and the address checks.
@@ -5344,6 +5410,7 @@ const SECTIONS = [
   ['consistency', section_consistency],
   ['scrub', section_scrub],
   ['watching', section_watching],
+  ['decorations', section_decorations],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

@@ -179,6 +179,10 @@ pub(crate) enum Request {
     /// Whether the responder holds mail for the asker's root, and how much. Signed by the asking device.
     /// Answered with `Response::InboxProbe`. Appended, see `inbox`.
     InboxProbe(Box<crate::inbox::Probe>),
+    /// The sender's signed avatar decoration, if it has ever set one, and a request for ours, sent to a contact's
+    /// device. A device from before decorations cannot decode it and answers with an error. Appended, see
+    /// `decorations`.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -260,6 +264,8 @@ pub(crate) enum Response {
     RotationSupport(bool),
     /// The answer to `Request::InboxProbe`. Appended, see `inbox`.
     InboxProbe(Box<crate::inbox::ProbeAnswer>),
+    /// The answer to `Request::AvatarDecoration`: the responder's own, if it has ever set one. Appended.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 impl Request {
@@ -420,10 +426,10 @@ mod wire_order_tests {
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_REQUEST: &[&str] =
-        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe"];
+        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "AvatarDecoration"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe"];
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "AvatarDecoration"];
 
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[

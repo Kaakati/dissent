@@ -33,8 +33,8 @@ const PEERS_PURPOSE: &[u8] = b"dissent/avatar-peers/v1";
 /// Bound to every sealed picture file, so a sealed blob cannot be swapped between files.
 pub(crate) const FILE_AAD: &[u8] = b"dissent/avatar-file/v1";
 /// Tries to fetch one picture before giving up. A later restart tries again.
-const FETCH_TRIES: u32 = 30;
-const FETCH_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const FETCH_TRIES: u32 = 30;
+pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(2);
 
 /// Whose picture changed, for the notice the views refresh on.
 #[derive(Clone, Copy, Debug)]
@@ -50,6 +50,8 @@ pub(crate) struct PictureFetch {
     pub picture: Option<Picture>,
     /// A second picture to fetch with it: an animated banner's poster frame.
     pub poster: Option<Picture>,
+    /// An uploaded avatar decoration, which is checked as it arrives. See `decorations`.
+    pub decoration: Option<Picture>,
     pub roots: Vec<RootId>,
 }
 
@@ -153,13 +155,13 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The stem of a picture's file: its blob hash in hex.
-fn stem(picture: &Picture) -> String {
+pub(crate) fn stem(picture: &Picture) -> String {
     hex(&picture.hash)
 }
 
 /// PNG for a PNG, GIF for an animated banner, JPEG for its poster frame, WebP otherwise. The UI sends
 /// WebP, and falls back to PNG where WebP is not available.
-fn extension_of(bytes: &[u8]) -> &'static str {
+pub(crate) fn extension_of(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG") {
         "png"
     } else if bytes.starts_with(b"GIF8") {
@@ -308,29 +310,34 @@ impl Engine {
         if bytes.is_empty() || bytes.len() as u64 > cap {
             return Err(CoreError::Invalid(format!("a picture must be at most {} KB", cap / 1024)));
         }
+        let picture = self.add_picture_blob(&bytes).await?;
+        let paths = self.paths();
+        let path = paths.avatars_dir().join(format!("{}.{}", stem(&picture), extension_of(&bytes)));
+        // Kept sealed. The window reads it through the app's picture scheme, which opens it (`open_picture`).
+        paths.write_bytes(&path, &bytes)?;
+        Ok(picture)
+    }
+
+    /// Adds a picture to the blob store, for everyone who shares something with us. The caller keeps its file.
+    pub(crate) async fn add_picture_blob(&self, bytes: &[u8]) -> Result<Picture> {
         let fref = self
             .inner
             .files
             .add(Input::Bytes {
                 name: "avatar".into(),
                 mime: "image/webp".into(),
-                data: bytes.clone(),
+                data: bytes.to_vec(),
             })
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
         // Pictures are for everyone who shares a community or a conversation with us.
         self.add_blob_scope(fref.hash, crate::blob_gate::Scope::Shared);
-        let picture = Picture {
+        Ok(Picture {
             hash: fref.hash,
             key: fref.key,
             nonce_prefix: fref.nonce_prefix,
             size: fref.size,
-        };
-        let paths = self.paths();
-        let path = paths.avatars_dir().join(format!("{}.{}", stem(&picture), extension_of(&bytes)));
-        // Kept sealed. The window reads it through the app's picture scheme, which opens it (`open_picture`).
-        paths.write_bytes(&path, &bytes)?;
-        Ok(picture)
+        })
     }
 
     /// Publishes a profile picture to every community we are in, then to our contacts directly.
@@ -436,9 +443,17 @@ impl Engine {
 
     /// Downloads, verifies and decrypts one picture, in memory, and keeps it sealed in the avatars directory.
     pub(crate) async fn fetch_blob(&self, picture: &Picture, providers: &[PeerAddr]) -> Result<()> {
-        let from: Vec<_> = providers.iter().filter_map(|p| p.to_iroh().ok()).collect();
+        let bytes = self.fetch_picture_bytes(picture, providers).await?;
+        // The plaintext's type decides its extension, which the picture scheme uses as the MIME type.
         let paths = self.paths();
-        let dir = paths.avatars_dir();
+        let named = paths.avatars_dir().join(format!("{}.{}", stem(picture), extension_of(&bytes)));
+        paths.write_bytes(&named, &bytes)?;
+        Ok(())
+    }
+
+    /// Downloads, verifies and decrypts one picture, in memory. The caller decides what becomes of it.
+    pub(crate) async fn fetch_picture_bytes(&self, picture: &Picture, providers: &[PeerAddr]) -> Result<Vec<u8>> {
+        let from: Vec<_> = providers.iter().filter_map(|p| p.to_iroh().ok()).collect();
         let fref = FileRef {
             hash: picture.hash,
             size: picture.size,
@@ -458,10 +473,7 @@ impl Engine {
             .await
             .map_err(|e| CoreError::Invalid(e.to_string()))?;
         self.add_blob_scope(picture.hash, crate::blob_gate::Scope::Shared);
-        // The plaintext's type decides its extension, which the picture scheme uses as the MIME type.
-        let named = dir.join(format!("{}.{}", stem(picture), extension_of(&bytes)));
-        paths.write_bytes(&named, &bytes)?;
-        Ok(())
+        Ok(bytes)
     }
 
     /// The bytes and MIME type of a picture this device keeps: an avatar, an icon, a banner, a thumbnail or a link
@@ -492,9 +504,15 @@ impl Engine {
 
     /// Fetches the pictures this device names but has not decrypted, for example after a restart.
     pub(crate) fn refetch_pictures(&self) {
+        let mut decorations = Vec::new();
         let wanted: Vec<(Owner, Picture, Vec<RootId>)> = {
             let w = self.read();
             let mut out = Vec::new();
+            for (root, (_, decoration)) in &w.decorations.peers {
+                if let Some(picture) = decoration.as_ref().and_then(|d| d.picture()) {
+                    decorations.push((Owner::Person(*root), picture, vec![*root]));
+                }
+            }
             for (root, (_, picture)) in &w.peer_avatars {
                 if let Some(picture) = picture {
                     out.push((Owner::Person(*root), *picture, vec![*root]));
@@ -508,6 +526,11 @@ impl Engine {
             for c in w.communities.values() {
                 // A person's picture in a server comes from any member, so a seeder that holds it can serve it.
                 let members: Vec<RootId> = c.state().members.keys().copied().collect();
+                for (root, (_, decoration)) in &c.state().avatar_decorations {
+                    if let Some(picture) = decoration.as_ref().and_then(|d| d.picture()) {
+                        decorations.push((Owner::Person(*root), picture, members.clone()));
+                    }
+                }
                 for (root, (_, banner)) in &c.state().profile_banners {
                     for picture in banner.map(|b| b.pictures()).unwrap_or_default() {
                         out.push((Owner::Person(*root), picture, members.clone()));
@@ -530,6 +553,9 @@ impl Engine {
         };
         for (owner, picture, roots) in wanted {
             self.fetch_picture(owner, picture, roots);
+        }
+        for (owner, picture, roots) in decorations {
+            self.fetch_decoration(owner, picture, roots);
         }
     }
 
@@ -559,6 +585,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Person(author),
                 picture: *avatar,
                 poster: None,
+                decoration: None,
                 roots: c.state().members.keys().copied().collect(),
             })
         }
@@ -568,6 +595,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Community(community),
                 picture: *avatar,
                 poster: None,
+                decoration: None,
                 roots: c.state().members.keys().copied().collect(),
             })
         }
@@ -577,6 +605,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Community(community),
                 picture: icon.map(|i| i.image),
                 poster: icon.map(|i| i.poster),
+                decoration: None,
                 roots: c.state().members.keys().copied().collect(),
             })
         }
@@ -586,6 +615,17 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Person(author),
                 picture: banner.and_then(|b| b.picture()),
                 poster: banner.and_then(|b| b.poster()),
+                decoration: None,
+                roots: c.state().members.keys().copied().collect(),
+            })
+        }
+        Payload::AvatarDecorationSet { decoration } => {
+            let current = c.state().avatar_decorations.get(&author).is_some_and(|(_, d)| d == decoration);
+            current.then(|| PictureFetch {
+                owner: Owner::Person(author),
+                picture: None,
+                poster: None,
+                decoration: decoration.as_ref().and_then(|d| d.picture()),
                 roots: c.state().members.keys().copied().collect(),
             })
         }
@@ -595,6 +635,7 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 owner: Owner::Community(community),
                 picture: banner.and_then(|b| b.picture()),
                 poster: banner.and_then(|b| b.poster()),
+                decoration: None,
                 roots: c.state().members.keys().copied().collect(),
             })
         }
