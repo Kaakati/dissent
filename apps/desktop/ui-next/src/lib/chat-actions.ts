@@ -2,12 +2,11 @@
 // conversation it is in (a channel, a direct conversation or a group), then reloads that conversation. A failure is a
 // toast and the action resolves to false, so a caller never throws. Ported from the message parts of the old UI's actions.js.
 import { api } from './api';
-import { confirm } from './dialog';
 import { has } from './features';
 import { markOpenRead, reloadOpen } from './chat';
 import { reloadCallChat } from './call-chat';
 import { noteReaction } from './quick-reactions';
-import { extOf, guessMime, isExecutable } from './attachments';
+import { guessMime } from './attachments';
 import type { StagedFile } from './chat';
 import { useShell } from './store';
 import { toast } from './toasts';
@@ -160,16 +159,9 @@ export function retryMessage(messageId: Id): Promise<boolean> {
   return run(() => api.retryMessage(messageId), { read: false });
 }
 
-// Programs get a confirmation first. The check uses the real (last) extension.
+// A file that can run code is never opened from here. The backend checks again and refuses it too.
 export async function openAttachment(a: Attachment): Promise<void> {
-  if (!a.local_path) return;
-  if (isExecutable(a.name)) {
-    const ok = await confirm({
-      message: `"${a.name}" is a program (.${extOf(a.name)}). Opening it runs it on this computer. Only open programs from people you trust.`,
-      okLabel: 'Open anyway',
-    });
-    if (!ok) return;
-  }
+  if (!a.local_path || a.danger) return;
   try {
     await api.openAttachment(a.local_path);
   } catch (err) {

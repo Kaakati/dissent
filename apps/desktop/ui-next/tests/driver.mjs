@@ -4509,6 +4509,44 @@ check('T3 once downloaded, the same frame plays the video, with the mark still o
 await b.close();
 }
 
+// ---- Received files: a file that can run code warns, has no Open, and is never shown as a picture ----
+async function section_safefiles() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9877, profile: `${SCRATCH}/safefiles-next-profile` });
+const { ev } = b;
+await sleep(1500);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('announcements'))?.click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-danger="program"]')`)) === true, 8000);
+const card = (name) => ev(`(() => {
+  const c = [...document.querySelectorAll('.att-card')].find((n) => n.querySelector('.att-name-text')?.textContent === ${JSON.stringify(name)});
+  if (!c) return null;
+  return {
+    warning: c.querySelector('.att-danger')?.textContent ?? null,
+    open: !!c.querySelector('button[aria-label^="Open "]'),
+    show: !!c.querySelector('button[aria-label^="Show "]'),
+    download: !!c.querySelector('button[aria-label^="Download "]'),
+  };
+})()`);
+const exe = await card('cutter-setup.exe');
+check('SF1 a program not yet here warns and can still be downloaded on request', !!exe?.warning?.includes('This is a program') && exe.download && !exe.open, JSON.stringify(exe));
+const renamed = await card('holiday.png');
+check('SF2 a renamed program shows a warning, not a picture', !!renamed?.warning?.includes('This is a program'), JSON.stringify(renamed));
+check('SF2 it has no Open, and offers Show in folder', renamed?.open === false && renamed.show === true, JSON.stringify(renamed));
+check('SF2 no image or open button stands in for it', (await ev(`!document.querySelector('.att-image-btn[aria-label="Open holiday.png"]') && !document.querySelector('img[alt="holiday.png"]')`)) === true);
+const macro = await card('budget.docx');
+check('SF3 a document with macros warns, with no Open and Show in folder', !!macro?.warning?.includes('macros') && !macro.open && macro.show, JSON.stringify(macro));
+check('SF4 the warning says it was not scanned', !!macro?.warning?.includes('has not scanned it'), macro?.warning);
+const pdf = await card('cutter-manual.pdf');
+check('SF5 a plain file is unchanged: no warning, Open and Show in folder', pdf?.warning === null && pdf.open && pdf.show, JSON.stringify(pdf));
+check('SF5 a plain picture still shows inline', (await ev(`!!document.querySelector('.att-image-btn[aria-label="Open cutter-photo.png"] img')`)) === true);
+await ev(`[...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === 'Show holiday.png in folder').click()`);
+await sleep(200);
+check('SF6 Show in folder reveals the file and opens nothing', (await ev(`(window.__mockRevealed ?? []).length === 1 && (window.__mockOpened ?? []).length === 0`)) === true);
+noConsoleErrors('safefiles', b.consoleErrors);
+await b.close();
+}
+
 // ---- Invite cards: nothing is asked for until the viewer clicks Show preview (privacy audit P-04) ----
 async function section_invitecards() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9865, profile: `${SCRATCH}/invitecards-next-profile` });
@@ -5450,6 +5488,7 @@ const SECTIONS = [
   ['memberonly', section_memberonly],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
+  ['safefiles', section_safefiles],
   ['paste', section_paste],
   ['dmmentions', section_dmmentions],
   ['invitecards', section_invitecards],

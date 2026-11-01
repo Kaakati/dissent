@@ -9,6 +9,7 @@ mod error;
 mod file_ref;
 mod inplace;
 mod name;
+mod received;
 mod store;
 mod swarm;
 mod tally;
@@ -21,6 +22,7 @@ pub use file_ref::FileRef;
 pub use inplace::{FilesProtocol, Linked, ServedHook};
 pub use iroh_blobs::provider::events::EventSender;
 pub use name::{sanitize_mime, sanitize_name, MAX_NAME_LEN};
+pub use received::{danger_of_content, danger_of_name, danger_of_path, mark_received, Danger};
 pub use swarm::{SwarmFetch, MAX_PARALLEL};
 pub use tally::{pieces_of, SourceCount, PIECE_BYTES};
 pub use thumbnail::{

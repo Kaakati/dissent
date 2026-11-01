@@ -30,7 +30,7 @@ pub fn sanitize_name(raw: &str) -> String {
     }
     let trimmed: String = cleaned
         .trim()
-        .trim_start_matches('.')
+        .trim_start_matches([' ', '.'])
         .trim_end_matches([' ', '.'])
         .chars()
         .take(MAX_NAME_LEN)
@@ -63,37 +63,19 @@ pub fn sanitize_mime(raw: &str) -> String {
 fn is_invisible_or_bidi(c: char) -> bool {
     matches!(
         c as u32,
-        0x061C | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF
+        0x00AD | 0x034F | 0x061C | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB | 0xE0000..=0xE007F
     )
 }
 
+/// Windows reads these as devices, with any extension and with spaces before the dot. That includes COM and LPT with
+/// a zero or a superscript digit, and the console's own two names.
 fn is_reserved_device(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    matches!(
-        stem.as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    let digit = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"));
+    digit.is_some_and(|d| matches!(d, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{B9}" | "\u{B2}" | "\u{B3}"))
 }
 
 #[cfg(test)]
@@ -126,6 +108,7 @@ mod tests {
         assert_eq!(sanitize_name("a\u{202E}cod.exe"), "acod.exe");
         assert_eq!(sanitize_name("bad\u{7}name\u{200B}"), "badname");
         assert_eq!(sanitize_name("line\nbreak"), "linebreak");
+        assert_eq!(sanitize_name("a\u{AD}b\u{E0041}.exe"), "ab.exe");
     }
 
     #[test]
@@ -133,6 +116,12 @@ mod tests {
         assert_eq!(sanitize_name("CON.txt"), "_CON.txt");
         assert_eq!(sanitize_name("lpt1"), "_lpt1");
         assert_eq!(sanitize_name("console.txt"), "console.txt");
+        assert_eq!(sanitize_name("NUL .txt"), "_NUL .txt");
+        assert_eq!(sanitize_name("com0.log"), "_com0.log");
+        assert_eq!(sanitize_name("COM\u{B9}.txt"), "_COM\u{B9}.txt");
+        assert_eq!(sanitize_name("lpt\u{B3}"), "_lpt\u{B3}");
+        assert_eq!(sanitize_name("CONIN$"), "_CONIN$");
+        assert_eq!(sanitize_name("com10.txt"), "com10.txt");
     }
 
     #[test]
@@ -142,6 +131,7 @@ mod tests {
         assert_eq!(sanitize_name(""), "file");
         assert_eq!(sanitize_name("   "), "file");
         assert_eq!(sanitize_name(".hidden. "), "hidden");
+        assert_eq!(sanitize_name(". .hidden"), "hidden");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+import type { FileDanger } from './types';
+
 // File rules for the composer and the message cards: size limit, names, extensions and icons. Ported from
 // the old UI's views/attachments.js. Nothing here renders markup; the icon is named, and the component maps it to a glyph.
 
@@ -5,7 +7,6 @@
 export const MAX_FILE_BYTES = 10 * 1024 ** 3;
 export const MAX_FILE_LABEL = '10 GB';
 
-const EXECUTABLE = new Set(['exe', 'msi', 'bat', 'cmd', 'ps1', 'js', 'vbs', 'scr', 'jar', 'app', 'dmg', 'sh']);
 const ARCHIVE = new Set(['zip', '7z', 'rar', 'gz', 'tgz', 'tar', 'xz', 'bz2']);
 const CODE = new Set(['js', 'mjs', 'ts', 'rs', 'py', 'json', 'html', 'css', 'toml', 'yaml', 'yml', 'sh', 'c', 'h', 'cpp', 'go', 'java']);
 const TEXT = new Set(['md', 'txt', 'pdf', 'doc', 'docx', 'rtf', 'csv', 'log']);
@@ -13,6 +14,17 @@ const MIME_BY_EXT: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
   mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', mp4: 'video/mp4', mkv: 'video/x-matroska', webm: 'video/webm',
   pdf: 'application/pdf', zip: 'application/zip', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
+};
+
+// What the card says about a file the engine flagged. The engine decides, from the name, the claimed type and the content.
+export const DANGER_TEXT: Record<FileDanger, string> = {
+  program: 'This is a program. Opening it runs it on this computer.',
+  installer: 'This is an installer. Opening it can change this computer.',
+  script: 'This is a script. Opening it can run commands on this computer.',
+  shortcut: 'This is a shortcut. Opening it can start a program or a web page.',
+  macro: 'This document has macros, which can run code on this computer.',
+  disk_image: 'This is a disk image. It can hold programs that run on this computer.',
+  unchecked: 'Dissent could not check what this file is, so treat it like a program.',
 };
 
 export type FileIconName = 'image' | 'file-audio' | 'file-video' | 'file-archive' | 'file-code' | 'file-text' | 'file';
@@ -37,7 +49,6 @@ export function extOf(name: string | null | undefined): string {
   return m ? m[1].toLowerCase() : '';
 }
 
-export const isExecutable = (name: string): boolean => EXECUTABLE.has(extOf(name));
 export const isOverLimit = (file: { size: number | null }): boolean =>
   file.size !== null && file.size !== undefined && Number(file.size) > MAX_FILE_BYTES;
 export const baseName = (path: string): string => String(path ?? '').split(/[\\/]/).pop() || 'file';

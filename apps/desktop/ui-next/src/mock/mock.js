@@ -250,6 +250,14 @@ if (!window.__TAURI__) {
     att('cutter-fix.mp4', 18.2 * MB, 'video/mp4', 'available', { thumb: { state: 'downloaded', path: mockImage(320, 180, 20, 'cutter'), width: 320, height: 180 } }),
     att('cutter-raw.webm', 6.4 * MB, 'video/webm'),
   ] });
+  // What the safe-file checks flag: by name before the download, by content once it is here. The last two stay plain.
+  servers.c1.msgs.ch3.unshift({ ...msg(7, 0, LINUS, 'Files to check.'), attachments: [
+    att('cutter-setup.exe', 2.1 * MB, 'application/vnd.microsoft.portable-executable', 'available', { danger: 'program' }),
+    att('holiday.png', 310 * 1024, 'image/png', 'downloaded', { danger: 'program', local_path: mockImage(320, 200, 90, 'not a picture') }),
+    att('budget.docx', 88 * 1024, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'downloaded', { danger: 'macro', local_path: 'C:/Downloads/budget.docx' }),
+    att('cutter-manual.pdf', 1.2 * MB, 'application/pdf', 'downloaded', { local_path: 'C:/Downloads/cutter-manual.pdf' }),
+    att('cutter-photo.png', 400 * 1024, 'image/png', 'downloaded', { local_path: mockImage(320, 200, 40, 'cutter photo') }),
+  ] });
 
   const dms = {
     [GRACE]: [
@@ -1444,10 +1452,12 @@ if (!window.__TAURI__) {
     },
     open_attachment: ({ path }) => {
       need(typeof path === 'string' && path.length > 0, 'Nothing to open');
+      (window.__mockOpened ??= []).push(path);
       return null;
     },
     reveal_attachment: ({ path }) => {
       need(typeof path === 'string' && path.length > 0, 'Nothing to show');
+      (window.__mockRevealed ??= []).push(path);
       return null;
     },
     check_update: () => (window.__mockNoUpdate ? null : { ...UPDATE }),

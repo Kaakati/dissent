@@ -630,6 +630,7 @@ export interface Attachment {
   needed?: number; // bytes, for disk_full
   note?: string; // why a download waits
   error?: string | null; // why the last download failed, shown beside Retry
+  danger?: FileDanger | null; // the file can run code: the card warns and has no Open
   status?: string; // a sending line
   sources?: FileSourceView[];
   rate_bps?: number;
@@ -828,3 +829,5 @@ export interface InboxSettings {
   max_hosted: number;
   notices: HostNotice[]; // newest first
 }
+
+export type FileDanger = 'program' | 'installer' | 'script' | 'shortcut' | 'macro' | 'disk_image' | 'unchecked';
