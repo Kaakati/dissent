@@ -28,6 +28,13 @@ impl Engine {
         state.communities.values().flat_map(|l| l.book.seeds.keys().copied()).collect()
     }
 
+    /// Whether a loaded tracker book could not be read, now or on an earlier start. Its seeds are not known, so nothing
+    /// may be unpinned as unreferenced.
+    pub(crate) fn tracker_book_damaged(&self) -> bool {
+        let state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        state.communities.values().any(|l| l.book_damaged)
+    }
+
     /// Whether the gate may serve `blob`: false only for a tracker seed that is not seeding now. A blob the tracker
     /// does not seed is not its business.
     pub(crate) fn tracker_serves(&self, blob: [u8; 32]) -> bool {

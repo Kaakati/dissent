@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use dissent_events::{EventId, Payload};
 use dissent_identity::{CommunityId, RootId};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::blob_gate::message_blobs;
 use crate::engine::{now_ms, Engine};
@@ -194,6 +194,10 @@ impl Engine {
     pub(crate) async fn unpin_unreferenced(&self, candidates: Vec<[u8; 32]>, keep_fresh_uploads: bool) -> usize {
         // What the file tracker keeps: every blob this device seeds or keeps for a listing. Read before the world, whose
         // lock the tracker also takes.
+        if self.tracker_book_damaged() {
+            warn!("a tracker book could not be read, so no blob is unpinned");
+            return 0;
+        }
         let seeded = self.tracker_kept_blobs();
         let release: Vec<[u8; 32]> = {
             let w = self.read();

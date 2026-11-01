@@ -94,6 +94,13 @@ pub(crate) struct Local {
     pub scopes: BTreeMap<u64, CategoryId>,
     pub book: LocalBook,
     loaded: bool,
+    /// False when `files_keys.bin` is there and could not be read this run, so it must not be replaced.
+    keys_writable: bool,
+    /// The same for `tracker.bin`.
+    book_writable: bool,
+    /// `tracker.bin` could not be read, now or on an earlier start. The book may be missing seeds, so the unpin sweep
+    /// keeps everything. See `Engine::tracker_book_damaged`.
+    book_damaged: bool,
     last_fetch: Option<Instant>,
     /// What each device said it holds lately. In memory only.
     pub(crate) heard: BTreeMap<DeviceId, swarm::HeardHoldings>,
@@ -136,20 +143,29 @@ fn book_path(paths: &Paths, id: &CommunityId) -> PathBuf {
 
 impl Local {
     fn load(paths: &Paths, id: &CommunityId) -> Self {
-        let keys: Vec<(u64, [u8; 32], Option<CategoryId>)> =
-            paths.read_bin(&keys_path(paths, id)).unwrap_or_else(|e| {
-                warn!(community = %id, error = %e, "could not read the files keys");
-                None
-            }).unwrap_or_default();
-        let scopes = keys.iter().filter_map(|(g, _, s)| s.map(|c| (*g, c))).collect();
-        let book = paths
-            .read_bin(&book_path(paths, id))
-            .unwrap_or_else(|e| {
-                warn!(community = %id, error = %e, "could not read the tracker book");
-                None
-            })
-            .unwrap_or_else(|| LocalBook { receipt_secret: rand::random(), ..LocalBook::default() });
-        Self { keys: keys.into_iter().map(|(g, k, _)| (g, k)).collect(), scopes, book, loaded: true, ..Self::default() }
+        let keys = paths.read_guarded::<Vec<(u64, [u8; 32], Option<CategoryId>)>>(&keys_path(paths, id));
+        let book = paths.read_guarded::<LocalBook>(&book_path(paths, id));
+        let found = keys.value.unwrap_or_default();
+        Self {
+            scopes: found.iter().filter_map(|(g, _, s)| s.map(|c| (*g, c))).collect(),
+            keys: found.into_iter().map(|(g, k, _)| (g, k)).collect(),
+            book: book.value.unwrap_or_else(|| LocalBook { receipt_secret: rand::random(), ..LocalBook::default() }),
+            keys_writable: keys.may_write,
+            book_writable: book.may_write,
+            book_damaged: book.damaged,
+            loaded: true,
+            ..Self::default()
+        }
+    }
+
+    /// The key file's contents, or `None` while the file could not be read and must not be replaced.
+    fn keys_to_save(&self) -> Option<Vec<(u64, [u8; 32], Option<CategoryId>)>> {
+        self.keys_writable.then(|| self.keys.iter().map(|(g, k)| (*g, *k, self.scopes.get(g).copied())).collect())
+    }
+
+    /// The book to save, or `None` while the file could not be read and must not be replaced.
+    fn book_to_save(&self) -> Option<LocalBook> {
+        self.book_writable.then(|| self.book.clone())
     }
 
     /// The newest files-key generation this device holds, and its key.
@@ -182,8 +198,10 @@ impl Engine {
 
     pub(crate) fn save_tracker_keys(&self, community: CommunityId) {
         let paths = self.read().paths.clone();
-        let keys: Vec<(u64, [u8; 32], Option<CategoryId>)> =
-            self.with_tracker(community, |l| l.keys.iter().map(|(g, k)| (*g, *k, l.scopes.get(g).copied())).collect());
+        let Some(keys) = self.with_tracker(community, |l| l.keys_to_save()) else {
+            warn!(community = %community, "the files keys file could not be read, so it is not replaced");
+            return;
+        };
         if let Err(e) = paths.write_bin(&keys_path(&paths, &community), &keys) {
             warn!(community = %community, error = %e, "could not save the files keys");
         }
@@ -191,7 +209,10 @@ impl Engine {
 
     pub(crate) fn save_tracker_book(&self, community: CommunityId) {
         let paths = self.read().paths.clone();
-        let book = self.with_tracker(community, |l| l.book.clone());
+        let Some(book) = self.with_tracker(community, |l| l.book_to_save()) else {
+            warn!(community = %community, "the tracker book could not be read, so it is not replaced");
+            return;
+        };
         if let Err(e) = paths.write_bin(&book_path(&paths, &community), &book) {
             warn!(community = %community, error = %e, "could not save the tracker book");
         }
@@ -402,6 +423,35 @@ mod sealing_tests {
         assert_eq!(local.keys.get(&1), Some(&[9; 32]));
         assert_eq!(local.book.receipt_secret, [7; 32]);
         assert!(local.book.folders.values().any(|p| p.ends_with("secret-folder")));
+    }
+
+    /// A book or key file from an earlier build's sealing is kept, and a good profile starts clean.
+    #[test]
+    fn files_that_do_not_read_are_kept_and_a_blocked_file_is_not_saved_over() {
+        let dir = profile("guard");
+        let paths = Paths::for_test(dir);
+        let id = CommunityId([2; 32]);
+        let fresh = Local::load(&paths, &id);
+        assert!(fresh.keys_to_save().is_some() && fresh.book_to_save().is_some() && !fresh.book_damaged);
+
+        let (keys, book) = (keys_path(&paths, &id), book_path(&paths, &id));
+        std::fs::create_dir_all(keys.parent().unwrap()).unwrap();
+        // XChaCha output, as the earlier builds wrote it: a first byte of 0 would decode as an empty key list.
+        let old_seal = [&[0u8][..], &[0x5a; 80]].concat();
+        std::fs::write(&keys, &old_seal).unwrap();
+        std::fs::write(&book, &old_seal).unwrap();
+        let local = Local::load(&paths, &id);
+        assert!(local.keys.is_empty() && local.book.seeds.is_empty() && local.book_damaged);
+        assert_eq!(std::fs::read(keys.with_file_name("files_keys.bin.bad")).unwrap(), old_seal);
+        assert_eq!(std::fs::read(book.with_file_name("tracker.bin.bad")).unwrap(), old_seal);
+        assert!(local.keys_to_save().is_some(), "with the old file safe, new state may be saved");
+        assert!(Local::load(&paths, &id).book_damaged, "a later start still knows the book was lost");
+
+        let other = CommunityId([3; 32]);
+        std::fs::create_dir_all(book_path(&paths, &other)).unwrap();
+        std::fs::create_dir_all(keys_path(&paths, &other)).unwrap();
+        let blocked = Local::load(&paths, &other);
+        assert!(blocked.keys_to_save().is_none() && blocked.book_to_save().is_none() && blocked.book_damaged);
     }
 
     /// A migration seals a plaintext book, and a profile copy under a new vault carries it over.

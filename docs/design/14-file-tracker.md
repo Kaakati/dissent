@@ -385,7 +385,9 @@ needs a new kind byte in the associated data (`BodyKind`), not a changed struct.
 
 ### Local files (this device only, sealed like every store file, see `at_rest`)
 
-`files_keys.bin`: `Vec<(generation, key, Option<CategoryId>)>`. `tracker.bin`: `LocalBook { receipt_secret, folders,
+`files_keys.bin`: `Vec<(generation, key, Option<CategoryId>)>`. `files_keys.bin` and `tracker.bin` are never replaced after a bad read:
+one that does not open or decode moves to `<name>.bad` untouched, any other read error stops saves for that run, and while
+a `tracker.bin.bad` is there the unpin sweep keeps everything. `tracker.bin`: `LocalBook { receipt_secret, folders,
 auto_import, seeds: BTreeMap<blob, SeedRecord { listing, path, limit, paused, stopped, linked, modified_ms, uploaded,
 since_ms, downloaded }>, completed }`. `seeding.bin`: `SeedingSettings`. `outboards/*.obao`: bao post-order
 outboards. Neither crosses the wire. After the merge they get an `upgrade_compat`

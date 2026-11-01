@@ -479,3 +479,37 @@ async fn the_trackers_files_are_sealed_and_survive_a_restart() {
     })
     .await;
 }
+
+/// A tracker book that no longer reads is kept beside its place, and the seeds it held are not unpinned by the sweep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_book_that_does_not_read_is_kept_and_its_seeds_keep_their_pins() {
+    bounded(async {
+        let alice = peer("tracker-bad-book").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let src = scratch("tracker-bad-book-src");
+        let file = write(&src, "kept.zip", &sample(300_000, 21));
+        alice.engine.prepare_listing(id, cat, vec![file.clone()]).await.unwrap();
+        alice.engine.list_files(id, cat, vec![item(&file, &[])], SeedLimit::Forever).await.unwrap();
+
+        let (identity, data) = stop(alice).await;
+        fn find(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+            std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+                if e.file_type().ok()?.is_dir() { find(&e.path(), name) } else { (e.file_name() == name).then(|| e.path()) }
+            })
+        }
+        let book = find(&data, "tracker.bin").expect("the book was written");
+        let damaged = [&[0u8][..], &[0x5a; 200]].concat();
+        std::fs::write(&book, &damaged).unwrap();
+
+        let alice = start(identity, data).await;
+        alice.engine.files_view(id).unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(std::fs::read(book.with_file_name("tracker.bin.bad")).unwrap(), damaged, "the bad book is kept whole");
+        assert_eq!(alice.engine.store_stats().await.unwrap().files, 1, "the seed keeps its pin");
+        let _ = std::fs::remove_dir_all(&src);
+        finish(vec![alice]).await;
+    })
+    .await;
+}

@@ -95,7 +95,63 @@ fn read_or_none(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
+/// What a store file that must not be lost read as. See [`Paths::read_guarded`].
+pub(crate) struct Guarded<T> {
+    pub value: Option<T>,
+    /// False when the file is there and could not be read: writing would destroy what it holds.
+    pub may_write: bool,
+    /// The file could not be read, now or on an earlier start, so its state is not known to be complete.
+    pub damaged: bool,
+}
+
+/// `path` with `.bad` added, then `.bad.1`, `.bad.2` and so on: the first that is free, or the first if `free` is false.
+fn aside_path(path: &Path, free: bool) -> PathBuf {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let first = path.with_file_name(format!("{name}.bad"));
+    if !free || !first.exists() {
+        return first;
+    }
+    (1u32..)
+        .map(|n| path.with_file_name(format!("{name}.bad.{n}")))
+        .find(|p| !p.exists())
+        .unwrap_or(first)
+}
+
 impl Paths {
+    /// Reads a postcard value that must not be lost to a bad read. Only a missing file reads as nothing. A file that
+    /// does not open or decode, trailing bytes included, is moved to `<name>.bad` untouched, where renaming it back
+    /// opens it again. Any other read error, or a failed move, leaves the file in place and says not to write it.
+    pub(crate) fn read_guarded<T: DeserializeOwned>(&self, path: &Path) -> Guarded<T> {
+        let found = self.read_bytes(path).and_then(|bytes| match bytes {
+            Some(bytes) => match postcard::take_from_bytes::<T>(&bytes) {
+                Ok((value, [])) => Ok(Some(value)),
+                Ok(_) => Err(CoreError::Encoding("trailing bytes".into())),
+                Err(e) => Err(encoding(e)),
+            },
+            None => Ok(None),
+        });
+        let error = match found {
+            Ok(value) => {
+                let damaged = aside_path(path, false).exists();
+                return Guarded { value, may_write: true, damaged };
+            }
+            Err(e) => e,
+        };
+        let may_write = match error {
+            CoreError::Encoding(_) | CoreError::Invalid(_) => {
+                let aside = aside_path(path, true);
+                let moved = fs::rename(path, &aside);
+                tracing::warn!(path = %path.display(), aside = %aside.display(), error = %error, moved = moved.is_ok(), "a store file does not read; set it aside");
+                moved.is_ok()
+            }
+            _ => {
+                tracing::warn!(path = %path.display(), error = %error, "could not read a store file; it will not be written this run");
+                false
+            }
+        };
+        Guarded { value: None, may_write, damaged: true }
+    }
+
     /// What a file's seal is bound to: its path inside the profile.
     fn aad(&self, path: &Path) -> Vec<u8> {
         let rel = path.strip_prefix(self.root()).unwrap_or(path);
@@ -368,7 +424,8 @@ pub(crate) fn reseal_tree(root: &Path, from: &Vault, to: &Vault) -> Result<()> {
             let name = entry.file_name().to_string_lossy().into_owned();
             if kind.is_dir() && !KEEP_DIRS.contains(&name.as_str()) {
                 walk(&entry.path(), out)?;
-            } else if kind.is_file() {
+            } else if kind.is_file() && !name.contains(".bad") {
+                // A file set aside does not open, by its name or by what is wrong with it. It stays as it is.
                 out.push(entry.path());
             }
         }
@@ -574,6 +631,61 @@ mod tests {
         assert!(fs::read(dir.join("local.bin")).unwrap().starts_with(FILE_MAGIC), "a plaintext file is sealed on the way");
         assert_eq!(after.read_bin::<String>(&dir.join("local.bin")).unwrap().as_deref(), Some("plain note"));
         assert!(before.read_bin::<String>(&dir.join("contacts.bin")).is_err(), "the old vault no longer opens it");
+    }
+
+    #[test]
+    fn a_file_that_does_not_read_is_set_aside_whole_and_only_a_missing_one_reads_as_nothing() {
+        let dir = scratch("guarded");
+        let p = paths(&dir);
+        let path = dir.join("book.bin");
+        let missing = p.read_guarded::<Vec<u32>>(&path);
+        assert!(missing.value.is_none() && missing.may_write && !missing.damaged);
+
+        // Bytes from another seal: no header, and the first byte decodes as an empty list, so only the trailing bytes
+        // tell them apart from a real file.
+        let foreign = [&[0u8][..], b"sealed some other way"].concat();
+        fs::write(&path, &foreign).unwrap();
+        let read = p.read_guarded::<Vec<u32>>(&path);
+        assert!(read.value.is_none() && read.may_write && read.damaged);
+        assert!(!path.exists());
+        assert_eq!(fs::read(dir.join("book.bin.bad")).unwrap(), foreign);
+
+        // A later good file works, and the earlier damage is still known. A second bad file gets its own name.
+        p.write_bin(&path, &vec![1u32]).unwrap();
+        let read = p.read_guarded::<Vec<u32>>(&path);
+        assert_eq!(read.value, Some(vec![1]));
+        assert!(read.may_write && read.damaged);
+        fs::write(&path, [0xff, 0xff]).unwrap();
+        p.read_guarded::<Vec<u32>>(&path);
+        assert_eq!(fs::read(dir.join("book.bin.bad")).unwrap(), foreign);
+        assert_eq!(fs::read(dir.join("book.bin.bad.1")).unwrap(), [0xff, 0xff]);
+
+        // A sealed file under another key is moved too, and opens again once renamed back under the right vault.
+        let other = dir.join("keys.bin");
+        p.write_bin(&other, &vec![2u32]).unwrap();
+        let wrong = Paths::new(dir.clone(), Arc::new(Vault::from_passphrase("other", &[3u8; 16]).unwrap()));
+        assert!(wrong.read_guarded::<Vec<u32>>(&other).may_write);
+        fs::rename(dir.join("keys.bin.bad"), &other).unwrap();
+        assert_eq!(p.read_guarded::<Vec<u32>>(&other).value, Some(vec![2]));
+
+        // A read that fails for any other reason leaves the path alone and says not to write it.
+        let blocked = dir.join("blocked.bin");
+        fs::create_dir(&blocked).unwrap();
+        let read = p.read_guarded::<Vec<u32>>(&blocked);
+        assert!(read.value.is_none() && !read.may_write && read.damaged);
+        assert!(blocked.is_dir() && !dir.join("blocked.bin.bad").exists());
+    }
+
+    #[test]
+    fn a_profile_copy_leaves_files_set_aside_alone() {
+        let dir = scratch("reseal-aside");
+        let old = Vault::from_passphrase("old", &[3u8; 16]).unwrap();
+        let new = Vault::from_passphrase("new", &[3u8; 16]).unwrap();
+        let before = Paths::sealed_by(dir.clone(), &old);
+        before.write_bin(&dir.join("book.bin"), &1u32).unwrap();
+        fs::rename(dir.join("book.bin"), dir.join("book.bin.bad")).unwrap();
+        reseal_tree(&dir, &old, &new).unwrap();
+        assert!(fs::read(dir.join("book.bin.bad")).unwrap().starts_with(FILE_MAGIC));
     }
 
     #[cfg(unix)]
