@@ -455,6 +455,7 @@ mod tests {
             last_ms: 0,
             status: None,
             avatar: None,
+            decoration: None,
             live_call: None,
             contact_since_ms: None,
             first_seen_ms: None,

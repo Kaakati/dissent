@@ -15,15 +15,16 @@ use iroh_blobs::api::{Store, TempTag};
 use iroh_blobs::store::fs::options::Options;
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::store::GcConfig;
-use iroh_blobs::{BlobsProtocol, Hash, HashAndFormat};
+use iroh_blobs::{Hash, HashAndFormat};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use crate::crypt::{self, cipher_len, plain_len_for_cipher, Sealed};
+use crate::crypt::{self, cipher_len, plain_len_for_cipher, FileKey, Sealed};
 use crate::tally::{Observer, SourceCount};
 use crate::error::{FilesError, Result};
 use crate::file_ref::FileRef;
 use crate::name::{sanitize_mime, sanitize_name};
+use crate::received::mark_or_log;
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -144,13 +145,17 @@ type FreeSpaceFn = Arc<dyn Fn(&Path) -> io::Result<u64> + Send + Sync>;
 /// `BlobReader`, one chunk at a time. No path reads a whole file into memory. Only [`Input::Bytes`]
 /// holds its payload in memory.
 pub struct Files {
-    store: FsStore,
-    blobs_dir: PathBuf,
+    pub(crate) store: FsStore,
+    pub(crate) blobs_dir: PathBuf,
     staging: PathBuf,
-    size_limit: u64,
-    timeouts: Timeouts,
+    pub(crate) size_limit: u64,
+    pub(crate) timeouts: Timeouts,
     partial_ttl: Duration,
     free_space: FreeSpaceFn,
+    /// The cap on swarm downloads, shared by their workers. See `swarm`.
+    pub(crate) download_cap: Arc<crate::swarm::DownloadCap>,
+    /// Files seeded from where they are. See `inplace`.
+    pub(crate) linked: crate::inplace::LinkedSet,
 }
 
 impl std::fmt::Debug for Files {
@@ -202,6 +207,8 @@ impl Files {
             timeouts: Timeouts::default(),
             partial_ttl: DEFAULT_PARTIAL_TTL,
             free_space: Arc::new(|dir: &Path| fs4::available_space(dir)),
+            download_cap: Arc::default(),
+            linked: Default::default(),
         };
         files.prune_partials().await?;
         Ok(files)
@@ -249,16 +256,6 @@ impl Files {
     }
 
     /// Protocol handler that serves blobs to peers. Mount it on a `Router` under [`crate::ALPN`].
-    pub fn protocol_handler(&self) -> BlobsProtocol {
-        BlobsProtocol::new(self.store(), None)
-    }
-
-    /// Protocol handler that serves blobs only as `events` allows. The events' owner answers each connection and
-    /// request it intercepts, and can refuse it with [`crate::gate::AbortReason::Permission`].
-    pub fn protocol_handler_with(&self, events: crate::gate::EventSender) -> BlobsProtocol {
-        BlobsProtocol::new(self.store(), Some(events))
-    }
-
     /// Stops the blob store. Shutting down a `Router` that serves this handler also stops it.
     pub async fn shutdown(&self) -> Result<()> {
         self.store.shutdown().await.map_err(store_err)
@@ -268,6 +265,19 @@ impl Files {
     ///
     /// Needs the ciphertext size plus [`DISK_MARGIN`] free on the blobs volume.
     pub async fn add(&self, input: Input) -> Result<FileRef> {
+        self.add_keyed(input, None).await
+    }
+
+    /// Like [`Files::add`], under `key` instead of a fresh one. The tracker derives `key` from the server's files key
+    /// and the plaintext's fingerprint, so the same file always gives the same blob. See `tracker::content_key`.
+    /// The plaintext must hash to `fingerprint`, the value `key` was derived from. If it does not, because the file
+    /// changed since it was fingerprinted, nothing is stored and this fails with [`FilesError::Changed`]: ciphertext of
+    /// other bytes under that key would reuse its nonces.
+    pub async fn add_with_key(&self, input: Input, key: FileKey, fingerprint: [u8; 32]) -> Result<FileRef> {
+        self.add_keyed(input, Some((key, fingerprint))).await
+    }
+
+    async fn add_keyed(&self, input: Input, key: Option<(FileKey, [u8; 32])>) -> Result<FileRef> {
         let limit = self.size_limit;
         let (name, mime, source, plain_len) = match input {
             Input::Path { path, mime } => {
@@ -298,7 +308,7 @@ impl Files {
 
         self.check_space(cipher_len(plain_len) + DISK_MARGIN)
             .await?;
-        let (tag, sealed) = self.store_encrypted(source, limit).await?;
+        let (tag, sealed) = self.store_encrypted(source, limit, key).await?;
         let hash = tag.hash();
         self.pin_hash(hash).await?;
         drop(tag);
@@ -500,7 +510,7 @@ impl Files {
         Ok(())
     }
 
-    async fn pin_hash(&self, hash: Hash) -> Result<()> {
+    pub(crate) async fn pin_hash(&self, hash: Hash) -> Result<()> {
         self.store
             .tags()
             .set(pin_name(&hash), HashAndFormat::raw(hash))
@@ -572,7 +582,7 @@ impl Files {
     }
 
     /// Fails with [`FilesError::DiskFull`] when the blobs volume has less than `needed` free.
-    async fn check_space(&self, needed: u64) -> Result<()> {
+    pub(crate) async fn check_space(&self, needed: u64) -> Result<()> {
         let probe = Arc::clone(&self.free_space);
         let dir = self.blobs_dir.clone();
         let available = run_blocking(move || Ok(probe(&dir)?)).await?;
@@ -583,9 +593,18 @@ impl Files {
     }
 
     /// Encrypts `source` and streams the ciphertext into the store. Nothing is staged on disk.
-    async fn store_encrypted(&self, source: Source, limit: u64) -> Result<(TempTag, Sealed)> {
+    async fn store_encrypted(
+        &self,
+        source: Source,
+        limit: u64,
+        key: Option<(FileKey, [u8; 32])>,
+    ) -> Result<(TempTag, Sealed)> {
         let (tx, rx) = mpsc::channel::<io::Result<Bytes>>(STREAM_DEPTH);
-        let encryptor = tokio::task::spawn_blocking(move || encrypt_into(source, limit, tx));
+        let (key, expect) = match key {
+            Some((key, fingerprint)) => (key, Some(fingerprint)),
+            None => (FileKey::generate(), None),
+        };
+        let encryptor = tokio::task::spawn_blocking(move || encrypt_into(source, limit, key, expect, tx));
         let chunks = futures_lite::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         });
@@ -743,7 +762,7 @@ impl Files {
     }
 
     /// Decrypts the verified blob into a staging file, then moves it to `dest_dir`.
-    async fn decrypt_to_dest(
+    pub(crate) async fn decrypt_to_dest(
         &self,
         hash: Hash,
         fref: &FileRef,
@@ -777,18 +796,18 @@ impl Files {
             .join(format!("{:016x}.part", rand::random::<u64>()))
     }
 
-    async fn is_complete(&self, hf: HashAndFormat) -> Result<bool> {
+    pub(crate) async fn is_complete(&self, hf: HashAndFormat) -> Result<bool> {
         let local = self.store.remote().local(hf).await.map_err(store_err)?;
         Ok(local.is_complete())
     }
 
-    async fn local_bytes(&self, hf: HashAndFormat) -> Result<u64> {
+    pub(crate) async fn local_bytes(&self, hf: HashAndFormat) -> Result<u64> {
         let local = self.store.remote().local(hf).await.map_err(store_err)?;
         Ok(local.local_bytes())
     }
 
     /// Holds the ciphertext for `hash` for [`Files::with_partial_ttl`] time, replacing any earlier hold.
-    async fn hold_partial(&self, hash: Hash) -> Result<()> {
+    pub(crate) async fn hold_partial(&self, hash: Hash) -> Result<()> {
         self.release_partial(hash).await?;
         let expires = now_ms().saturating_add(self.partial_ttl.as_millis() as u64);
         self.store
@@ -798,7 +817,7 @@ impl Files {
             .map_err(store_err)
     }
 
-    async fn release_partial(&self, hash: Hash) -> Result<()> {
+    pub(crate) async fn release_partial(&self, hash: Hash) -> Result<()> {
         let prefix = format!("{PARTIAL_PREFIX}{}/", hash.to_hex());
         self.store
             .tags()
@@ -817,22 +836,33 @@ enum Source {
 
 /// Encrypts `source` and sends each sealed chunk down `tx`. On failure it sends the error too, so
 /// the import fails instead of storing a truncated blob.
-fn encrypt_into(source: Source, limit: u64, tx: mpsc::Sender<io::Result<Bytes>>) -> Result<Sealed> {
+fn encrypt_into(
+    source: Source,
+    limit: u64,
+    key: FileKey,
+    expect: Option<[u8; 32]>,
+    tx: mpsc::Sender<io::Result<Bytes>>,
+) -> Result<Sealed> {
     let mut out = ChannelWriter(tx.clone());
     let result = match source {
         Source::Path(path) => File::open(&path)
             .map_err(FilesError::from)
             .and_then(|file| {
                 let mut input = BufReader::new(file);
-                crypt::encrypt_stream(&mut input, &mut out, limit)
+                crypt::encrypt_stream_with(&mut input, &mut out, limit, key, expect)
             }),
         Source::Bytes(data) => {
             let mut input: &[u8] = &data;
-            crypt::encrypt_stream(&mut input, &mut out, limit)
+            crypt::encrypt_stream_with(&mut input, &mut out, limit, key, expect)
         }
     };
+    // A changed file ends the stream short instead: the import stores a partial blob that nothing pins, and garbage
+    // collection removes it. Sent at the end of the stream, an error item left the import waiting (see the test
+    // `a_file_that_does_not_match_its_fingerprint_is_not_stored`).
     if let Err(e) = &result {
-        let _ = tx.blocking_send(Err(io::Error::other(e.to_string())));
+        if !matches!(e, FilesError::Changed) {
+            let _ = tx.blocking_send(Err(io::Error::other(e.to_string())));
+        }
     }
     result
 }
@@ -898,7 +928,7 @@ impl DecryptJob {
             if self.cancelled.load(Ordering::SeqCst) {
                 return Err(FilesError::Fetch("fetch was cancelled".to_owned()));
             }
-            place(&self.partial, &self.dest_dir, &self.name)
+            place(&self.partial, &self.dest_dir, &self.name).inspect(|path| mark_or_log(path))
         });
         if outcome.is_err() {
             let _ = fs::remove_file(&self.partial);
@@ -987,7 +1017,7 @@ where
         .map_err(|e| FilesError::Store(format!("blocking task failed: {e}")))?
 }
 
-fn store_err(e: impl std::fmt::Display) -> FilesError {
+pub(crate) fn store_err(e: impl std::fmt::Display) -> FilesError {
     FilesError::Store(e.to_string())
 }
 

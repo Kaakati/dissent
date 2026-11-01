@@ -12,6 +12,7 @@ import { UserAvatar } from '@/components/user-avatar';
 import { Button } from '@/components/ui/button';
 import { Tip } from '@/components/ui/tip';
 import { addressOf, shortOf } from '@/lib/address';
+import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import type { ContactsView, DirectSummary, Presence, UserProfileView } from '@/lib/types';
 
@@ -57,7 +58,7 @@ export function DmPanel({ peer }: { peer: string }) {
   const presence = presenceOf(view, conv);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto dissent-scroll">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto dissent-scroll" {...themeProps(view.theme)}>
       <div data-profile-banner className="relative h-[104px] shrink-0" style={{ background: bannerBackground(peer, view) }}>
         <div className="absolute top-s-2 right-s-2 flex gap-s-2">
           {status && StatusIcon ? (

@@ -30,6 +30,7 @@ import { DisclaimerHost } from '@/components/startup/disclaimer';
 import { SettingsPage } from '@/components/settings/settings-page';
 import { Toaster } from '@/components/toaster';
 import { TipProvider } from '@/components/ui/tip';
+import { FilesBody, FilesTabs } from '@/components/files/files-page';
 import { useShell } from '@/lib/store';
 
 export default function App() {
@@ -40,6 +41,8 @@ export default function App() {
   const friends = page === 'contacts';
   // The Saved Messages page (Home) fills the main column; it has no right column.
   const saved = page === 'saved';
+  // The server's Files area fills the main column and keeps the right column.
+  const files = page === 'files';
   // The chat shows the open conversation or server channel. A voice channel's board, a call here, or the lobby of a live
   // call takes its place (call-mode.ts decides which).
   const chatOpen = useShell((s) => !s.page && !s.voiceChannelId && (s.route.kind === 'server' || s.peer !== null));
@@ -49,17 +52,17 @@ export default function App() {
   const right = useRightColumn();
   return (
     <TipProvider>
-      <div className="flex h-[calc(100vh/var(--ui-zoom,1))] flex-col overflow-hidden bg-chat text-text">
+      <div className="flex h-screen flex-col overflow-hidden bg-chat text-text">
         <Titlebar />
         <div className="app-shell" data-right={transfers ? 'members' : right.mode}>
           <ServerRail />
           <Sidebar />
           <MainArea
             header={board === 'call' ? <CallHeader /> : board === 'lobby' ? <LobbyHeader /> : !transfers && chatOpen ? <ChatHeader /> : undefined}
-            headerExtra={transfers ? <TransfersTabs /> : friends ? <FriendsTabs /> : null}
+            headerExtra={transfers ? <TransfersTabs /> : friends ? <FriendsTabs /> : files ? <FilesTabs /> : null}
             overlay={!transfers && chatOpen && (board === null || conversationCall) ? <ChatOverlay /> : null}
           >
-            {transfers ? <TransfersBody /> : friends ? <FriendsBody /> : saved ? <SavedBody /> : board === 'call' ? <CallBody /> : board === 'lobby' ? <LobbyBody /> : chatOpen ? <ChatBody /> : <div className="flex min-h-0 items-center justify-center"><EmptyPane /></div>}
+            {transfers ? <TransfersBody /> : friends ? <FriendsBody /> : saved ? <SavedBody /> : files ? <FilesBody /> : board === 'call' ? <CallBody /> : board === 'lobby' ? <LobbyBody /> : chatOpen ? <ChatBody /> : <div className="flex min-h-0 items-center justify-center"><EmptyPane /></div>}
           </MainArea>
           <RightPanel>{transfers ? <TransfersAside /> : right.node}</RightPanel>
           <UserBar />

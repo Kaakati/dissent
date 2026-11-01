@@ -1,8 +1,10 @@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { hueBackground, hueOf, initials } from '@/lib/identity';
+import { decorationOf, type Decoration } from '@/lib/decorations';
 import { imageOf } from '@/lib/images';
 import type { Presence as PresenceState } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { DecorationOverlay } from './decoration-overlay';
 import { PresenceDot } from './presence';
 
 export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
@@ -24,6 +26,7 @@ export function UserAvatar({
   presenceClass,
   speaking = false,
   className,
+  decoration,
 }: {
   name: string;
   seed?: string | null;
@@ -33,9 +36,13 @@ export function UserAvatar({
   presenceClass?: string;
   speaking?: boolean;
   className?: string;
+  // The decoration to preview instead of the person's own. Null draws none.
+  decoration?: Decoration | null;
 }) {
   const id = seed || name;
   const src = imageOf(seed);
+  // At 16 px the art would only be noise. The largest pictures loop; a list row moves when it is hovered.
+  const art = size === 'xs' ? null : decoration === undefined ? decorationOf(seed) : decoration;
   return (
     <Avatar
       className={cn(
@@ -49,6 +56,7 @@ export function UserAvatar({
       <AvatarFallback className="bg-transparent text-white" style={{ background: hueBackground(hueOf(id)), fontSize: 'inherit' }}>
         {initials(name)}
       </AvatarFallback>
+      {art ? <DecorationOverlay decoration={art} loop={size === 'xl'} /> : null}
       {presence ? <PresenceDot status={presence} className={presenceClass ?? (size === 'xl' ? 'right-0 bottom-0 size-[18px]' : undefined)} /> : null}
     </Avatar>
   );

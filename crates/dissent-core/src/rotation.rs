@@ -440,6 +440,8 @@ impl Engine {
                 // The replay may still pick a rival with a lower id. Adoption corrects that later.
                 self.install_secret(community, generation, secret, se.event.id.0)
                     .await;
+                // Listings from now on go under a files key the departed never held.
+                self.rotate_files_key(community).await;
             }
             Err(e) => debug!(community = %community, error = %e, "rotation not accepted"),
         }

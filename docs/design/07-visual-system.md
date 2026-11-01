@@ -288,6 +288,28 @@ Measured again after the redesign with the same driver. Every value below is at 
 - Toasts stay bottom-right above the status bar; the references pop notices at the top centre.
 - Header features that do not exist here (topic, pins, threads, voice) are not drawn.
 
+### Avatar decorations
+
+`UserAvatar` draws a person's decoration over their picture, so every surface that shows the avatar gets it: 120% of the
+picture's size, centred, `pointer-events: none`, `aria-hidden`, under the presence dot and over the speaking ring. 200 and
+288 px art land at the same scale, since the art is sized to the picture. Not drawn at the `xs` size (16 px), where it
+would only be noise.
+
+- **Motion.** The `xl` size (profile card, full profile, DM panel, call tiles, Settings, lobby) loops. Smaller sizes (lists,
+  message rows, user panel, voice roster) show a still frame and move while their row is hovered. Everything holds still
+  under reduced motion and while the window is in the background, the same switch as animated banners (`bannersStill`).
+  Measured with five pieces of real art in headless Chrome: 300 overlays moving cost 0.30 of a core against 0.05 still,
+  with no long tasks and 60 fps on the main thread at either count. So the still rows are for battery, not for jank.
+- **Still frames.** An upload's comes from the engine, which picks the first frame that shows anything. A built-in's first
+  frame is drawn to a canvas once per piece of art (`stillOf`).
+- **Built-ins.** None ship today: only art with confirmed rights may. `apps/desktop/ui-next/decorations.json` is the one
+  list of what ships: id (on the wire for good), label and file. The Vite plugin in `vite.config.ts` bundles each listed file
+  found in `assets/decorations` (or `DISSENT_DECORATIONS_DIR`) and leaves out the rest with a warning. An id this build does
+  not ship draws nothing. `assets/avatar_animations` is a private, gitignored folder: nothing from it is listed or bundled.
+- **Picker.** Settings > My identity, under the avatar: None, any built-ins, this device's six latest uploads, Upload with
+  "Use only art you have the right to share.", and a preview on your own avatar that follows the pointer. A pick is
+  published at once, as the banner is.
+
 ## Part 4. Replies and reactions
 
 Built against the engine contract that core2 will implement: `MessageItem.reply_to: { id, author_name, text | null }`, `MessageItem.reactions: [{ emoji, count, me }]`, and the commands `send_reply`, `react` and `unreact`. The UI feature-detects: reply and reaction affordances appear only when the channel's message items carry a `reactions` array (`view.social` in `views/chat.js`). Without it the channel renders exactly as before, and R in the message list does nothing. DMs never show them (the contract is channel-only).

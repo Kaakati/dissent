@@ -59,6 +59,7 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&root);
             }
+            engine.exchange_themes(device).await;
         });
     }
 
@@ -77,6 +78,7 @@ impl Engine {
                         debug!(device = %device, error = %e, "synced banner not taken");
                     }
                 }
+                self.exchange_decorations(device).await;
                 true
             }
             Ok(_) => {

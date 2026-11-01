@@ -151,6 +151,8 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     .await
     .map_err(err)?;
     crate::attachments::prepare_engine(app, &engine);
+    // A new engine starts on mains power and an unmetered network until told otherwise: tell it now.
+    engine.set_device_conditions(crate::device_conditions::read());
     // The engine keeps no copy of the photo choice, so a new one is told before it serves any command.
     if let Some(shell) = app.try_state::<crate::shell_cmds::ShellState>() {
         engine.set_keep_photo_metadata(shell.get().keep_photo_metadata);
@@ -169,6 +171,12 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
 #[tauri::command]
 pub fn get_network_settings(state: State<'_, AppState>) -> crate::network::NetworkSettings {
     crate::network::load(&state.data_dir)
+}
+
+/// Applies the font scale as the webview's own zoom.
+#[tauri::command]
+pub fn set_ui_zoom(webview: tauri::Webview, scale: f64) -> Result<(), String> {
+    webview.set_zoom(scale.clamp(0.9, 1.1)).map_err(|e| e.to_string())
 }
 
 /// Saves the relay settings and restarts the engine on them. Invalid settings are rejected before anything changes.

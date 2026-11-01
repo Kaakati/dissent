@@ -432,7 +432,7 @@ check('SS1 the owner\'s server menu offers Server Settings', (await menuItems())
 await ev(`(async () => { [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click(); await new Promise((r) => setTimeout(r, 300)); [...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.trim() === 'Server Profile').click(); })()`);
 await sleep(400);
 check('SS2 Server Settings opens on Server Profile', (await ev(`document.querySelector('${SS} h1')?.textContent`)) === 'Server Profile');
-check('SS3 the nav lists Server Profile, Privacy and Boosts, then People: Members, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Privacy', 'Boosts', 'Members', 'Invites', 'Bans']));
+check('SS3 the nav lists Server Profile, Privacy, Boosts and Files, then People: Members, Roles, Invites and Bans', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} nav button')].map((b) => b.textContent))`)) === JSON.stringify(['Server Profile', 'Privacy', 'Boosts', 'Files', 'Members', 'Roles', 'Invites', 'Bans']));
 check('SS4 the form holds Name, Server Icon, Banner, Traits, Message history and Description', (await ev(`JSON.stringify([...document.querySelectorAll('${SS} section h2')].map((n) => n.textContent))`)) === JSON.stringify(['Name', 'Server Icon', 'Banner', 'Traits', 'Message history', 'Description']));
 check('SS5 the name field holds the name, stops at 64, and nothing is unsaved', (await ev(`(() => { const i = document.querySelector('${SS} input[aria-label="Server Name"]'); return i.value === 'Settings test' && i.maxLength === 64; })()`)) === true && !(await ssBar()));
 check('SS6 the icon block offers Change Server Icon', (await ev(`!!${ssButton('Change Server Icon')}`)) === true);
@@ -621,6 +621,102 @@ check('BS4 the sidebar shows the level by the server name', (await ev(`document.
 await ev(`${ssButton('Withdraw my relay')}.click()`);
 await sleep(800);
 check('BS5 withdrawing drops back to level 0', (await ev(`document.querySelector('${SS} [data-boost-summary]')?.textContent`)) === 'Level 0 · 0 relay hosts');
+
+// Roles: the owner makes a custom role and adds a bot whose token is shown once.
+await ev(`${ssButton('Roles')}.click()`);
+await sleep(300);
+check('RL1 Roles starts with no custom roles and no bots', (await ev(`document.querySelector('${SS}').textContent.includes('No custom roles yet.') && document.querySelector('${SS}').textContent.includes('No bots yet.')`)) === true);
+await ev(`[...document.querySelectorAll('${SS} button')].find((b) => b.textContent.trim().endsWith('New role')).click()`);
+await sleep(200);
+await fill(`${SS} [data-role-editor] input:not([type])`, 'Testers');
+await ev(`[...document.querySelectorAll('${SS} [data-role-editor] label')].find((l) => l.textContent.startsWith('Manage files')).querySelector('input').click()`);
+await ev(`${ssButton('Save role')}.click()`);
+await sleep(600);
+check('RL2 a saved role is listed', (await ev(`[...document.querySelectorAll('${SS} [data-roles] li')].map((l) => l.textContent).join('|')`))?.includes('Testers'));
+check('RL3 its editor lists members to give it to', (await ev(`document.querySelectorAll('${SS} [data-role-members] li').length`)) > 0);
+await fill(`${SS} input[aria-label="Bot name"]`, 'CI bot');
+await ev(`[...document.querySelectorAll('${SS} button')].find((b) => b.textContent.trim().endsWith('Add bot')).click()`);
+await sleep(600);
+check('RL4 adding a bot shows its token once and lists the bot', (await ev(`document.querySelector('${SS} [data-bot-token] code')?.textContent.startsWith('dissent-bot:') && document.querySelector('${SS} [data-bots]').textContent.includes('CI bot')`)) === true);
+await ev(`${ssButton('Done')}.click()`);
+await sleep(200);
+check('RL5 Done hides the token', (await ev(`!document.querySelector('${SS} [data-bot-token]')`)) === true);
+// Files (the tracker): the owner makes a category in Server Settings, then lists files from the Files area. A picked file
+// whose type the category refuses is shown so and left out; picking listed files again seeds them instead.
+await ev(`${ssButton('Files')}.click()`);
+await sleep(300);
+check('FL1 Server Settings lists Files, with no categories yet', (await ev(`document.querySelector('${SS} [data-categories]')?.textContent.includes('No categories yet.')`)) === true);
+await ev(`[...document.querySelectorAll('${SS} button')].find((b) => b.textContent.trim().endsWith('New category')).click()`);
+await sleep(200);
+await fill(`${SS} input[aria-label="Category name"]`, 'Releases');
+await ev(`[...document.querySelectorAll('${SS} [data-allowed-types] button')].find((b) => b.textContent === 'Installer').click()`);
+await ev(`${ssButton('Save changes')}.click()`);
+await sleep(600);
+check('FL2 a saved category is listed with who can add', (await ev(`document.querySelector('${SS} [data-categories]')?.textContent`))?.includes('Releases'));
+await ev(`${ssButton('Choose folder')}.click()`);
+await sleep(500);
+check('FL2b a category links to a folder on this computer', (await ev(`document.querySelector('${SS} [data-category-editor]')?.textContent.includes('releases') && document.querySelector('${SS} [data-category-editor]').textContent.includes('Dissent')`)) === true);
+await press('Escape');
+await sleep(300);
+const sideButton = (text) => `[...document.querySelectorAll('${SIDEBAR} button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)})`;
+await ev(`${sideButton('Files')}.click()`);
+await sleep(500);
+check('FL3 the Files area shows Browse, My seeding and Uploads, and the category', (await ev(`JSON.stringify([...document.querySelectorAll('[role="tablist"][aria-label="Files"] [role="tab"]')].map((t) => t.firstChild.textContent))`)) === JSON.stringify(['Browse', 'My seeding', 'Uploads']) && (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Releases')`)) === true);
+await ev(`[...document.querySelectorAll('[data-files] button')].find((b) => b.textContent.trim() === 'Scan folder').click()`);
+await sleep(500);
+check('FL10 scanning the linked folder lists what it found since the last scan', (await ev(`document.querySelector('[role="dialog"]')?.textContent.includes('since the last scan') && document.querySelectorAll('[data-add-files] [data-state]').length === 3`)) === true);
+await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === 'Cancel').click()`);
+await sleep(300);
+const filesButton = (text) => `[...document.querySelectorAll('[data-files] button, [role="dialog"] button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)})`;
+await ev(`${filesButton('Add files')}.click()`);
+await sleep(500);
+const states = await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`);
+check('FL4 the picked files show ready, ready and type not allowed', states === JSON.stringify(['ready', 'ready', 'type_not_allowed']), states);
+await ev(`${filesButton('Add 2 files')}.click()`);
+await sleep(600);
+check('FL5 the two installers are listed', (await ev(`document.querySelectorAll('[data-files] [data-listing]').length`)) === 2);
+await ev(`${filesButton('Add files')}.click()`);
+await sleep(500);
+check('FL6 picking listed files again offers to seed them', (await ev(`!!${filesButton('Add 0 files · seed 2 listed')} && document.querySelector('[data-add-files]').textContent.includes('Already listed by')`)) === true);
+await ev(`${filesButton('Cancel')}.click()`);
+await sleep(300);
+await ev(`document.querySelector('[data-files] [data-listing]').click()`);
+await sleep(300);
+check('FL7b an installer\'s page warns that it can run code', (await ev(`document.querySelector('[data-file-page] .att-danger')?.textContent`))?.includes('This is an installer.'));
+check('FL7 a file page shows its fingerprint and the server key', (await ev(`document.querySelector('[data-file-facts]')?.textContent`))?.includes('b3:9f2c41') && (await ev(`document.querySelector('[data-file-facts]').textContent.includes('AES-256-GCM, server key')`)) === true);
+await sleep(300);
+check('FL9 the file page shows piece availability and the swarm', (await ev(`document.querySelectorAll('[data-pieces] [role="img"] span').length > 0 && document.querySelector('[data-swarm]')?.textContent.includes('Jonas')`)) === true);
+await ev(`[...document.querySelectorAll('[data-file-page] button')].find((b) => b.textContent.trim() === 'Files').click()`);
+await sleep(300);
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] label')].find((l) => l.textContent.trim() === 'Installer').querySelector('input').click()`);
+await sleep(200);
+check('FL8 hiding installers empties the list', (await ev(`document.querySelector('[data-files]').textContent.includes('No files match these filters.')`)) === true);
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] label')].find((l) => l.textContent.trim() === 'Installer').querySelector('input').click()`);
+await sleep(200);
+const filesTab = (name) => `[...document.querySelectorAll('[role="tablist"][aria-label="Files"] [role="tab"]')].find((t) => t.firstChild.textContent === ${JSON.stringify(name)})`;
+await ev(`${filesTab('My seeding')}.click()`);
+await sleep(500);
+check('SD1 My seeding lists the two seeded installers as seeding', (await ev(`JSON.stringify([...document.querySelectorAll('[data-seeding] [data-seed-state]')].map((s) => s.dataset.seedState))`)) === JSON.stringify(['seeding', 'seeding']));
+await ev(`document.querySelector('[data-seed-row] button[aria-expanded]').click()`);
+await sleep(200);
+await ev(`[...document.querySelectorAll('[data-limit-editor] label')].find((l) => l.textContent.startsWith('Until ratio')).querySelector('input[type="radio"]').click()`);
+await ev(`[...document.querySelectorAll('[data-limit-editor] button')].find((b) => b.textContent === 'Apply').click()`);
+await sleep(400);
+check('SD2 a seed limit applies to its row', (await ev(`document.querySelector('[data-seed-row] button[aria-expanded]')?.textContent`)) === 'Until ratio 5.0');
+await ev(`document.querySelector('[data-seed-row] button[aria-label="Pause seeding"]').click()`);
+await sleep(400);
+check('SD3 pausing a file shows it paused', (await ev(`document.querySelector('[data-seed-row] [data-seed-state]')?.dataset.seedState`)) === 'paused');
+await ev(`document.querySelector('[data-speed] button[aria-label="More"]').click()`);
+await sleep(400);
+check('SD4 max active seeds goes up by one', (await ev(`document.querySelector('[data-speed] [data-max-active]')?.textContent`)) === '6');
+await ev(`${filesTab('Browse')}.click()`);
+await sleep(300);
+await clickRail('Settings test');
+await sleep(400);
+await pointerClick(`document.querySelector('button[aria-label="Settings test menu"]')`);
+await sleep(250);
+await ev(`[...document.querySelectorAll('[role="menuitem"]')].find((m) => m.textContent.startsWith('Server Settings')).click()`);
+await sleep(400);
 await press('Escape');
 await sleep(300);
 
@@ -1130,6 +1226,72 @@ noConsoleErrors('core', consoleErrors);
 await b.close();
 }
 
+// Avatar decorations: the picker, the live preview, the overlay in lists, and an upload refused when too large. The
+// runner builds with its own fixture art (tests/run.mjs).
+async function section_decorations() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9877, profile: `${SCRATCH}/deco-profile` });
+await sleep(2600);
+const ev = b.ev;
+const TILE = (id) => `document.querySelector('[data-decoration-tile="${id}"]')`;
+const PREVIEW = `document.querySelector('[data-decoration-preview] [data-decoration]')`;
+await ev(`document.querySelector('[aria-label="User settings"], [aria-label="Settings"]')?.click()`);
+await sleep(800);
+await ev(`[...document.querySelectorAll('button, a, [role="tab"]')].find((n) => n.textContent.trim() === 'My identity')?.click()`);
+await sleep(500);
+check('D1 the picker offers None, the shipped built-ins and Upload, and leaves out art that is absent', (await ev(`[...document.querySelectorAll('[data-decoration-tile]')].map((t) => t.dataset.decorationTile).join()`)) === 'none,fixture_ring,fixture_small,upload', String(await ev(`[...document.querySelectorAll('[data-decoration-tile]')].map((t) => t.dataset.decorationTile).join()`)));
+check('D2 None is chosen at first, and the preview has no overlay', (await ev(`${TILE('none')}.getAttribute('aria-checked') === 'true' && !${PREVIEW}`)) === true);
+await ev(`${TILE('fixture_ring')}.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))`);
+await sleep(200);
+check('D3 pointing at a tile previews it without choosing it', (await ev(`!!${PREVIEW} && ${TILE('none')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(`${TILE('fixture_ring')}.click()`);
+await sleep(500);
+const overlay = await ev(`(() => { const i = ${PREVIEW}; const a = i.parentElement.getBoundingClientRect(); const r = i.getBoundingClientRect(); const cs = getComputedStyle(i); return { state: i.dataset.decoration, events: cs.pointerEvents, ratio: Math.round((r.width / a.width) * 100), dx: Math.round(r.left + r.width / 2 - a.left - a.width / 2), dy: Math.round(r.top + r.height / 2 - a.top - a.height / 2), hidden: i.getAttribute('aria-hidden'), loaded: i.complete && i.naturalWidth > 0, under: document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) !== i }; })()`);
+check('D4 a pick is chosen and loops over the avatar, larger and centred', overlay.state === 'moving' && overlay.ratio === 120 && overlay.dx === 0 && overlay.dy === 0 && overlay.loaded && (await ev(`${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true, JSON.stringify(overlay));
+check('D5 the overlay takes no clicks and is hidden from assistive tech', overlay.events === 'none' && overlay.hidden === 'true' && overlay.under, JSON.stringify(overlay));
+await ev(`${TILE('fixture_ring')}.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }))`);
+await sleep(200);
+await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+await sleep(500);
+check('D6 under reduced motion it holds still, on its first frame', (await ev(`${PREVIEW}.dataset.decoration === 'still' && ${PREVIEW}.src.startsWith('blob:')`)) === true);
+await b.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+await sleep(300);
+// Too large, and refused before it is sent anywhere. Then a good upload, which the engine would have checked.
+const pick = (name, type, size, head) => `(() => { const input = document.querySelector('[data-decoration-input]'); const bytes = new Uint8Array(${size}); const head = ${JSON.stringify(head)}; head.forEach((v, i) => { bytes[i] = v; }); const dt = new DataTransfer(); dt.items.add(new File([bytes], ${JSON.stringify(name)}, { type: ${JSON.stringify(type)} })); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`;
+await ev(pick('big.gif', 'image/gif', 2 * 1024 * 1024 + 1, [71, 73, 70, 56]));
+await sleep(500);
+check('D7 an upload over 2 MB is refused with a message, and changes nothing', (await ev(`document.body.textContent.includes('A decoration must be at most 2 MB') && ${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(pick('art.svg', 'image/svg+xml', 64, [60, 115, 118, 103]));
+await sleep(400);
+check('D8 an SVG is refused', (await ev(`document.body.textContent.includes('Pick a WebP, GIF or PNG image') && ${TILE('fixture_ring')}.getAttribute('aria-checked') === 'true'`)) === true);
+await ev(`(async () => { const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='; const bytes = Uint8Array.from(atob(png), (c) => c.charCodeAt(0)); const input = document.querySelector('[data-decoration-input]'); const dt = new DataTransfer(); dt.items.add(new File([bytes], 'mine.png', { type: 'image/png' })); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await sleep(700);
+check('D9 a good upload is chosen, shown and offered as a recent one', (await ev(`${TILE('recent-0')}?.getAttribute('aria-checked') === 'true' && ${PREVIEW}?.src.startsWith('data:image/png')`)) === true);
+check('D9a the upload control says whose art it should be', (await ev(`document.body.textContent.includes('Use only art you have the right to share.')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/decoration-picker.png`);
+await ev(`${TILE('none')}.click()`);
+await sleep(500);
+check('D10 None removes it, and the upload stays on offer', (await ev(`${TILE('none')}.getAttribute('aria-checked') === 'true' && !${PREVIEW} && !!${TILE('recent-0')}`)) === true);
+await ev(`${TILE('recent-0')}.click()`);
+await sleep(500);
+check('D10a a recent upload can be picked again', (await ev(`${TILE('recent-0')}.getAttribute('aria-checked') === 'true' && ${PREVIEW}?.src.startsWith('data:image/png')`)) === true);
+await ev(`${TILE('none')}.click()`);
+await sleep(500);
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(500);
+// Grace's mock decoration, in the lists: still until the row is hovered, and not in the way of the row.
+await ev(`[...document.querySelectorAll('nav button, nav a, button')].find((n) => n.getAttribute('aria-label') === 'Direct messages' || n.getAttribute('aria-label') === 'Home')?.click()`);
+await sleep(600);
+const row = await ev(`(() => { const i = [...document.querySelectorAll('[data-decoration]')].find((n) => n.closest('button, a, li')); if (!i) return null; const r = i.closest('button, a, li'); r.dataset.decoRow = '1'; const box = r.getBoundingClientRect(); const a = i.getBoundingClientRect(); return { state: i.dataset.decoration, src: !!i.getAttribute('src'), inRow: a.left >= 0, cx: Math.round(a.left + a.width / 2), cy: Math.round(a.top + a.height / 2), hit: !!document.elementFromPoint(a.left + a.width / 2, a.top + a.height / 2)?.closest('[data-deco-row]'), box: Math.round(box.height) }; })()`);
+check('D11 a list row shows a still overlay, and the row still takes the click', row?.state === 'still' && row?.src === true && row?.hit === true, JSON.stringify(row));
+await ev(`document.querySelector('[data-deco-row]').dispatchEvent(new PointerEvent('pointerenter'))`);
+await sleep(200);
+check('D12 hovering the row makes it move', (await ev(`document.querySelector('[data-deco-row] [data-decoration]').dataset.decoration`)) === 'moving');
+await ev(`document.querySelector('[data-deco-row]').dispatchEvent(new PointerEvent('pointerleave'))`);
+await sleep(200);
+check('D13 leaving the row holds it still again', (await ev(`document.querySelector('[data-deco-row] [data-decoration]').dataset.decoration`)) === 'still');
+await b.close();
+}
+
 // Friends, the DM profile panel, the profile card and addresses (batch B).
 async function section_friends() {
 // the DM profile panel, the full profile, the profile card, the conversation menu's Profile item, and the address checks.
@@ -1348,6 +1510,129 @@ await sleep(300);
 await clickByText('[role="menuitem"]', 'Profile');
 await sleep(500);
 check('the card suffix is the short address (dsu1…)', (await b.ev(`document.querySelector('[role="dialog"][aria-label="User profile"]')?.textContent.includes('dsu1')`)) === true);
+await b.press('Escape');
+await sleep(300);
+
+// ---- Profile colours on other people's profiles ----
+const THEMED = '[data-profile-theme]';
+const openCardOf = async (who) => {
+  await b.ev(`(() => { const n = [...document.querySelectorAll('button')].find(x => x.textContent.includes(${JSON.stringify(who)}) && !x.closest('main') && !x.closest('[aria-label="Active now"]')); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await sleep(300);
+  await clickByText('[role="menuitem"]', 'Profile');
+  await sleep(500);
+};
+await openCardOf('Jonas');
+check('T1 a malformed theme from a peer shows as no theme', (await b.ev(`(() => { const c = document.querySelector('[role="dialog"][aria-label="User profile"]'); return !!c && !c.matches('${THEMED}') && getComputedStyle(document.body).display !== 'none'; })()`)) === true);
+await b.press('Escape');
+await sleep(300);
+// Contrast of two computed rgb() colours, with an alpha over a backdrop ignored: the surfaces only darken the gradient.
+const THEME_READ = `const parse = (s) => s.match(/[\\d.]+/g).slice(0, 3).map(Number);
+  const lum = (c) => { const [r, g, b] = c.map((n) => { const s = n / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  const stops = (el) => [el.style.getPropertyValue('--profile-top'), el.style.getPropertyValue('--profile-bottom')].map(parse);`;
+await openCardOf('Leila');
+const leila = await b.ev(`(() => { ${THEME_READ}
+  const c = document.querySelector('[role="dialog"][aria-label="User profile"]${THEMED}');
+  if (!c) return null;
+  const [top, bottom] = stops(c);
+  const low = (el) => Math.min(ratio(parse(getComputedStyle(el).color), top), ratio(parse(getComputedStyle(el).color), bottom));
+  const name = [...c.querySelectorAll('div')].find((d) => d.textContent === 'Leila');
+  const tag = c.querySelector('.font-mono');
+  return { name: low(name), tag: low(tag), image: getComputedStyle(c).backgroundImage, border: getComputedStyle(c).borderTopWidth, buttons: [...c.querySelectorAll('button[data-slot="button"]')].length };
+})()`);
+check('T2 a bright theme fills the card with a gradient and a thin border', leila && leila.image.split('linear-gradient').length === 3 && leila.border === '1px', JSON.stringify(leila));
+check('T3 the name and tag pass AA on a yellow to white theme', leila && leila.name >= 4.5 && leila.tag >= 4.5, JSON.stringify(leila));
+await b.screenshot(`${SCRATCH}/shots/theme-card-bright.png`);
+await b.press('Escape');
+await sleep(300);
+// The DM panel fills the column on the gradient, with View Full Profile on it, and the full profile carries it too.
+await b.ev(`[...document.querySelectorAll('button')].find(x => x.textContent.includes('Leila') && !x.closest('main') && !x.closest('[aria-label="Active now"]')).click()`);
+await sleep(700);
+const dmTheme = await until(() => b.ev(`(() => { const p = document.querySelector('aside ${THEMED}, ${THEMED}'); if (!p) return null; const r = p.getBoundingClientRect(); const c = p.parentElement.getBoundingClientRect(); const view = [...p.querySelectorAll('button')].find((x) => x.textContent.includes('View Full Profile')); return { fills: Math.abs(r.bottom - c.bottom) <= 1, view: !!view }; })()`), 5000);
+check('T4 the DM panel fills its column on the gradient with View Full Profile on it', dmTheme?.fills === true && dmTheme?.view === true, JSON.stringify(dmTheme));
+await b.screenshot(`${SCRATCH}/shots/theme-dm-bright.png`);
+await b.ev(`[...document.querySelectorAll('${THEMED} button')].find((x) => x.textContent.includes('View Full Profile')).click()`);
+await sleep(500);
+check('T5 the full profile dialog carries the theme', (await b.ev(`!!document.querySelector('[role="dialog"]${THEMED}')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/theme-full-bright.png`);
+await b.press('Escape');
+await sleep(300);
+
+// ---- Your own profile card: above the bar, Edit Profile and the status submenu ----
+const OWN = '[data-own-profile]';
+const openOwn = async () => {
+  // Radix opens a menu on the pointer going down, not on a click.
+  await b.ev(`document.querySelector('button[aria-label$="Profile and status"]').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, ctrlKey: false }))`);
+  await sleep(400);
+};
+const realClick = async (text) => {
+  const at = await b.ev(`(() => { const n = [...document.querySelectorAll('[role^="menuitem"]')].find((x) => x.textContent.trim().startsWith(${JSON.stringify(text)})); const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+  await sleep(300);
+};
+await openOwn();
+const own = await b.ev(`(() => { const c = document.querySelector('${OWN}'); if (!c) return null; const r = c.getBoundingClientRect(); const bar = document.querySelector('[data-user-panel]').getBoundingClientRect(); return { w: Math.round(r.width), above: r.bottom <= bar.top + 1, banner: Math.round(c.querySelector('[data-profile-banner]').getBoundingClientRect().height), rows: [...c.querySelectorAll('[role^="menuitem"]')].map((n) => n.textContent.trim()), switchAccounts: c.textContent.includes('Switch') }; })()`);
+check('T6 your name opens a 300 px card above the bar, with a 105 px banner', own && own.w === 300 && own.above && own.banner === 105, JSON.stringify(own));
+check('T7 the card has Edit Profile and your status, and no invented rows', own && own.rows.length === 2 && own.rows[0] === 'Edit Profile' && own.rows[1] === 'Online' && !own.switchAccounts, JSON.stringify(own));
+await realClick('Online');
+const subs = await until(() => b.ev(`(() => { const t = [...document.querySelectorAll('[role="menu"]')].flatMap((m) => [...m.querySelectorAll('[role^="menuitem"]')].map((n) => n.textContent.trim())); return ['Idle', 'Do Not Disturb', 'Invisible'].every((l) => t.some((x) => x.startsWith(l))) ? t : null; })()`), 3000);
+check('T8 the status row opens every status the old menu had', !!subs, JSON.stringify(subs));
+await b.screenshot(`${SCRATCH}/shots/own-card-plain.png`);
+await realClick('Do Not Disturb');
+const durations = await until(() => b.ev(`[...document.querySelectorAll('[role="menuitem"]')].some((n) => n.textContent.trim() === 'For 1 hour')`), 3000);
+check('T9 a timed status still offers its durations', durations === true);
+await b.ev(`[...document.querySelectorAll('[role="menuitem"]')].find((n) => n.textContent.trim() === 'For 1 hour').click()`);
+await sleep(400);
+check('T10 picking one sets the status', (await b.ev(`document.querySelector('button[aria-label$="Profile and status"]').getAttribute('aria-label').includes('Do Not Disturb')`)) === true);
+await openOwn();
+await b.ev(`[...document.querySelectorAll('${OWN} [role="menuitem"]')].find((n) => n.textContent.trim() === 'Edit Profile').click()`);
+await sleep(500);
+const previewThemed = async () => b.ev(`!!document.querySelector('[data-theme-preview]${THEMED}')`);
+check('T11 Edit Profile opens your profile settings with the theme preview', (await previewThemed()) === true);
+
+// ---- Settings: pick, preview, save, clear ----
+const setPicker = (label, value) => b.ev(`(() => { const i = document.querySelector('input[aria-label="Profile ' + ${JSON.stringify(label)} + ' colour"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, ${JSON.stringify(value)}); i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const saveButton = `[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Save theme')`;
+await setPicker('primary', '#ffff00');
+await setPicker('accent', '#ffffff');
+await sleep(200);
+const previewTop = await b.ev(`document.querySelector('[data-theme-preview]').style.getPropertyValue('--profile-top')`);
+check('T12 the preview follows the pickers, darkened to stay readable', /^rgb\(\d+ \d+ 0\)$/.test(previewTop) && !previewTop.startsWith('rgb(255'), previewTop);
+check('T13 nothing is published until Save', (await b.ev(`![...document.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Clear')`)) === true);
+await b.ev(`${saveButton}.click()`);
+await sleep(400);
+await b.screenshot(`${SCRATCH}/shots/theme-settings.png`);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+check('T14 after Save your own card carries the theme', (await b.ev(`!!document.querySelector('${OWN}${THEMED}')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/own-card-bright.png`);
+await b.press('Escape');
+await sleep(300);
+await b.press(',', 2);
+await sleep(500);
+await b.ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'My identity').click()`);
+await sleep(300);
+await setPicker('primary', '#101030');
+await setPicker('accent', '#7a1fa2');
+await sleep(200);
+await b.ev(`${saveButton}.click()`);
+await sleep(400);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+await b.screenshot(`${SCRATCH}/shots/own-card-dark.png`);
+await b.press('Escape');
+await sleep(300);
+await b.press(',', 2);
+await sleep(500);
+await b.ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Clear').click()`);
+await sleep(400);
+check('T15 Clear removes the theme', (await b.ev(`![...document.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Clear')`)) === true);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+check('T16 with no theme your card has the plain look', (await b.ev(`(() => { const c = document.querySelector('${OWN}'); return !!c && !c.matches('${THEMED}'); })()`)) === true);
 await b.press('Escape');
 await sleep(300);
 
@@ -3831,13 +4116,13 @@ await ev(`document.querySelector('${SIDE} button[aria-label="Open Source Arabic 
 await pressKey('Enter', 13, 0);
 await sleep(400);
 const serverItems = await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
-check('O3 the server menu offers Create category to an owner', serverItems.includes('Create category'), JSON.stringify(serverItems));
-await ev(`${menuItem('Create category')}.click()`);
+check('O3 the server menu offers Create Category to an owner', serverItems.includes('Create Category'), JSON.stringify(serverItems));
+await ev(`${menuItem('Create Category')}.click()`);
 await sleep(400);
 await typeInto('[role="dialog"] input[aria-label="Category name"]', 'Projects');
 await pressKey('Enter', 13, 0);
 await sleep(500);
-check('O3 Create category adds an empty category at the end', (await tree()).at(-1) === 'Projects[]', JSON.stringify(await tree()));
+check('O3 Create Category adds an empty category at the end', (await tree()).at(-1) === 'Projects[]', JSON.stringify(await tree()));
 check('O3 the new category is sent without an id, for the engine to make one', JSON.parse(await lastLayout()).at(-1).id === undefined);
 
 // Drag events onto the empty Projects header.
@@ -4516,6 +4801,44 @@ check('T3 once downloaded, the same frame plays the video, with the mark still o
 await b.close();
 }
 
+// ---- Received files: a file that can run code warns, has no Open, and is never shown as a picture ----
+async function section_safefiles() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9877, profile: `${SCRATCH}/safefiles-next-profile` });
+const { ev } = b;
+await sleep(1500);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('announcements'))?.click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-danger="program"]')`)) === true, 8000);
+const card = (name) => ev(`(() => {
+  const c = [...document.querySelectorAll('.att-card')].find((n) => n.querySelector('.att-name-text')?.textContent === ${JSON.stringify(name)});
+  if (!c) return null;
+  return {
+    warning: c.querySelector('.att-danger')?.textContent ?? null,
+    open: !!c.querySelector('button[aria-label^="Open "]'),
+    show: !!c.querySelector('button[aria-label^="Show "]'),
+    download: !!c.querySelector('button[aria-label^="Download "]'),
+  };
+})()`);
+const exe = await card('cutter-setup.exe');
+check('SF1 a program not yet here warns and can still be downloaded on request', !!exe?.warning?.includes('This is a program') && exe.download && !exe.open, JSON.stringify(exe));
+const renamed = await card('holiday.png');
+check('SF2 a renamed program shows a warning, not a picture', !!renamed?.warning?.includes('This is a program'), JSON.stringify(renamed));
+check('SF2 it has no Open, and offers Show in folder', renamed?.open === false && renamed.show === true, JSON.stringify(renamed));
+check('SF2 no image or open button stands in for it', (await ev(`!document.querySelector('.att-image-btn[aria-label="Open holiday.png"]') && !document.querySelector('img[alt="holiday.png"]')`)) === true);
+const macro = await card('budget.docx');
+check('SF3 a document with macros warns, with no Open and Show in folder', !!macro?.warning?.includes('macros') && !macro.open && macro.show, JSON.stringify(macro));
+check('SF4 the warning says it was not scanned', !!macro?.warning?.includes('has not scanned it'), macro?.warning);
+const pdf = await card('cutter-manual.pdf');
+check('SF5 a plain file is unchanged: no warning, Open and Show in folder', pdf?.warning === null && pdf.open && pdf.show, JSON.stringify(pdf));
+check('SF5 a plain picture still shows inline', (await ev(`!!document.querySelector('.att-image-btn[aria-label="Open cutter-photo.png"] img')`)) === true);
+await ev(`[...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === 'Show holiday.png in folder').click()`);
+await sleep(200);
+check('SF6 Show in folder reveals the file and opens nothing', (await ev(`(window.__mockRevealed ?? []).length === 1 && (window.__mockOpened ?? []).length === 0`)) === true);
+noConsoleErrors('safefiles', b.consoleErrors);
+await b.close();
+}
+
 // ---- Invite cards: nothing is asked for until the viewer clicks Show preview (privacy audit P-04) ----
 async function section_invitecards() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9865, profile: `${SCRATCH}/invitecards-next-profile` });
@@ -4863,6 +5186,29 @@ for (const role of ['owner', 'admin', 'member']) {
   check(`K4c ${role}: the expected items, Leave Server ${role === 'owner' ? 'hidden' : 'offered'}`, missing.length === 0 && leaveOk && manageOk, JSON.stringify({ shown, missing }));
 }
 await ev(`window.__mockSetMyRole('c2', 'owner')`);
+// The channel list's own menu, on its empty space. A row keeps its own menu.
+const listMenu = async () => {
+  await ev(`(() => { const n = document.querySelector('[data-sidebar-list]'); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.bottom - 10 })); })()`);
+  await sleep(500);
+  const shown = await items();
+  await press('Escape');
+  await sleep(200);
+  return shown;
+};
+const ownerList = await listMenu();
+check('K4d the channel list menu, for the owner', JSON.stringify(ownerList) === JSON.stringify(['Hide Muted Channels', 'Create Channel', 'Create Category', 'Invite to Server']), JSON.stringify(ownerList));
+await ev(`window.__mockSetMyRole('c2', 'member')`);
+await sleep(400);
+const memberList = await listMenu();
+check('K4e a member gets no create items in it', JSON.stringify(memberList) === JSON.stringify(['Hide Muted Channels', 'Invite to Server']), JSON.stringify(memberList));
+await ev(`window.__mockSetMyRole('c2', 'owner')`);
+await sleep(400);
+await ev(`(() => { const n = document.querySelector('[data-sidebar-list] button[aria-current], [data-sidebar-list] button'); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 })); })()`);
+await sleep(500);
+const rowMenu = await items();
+await press('Escape');
+await sleep(200);
+check('K4f a channel row keeps its own menu', !rowMenu.includes('Create Category') || rowMenu.includes('Move Up'), JSON.stringify(rowMenu));
 await sleep(800);
 
 // (b) Bans: a banned member has Unban, which asks first and then lifts the ban.
@@ -5434,6 +5780,7 @@ const SECTIONS = [
   ['memberonly', section_memberonly],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
+  ['safefiles', section_safefiles],
   ['paste', section_paste],
   ['dmmentions', section_dmmentions],
   ['invitecards', section_invitecards],
@@ -5446,6 +5793,7 @@ const SECTIONS = [
   ['consistency', section_consistency],
   ['scrub', section_scrub],
   ['watching', section_watching],
+  ['decorations', section_decorations],
 ];
 // SECTIONS=core,calls runs only those sections (comma-separated names); all of them by default.
 const only = process.env.SECTIONS?.split(',').map((x) => x.trim()).filter(Boolean);

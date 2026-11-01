@@ -286,6 +286,10 @@ impl Engine {
         }
         self.release_blobs(fx.released);
         for fetch in fx.pictures {
+            if let Some(decoration) = fetch.decoration {
+                self.fetch_decoration(fetch.owner, decoration, fetch.roots);
+                continue;
+            }
             if let Some(poster) = fetch.poster {
                 self.fetch_picture(fetch.owner, poster, fetch.roots.clone());
             }
@@ -440,6 +444,14 @@ impl Engine {
                 &conn_from,
                 Response::RotationSupport(self.inner.rotation_support.load(std::sync::atomic::Ordering::Relaxed)),
             ),
+            Request::Features => Response::Features(self.inner.features.load(std::sync::atomic::Ordering::Relaxed)),
+            Request::FilesKeys { community } => self.serve_files_keys(conn_from, community),
+            Request::PushFilesKeys { community, pairs } => self.accept_files_keys(conn_from, community, pairs),
+            Request::Holdings { community, digest } => self.serve_holdings(conn_from, community, digest),
+            Request::CategoryKeys { community, category } => self.serve_category_keys(conn_from, community, category),
+            Request::PushCategoryKeys { community, category, pairs } => {
+                self.accept_category_keys(conn_from, community, category, pairs)
+            }
             Request::MlsCommit { community, epoch } => {
                 Response::MlsCommit(self.commit_at(community, epoch))
             }
@@ -485,6 +497,8 @@ impl Engine {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile banner: {e}")),
             },
+            Request::ProfileTheme(st) => self.answer_profile_theme(conn_from, *st),
+            Request::AvatarDecoration(sd) => self.answer_decoration(conn_from, sd.map(|sd| *sd)),
             Request::Typing(st) => match self.accept_typing(None, *st) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid typing: {e}")),
@@ -838,6 +852,17 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
         engine.refresh_lan_keys();
         engine.anti_entropy().await;
         engine.check_relay_hosts().await;
+        {
+            // Swarm holdings, asked off the tick so a slow device does not hold it up. See `tracker::swarm`.
+            let engine = engine.clone();
+            let auto = rounds.is_multiple_of((crate::tracker::scan::AUTO_IMPORT_EVERY.as_secs() / 30) as u32);
+            tokio::spawn(async move {
+                engine.refresh_all_holdings().await;
+                if auto {
+                    engine.auto_import().await;
+                }
+            });
+        }
         engine.mls_maintenance().await;
         engine.flush_mls(false);
         rounds += 1;

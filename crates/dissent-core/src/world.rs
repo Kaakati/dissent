@@ -100,6 +100,10 @@ pub(crate) struct World {
     pub peer_avatars: BTreeMap<RootId, (Hlc, Option<Picture>)>,
     /// This device's profile banner, and the banners contacts sent directly. See `profile_banners`.
     pub banners: crate::profile_banners::BannerBook,
+    /// This device's profile colours, and the ones contacts sent directly. See `profile_themes`.
+    pub themes: crate::profile_themes::ThemeBook,
+    /// This device's avatar decoration, and those contacts sent directly. See `decorations`.
+    pub decorations: crate::decorations::DecorationBook,
     /// When each hosted relay last passed this app's check, in ms. In memory: after a restart a host
     /// counts again once its relay passes. See `boosts`.
     pub relay_checks: BTreeMap<String, u64>,
@@ -175,6 +179,10 @@ impl World {
             .unwrap_or_default();
         let banners = crate::avatars::read_sealed(&paths.banners(), &crate::avatars::peers_vault(vault))?
             .unwrap_or_default();
+        let themes = crate::avatars::read_sealed(&paths.themes(), &crate::avatars::peers_vault(vault))?
+            .unwrap_or_default();
+        let decorations = crate::avatars::read_sealed(&paths.decorations(), &crate::avatars::peers_vault(vault))?
+            .unwrap_or_default();
         Ok(World {
             me: identity.root_id(),
             device: identity.device_id(),
@@ -213,6 +221,8 @@ impl World {
             own_avatar,
             peer_avatars,
             banners,
+            themes,
+            decorations,
             relay_checks: BTreeMap::new(),
             relay_probed: BTreeMap::new(),
             relays_adopted: std::collections::BTreeSet::new(),
@@ -411,6 +421,7 @@ impl World {
                 suffix: root.suffix(),
                 display_name: self.display_name(root),
                 avatar: self.avatar_of(root),
+                decoration: self.decoration_view(root),
                 handle: c.handle_of(root),
                 role: c.role_of(root).to_string(),
                 banned: c.state().banned.contains(root),
@@ -418,6 +429,8 @@ impl World {
                 relay_host: hosts.contains(root),
                 storage: c.state().members.get(root).is_some_and(|m| m.storage),
                 storage_granted: c.state().members.get(root).is_some_and(|m| m.storage) && c.state().storage_granted(root),
+                roles: c.state().custom.roles_of(root).iter().map(|r| r.to_string()).collect(),
+                bot: c.state().is_bot(root),
             })
             .collect();
         CommunityView {
@@ -466,9 +479,11 @@ impl World {
             suffix: user.suffix(),
             display_name: self.display_name(user),
             avatar: self.avatar_of(user),
+            decoration: self.decoration_view(user),
             banner,
             banner_poster,
             banner_preset,
+            theme: self.profile_theme(user),
             is_contact: self.is_contact(user),
             identity_changed_ms: crate::identity_watch::last_change(&self.identity_changes, user),
             key_changed_ms: fields.key_changed_ms,

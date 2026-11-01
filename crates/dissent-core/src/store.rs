@@ -61,9 +61,18 @@ impl Paths {
     pub fn peer_avatars(&self) -> PathBuf {
         self.root.join("peer_avatars.bin")
     }
+    /// This device's avatar decoration and those contacts sent directly. See `decorations`.
+    pub fn decorations(&self) -> PathBuf {
+        self.root.join("decorations.bin")
+    }
+
     /// This device's profile banner and the banners contacts sent directly. See `profile_banners`.
     pub fn banners(&self) -> PathBuf {
         self.root.join("banners.bin")
+    }
+    /// This device's profile colours and the ones contacts sent directly. See `profile_themes`.
+    pub fn themes(&self) -> PathBuf {
+        self.root.join("themes.bin")
     }
     /// Decrypted pictures, one file per content hash.
     pub fn avatars_dir(&self) -> PathBuf {

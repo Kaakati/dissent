@@ -296,7 +296,10 @@ impl Engine {
                     | Payload::StorageGrant { .. }
                     | Payload::HistorySupport { .. }
                     | Payload::ChannelLayout { .. }
-            );
+                    | Payload::ProfileThemeSet { .. }
+                    | Payload::AvatarDecorationSet { .. }
+            ) || dissent_events::is_roles_payload(&body.payload)
+                || dissent_events::is_files_payload(&body.payload);
             body.payload = match &member {
                 Some((epoch, keys)) => dissent_events::seal_member(keys, *epoch, &body)?,
                 None => {

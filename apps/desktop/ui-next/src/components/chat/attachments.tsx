@@ -3,16 +3,16 @@
 // as a URL (the asset protocol for a download, `dimg` for a sealed picture), never a URL taken from a message. Ported
 // from the old UI's views/attachments.js.
 import { useState, type ComponentType } from 'react';
-import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, Play, RotateCcw, X } from 'lucide-react';
+import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileText, FileVideo, FolderOpen, Image as ImageIcon, Lock, Pause, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
 import type { LucideProps } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ProgressBar } from '@/components/transfers/progress';
-import { MAX_FILE_LABEL, extOf, formatSize, iconFor, isExecutable, isImage, isOverLimit, isVideo, transferText, type FileIconName } from '@/lib/attachments';
+import { DANGER_TEXT, MAX_FILE_LABEL, extOf, formatSize, iconFor, isImage, isOverLimit, isVideo, transferText, type FileIconName } from '@/lib/attachments';
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
 import { pictureSrc } from '@/lib/pictures';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
-import type { Attachment, Id, ThumbView } from '@/lib/types';
+import type { Attachment, FileDanger, Id, ThumbView } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { IconBtn } from './parts';
 import type { StagedFile } from '@/lib/chat';
@@ -110,7 +110,7 @@ function CardActions({ a, communityId, messageId }: { a: Attachment; communityId
     case 'downloaded':
       return (
         <>
-          <IconBtn label={`Open ${a.name}`} icon={ExternalLink} onClick={() => void openAttachment(a)} />
+          {a.danger ? null : <IconBtn label={`Open ${a.name}`} icon={ExternalLink} onClick={() => void openAttachment(a)} />}
           <IconBtn label={`Show ${a.name} in folder`} icon={FolderOpen} onClick={() => void revealAttachment(a.local_path)} />
         </>
       );
@@ -120,10 +120,20 @@ function CardActions({ a, communityId, messageId }: { a: Attachment; communityId
 
 // One file as a card: its icon, name, size, state and buttons. A picture that is not here yet is a card too, never an
 // empty or broken image. `unshown` marks a downloaded picture the webview could not show.
+// The warning on a file that can run code, on an attachment card and on a file page.
+export function DangerNote({ danger }: { danger: FileDanger }) {
+  return (
+    <div className="att-danger" role="note">
+      <TriangleAlert aria-hidden="true" />
+      <span>{`${DANGER_TEXT[danger] ?? DANGER_TEXT.unchecked} Dissent will not open it for you, and has not scanned it. Run it only if you trust the sender.`}</span>
+    </div>
+  );
+}
+
 function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachment; communityId: Id | null; messageId: Id; unshown?: boolean }) {
   const name = String(a.name ?? 'file');
   const ext = extOf(name);
-  const exec = isExecutable(name);
+  const exec = Boolean(a.danger);
   const downloading = a.state === 'downloading';
   const moving = a.state === 'downloading' || a.state === 'paused' || a.state === 'sending';
   const progress = Math.max(0, Math.min(1, Number(a.progress) || 0));
@@ -133,6 +143,7 @@ function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachmen
       className={cn('att-card', failed && 'failed', downloading && 'downloading')}
       data-att={a.id}
       data-state={a.state}
+      data-danger={a.danger ?? undefined}
     >
       <span className="att-icon">
         <FileGlyph name={name} mime={a.mime} />
@@ -146,13 +157,14 @@ function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachmen
           >
             {name}
           </span>
-          {ext ? <span className={cn('att-ext', exec && 'danger')} title={exec ? 'This is a program' : `.${ext} file`}>{ext.toUpperCase()}</span> : null}
+          {ext ? <span className={cn('att-ext', exec && 'danger')} title={exec ? 'This file can run code' : `.${ext} file`}>{ext.toUpperCase()}</span> : null}
         </div>
         <div className="att-meta">
           <span className="tnum">{formatSize(a.size)}</span>
           <LockGlyph />
           <StateNode a={a} unshown={unshown} />
         </div>
+        {a.danger ? <DangerNote danger={a.danger} /> : null}
         {failed && a.error ? <div className="att-error">{a.error}</div> : null}
         {moving ? <ProgressBar value={progress} thin className="att-progress" /> : null}
         {a.state === 'waiting' && a.note ? <div className="piece-note">{a.note}</div> : null}
@@ -205,6 +217,8 @@ export function AttachmentView({ a, communityId, messageId }: { a: Attachment; c
   const [broken, setBroken] = useState<ReadonlySet<string>>(() => new Set());
   const markBroken = (src: string) => setBroken((s) => new Set(s).add(src));
   const name = String(a.name ?? 'file');
+  // A file that can run code is only ever a card, whatever picture or type its sender claims.
+  if (a.danger) return <FileCard a={a} communityId={communityId} messageId={messageId} />;
   const src = isImage(a) && a.state === 'downloaded' ? imageSrc(a.local_path) : null;
   if (src && !broken.has(src)) {
     return (

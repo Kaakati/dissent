@@ -73,6 +73,94 @@ async fn dm_file_is_sealed_and_downloads_for_the_recipient() {
     finish(vec![alice, bob]).await;
 }
 
+/// Sends a file from alice and has bob download it, and returns bob's view of the attachment.
+async fn received(alice: &Peer, bob: &Peer, name: &str, body: &[u8]) -> dissent_core::AttachmentView {
+    let dir = scratch("danger");
+    let path = dir.join(name);
+    std::fs::write(&path, body).expect("write source file");
+    let sent = alice.engine.send_dm_files(bob.identity.root_id(), vec![path], String::new()).await.expect("alice sends");
+    let alice_root = alice.identity.root_id();
+    eventually("bob sees the file", || {
+        bob.engine.dm_messages(alice_root, 20).iter().any(|m| m.id == sent.id && !m.attachments.is_empty()).then_some(())
+    })
+    .await;
+    let attachment = sent.attachments[0].id.clone();
+    bob.engine.download_attachment(None, sent.id.clone(), attachment.clone()).await.expect("bob downloads");
+    eventually("bob has the file", || {
+        bob.engine
+            .dm_messages(alice_root, 20)
+            .iter()
+            .flat_map(|m| m.attachments.clone())
+            .find(|a| a.id == attachment && a.state == "downloaded")
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_attachment_view_reports_files_that_can_run_code() {
+    use dissent_core::Danger;
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+
+    let mut program = vec![0u8; 256];
+    program[..2].copy_from_slice(b"MZ");
+    let by_name = received(&alice, &bob, "setup.exe", b"anything").await;
+    assert_eq!(by_name.danger, Some(Danger::Program), "the name is enough");
+    let by_content = received(&alice, &bob, "holiday.txt", &program).await;
+    assert_eq!(by_content.danger, Some(Danger::Program), "a renamed program is caught once it is here");
+    let script = received(&alice, &bob, "notes.txt", b"#!/bin/sh\necho hi\n").await;
+    assert_eq!(script.danger, Some(Danger::Script));
+    let safe = received(&alice, &bob, "plain.txt", b"just notes").await;
+    assert_eq!(safe.danger, None);
+    assert_eq!(std::fs::read(safe.local_path.as_deref().unwrap()).unwrap(), b"just notes");
+
+    #[cfg(windows)]
+    {
+        let stream = std::fs::read_to_string(format!("{}:Zone.Identifier", safe.local_path.as_deref().unwrap())).expect("the mark");
+        assert!(stream.contains("ZoneId=3"), "a downloaded file is marked: {stream}");
+    }
+
+    finish(vec![alice, bob]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_says_it_can_run_code_never_downloads_by_itself() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let alice_root = alice.identity.root_id();
+    let bob_root = bob.identity.root_id();
+    bob.engine.set_transfer_settings(Some(1024 * 1024)).expect("limit set");
+
+    let dir = scratch("auto-danger");
+    let program = dir.join("small.exe");
+    let notes = dir.join("small.txt");
+    std::fs::write(&program, vec![1u8; 100]).expect("program");
+    std::fs::write(&notes, vec![2u8; 100]).expect("notes");
+    let program_sent = alice.engine.send_dm_files(bob_root, vec![program], "program".into()).await.expect("sends program");
+    let notes_sent = alice.engine.send_dm_files(bob_root, vec![notes], "notes".into()).await.expect("sends notes");
+
+    eventually("the harmless file arrives downloaded", || {
+        bob.engine
+            .dm_messages(alice_root, 10)
+            .iter()
+            .any(|m| m.id == notes_sent.id && m.attachments.iter().any(|a| a.state == "downloaded"))
+            .then_some(())
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let state = bob
+        .engine
+        .dm_messages(alice_root, 10)
+        .iter()
+        .find(|m| m.id == program_sent.id)
+        .and_then(|m| m.attachments.first().map(|a| a.state.clone()));
+    assert_eq!(state.as_deref(), Some("available"), "the program waits for a click");
+
+    finish(vec![alice, bob]).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn channel_file_reaches_members_and_mirror_policy_is_opt_in() {
     let alice = peer("alice").await;

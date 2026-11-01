@@ -340,6 +340,27 @@ outsiders see neither the banner nor that it changed. A picture banner is fetche
 devices, so they learn who fetched it, as for an avatar. Only the person's own devices can set it,
 since replay keys it by author and the direct form is device-signed.
 
+An **avatar decoration** reaches the same people as the banner, by the same two paths: `AvatarDecorationSet` in each server,
+sealed and carried so an older client shows the event as locked and draws nothing, and a signed `Request::AvatarDecoration`
+to contacts, answered only to a contact's device. `decorations.bin` is sealed like `banners.bin`. A built-in is a short id
+matched against art the app ships, so it fetches nothing and tells the fetcher nothing. An id is free text within its
+pattern, so a member can show a made-up id, which draws nothing. An upload is a `Scope::Shared` blob like a banner.
+
+An uploaded decoration is **untrusted art**, drawn on every row its owner appears on. So a receiver decodes every frame in a
+blocking task, one frame held at a time, before the art gets a file: at most 2 MB, 512 pixels a side, about square, 300
+frames, 300 by 288 by 288 pixels over all frames, 64 MB per frame and 10 seconds. It must be a WebP, GIF or PNG by its
+contents: SVG, the one format here that can hold script or fetch, never passes. The view shows nothing until that passes.
+The checked copy has a file name of its own (`<hash>-deco.<ext>`), so a blob that arrived through a path without the check, such
+as a banner naming the same hash, cannot be shown as a decoration. What remains: the check runs the same decoders as the
+sender's, so a decoder bug is reachable by anyone who shares a server, as for any picture; and refused art is fetched
+again after a restart, costing its owner's contacts at most 2 MB and one decode per run.
+
+A past upload stays pinned and is still served to the same people while it is among this device's six recent ones, even
+after the person stops wearing it: the blob's key is in events they already hold.
+
+The sender removes a file's metadata (PNG text, EXIF and time chunks, WebP EXIF and XMP, GIF comments and foreign application
+blocks) without touching the pixels. A modified client can skip that, which only exposes its own metadata.
+
 ## Photo and video metadata: what a sent file carries
 
 Audit finding P-28. A photo went out with its EXIF block (the GPS position where it was taken, the camera and its
@@ -395,6 +416,24 @@ a screen); the camera sensor's noise pattern (PRNU), which can tie a photo to th
 holds other photos from it; and traits of the compression and of the processing a phone applies. A split ICC profile
 (more than one APP2 chunk, rare) and a compressed PNG `iCCP` profile keep their text. The exact file size, and the
 message's own time, stay visible to anyone who can read the message.
+
+## Received files: what a sender can make this device do
+
+A member can send any bytes under any name and MIME type, inside a message that decrypts properly. End-to-end
+encryption says who sent a file, not that it is harmless, and a member's account can be stolen.
+
+Holds: nothing runs without a click, and the automatic-download setting (off by default) skips a file that says it can
+run code. A file that can run code, by its name, its claimed type or its content, gets a warning and no Open, and the
+backend refuses to open it, so a renamed `.exe` is not started from the app. A saved file is marked as coming from the
+internet on Windows and macOS. A name cannot leave the download folder: it is cut to its last path segment, characters
+Windows forbids are replaced, device names (including `COM¹`, `LPT0`, `CONIN$` and `NUL .txt`) are prefixed, trailing
+dots and spaces go, so `evil.exe. .` and `x.exe:stream` cannot hide an extension or reach a stream, and an existing file
+is never overwritten.
+
+Does not hold: **this is not malware detection.** A file with no warning is not a safe file. A user can still start a
+flagged file from their file manager, where only the OS checks stand. A viewer bug can be attacked through a PDF or a
+picture, an archive's contents are not inspected, and Linux has no mark. See `08-files.md`, "Received files", for
+the full list.
 
 ## Image thumbnails: what a preview reveals
 

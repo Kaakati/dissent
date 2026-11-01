@@ -1,16 +1,15 @@
 // The floating panel over the rail and the sidebar: your name and status, the mic and headphone buttons with their
-// option chevrons, and settings. Clicking your name opens the status menu (a dropdown with duration submenus).
-// Ported from the old UI's views/sidebar.js (renderMe) and the old UI's views/statusmenu.js.
+// option chevrons, and settings. Clicking your name opens your profile card, a menu with Edit Profile and the status
+// submenu (with its duration submenus). Ported from the old UI's views/sidebar.js (renderMe) and views/statusmenu.js.
 import { useLayoutEffect, useRef, type CSSProperties } from 'react';
-import { ChevronDown, Headphones, Mic, MicOff, PhoneOff, Settings } from 'lucide-react';
+import { ChevronDown, Headphones, Mic, MicOff, Pencil, PhoneOff, Settings } from 'lucide-react';
+import { bannerBackground } from '@/components/profile/banner';
 import { Button } from '@/components/ui/button';
 import { MOD, Tip } from '@/components/ui/tip';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -19,6 +18,7 @@ import {
 import { UserAvatar } from '@/components/user-avatar';
 import { shortOf } from '@/lib/address';
 import { has } from '@/lib/features';
+import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import { openInputMenu, openOutputMenu } from '@/components/voice/voice-menus';
 import type { Presence, StatusName } from '@/lib/types';
@@ -58,70 +58,97 @@ function MenuGlyph({ presence }: { presence: Presence }) {
   return <span aria-hidden="true" className={cn('inline-block size-2.5 shrink-0 rounded-full', shape[presence])} />;
 }
 
-function StatusMenu() {
+// The status rows, in the card's status submenu.
+function StatusChoices() {
+  const setStatus = useShell((s) => s.setStatus);
+  return CHOICES.map((c) =>
+    c.timed ? (
+      <DropdownMenuSub key={c.status}>
+        <DropdownMenuSubTrigger className="gap-s-2">
+          <MenuGlyph presence={c.presence} />
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span>{c.label}</span>
+            {c.sub ? <span className="text-meta font-normal text-muted-foreground">{c.sub}</span> : null}
+          </span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          {DURATIONS.map(([label, ms]) => (
+            <DropdownMenuItem key={label} onSelect={() => void setStatus(c.status, ms === null ? null : Date.now() + ms)}>
+              {label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    ) : (
+      <DropdownMenuItem key={c.status} className="gap-s-2" onSelect={() => void setStatus(c.status, null)}>
+        <MenuGlyph presence={c.presence} />
+        {c.label}
+      </DropdownMenuItem>
+    ),
+  );
+}
+
+const CARD_ROW = 'h-9 gap-s-2 rounded-md px-s-2 text-ui text-text-strong';
+
+// Your profile as a card above the bar: the banner, the avatar over its edge, your name and tag, Edit Profile and your
+// status. It carries your profile colours, so you see what others do. The submenus portal out of it, so they keep the
+// app's own surface.
+function ProfileMenu() {
   const me = useShell((s) => s.me);
   const status = useShell((s) => s.status);
   const call = useShell((s) => s.call);
-  const setStatus = useShell((s) => s.setStatus);
+  const openSettings = useShell((s) => s.openSettings);
   const choice = choiceOf(status.status);
   const name = me?.display_name || 'Set a display name';
   const statusText = call ? 'In a call' : choice.label;
-  const trigger = (
-    <button
-      type="button"
-      className="flex h-11 min-w-0 flex-1 items-center gap-s-2 rounded-lg px-1.5 text-left hover:bg-hover"
-      aria-label={`${name}, ${statusText}. Profile and status`}
-      aria-haspopup={has('status') ? 'menu' : undefined}
-      title={me ? me.display_name : undefined}
-      disabled={!has('status')}
-    >
-      <UserAvatar name={me?.display_name || '?'} seed={me?.root_id} presence={choice.presence} className="size-8" />
-      <span className="flex min-w-0 flex-col">
-        <span className="truncate text-body leading-[19px] font-semibold text-text-strong">{name}</span>
-        <span className="truncate text-meta leading-4 text-muted-foreground">{statusText}</span>
-      </span>
-    </button>
-  );
-
-  if (!has('status')) return trigger;
-
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="start" className="w-[260px]">
-        <DropdownMenuLabel className="flex items-center gap-s-2 font-normal">
-          <UserAvatar name={me?.display_name || '?'} seed={me?.root_id} size="lg" presence={choice.presence} />
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="flex h-11 min-w-0 flex-1 items-center gap-s-2 rounded-lg px-1.5 text-left hover:bg-hover"
+          aria-label={`${name}, ${statusText}. Profile and status`}
+          title={me ? me.display_name : undefined}
+        >
+          <UserAvatar name={me?.display_name || '?'} seed={me?.root_id} presence={choice.presence} className="size-8" />
           <span className="flex min-w-0 flex-col">
             <span className="truncate text-body leading-[19px] font-semibold text-text-strong">{name}</span>
-            {me ? <span className="truncate font-mono text-meta leading-4 text-muted-foreground">{shortOf('user', me.root_id)}</span> : null}
+            <span className="truncate text-meta leading-4 text-muted-foreground">{statusText}</span>
           </span>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {CHOICES.map((c) =>
-          c.timed ? (
-            <DropdownMenuSub key={c.status}>
-              <DropdownMenuSubTrigger className="gap-s-2">
-                <MenuGlyph presence={c.presence} />
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span>{c.label}</span>
-                  {c.sub ? <span className="text-meta font-normal text-muted-foreground">{c.sub}</span> : null}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {DURATIONS.map(([label, ms]) => (
-                  <DropdownMenuItem key={label} onSelect={() => void setStatus(c.status, ms === null ? null : Date.now() + ms)}>
-                    {label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          ) : (
-            <DropdownMenuItem key={c.status} className="gap-s-2" onSelect={() => void setStatus(c.status, null)}>
-              <MenuGlyph presence={c.presence} />
-              {c.label}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" align="start" sideOffset={14} data-own-profile className="w-[300px] p-0 [--presence-ring:var(--ink)]" {...themeProps(me?.theme)}>
+        <div data-profile-banner className="h-[105px]" style={{ background: bannerBackground(me?.root_id ?? '', me) }} />
+        <div className="px-s-3 pb-s-3">
+          <UserAvatar
+            name={me?.display_name || '?'}
+            seed={me?.root_id}
+            size="xl"
+            presence={choice.presence}
+            className="-mt-10 size-[88px] text-[27px] ring-[6px] ring-ink"
+          />
+          <div className="mt-s-2 text-head leading-6 font-bold break-words text-text-strong">{name}</div>
+          {me ? (
+            <div className="mt-0.5 font-mono text-sm leading-5 break-all text-muted-foreground">{`${me.display_name}·${shortOf('user', me.root_id)}`}</div>
+          ) : null}
+          <div className="mt-s-3 flex flex-col rounded-lg bg-profile-panel p-1">
+            <DropdownMenuItem className={CARD_ROW} onSelect={() => openSettings('account')}>
+              <Pencil className="text-text-strong" />
+              Edit Profile
             </DropdownMenuItem>
-          ),
-        )}
+            {has('status') ? (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className={CARD_ROW}>
+                  <MenuGlyph presence={choice.presence} />
+                  <span className="min-w-0 flex-1">{choice.label}</span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-[260px]">
+                  <StatusChoices />
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            ) : null}
+          </div>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -190,7 +217,7 @@ export function UserBar() {
     >
       <VoiceStrip />
       <div className="flex h-[58px] items-center gap-s-1 pr-s-2 pl-[10px]">
-        <StatusMenu />
+        <ProfileMenu />
         {has('calls') ? (
           <>
             {/* Each control sits flush with its options arrow, as one split button. */}

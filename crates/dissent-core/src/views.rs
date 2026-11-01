@@ -13,12 +13,16 @@ pub struct MeView {
     pub display_name: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// The avatar decoration shown over the picture. See `decorations`.
+    pub decoration: Option<crate::decorations::DecorationView>,
     /// Path of the profile banner's picture on this device, when the banner is one. See `profile_banners`.
     pub banner: Option<String>,
     /// Path of an animated banner's still frame, shown under reduced motion.
     pub banner_poster: Option<String>,
     /// The preset gradient the profile banner is, when it is one.
     pub banner_preset: Option<u8>,
+    /// The profile colours, when set. See `profile_themes`.
+    pub theme: Option<dissent_events::ProfileTheme>,
     /// True until the recovery phrase has been shown on a fresh device. See `capabilities`.
     pub first_run: bool,
 }
@@ -197,6 +201,8 @@ pub struct MemberInfo {
     pub display_name: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// The avatar decoration shown over the picture. See `decorations`.
+    pub decoration: Option<crate::decorations::DecorationView>,
     pub handle: Option<String>,
     pub role: String,
     pub banned: bool,
@@ -208,6 +214,10 @@ pub struct MemberInfo {
     pub storage: bool,
     /// For a seeder: whether an admin granted it storage (`StorageGrant`). False for a person.
     pub storage_granted: bool,
+    /// Ids of the custom roles the member holds. See `custom_roles`.
+    pub roles: Vec<String>,
+    /// Whether an admin registered the member as a bot.
+    pub bot: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -280,12 +290,16 @@ pub struct UserView {
     pub display_name: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// The avatar decoration shown over the picture. See `decorations`.
+    pub decoration: Option<crate::decorations::DecorationView>,
     /// Path of the profile banner's picture on this device, once fetched, when the banner is one.
     pub banner: Option<String>,
     /// Path of an animated banner's still frame, shown under reduced motion.
     pub banner_poster: Option<String>,
     /// The preset gradient the profile banner is, when it is one. Neither set: the hue colour.
     pub banner_preset: Option<u8>,
+    /// The profile colours, when set. See `profile_themes`.
+    pub theme: Option<dissent_events::ProfileTheme>,
     pub is_contact: bool,
     pub handles: Vec<HandleView>,
     pub mutual_communities: Vec<CommunityRef>,
@@ -335,6 +349,8 @@ pub struct ConvMember {
     pub suffix: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    /// The avatar decoration shown over the picture. See `decorations`.
+    pub decoration: Option<crate::decorations::DecorationView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -356,6 +372,8 @@ pub struct ConversationSummary {
     pub status: Option<crate::presence::Presence>,
     /// The other party's picture in a 1:1 DM. `None` for a group, or when there is none yet.
     pub avatar: Option<String>,
+    /// The other party's avatar decoration in a 1:1 DM. See `decorations`.
+    pub decoration: Option<crate::decorations::DecorationView>,
     /// The call in this conversation that another member's device says is live. `None` when none is.
     pub live_call: Option<crate::calls::LiveCallView>,
     /// When the other party was added as a contact, in milliseconds. `None` for a group or a non-contact.

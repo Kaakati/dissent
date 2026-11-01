@@ -32,6 +32,7 @@ mod private_keys;
 #[cfg(test)]
 mod private_create_tests;
 mod contact_times;
+pub mod custom_roles;
 mod contacts;
 mod conv_actions;
 mod dht_probe;
@@ -39,7 +40,9 @@ mod community;
 mod community_profile;
 mod animated_banner;
 pub mod boosts;
+mod decorations;
 mod profile_banners;
+mod profile_themes;
 mod profile_sync;
 mod membership;
 mod peer_exchange;
@@ -77,6 +80,7 @@ mod server_prefs;
 mod store;
 mod sync;
 mod timings;
+pub mod tracker;
 mod typing;
 mod video_thumbs;
 mod views;
@@ -96,6 +100,8 @@ pub use calls::{
 pub use attachments::{AttachmentView, FileInspection, Mentions, OutgoingFile, StoreStats, TransferSettings, TransferView};
 /// The limits `Engine::set_mirror_policy` takes: the largest file and the most ciphertext a device keeps for others.
 pub use dissent_files::MirrorPolicy;
+/// Why a received file is not opened from the app, and how to tell.
+pub use dissent_files::{danger_of_path, Danger};
 pub use recovery_flow::{RecoveryAnswerView, RecoveryGuardian, RecoveryRequestView, RecoveryView};
 pub use engine::Engine;
 pub use at_rest::harden as harden_folder;

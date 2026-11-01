@@ -104,13 +104,6 @@
   }
 }
 
-/* Font scale (lib/appearance.ts): zoom on the body scales every size, px included. The height is divided back so the
-   window still fills exactly. The app root takes the same height (App.tsx). */
-body {
-  zoom: var(--ui-zoom, 1);
-  height: calc(100vh / var(--ui-zoom, 1));
-}
-
 /* Compact density only changes tokens. Cozy is the default and needs no rule. */
 html[data-density='compact'] {
   --row-channel: 32px;

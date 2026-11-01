@@ -492,7 +492,9 @@ export const useShell = create<ShellState>()((set, get) => ({
         if (page === 'contacts' && !has('contacts')) return;
         if (page === 'transfers' && !has('transfers')) return;
         const { route, peer, group } = get();
-        if (route.kind !== 'home' || peer || group) {
+        // The Files area belongs to the open server, so it keeps the route.
+        if (page === 'files' && route.kind !== 'server') return;
+        if (page !== 'files' && (route.kind !== 'home' || peer || group)) {
           set({ route: { kind: 'home' }, peer: null, peerName: '', group: null });
         }
         set({ page });

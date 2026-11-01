@@ -5,7 +5,10 @@ import { useEffect, useState } from 'react';
 import { AtSign, Copy, Image as ImageIcon, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
 import { AddressCard } from '@/components/address-card';
 import { BannerPicker } from '@/components/banner-picker';
+import { ProfileCardBody } from '@/components/profile/profile-card';
+import { useUserProfile } from '@/components/profile/use-user-profile';
 import { chooseImage } from '@/components/settings/avatar-editor';
+import { DecorationSection } from '@/components/settings/decoration-picker';
 import { Block, Hint, ROW } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,8 +21,9 @@ import { copyText } from '@/lib/clipboard';
 import { confirm } from '@/lib/dialog';
 import { imageOf } from '@/lib/images';
 import { toast } from '@/lib/toasts';
-import { clearProfileBanner, setProfileBanner, setProfileBannerAnimated, setProfileBannerPreset } from '@/lib/actions';
+import { clearProfileBanner, clearProfileTheme, setProfileBanner, setProfileBannerAnimated, setProfileBannerPreset, setProfileTheme } from '@/lib/actions';
 import { bannerOf } from '@/lib/banners';
+import { fromHex, themeProps, toHex, validTheme } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import type { HandleCheck, WebsiteHandleSetup } from '@/lib/types';
 import { noteHandleCheck } from '@/lib/website-handles';
@@ -68,6 +72,67 @@ function BannerSection() {
           onRemove={() => void clearProfileBanner()}
         />
         <Hint>Shown behind your profile card, in DMs and on your full profile. A 16:9 picture of up to 512 KB, a looping GIF of up to 2 MB, or a colour.</Hint>
+      </div>
+    </Block>
+  );
+}
+
+// What the pickers start on when you have no colours yet: a dark top running into the app's accent.
+const THEME_START = { primary: '#1c1d33', accent: '#d93f00' };
+
+// The profile colours: two pickers and the card as others will see it. Nothing is published until Save, as a colour
+// input fires on every move of its pointer.
+function ThemeSection() {
+  const me = useShell((s) => s.me);
+  const load = useUserProfile(me?.root_id ?? null);
+  const saved = validTheme(me?.theme);
+  const savedHex = saved ? { primary: toHex(saved.primary), accent: toHex(saved.accent) } : null;
+  const [draft, setDraft] = useState(savedHex ?? THEME_START);
+  const primary = fromHex(draft.primary);
+  const accent = fromHex(draft.accent);
+  const preview = primary && accent ? { primary, accent } : null;
+  const unchanged = savedHex?.primary === draft.primary && savedHex?.accent === draft.accent;
+  const picker = (key: 'primary' | 'accent', label: string) => (
+    <label className="flex flex-col gap-s-1 text-sm font-medium text-text">
+      {label}
+      <input
+        type="color"
+        aria-label={`Profile ${key} colour`}
+        value={draft[key]}
+        onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+        className="h-9 w-16 cursor-pointer rounded border border-input-border bg-input"
+      />
+    </label>
+  );
+  return (
+    <Block title="Profile theme">
+      <div className="flex flex-wrap items-start gap-s-5">
+        <div className="flex max-w-[280px] flex-col gap-s-3">
+          <div className="flex gap-s-4">
+            {picker('primary', 'Primary')}
+            {picker('accent', 'Accent')}
+          </div>
+          <Hint>Everyone sees these on your profile. Bright colours are darkened so your name stays readable.</Hint>
+          <div className={ROW}>
+            <Button disabled={unchanged || !preview} onClick={() => preview && void setProfileTheme(preview.primary, preview.accent)}>Save theme</Button>
+            {saved ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setDraft(THEME_START);
+                  void clearProfileTheme();
+                }}
+              >
+                Clear
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {me && load.status === 'ready' ? (
+          <div data-theme-preview className="w-[300px] overflow-hidden rounded-lg bg-ink" {...themeProps(preview)}>
+            <ProfileCardBody view={{ ...load.view, theme: preview }} userId={me.root_id} preview />
+          </div>
+        ) : null}
       </div>
     </Block>
   );
@@ -317,7 +382,9 @@ export function AccountPage() {
   return (
     <div className="flex flex-col">
       {has('avatars') ? <AvatarSection /> : null}
+      {has('avatars') ? <DecorationSection /> : null}
       {has('avatars') ? <BannerSection /> : null}
+      {has('avatars') ? <ThemeSection /> : null}
       <DisplayName />
       <Block title="Identity">
         <AddressCard kind="user" id={me?.root_id} label="User address" qr />

@@ -11,6 +11,7 @@ import { UserAvatar } from '@/components/user-avatar';
 import { HandleStatus } from '@/components/website-handle';
 import { addressOf, shortOf } from '@/lib/address';
 import { moderate } from '@/lib/actions';
+import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import type { CommunityView, Presence, Role, UserProfileView } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -135,7 +136,7 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
 
   return (
     <>
-      <div data-profile-banner className="h-[60px]" style={{ background: bannerBackground(userId, view) }} />
+      <div data-profile-banner className="h-[105px]" style={{ background: bannerBackground(userId, view) }} />
       <div className="relative px-s-4 pb-s-4">
         <UserAvatar
           name={view.display_name}
@@ -186,6 +187,7 @@ function ProfileCard({ userId }: { userId: string }) {
   const { x, y } = useProfileCardState(useShallow((s) => ({ x: s.x, y: s.y })));
   const load = useUserProfile(userId);
   const ref = useRef<HTMLDivElement>(null);
+  const theme = themeProps(load.status === 'ready' ? load.view.theme : null);
 
   useLayoutEffect(() => {
     const node = ref.current;
@@ -220,7 +222,8 @@ function ProfileCard({ userId }: { userId: string }) {
       role="dialog"
       aria-label="User profile"
       className="fixed z-30 w-[300px] overflow-hidden rounded-lg bg-ink shadow-[var(--shadow-2)]"
-      style={{ left: 0, top: 0 }}
+      {...theme}
+      style={{ left: 0, top: 0, ...theme.style }}
     >
       {load.status === 'ready' ? (
         <ProfileCardBody view={load.view} userId={userId} />

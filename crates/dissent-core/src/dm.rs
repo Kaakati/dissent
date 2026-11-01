@@ -111,6 +111,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
                 display_name: w.display_name(m),
                 suffix: m.suffix(),
                 avatar: w.avatar_of(m),
+                decoration: w.decoration_view(m),
             })
             .collect(),
         name,
@@ -119,6 +120,7 @@ pub(crate) fn summary(w: &World, meta: &ConvMeta) -> ConversationSummary {
         last_ms,
         status,
         avatar: peer.and_then(|p| w.avatar_of(&p)),
+        decoration: peer.and_then(|p| w.decoration_view(&p)),
         live_call: None,
         contact_since_ms: peer.and_then(|p| w.contact_times.since.get(&p).copied()),
         first_seen_ms: peer.and_then(|p| w.contact_times.first_seen.get(&p).copied()),

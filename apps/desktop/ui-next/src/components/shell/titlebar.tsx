@@ -1,7 +1,7 @@
 // The 30 px custom title bar: in-app Back and Forward, the context label, and the window controls. The bar is a drag
 // region; every element that is not a button carries the drag attribute too, as the current UI does.
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, ArrowUpDown, Bookmark, Server, Settings, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpDown, Bookmark, FolderOpen, Server, Settings, Users } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { OwlMark } from '@/components/owl-mark';
 import { Tip } from '@/components/ui/tip';
@@ -53,6 +53,9 @@ function TitleText() {
   } else if (page === 'transfers') {
     text = 'Transfers';
     mark = <ArrowUpDown className="size-4" aria-hidden="true" />;
+  } else if (page === 'files' && community) {
+    text = `${community.name} · Files`;
+    mark = <FolderOpen className="size-4" aria-hidden="true" />;
   } else if (page === 'saved') {
     text = 'Saved Messages';
     mark = <Bookmark className="size-4" aria-hidden="true" />;

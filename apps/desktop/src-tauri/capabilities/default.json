@@ -10,8 +10,6 @@
     "updater:default",
     "process:allow-restart",
     "dialog:allow-open",
-    "opener:allow-open-path",
-    "opener:allow-reveal-item-in-dir",
     "notification:default",
     "global-shortcut:default",
     "core:window:allow-minimize",

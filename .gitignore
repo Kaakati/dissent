@@ -16,3 +16,6 @@ apps/desktop/src-tauri/gen
 
 # Extra cargo target folders made for parallel builds
 /target-*/
+
+# Avatar decoration art without confirmed redistribution rights: never commit.
+assets/avatar_animations/

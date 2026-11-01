@@ -3,6 +3,7 @@
 // noteImages(), so a component looks an image up by the id it already has. Ported from the old UI's avatars.js.
 
 import { bannersStill } from './banners';
+import { setDecoration } from './decorations';
 
 const images = new Map<string, string>(); // id -> src
 const posters = new Map<string, string>(); // server id -> the still frame of its animated icon
@@ -33,6 +34,7 @@ export function noteImages(value: unknown): void {
   const record = value as Record<string, unknown>;
   const key = record.root_id ?? record.peer;
   if (typeof key === 'string' && 'avatar' in record) setImage(key, record.avatar);
+  if (typeof key === 'string' && 'decoration' in record) setDecoration(key, record.decoration);
   if (typeof record.id === 'string' && 'icon' in record) setImage(record.id, record.icon);
   if (typeof record.id === 'string' && 'icon_poster' in record) setPoster(record.id, record.icon_poster);
   for (const child of Object.values(record)) if (child && typeof child === 'object') noteImages(child);

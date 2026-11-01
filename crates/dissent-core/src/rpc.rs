@@ -179,6 +179,40 @@ pub(crate) enum Request {
     /// Whether the responder holds mail for the asker's root, and how much. Signed by the asking device.
     /// Answered with `Response::InboxProbe`. Appended, see `inbox`.
     InboxProbe(Box<crate::inbox::Probe>),
+    /// Which features the responder supports, as bits. A device from before this answers with an error, which reads
+    /// as none. Appended, see `custom_roles::FEATURES`.
+    Features,
+    /// Every files-key generation the responder holds, for an active person. Appended, see `tracker`.
+    FilesKeys { community: CommunityId },
+    /// Files keys a member offers after it rotated the secret. Answered `Ack`. Appended, see `tracker`.
+    PushFilesKeys {
+        community: CommunityId,
+        pairs: Vec<(u64, [u8; 32])>,
+    },
+    /// What the responder holds of the community's listings, unless `digest` matches what it would answer. For active
+    /// persons and granted storage members. Appended, see `tracker::swarm`.
+    Holdings {
+        community: CommunityId,
+        digest: Option<[u8; 32]>,
+    },
+    /// A restricted category's key generations, for a person who may see it. Appended, see `tracker::restricted`.
+    CategoryKeys {
+        community: CommunityId,
+        category: dissent_events::CategoryId,
+    },
+    /// Keys of a restricted category a reader offers after making a new generation. Answered `Ack`. Appended.
+    PushCategoryKeys {
+        community: CommunityId,
+        category: dissent_events::CategoryId,
+        pairs: Vec<(u64, [u8; 32])>,
+    },
+    /// The sender's signed profile colours, sent to a contact. Answered with `Response::ProfileTheme`, the
+    /// responder's own. A device from before this answers with an error. Appended, see `profile_themes`.
+    ProfileTheme(Box<crate::profile_themes::SignedTheme>),
+    /// The sender's signed avatar decoration, if it has ever set one, and a request for ours, sent to a contact's
+    /// device. A device from before decorations cannot decode it and answers with an error. Appended, see
+    /// `decorations`.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -260,6 +294,19 @@ pub(crate) enum Response {
     RotationSupport(bool),
     /// The answer to `Request::InboxProbe`. Appended, see `inbox`.
     InboxProbe(Box<crate::inbox::ProbeAnswer>),
+    /// The answer to `Request::Features`. Appended.
+    Features(u64),
+    /// The answer to `Request::FilesKeys`: `(generation, key)` pairs. Appended.
+    FilesKeys(Vec<(u64, [u8; 32])>),
+    /// The answer to `Request::Holdings`: the digest and `(blob, bytes held)` pairs, or `None` when the asker's digest
+    /// is current. Appended.
+    Holdings(Option<crate::tracker::swarm::HoldingsAnswer>),
+    /// The answer to `Request::CategoryKeys`: `(generation, key)` pairs. Appended.
+    CategoryKeys(Vec<(u64, [u8; 32])>),
+    /// The answer to `Request::ProfileTheme`: the responder's signed profile colours. Appended.
+    ProfileTheme(Box<crate::profile_themes::SignedTheme>),
+    /// The answer to `Request::AvatarDecoration`: the responder's own, if it has ever set one. Appended.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 impl Request {
@@ -285,7 +332,12 @@ impl Request {
             | Request::MirrorHint { community, .. }
             | Request::PushHistoryKeys { community, .. }
             | Request::FetchRaw { community, .. }
-            | Request::ChannelKeys { community, .. } => Some(*community),
+            | Request::ChannelKeys { community, .. }
+            | Request::FilesKeys { community }
+            | Request::PushFilesKeys { community, .. }
+            | Request::Holdings { community, .. }
+            | Request::CategoryKeys { community, .. }
+            | Request::PushCategoryKeys { community, .. } => Some(*community),
             _ => None,
         }
     }
@@ -420,10 +472,10 @@ mod wire_order_tests {
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_REQUEST: &[&str] =
-        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe"];
+        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys", "ProfileTheme", "AvatarDecoration"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe"];
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys", "ProfileTheme", "AvatarDecoration"];
 
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[

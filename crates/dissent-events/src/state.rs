@@ -25,6 +25,7 @@
 use crate::emoji::{normalize_emoji, normalize_trait_emoji};
 use crate::names::{normalize_handle, skeleton};
 use crate::control::{open_event_keyed, EpochKey, OpenError, SealKey};
+use crate::roles::Perms;
 use crate::{ChannelId, ChannelVisibility, Dag, Event, EventId, HistorySetting, Hlc, LayoutEntry, Payload, Role, SealedKind};
 use dissent_identity::{DeviceId, RootId};
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,12 @@ pub struct CommunityState {
     /// Each member's profile banner, from their latest accepted `ProfileBannerSet`, with its HLC. A
     /// `None` banner is a removed one. A newer HLC wins, as for `avatars`.
     pub profile_banners: BTreeMap<RootId, (Hlc, Option<crate::picture::Banner>)>,
+    /// Each member's profile colours, from their latest accepted `ProfileThemeSet`, with its HLC. `None` is
+    /// a cleared theme. A newer HLC wins, as for `profile_banners`.
+    pub profile_themes: BTreeMap<RootId, (Hlc, Option<crate::picture::ProfileTheme>)>,
+    /// Each member's avatar decoration, from their latest accepted `AvatarDecorationSet`, with its HLC. A `None` is
+    /// a removed one. A newer HLC wins, as for `avatars`.
+    pub avatar_decorations: BTreeMap<RootId, (Hlc, Option<crate::picture::Decoration>)>,
     /// The relays each member says they host for this community, from their latest accepted
     /// `RelayHostSet`, with its HLC. Apps verify them before counting a host. See `boosts`.
     pub relay_hosts: BTreeMap<RootId, (Hlc, Vec<String>)>,
@@ -131,6 +138,12 @@ pub struct CommunityState {
     /// Key generation of each channel that has been private. It starts at 0 and moves on each accepted
     /// change that removes a reader from a private channel.
     pub key_generation: BTreeMap<ChannelId, u64>,
+    /// Custom roles, their assignments and bots. See `crate::roles`.
+    #[serde(default)]
+    pub custom: crate::roles::RoleBook,
+    /// The file tracker: categories, listings, receipts and rules. See `crate::tracker`.
+    #[serde(default)]
+    pub files: crate::tracker::FilesBook,
 }
 
 /// A server's channel order as published: text channels and voice channels, top first. See
@@ -339,7 +352,7 @@ impl From<OpenError> for Rejection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Rank {
+pub(crate) enum Rank {
     User,
     Moderator,
     Admin,
@@ -473,6 +486,8 @@ impl CommunityState {
             banner: None,
             profile: None,
             profile_banners: BTreeMap::new(),
+            profile_themes: BTreeMap::new(),
+            avatar_decorations: BTreeMap::new(),
             relay_hosts: BTreeMap::new(),
             storage_grants: BTreeMap::new(),
             history_support: BTreeMap::new(),
@@ -482,6 +497,8 @@ impl CommunityState {
             last_post: BTreeMap::new(),
             channel_access: BTreeMap::new(),
             key_generation: BTreeMap::new(),
+            custom: Default::default(),
+            files: Default::default(),
         }
     }
 
@@ -491,9 +508,10 @@ impl CommunityState {
     }
 
     /// Whether `user` may arrange the server's channels: create categories and publish a layout or an order. The
-    /// owner and admins today. Custom roles with a "manage channels" permission plug in here.
+    /// owner and admins, and, while `CustomRolePerms` is on, holders of a custom role with `MANAGE_CHANNELS`.
     pub fn may_manage_channels(&self, user: &RootId) -> bool {
-        self.rank(&self.canonical(user)) >= Rank::Admin
+        let root = self.canonical(user);
+        self.may(&root, self.rank(&root), Rank::Admin, Perms::MANAGE_CHANNELS)
     }
 
     /// The server's channel layout as it shows now, or `None` when no `ChannelLayout` was accepted (the order
@@ -581,7 +599,8 @@ impl CommunityState {
 
     /// Whether `user` may mention everyone in a community message: the owner and admins by default.
     pub fn may_mention_everyone(&self, user: &RootId) -> bool {
-        self.rank(&self.canonical(user)) >= Rank::Admin
+        let rank = self.rank(&self.canonical(user));
+        self.may(user, rank, Rank::Admin, Perms::MENTION_EVERYONE)
     }
 
     /// Whether `chan` is private, by its latest accepted `ChannelAccess`.
@@ -636,7 +655,7 @@ impl CommunityState {
             .collect()
     }
 
-    fn rank(&self, user: &RootId) -> Rank {
+    pub(crate) fn rank(&self, user: &RootId) -> Rank {
         let roles = self.roles.get(user);
         let has = |r| roles.is_some_and(|s| s.contains(&r));
         if *user == self.owner {
@@ -719,7 +738,7 @@ impl CommunityState {
             | Payload::VoiceChannelCreate { name }
             | Payload::ChannelCreatePrivate { name, .. } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_CHANNELS) {
                     return Err(Rejection::NoPermission);
                 }
                 if name.trim().is_empty() {
@@ -728,7 +747,7 @@ impl CommunityState {
             }
             Payload::ChannelAccess { channel, .. } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_CHANNELS) {
                     return Err(Rejection::NoPermission);
                 }
                 if !self.channels.contains_key(channel) {
@@ -800,7 +819,7 @@ impl CommunityState {
             }
             Payload::Delete { target } => {
                 let msg = self.live_message(chan, target)?;
-                if msg.author != actor && rank < Rank::Moderator {
+                if msg.author != actor && !self.may(&actor, rank, Rank::Moderator, Perms::MANAGE_MESSAGES) {
                     return Err(Rejection::NoPermission);
                 }
             }
@@ -839,7 +858,7 @@ impl CommunityState {
                 relay,
             } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_CHANNELS) {
                     return Err(Rejection::NoPermission);
                 }
                 if !self.channels.contains_key(channel) {
@@ -868,7 +887,7 @@ impl CommunityState {
             }
             Payload::ChannelDelete { channel } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_CHANNELS) {
                     return Err(Rejection::NoPermission);
                 }
                 if !self.channels.contains_key(channel) {
@@ -884,7 +903,7 @@ impl CommunityState {
             }
             Payload::InviteRevoke { invite_id } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_INVITES) {
                     return Err(Rejection::NoPermission);
                 }
                 if !self.invites.contains_key(invite_id) {
@@ -929,7 +948,7 @@ impl CommunityState {
             }
             Payload::SetRelays { relays } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
                 if !crate::relay::valid_relays(relays) {
@@ -944,7 +963,7 @@ impl CommunityState {
             }
             Payload::HistoryVisibility { .. } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
             }
@@ -954,7 +973,7 @@ impl CommunityState {
             }
             Payload::Ban { user } | Payload::Unban { user } => {
                 require_control(chan)?;
-                if self.rank(&self.canonical(user)) >= rank {
+                if !self.may_ban(&actor, rank, user) {
                     return Err(Rejection::NoPermission);
                 }
             }
@@ -1018,7 +1037,7 @@ impl CommunityState {
             }
             Payload::CommunityIconSet { avatar } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
                 if avatar.is_some_and(|p| !p.is_valid()) {
@@ -1036,7 +1055,7 @@ impl CommunityState {
             }
             Payload::CommunityBannerSet { banner } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
                 if banner.is_some_and(|b| !b.is_valid()) {
@@ -1045,7 +1064,7 @@ impl CommunityState {
             }
             Payload::CommunityIconAnimated { icon } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
                 if icon.is_some_and(|i| !i.is_valid()) {
@@ -1054,7 +1073,7 @@ impl CommunityState {
             }
             Payload::CommunityProfileSet { description, traits } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
                 if !valid_profile(description, traits) {
@@ -1064,6 +1083,13 @@ impl CommunityState {
             Payload::ProfileBannerSet { banner } => {
                 require_control(chan)?;
                 if banner.is_some_and(|b| !b.is_valid()) {
+                    return Err(Rejection::Malformed);
+                }
+            }
+            Payload::ProfileThemeSet { .. } => require_control(chan)?,
+            Payload::AvatarDecorationSet { decoration } => {
+                require_control(chan)?;
+                if decoration.as_ref().is_some_and(|d| !d.is_valid()) {
                     return Err(Rejection::Malformed);
                 }
             }
@@ -1078,7 +1104,7 @@ impl CommunityState {
             }
             Payload::MembersHostRelays { .. } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
                     return Err(Rejection::NoPermission);
                 }
             }
@@ -1088,9 +1114,23 @@ impl CommunityState {
                     return Err(Rejection::NoPermission);
                 }
             }
+            Payload::RoleCreate { .. }
+            | Payload::RoleUpdate { .. }
+            | Payload::RoleDelete { .. }
+            | Payload::RoleAssign { .. }
+            | Payload::BotRegister { .. }
+            | Payload::CustomRolePerms { .. } => self.check_roles(ev, rank)?,
+            Payload::FileCategorySet { .. }
+            | Payload::FileCategoryDelete { .. }
+            | Payload::FileListing { .. }
+            | Payload::FileListingUpdate { .. }
+            | Payload::FileListingRemove { .. }
+            | Payload::FileReceipt { .. }
+            | Payload::ReputationRulesSet { .. }
+            | Payload::ReputationReset { .. } => self.check_files(ev)?,
             Payload::StorageGrant { .. } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_STORAGE) {
                     return Err(Rejection::NoPermission);
                 }
             }
@@ -1111,7 +1151,7 @@ impl CommunityState {
             // flight. `channel_order` skips them.
             Payload::ChannelOrder { text, voice } => {
                 require_control(chan)?;
-                if rank < Rank::Admin {
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_CHANNELS) {
                     return Err(Rejection::NoPermission);
                 }
                 if text.len() + voice.len() > MAX_ORDERED_CHANNELS {
@@ -1508,6 +1548,16 @@ impl CommunityState {
                     self.profile_banners.insert(actor, (ev.body.hlc, *banner));
                 }
             }
+            Payload::ProfileThemeSet { theme } => {
+                if self.profile_themes.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.profile_themes.insert(actor, (ev.body.hlc, *theme));
+                }
+            }
+            Payload::AvatarDecorationSet { decoration } => {
+                if self.avatar_decorations.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
+                    self.avatar_decorations.insert(actor, (ev.body.hlc, decoration.clone()));
+                }
+            }
             Payload::RelayHostSet { relays } => {
                 if self.relay_hosts.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.relay_hosts.insert(actor, (ev.body.hlc, relays.clone()));
@@ -1525,6 +1575,20 @@ impl CommunityState {
                     self.seeder_forwards_calls_hlc = ev.body.hlc;
                 }
             }
+            Payload::RoleCreate { .. }
+            | Payload::RoleUpdate { .. }
+            | Payload::RoleDelete { .. }
+            | Payload::RoleAssign { .. }
+            | Payload::BotRegister { .. }
+            | Payload::CustomRolePerms { .. } => self.commit_roles(ev),
+            Payload::FileCategorySet { .. }
+            | Payload::FileCategoryDelete { .. }
+            | Payload::FileListing { .. }
+            | Payload::FileListingUpdate { .. }
+            | Payload::FileListingRemove { .. }
+            | Payload::FileReceipt { .. }
+            | Payload::ReputationRulesSet { .. }
+            | Payload::ReputationReset { .. } => self.commit_files(ev),
             Payload::StorageGrant { root, granted } => {
                 if self.storage_grants.get(root).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.storage_grants.insert(*root, (ev.body.hlc, *granted));
@@ -1557,7 +1621,7 @@ impl CommunityState {
     /// admins and moderators are exempt.
     fn check_slowmode(&self, chan: ChannelId, actor: RootId, rank: Rank, wall_ms: u64) -> Result<(), Rejection> {
         let seconds = self.settings(&chan).slowmode_s;
-        if seconds == 0 || rank >= Rank::Moderator {
+        if seconds == 0 || self.may(&actor, rank, Rank::Moderator, Perms::BYPASS_SLOWMODE) {
             return Ok(());
         }
         match self.last_post.get(&(chan, actor)) {
@@ -1569,6 +1633,8 @@ impl CommunityState {
     /// Make `new` the same user as `old` from here on. Moves every stored reference.
     fn migrate(&mut self, old: RootId, new: RootId) {
         self.aliases.insert(old, new);
+        self.migrate_roles(old, new);
+        self.migrate_files(old, new);
         if let Some(roles) = self.roles.remove(&old) {
             self.roles.insert(new, roles);
         }

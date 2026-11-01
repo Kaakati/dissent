@@ -140,6 +140,14 @@ pub async fn reveal_attachment(app: AppHandle, state: tauri::State<'_, AppState>
     app.opener().reveal_item_in_dir(&real).map_err(|e| e.to_string())
 }
 
+/// Checks the file as it is now, whatever the UI was told. A file that can run code is never started from the app.
+fn refuse_dangerous(path: &Path) -> Result<(), String> {
+    match dissent_core::danger_of_path(path) {
+        Some(_) => Err("This file can run code on this computer, so Dissent does not open it. Use Show in folder if you trust it.".into()),
+        None => Ok(()),
+    }
+}
+
 /// Opens a saved download with the OS default application.
 #[tauri::command]
 pub async fn open_attachment(app: AppHandle, state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
@@ -147,6 +155,8 @@ pub async fn open_attachment(app: AppHandle, state: tauri::State<'_, AppState>, 
     if !real.is_file() {
         return Err("only files can be opened".into());
     }
+    let checked = real.clone();
+    tauri::async_runtime::spawn_blocking(move || refuse_dangerous(&checked)).await.map_err(|e| e.to_string())??;
     app.opener()
         .open_path(real.to_string_lossy().into_owned(), None::<String>)
         .map_err(|e| e.to_string())
@@ -256,6 +266,18 @@ mod tests {
         file(&data.join("secret.txt"), b"x");
         let saved = vec![downloads.join("a.txt")];
         assert!(validate_saved(&saved, &downloads.join("..").join("secret.txt")).is_err());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn opening_is_refused_for_a_file_that_can_run_code_whatever_it_is_called() {
+        let data = scratch("open-danger");
+        file(&data.join("setup.exe"), b"anything");
+        file(&data.join("holiday.png"), b"MZ\x90\0renamed program");
+        file(&data.join("notes.txt"), b"just notes");
+        assert!(refuse_dangerous(&data.join("setup.exe")).is_err());
+        assert!(refuse_dangerous(&data.join("holiday.png")).is_err());
+        assert!(refuse_dangerous(&data.join("notes.txt")).is_ok());
         let _ = std::fs::remove_dir_all(&data);
     }
 

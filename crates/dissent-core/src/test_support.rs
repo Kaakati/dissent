@@ -31,6 +31,12 @@ pub fn vault_for(dir: &Path) -> Arc<Vault> {
 
 /// Engine intervals short enough for tests. Everything stays well apart: a beacon still arrives
 /// several times inside its presence window, so one late beacon does not flicker a peer offline.
+/// Publishes `bytes` as an uploaded decoration without the check an honest sender runs, as a modified client could.
+pub async fn publish_unchecked_decoration(engine: &crate::Engine, bytes: Vec<u8>) -> crate::Result<()> {
+    let picture = engine.add_picture_blob(&bytes).await?;
+    engine.publish_decoration(Some(dissent_events::Decoration::Upload(picture))).await
+}
+
 pub fn fast_timings() -> crate::Timings {
     use std::time::Duration;
     crate::Timings {
@@ -134,6 +140,11 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
         .inner
         .dm_devices_support
         .store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Makes `engine` answer `Request::Features` with `bits`. Zero models a device from before the probe.
+pub fn set_features(engine: &crate::Engine, bits: u64) {
+    engine.inner.features.store(bits, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Makes `engine` act as if it were in a call, or stop. Relay probes wait during calls.
@@ -262,6 +273,38 @@ pub async fn publish_hosted_relays_unchecked(
 /// Runs one relay-host check now, as the maintenance tick does. See `boosts`.
 pub async fn check_relay_hosts(engine: &crate::Engine) {
     engine.check_relay_hosts().await;
+}
+
+#[cfg(feature = "test-hooks")]
+/// Lists `bytes` in `category` as a lying lister would: the listing claims `claimed` as its fingerprint, and its blob
+/// is `bytes` encrypted under the key that fingerprint gives. Returns the listing id. See `tracker::catalog`.
+pub async fn list_with_false_fingerprint(
+    engine: &crate::Engine,
+    community: dissent_identity::CommunityId,
+    category: dissent_events::CategoryId,
+    name: &str,
+    bytes: Vec<u8>,
+    claimed: [u8; 32],
+) -> crate::Result<String> {
+    engine.list_with_false_fingerprint(community, category, name, bytes, claimed).await
+}
+
+/// Sends `pairs` to `device` as `PushFilesKeys`, as any member could. Returns whether it answered `Ack`.
+pub async fn push_files_keys(
+    engine: &crate::Engine,
+    device: dissent_identity::DeviceId,
+    community: dissent_identity::CommunityId,
+    pairs: Vec<(u64, [u8; 32])>,
+) -> bool {
+    matches!(
+        engine.call(device, &crate::rpc::Request::PushFilesKeys { community, pairs }).await,
+        Ok(crate::rpc::Response::Ack)
+    )
+}
+
+/// The newest files-key generation `engine` would seal under, if it holds one.
+pub fn newest_files_generation(engine: &crate::Engine, community: dissent_identity::CommunityId) -> Option<u64> {
+    engine.with_tracker(community, |l| l.newest().map(|(g, _)| g))
 }
 
 /// The direct IP addresses `engine` holds for `device`, from the signed addresses it has learned. A

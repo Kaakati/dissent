@@ -17,6 +17,11 @@ pub const MAX_ANIMATED_BANNER_BYTES: u64 = 2 * 1024 * 1024;
 /// Largest animated icon accepted, in plaintext bytes: a looping GIF, at most 256 by 256.
 pub const MAX_ANIMATED_ICON_BYTES: u64 = 1024 * 1024;
 
+/// Largest uploaded avatar decoration accepted, in plaintext bytes: a looping overlay for a person's picture.
+pub const MAX_DECORATION_BYTES: u64 = 2 * 1024 * 1024;
+/// Longest built-in decoration id accepted. See [`Decoration::is_valid`].
+pub const MAX_DECORATION_ID_CHARS: usize = 40;
+
 /// An animated community icon: a looping square GIF, and a still poster frame shown under reduced
 /// motion and while the window is in the background. Appended with `Payload::CommunityIconAnimated`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +35,14 @@ impl AnimatedIcon {
     pub fn is_valid(&self) -> bool {
         (1..=MAX_ANIMATED_ICON_BYTES).contains(&self.image.size) && self.poster.is_valid()
     }
+}
+
+/// A person's profile colours, drawn as a vertical gradient behind their card, the primary at the top. Plain RGB bytes:
+/// any value is valid, and the UI builds its CSS from the numbers, so a peer cannot put anything else in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileTheme {
+    pub primary: [u8; 3],
+    pub accent: [u8; 3],
 }
 
 /// A community banner: one of the preset gradients, which the UI draws, or an uploaded picture.
@@ -74,6 +87,36 @@ impl Banner {
     /// Every picture a device must fetch to show the banner.
     pub fn pictures(&self) -> Vec<Picture> {
         self.picture().into_iter().chain(self.poster()).collect()
+    }
+}
+
+/// An overlay drawn around a person's picture: one of the app's built-in pieces of art, or one they uploaded. A
+/// built-in travels as its id and is matched at the viewer's end, so nothing is fetched, and an id the viewer's app
+/// does not ship shows nothing. Append variants only: the order is the wire tag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decoration {
+    Builtin(String),
+    Upload(Picture),
+}
+
+impl Decoration {
+    /// Whether a built-in id is short lowercase ASCII, and an upload is within the decoration cap.
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Decoration::Builtin(id) => {
+                (1..=MAX_DECORATION_ID_CHARS).contains(&id.len())
+                    && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            }
+            Decoration::Upload(picture) => (1..=MAX_DECORATION_BYTES).contains(&picture.size),
+        }
+    }
+
+    /// The picture a device must fetch to show the decoration: none for a built-in.
+    pub fn picture(&self) -> Option<Picture> {
+        match self {
+            Decoration::Builtin(_) => None,
+            Decoration::Upload(picture) => Some(*picture),
+        }
     }
 }
 
@@ -416,6 +459,38 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_theme_is_the_authors_own_and_the_latest_wins() {
+        let theme = |tag| ProfileTheme { primary: [tag; 3], accent: [255, tag, 0] };
+        let owner = User::new();
+        let bob = User::new();
+        let mut evs = Vec::new();
+        chain(&mut evs, &owner, Payload::Join { display_name: "boss".into() });
+        chain(&mut evs, &bob, Payload::Join { display_name: "bob".into() });
+        chain(&mut evs, &owner, Payload::ProfileThemeSet { theme: Some(theme(1)) });
+        chain(&mut evs, &bob, Payload::ProfileThemeSet { theme: Some(theme(2)) });
+        let st = replay_with(owner.id(), &dag_of(evs.clone()), &[]);
+        assert_eq!(st.profile_themes[&owner.id()].1, Some(theme(1)));
+        assert_eq!(st.profile_themes[&bob.id()].1, Some(theme(2)));
+        chain(&mut evs, &bob, Payload::ProfileThemeSet { theme: None });
+        let st = replay_with(owner.id(), &dag_of(evs), &[]);
+        assert_eq!(st.profile_themes[&bob.id()].1, None);
+        assert_eq!(st.profile_themes[&owner.id()].1, Some(theme(1)));
+    }
+
+    #[test]
+    fn a_carried_profile_theme_opens_and_an_older_client_sees_it_locked() {
+        let bob = User::new();
+        let payload = Payload::ProfileThemeSet { theme: Some(ProfileTheme { primary: [1, 2, 3], accent: [4, 5, 6] }) };
+        let body = event(&bob, vec![], at(1), payload.clone()).body;
+        let carried = crate::carry_sealed(&seal(&SECRET, 0, &body).unwrap()).unwrap();
+        // The outer payload is a form every client decodes, and its generation has no secret.
+        assert!(matches!(carried, Payload::SealedControl { generation: crate::CARRIER_GENERATION, .. }));
+        let ev = Event::sign(EventBody { payload: carried, ..body }, &bob.device);
+        assert_eq!(crate::open_event(&ev, &[(0, SECRET)]).unwrap().body.payload, payload);
+        assert_eq!(crate::control::open(&[(0, SECRET)], &ev.body), Err(crate::OpenError::NoKey));
+    }
+
+    #[test]
     fn concurrent_profile_banners_converge_on_the_higher_hlc() {
         let bob = User::new();
         let join = event(&bob, vec![], at(1), Payload::Join { display_name: "bob".into() });
@@ -465,6 +540,58 @@ mod tests {
         let st = replay_with(owner.id(), &dag_of(evs), &[]);
         assert!(st.rejected.contains(&(unknown, Rejection::Malformed)));
         assert_eq!(st.banner.map(|(_, b)| b), Some(Some(Banner::Preset(BANNER_PRESETS - 1))));
+    }
+
+    #[test]
+    fn a_decoration_is_the_authors_own_and_the_latest_valid_one_wins() {
+        let owner = User::new();
+        let bob = User::new();
+        let set = |decoration| Payload::AvatarDecorationSet { decoration };
+        let builtin = |id: &str| Some(Decoration::Builtin(id.into()));
+        let mut evs = Vec::new();
+        chain(&mut evs, &owner, Payload::Join { display_name: "boss".into() });
+        chain(&mut evs, &bob, Payload::Join { display_name: "bob".into() });
+        chain(&mut evs, &owner, set(builtin("koi_pond")));
+        chain(&mut evs, &bob, set(Some(Decoration::Upload(pic(2)))));
+        // An id from a newer app is valid here: it only shows nothing where the art is not shipped.
+        chain(&mut evs, &bob, set(builtin("from-a-newer-app")));
+        let too_big = Decoration::Upload(Picture { size: MAX_DECORATION_BYTES + 1, ..pic(3) });
+        let bad = [
+            chain(&mut evs, &bob, set(Some(too_big))),
+            chain(&mut evs, &bob, set(builtin("Not Lowercase"))),
+            chain(&mut evs, &bob, set(builtin(""))),
+            chain(&mut evs, &bob, set(builtin(&"x".repeat(MAX_DECORATION_ID_CHARS + 1)))),
+        ];
+        let st = replay_with(owner.id(), &dag_of(evs.clone()), &[]);
+        for id in bad {
+            assert!(st.rejected.contains(&(id, Rejection::Malformed)), "{id:?}");
+        }
+        assert_eq!(st.avatar_decorations[&owner.id()].1, builtin("koi_pond"));
+        assert_eq!(st.avatar_decorations[&bob.id()].1, builtin("from-a-newer-app"));
+        chain(&mut evs, &bob, set(None));
+        let st = replay_with(owner.id(), &dag_of(evs), &[]);
+        assert_eq!(st.avatar_decorations[&bob.id()].1, None);
+    }
+
+    #[test]
+    fn a_decoration_is_carried_so_an_older_client_shows_it_as_locked() {
+        let u = User::new();
+        let body = EventBody {
+            community: CommunityId([0; 32]),
+            channel: ChannelId::CONTROL,
+            author: u.id(),
+            device: u.device.id(),
+            parents: vec![],
+            hlc: at(1),
+            payload: Payload::AvatarDecorationSet { decoration: Some(Decoration::Upload(pic(4))) },
+        };
+        let sealed = seal(&SECRET, 0, &body).unwrap();
+        let carried = crate::carry_sealed(&sealed).unwrap();
+        // The outer form is `SealedControl` under a generation no secret has: what every older client decodes and locks.
+        assert!(matches!(carried, Payload::SealedControl { generation: crate::CARRIER_GENERATION, .. }));
+        let ev = Event::sign(EventBody { payload: carried, ..body.clone() }, &u.device);
+        assert_eq!(crate::open_event(&ev, &[]).unwrap_err(), crate::OpenError::NoKey);
+        assert_eq!(crate::open_event(&ev, &[(0, SECRET)]).unwrap().body.payload, body.payload);
     }
 
     fn profile(description: &str, traits: &[(&str, &str)]) -> Payload {

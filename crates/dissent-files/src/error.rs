@@ -16,6 +16,8 @@ pub enum FilesError {
     Decrypt,
     #[error("encryption failed")]
     Crypto,
+    #[error("the file changed while it was being added")]
+    Changed,
     #[error("no provider could supply the file: {0}")]
     Fetch(String),
     /// Every provider that was reached refused to serve this device: it is not a member of a group the blob belongs to,

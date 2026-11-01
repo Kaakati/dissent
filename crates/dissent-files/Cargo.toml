@@ -6,7 +6,11 @@ license.workspace = true
 
 [dependencies]
 aes-gcm.workspace = true
+bao-tree.workspace = true
 blake3.workspace = true
+cfb.workspace = true
+infer.workspace = true
+tracing.workspace = true
 bytes.workspace = true
 fs4.workspace = true
 image.workspace = true
@@ -19,3 +23,10 @@ rand.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xattr.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+uuid.workspace = true

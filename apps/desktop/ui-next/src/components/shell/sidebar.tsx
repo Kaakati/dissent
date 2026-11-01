@@ -2,7 +2,7 @@
 // channels and categories (channel-tree.tsx), with the people in each voice channel. Controls whose views are not ported yet are shown disabled.
 // Ported from the old UI's views/sidebar.js.
 import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { ArrowUpDown, Bookmark, BellOff, ChevronDown, Radio, Link as LinkIcon, Pin, Plus, UserPlus, Users } from 'lucide-react';
+import { ArrowUpDown, Bookmark, BellOff, ChevronDown, FolderOpen, Radio, Link as LinkIcon, Pin, Plus, UserPlus, Users } from 'lucide-react';
 import { ChannelTree } from '@/components/shell/channel-tree';
 import { rowClass, SectionHead, UnreadDot } from '@/components/shell/sidebar-rows';
 import { openInviteDialog, openContactDialog } from '@/components/dialogs/invite-dialogs';
@@ -10,6 +10,7 @@ import { setSwitcherOpen } from '@/components/dialogs/quick-switcher';
 import { openAddContactDialog } from '@/components/dialogs/small-dialogs';
 import { NewConversationMenu, openConversationMenu } from '@/components/menus/conversation-menu';
 import { ServerMenu } from '@/components/menus/server-menu';
+import { openChannelListMenu } from '@/components/menus/server-rail-menu';
 import { Button } from '@/components/ui/button';
 import { Tip } from '@/components/ui/tip';
 import { Separator } from '@/components/ui/separator';
@@ -313,6 +314,7 @@ function ServerList({ community }: { community: CommunityView }) {
   return (
     <>
       <QuickLink icon={<UserPlus />} label="Invite people" onClick={() => openInviteDialog(community.id)} />
+      <QuickLink icon={<FolderOpen />} label="Files" onClick={() => void openPage('files')} active={page === 'files'} />
       {has('transfers') ? (
         <QuickLink icon={<ArrowUpDown />} label="Transfers" onClick={() => void openPage('transfers')} active={page === 'transfers'} extra={activeTransfers ? <ActiveBadge count={activeTransfers} /> : null} />
       ) : null}
@@ -356,6 +358,8 @@ export function Sidebar() {
         data-sidebar-list
         className="dissent-scroll mb-[calc(var(--user-panel-h,60px)+var(--s-2)*2)] flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-s-2"
         onScroll={route.kind === 'server' ? (e) => setScrollTop(e.currentTarget.scrollTop) : undefined}
+        // Only the list's empty space: rows and headers have their own menu, or none.
+        onContextMenu={route.kind === 'server' && community ? (e) => { if (!e.defaultPrevented && !(e.target as HTMLElement).closest('button, a')) void openChannelListMenu(e, community.id); } : undefined}
       >
         {route.kind === 'home' ? <HomeList /> : null}
         {route.kind === 'server' && community ? <ServerList community={community} /> : null}

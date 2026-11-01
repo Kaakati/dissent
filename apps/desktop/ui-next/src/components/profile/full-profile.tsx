@@ -16,6 +16,7 @@ import { startConversationCall } from '@/lib/calls';
 import { copyText } from '@/lib/clipboard';
 import { has } from '@/lib/features';
 import { openDialog } from '@/lib/dialog';
+import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { DirectSummary, Presence, UserProfileView } from '@/lib/types';
@@ -77,7 +78,7 @@ function FullProfileBody({ peer, view, close }: { peer: string; view: UserProfil
   };
   return (
     <div className="-mx-s-5 -mt-s-5 flex flex-col">
-      <div data-profile-banner className="h-[120px] w-full" style={{ background: bannerBackground(peer, view) }} />
+      <div data-profile-banner className="h-[var(--banner-h)] w-full" style={{ background: bannerBackground(peer, view) }} />
       <div className="relative px-s-5 pb-s-2">
         <UserAvatar
           name={view.display_name}
@@ -183,6 +184,7 @@ export async function openFullProfile(peer: string): Promise<void> {
   }
   openDialog({
     title: 'Profile',
+    surface: themeProps(view.theme),
     content: (close) => <FullProfileBody peer={peer} view={view} close={close} />,
   });
 }

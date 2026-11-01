@@ -344,6 +344,9 @@ pub struct AttachmentView {
     /// True until the file is on this device.
     pub needed: bool,
     pub seed: bool,
+    /// Set when the file can run code, from its name and claimed type and, once it is here, its content. The card warns
+    /// and offers no Open. Nothing here says a file with no flag is safe.
+    pub danger: Option<dissent_files::Danger>,
     /// The preview, for an image that has one.
     pub thumb: Option<ThumbView>,
     /// The download's id, while this device has a transfer for the file.
@@ -489,6 +492,9 @@ pub(crate) struct AttachBook {
     pub default_download_dir: Option<PathBuf>,
     /// Finished downloads: attachment id to local path.
     pub downloads: BTreeMap<String, PathBuf>,
+    /// What each file on disk turned out to be, by attachment id, so a file is read once a run.
+    #[serde(skip)]
+    pub content_checks: std::sync::Mutex<BTreeMap<String, Option<dissent_files::Danger>>>,
     pub transfers: BTreeMap<String, Transfer>,
     /// Mirrored ciphertext: attachment id to its size.
     pub mirrored: BTreeMap<String, u64>,
@@ -725,9 +731,13 @@ impl World {
                     .and_then(|t| t.local_path.as_ref())
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned());
+                let name = own_name.unwrap_or_else(|| a.file.safe_name());
+                let danger = dissent_files::danger_of_name(&name, &a.file.mime)
+                    .or_else(|| local_path.as_deref().and_then(|path| self.content_danger(&id, path)));
                 AttachmentView {
                     id: id.clone(),
-                    name: own_name.unwrap_or_else(|| a.file.safe_name()),
+                    danger,
+                    name,
                     size: a.file.size,
                     mime: a.file.mime.clone(),
                     needed: state != "downloaded",
@@ -743,6 +753,12 @@ impl World {
                 }
             })
             .collect()
+    }
+
+    /// What a file on this device is, by its content. Read once and remembered until the file is downloaded again.
+    pub(crate) fn content_danger(&self, id: &str, path: &Path) -> Option<dissent_files::Danger> {
+        let mut checks = self.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *checks.entry(id.to_string()).or_insert_with(|| dissent_files::danger_of_path(path))
     }
 
     /// Where one attachment stands on this device. A file this device shared shows from the path it was shared
@@ -1200,7 +1216,7 @@ impl Engine {
         Ok((image.file, roots))
     }
 
-    fn transfer_view(&self, id: &str) -> Result<TransferView> {
+    pub(crate) fn transfer_view(&self, id: &str) -> Result<TransferView> {
         let w = self.read();
         if let Some(path) = w.attach.downloads.get(id) {
             return Ok(TransferView {
@@ -1244,7 +1260,7 @@ impl Engine {
     }
 
     /// Writes the attachment book to disk.
-    fn persist_attach(&self) {
+    pub(crate) fn persist_attach(&self) {
         let guard = self.read();
         if let Err(e) = guard.attach.save(&guard.paths) {
             warn!(error = %e, "could not save transfers");
@@ -1312,7 +1328,7 @@ impl Engine {
     }
 
     /// Spawns the task that fetches one download, and keeps its handle so it can be paused.
-    fn start_download(&self, id: &str) {
+    pub(crate) fn start_download(&self, id: &str) {
         let engine = Engine {
             inner: self.inner.clone(),
         };
@@ -1359,26 +1375,40 @@ impl Engine {
             inner: self.inner.clone(),
         };
         let sink_id = id.to_string();
-        let result = self
-            .inner
-            .files
-            .fetch_tallied(
-                node.endpoint(),
-                &from,
-                &file,
-                &dest,
-                move |held, total| {
-                    let progress = if total == 0 { 0.0 } else { held as f64 / total as f64 };
-                    engine.set_progress(&att, progress, &msg);
-                },
-                move |counts| sink.record_sources(&sink_id, counts),
-            )
-            .await;
+        let on_progress = move |held: u64, total: u64| {
+            let progress = if total == 0 { 0.0 } else { held as f64 / total as f64 };
+            engine.set_progress(&att, progress, &msg);
+        };
+        let on_sources = move |counts: &[SourceCount]| sink.record_sources(&sink_id, counts);
+        // A tracker listing comes from its whole swarm at once; an attachment from its providers in turn.
+        let swarm = message_id.starts_with(crate::tracker::catalog::TRANSFER_PREFIX);
+        let mut failed: Vec<usize> = Vec::new();
+        let result = if swarm {
+            match self.inner.files.fetch_swarm(node.endpoint(), &from, &file, &dest, on_progress, on_sources).await {
+                Ok(done) => {
+                    failed = done.failed;
+                    // A listing's key comes from the fingerprint it claims, so a lister could encrypt other bytes under
+                    // it. The saved file must hash to that fingerprint, or it is removed.
+                    match self.check_listing_download(&message_id, &done.path).await {
+                        Ok(()) => Ok(done.path),
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&done.path);
+                            self.release_blobs(vec![file.hash]);
+                            Err(e)
+                        }
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.inner.files.fetch_tallied(node.endpoint(), &from, &file, &dest, on_progress, on_sources).await
+        };
         match result {
             Ok(path) => {
                 {
                     let mut guard = self.write();
                     guard.attach.downloads.insert(id.to_string(), path.clone());
+                    guard.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
                     if let Some(t) = guard.attach.transfers.get_mut(id) {
                         t.state = "done".into();
                         t.progress = 1.0;
@@ -1388,6 +1418,11 @@ impl Engine {
                     if let Err(e) = guard.attach.save(&guard.paths) {
                         warn!(error = %e, "could not save download state");
                     }
+                }
+                // A tracker listing is kept and seeded once it is in. See `tracker::catalog`.
+                if swarm {
+                    self.seed_downloaded(&message_id, file.hash, path.clone()).await;
+                    self.send_receipt(id, &message_id, &failed).await;
                 }
                 self.emit(EngineEvent::AttachmentProgress {
                     message_id,
@@ -2193,7 +2228,9 @@ impl Engine {
             None => return,
         };
         let (_, files) = unpack(plain);
-        for a in files.into_iter().filter(|a| a.file.size <= limit) {
+        // A file that says it can run code always waits for a click, whatever its size.
+        let wanted = files.into_iter().filter(|a| a.file.size <= limit && dissent_files::danger_of_name(&a.file.safe_name(), &a.file.mime).is_none());
+        for a in wanted {
             let id = attachment_id(&a.file);
             {
                 let w = self.read();

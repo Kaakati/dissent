@@ -1,3 +1,5 @@
+import type { DecorationField } from './decorations';
+
 // Wire types for the Tauri commands and events. Shapes are read from the current UI (apps/desktop/ui) and the engine
 // it talks to. Ids are lowercase base32 strings. Times are epoch milliseconds. Payloads that no ported view reads yet
 // are typed as `unknown` in api.ts; the batch that ports a view narrows them here.
@@ -25,6 +27,8 @@ export interface Me {
   banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
   banner_preset?: number | null; // the preset gradient (0-9), when it is one
   banner_poster?: string | null; // an animated banner's still frame
+  theme?: unknown; // the profile colours as the engine sent them: read through lib/profile-theme.ts
+  decoration?: DecorationField | null; // the avatar decoration, as the engine names it
 }
 
 export interface CommunitySummary {
@@ -82,6 +86,8 @@ export interface Member {
   relay_host?: boolean; // this device verifies the member as a relay host of the server
   storage?: boolean; // a seeder: a storage member, outside the encrypted group
   storage_granted?: boolean; // for a seeder: an admin granted it storage
+  roles?: Id[]; // custom roles the member holds
+  bot?: boolean; // an admin registered the member as a bot
 }
 
 export interface VoiceChannelView {
@@ -206,7 +212,7 @@ export interface GroupSummary {
 
 export type ConversationSummary = DirectSummary | GroupSummary;
 
-export type Page = 'contacts' | 'transfers' | 'saved';
+export type Page = 'contacts' | 'transfers' | 'saved' | 'files'; // 'files' is the open server's Files area
 
 export type Route = { kind: 'home' } | { kind: 'server'; communityId: Id };
 
@@ -573,6 +579,7 @@ export interface UserProfileView {
   banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
   banner_preset?: number | null; // the preset gradient (0-9); neither set means the hue colour
   banner_poster?: string | null; // an animated banner's still frame
+  theme?: unknown; // the profile colours from another person: read through lib/profile-theme.ts
   status?: Presence;
   online?: boolean;
   is_contact?: boolean;
@@ -629,6 +636,7 @@ export interface Attachment {
   needed?: number; // bytes, for disk_full
   note?: string; // why a download waits
   error?: string | null; // why the last download failed, shown beside Retry
+  danger?: FileDanger | null; // the file can run code: the card warns and has no Open
   status?: string; // a sending line
   sources?: FileSourceView[];
   rate_bps?: number;
@@ -827,3 +835,5 @@ export interface InboxSettings {
   max_hosted: number;
   notices: HostNotice[]; // newest first
 }
+
+export type FileDanger = 'program' | 'installer' | 'script' | 'shortcut' | 'macro' | 'disk_image' | 'unchecked';
