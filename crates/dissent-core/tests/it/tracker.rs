@@ -100,6 +100,45 @@ async fn an_owner_makes_a_category_lists_files_and_a_second_copy_dedupes() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_old_app_or_an_offline_member_does_not_stop_a_server_sharing_files() {
+    heavy(3, async {
+        let alice = peer("tracker-free-alice").await;
+        let bob = peer("tracker-free-bob").await;
+        let carol = peer("tracker-free-carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+
+        // Bob's app is too old for the tracker and Carol is offline.
+        dissent_core::test_support::set_features(&bob.engine, 0);
+        let (carol_identity, carol_dir) = stop(carol).await;
+        let cat = alice.engine.create_category(id, releases()).await.expect("the first category needs nobody's app");
+
+        let dir = scratch("tracker-free-src");
+        let bytes = sample(150_000, 9);
+        let msi = write(&dir, "app.msi", &bytes);
+        alice.engine.prepare_listing(id, cat, vec![msi.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.expect("the first listing");
+
+        // A member who comes back on a current app reads the catalog and downloads.
+        let carol = start(carol_identity, carol_dir).await;
+        until_event(&carol.engine, Duration::from_secs(60), "carol reads the listing", || {
+            carol.engine.files_view(id).ok().filter(|v| v.listings.len() == 1).map(|_| ())
+        })
+        .await;
+        carol.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download");
+        until_event(&carol.engine, Duration::from_secs(120), "carol has the file", || {
+            carol.engine.files_view(id).ok().filter(|v| v.listings[0].local == "seeding").map(|_| ())
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
     heavy(2, async {
         let alice = peer("tracker-alice").await;

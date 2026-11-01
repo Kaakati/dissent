@@ -105,11 +105,11 @@ rules are requests each app keeps for its own member); no streaming playback; no
   is refused.
 - `BotRegister { root, name, on }`: control; `MANAGE_BOTS`; name as for a role; the root must not be the owner.
 - **Effects on existing kinds**: replay honors a custom role's bits on released kinds (`ChannelCreate`, `Ban`,
-  `Delete`, ...) only while `CustomRolePerms { on: true }` is in force. That switch is owner only, carried, and the
-  owner may turn it on only when every member device answers `Request::Features` with `FEATURE_CUSTOM_ROLES`, as
-  for member-only control.
-  Without it, a released client would reject an event a new client accepts, and the two would replay different
-  servers. New kinds (roles, bots, files) always honor custom bits, since released clients see them locked anyway.
+  `Delete`, ...) only while `CustomRolePerms { on: true }` is in force. That switch is owner only, carried, and goes on
+  under "Switches older apps cannot follow" below.
+  A released client rejects an event a new client accepts while the switch is on, and the two replay different servers
+  until that client updates. New kinds (roles, bots, files) always honor custom bits, since released clients see them
+  locked anyway.
 - **Revocation of a role's bits** is immediate in replay order: an event is checked against the roles in force at
   its position.
 
@@ -119,6 +119,35 @@ All six payloads (`RoleCreate`, `RoleUpdate`, `RoleDelete`, `RoleAssign`, `BotRe
 appended after `StorageGrant` and carried (`carry_sealed`). `Request::Features` / `Response::Features(u64)` is an
 appended, generic feature probe; bit 0 is custom roles. A released client shows the events as locked and keeps its
 built-in view of ranks.
+
+### Switches older apps cannot follow
+
+`CustomRolePerms`, `MemberOnlyControl` and `HistoryVisibility` change what a device on an older app can follow. One member
+who never updates or never logs in again must not be able to hold a server hostage, and nobody should be surprised. So
+`Engine::gate_status` asks every member device at once (`GateStatus`) and sorts them:
+
+| Answer | Means | Effect |
+| --- | --- | --- |
+| The probe's yes | Current | Nothing. |
+| An answer without the bit, or `Response::Error("bad request: ...")`, which every release has sent for a request it cannot decode | Online and too old | Blocks by default. The owner may override. |
+| No answer, a failed dial, or another error | Offline or out of reach; nobody can tell its version | Named in a warning, and does not hold the switch back. |
+
+Going ahead always takes an explicit act. `set_custom_role_perms_confirmed`, `set_member_only_confirmed` and
+`set_history_visibility_confirmed` take the device ids the owner confirmed, and refuse if a device is listed that is not
+among them, so a device that turned up after the owner read the warning is not skipped silently. The plain forms confirm
+nothing. The UI's confirmation names the people and says what they will see until they update.
+
+What a returning device sees:
+
+- **On a current app**, nothing unusual: it syncs and reads everything.
+- **`CustomRolePerms`, on an app from before it.** The switch shows as locked, so it keeps the old rules: it refuses
+  channels, deletions and bans made through a custom role, and what was said in those channels. It sees a different
+  server. Updating recovers it, since refused events stay in the log and replay runs again from them with the switch
+  readable (`a_returning_old_app_diverges_on_custom_bits_and_updating_recovers_it`).
+- **Member-only, on an app from before it.** Control events sealed under the epoch show as locked (members, names, roles,
+  channels, settings changed since). Updating recovers them once its device has the epoch keys, through `MlsCommits` and
+  `EpochHistory` from any online member.
+- **Files, on an app from before the tracker.** See "No gate on files" under "Events": nothing to confirm.
 
 ### Core and app
 
@@ -222,6 +251,12 @@ Appended after the roles payloads, pinned in `wire_order.rs`, carried (`carry_se
 | `ReputationRulesSet { rules: ReputationRules { levels, distinct, decay_days, admins_reset } }` | all | — | `MANAGE_FILES` |
 | `ReputationReset { root }` | root | — | `MANAGE_FILES`, while `admins_reset` |
 
+- **No gate on files.** Every kind above is carried, so an app from before the tracker sees them as locked, agrees on
+  everything else and cannot diverge (`an_old_app_sees_tracker_events_as_locked_and_agrees_on_the_rest`). A server starts
+  sharing files whoever is offline or out of date (`an_old_app_or_an_offline_member_does_not_stop_a_server_sharing_files`).
+  `FEATURE_TRACKER` is still answered, and nothing depends on it. If every other holder of the files key is offline, a
+  file manager makes a new generation, and a member reads what the online holders can give it. A new member needs one
+  holder online to read the catalog.
 - `AddSpec { min_rank: u8, roles: Vec<RoleId>, members: Vec<RootId>, min_level: u8 }`: an actor may add when
   their rank is at least `min_rank` (0 member … 3 owner, 4 `NO_RANK` = no rank path), or they hold a listed role, or
   are listed, or their level is at least `min_level` (0 = no level path). `MANAGE_FILES` always may. "Admins, CI

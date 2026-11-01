@@ -284,6 +284,7 @@ pub fn run() {
             roles_cmds::create_bot,
             roles_cmds::unregister_bot,
             roles_cmds::set_custom_role_perms,
+            roles_cmds::custom_role_perms_status,
             tracker_cmds::files_view,
             tracker_cmds::create_category,
             tracker_cmds::update_category,

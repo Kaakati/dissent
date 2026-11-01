@@ -72,6 +72,8 @@ async fn a_role_grants_bits_once_every_device_knows_custom_roles() {
         dissent_core::test_support::set_features(&bob.engine, 0);
         let refused = alice.engine.set_custom_role_perms(id, true).await;
         assert!(refused.is_err(), "{refused:?}");
+        let status = alice.engine.custom_role_perms_status(id).await;
+        assert_eq!((status.outdated.len(), status.offline.len()), (1, 0), "an online device that answers is not offline");
         dissent_core::test_support::set_features(&bob.engine, dissent_core::custom_roles::FEATURES);
         alice.engine.set_custom_role_perms(id, true).await.expect("switch on");
 
@@ -82,6 +84,49 @@ async fn a_role_grants_bits_once_every_device_knows_custom_roles() {
         bob.engine.create_channel(id, "builds".into()).await.expect("bob makes a channel");
         until_event(&alice.engine, Duration::from_secs(60), "alice accepts bob's channel", || {
             channel_id(&alice.engine, id, "builds")
+        })
+        .await;
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn the_owner_overrides_an_old_or_offline_device_only_by_naming_it() {
+    heavy(2, async {
+        let alice = peer("gate-alice").await;
+        let bob = peer("gate-bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        let bob_device = bob.identity.device_id();
+
+        // Online and too old: blocks until the owner names it.
+        dissent_core::test_support::set_features(&bob.engine, 0);
+        let status = alice.engine.custom_role_perms_status(id).await;
+        assert_eq!(status.outdated.len(), 1, "{status:?}");
+        assert_eq!(status.outdated[0].device, bob_device.to_string());
+        assert!(alice.engine.set_custom_role_perms(id, true).await.is_err(), "never silently");
+        let member_only = alice.engine.member_only_status(id).await.unwrap();
+        assert!(!member_only.can_enable && member_only.outdated.len() == 1, "{member_only:?}");
+        alice.engine.set_custom_role_perms_confirmed(id, true, &[bob_device]).await.expect("the owner overrides");
+        assert!(alice.engine.roles_view(id).unwrap().honored);
+        alice.engine.set_custom_role_perms(id, false).await.expect("turning off asks nothing");
+        dissent_core::test_support::set_features(&bob.engine, dissent_core::custom_roles::FEATURES);
+
+        // Offline: warned about by name, still refused until confirmed, and an unrelated confirmation does not help.
+        let (bob_identity, bob_dir) = stop(bob).await;
+        let status = alice.engine.custom_role_perms_status(id).await;
+        assert_eq!((status.offline.len(), status.outdated.len()), (1, 0), "{status:?}");
+        assert_eq!(status.offline[0].name, "gate-bob");
+        let stranger = dissent_identity::DeviceKey::generate().id();
+        let refused = alice.engine.set_custom_role_perms_confirmed(id, true, &[stranger]).await;
+        assert!(refused.is_err_and(|e| e.to_string().contains("gate-bob")));
+        alice.engine.set_custom_role_perms_confirmed(id, true, &[bob_device]).await.expect("confirmed by name");
+
+        // The member comes back and catches up.
+        let bob = start(bob_identity, bob_dir).await;
+        until_event(&bob.engine, Duration::from_secs(60), "bob catches up on the switch", || {
+            bob.engine.roles_view(id).ok().filter(|v| v.honored).map(|_| ())
         })
         .await;
         finish(vec![alice, bob]).await;

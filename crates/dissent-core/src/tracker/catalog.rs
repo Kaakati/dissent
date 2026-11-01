@@ -496,14 +496,6 @@ impl Engine {
     /// Makes a category. Restricted categories, with their own keys, are not built yet.
     pub async fn create_category(&self, community: CommunityId, input: CategoryInput) -> Result<CategoryId> {
         let body = category_body(&input)?;
-        // The first category turns the Files area on for everyone, so it waits until every member's app has it.
-        let first = self.read().communities.get(&community).is_some_and(|c| c.state().files.categories.is_empty());
-        if first {
-            let waiting = self.devices_without(community, crate::custom_roles::FEATURE_TRACKER).await;
-            if waiting > 0 {
-                return Err(CoreError::Invalid(format!("{waiting} member device(s) need to update before this server can share files")));
-            }
-        }
         let add = spec_of(&input.add)?;
         let visible = input.visible.as_ref().map(reader_spec_of).transpose()?;
         // A restricted category is sealed under a key of its own from the start; an open one under the files key.

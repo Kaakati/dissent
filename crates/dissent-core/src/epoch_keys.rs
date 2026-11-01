@@ -13,6 +13,7 @@ use dissent_identity::{CommunityId, DeviceId, Vault};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::custom_roles::GateProbe;
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
 use crate::membership::CommitRules;
@@ -147,10 +148,14 @@ pub(crate) fn save(paths: &Paths, vault: &Vault, id: &CommunityId, store: &Epoch
 pub struct MemberOnlyStatus {
     /// Whether member-only control is on.
     pub on: bool,
-    /// Whether it may be turned on: every other member device answered that it supports it.
+    /// Whether it may be turned on without overriding anything: no device that answered is too old. Offline devices
+    /// are not counted here; the owner still confirms them by name.
     pub can_enable: bool,
-    /// Member devices that did not answer as supporting it, including offline ones.
+    /// Member devices that did not answer as supporting it, offline ones and too old ones.
     pub waiting: usize,
+    /// Those devices, by what they said.
+    pub offline: Vec<crate::custom_roles::GateDevice>,
+    pub outdated: Vec<crate::custom_roles::GateDevice>,
 }
 
 impl World {
@@ -441,37 +446,34 @@ impl Engine {
         }
     }
 
-    /// Whether every member device other than this one answers that it supports member-sealed
-    /// control. Returns the status the owner sees, counting the devices that did not answer.
+    /// Member-only control as the owner sees it: whether it is on, and which member devices would not follow it.
     pub async fn member_only_status(&self, community: CommunityId) -> Result<MemberOnlyStatus> {
-        let (on, devices) = {
-            let w = self.read();
-            let c = w
-                .communities
-                .get(&community)
-                .ok_or_else(|| CoreError::NotFound(community.to_string()))?;
-            (c.state().member_only, w.member_devices(c))
-        };
-        let mut waiting = 0;
-        for device in devices {
-            let supports = matches!(
-                self.call(device, &Request::MemberSealedSupport { community }).await,
-                Ok(Response::MemberSealedSupport(true))
-            );
-            if !supports {
-                waiting += 1;
-            }
-        }
+        let on = self
+            .read()
+            .communities
+            .get(&community)
+            .ok_or_else(|| CoreError::NotFound(community.to_string()))?
+            .state()
+            .member_only;
+        let gate = self.gate_status(community, GateProbe::MemberSealed(community)).await;
         Ok(MemberOnlyStatus {
             on,
-            can_enable: waiting == 0,
-            waiting,
+            can_enable: gate.outdated.is_empty(),
+            waiting: gate.offline.len() + gate.outdated.len(),
+            offline: gate.offline,
+            outdated: gate.outdated,
         })
     }
 
-    /// Turns member-only control on or off. Owner only. Turning it on needs every member device to
-    /// support it, so no one is left unable to read control events.
+    /// Turns member-only control on or off. Owner only. Turning it on is refused while a member device is unaccounted
+    /// for: see `set_member_only_confirmed`.
     pub async fn set_member_only(&self, community: CommunityId, on: bool) -> Result<()> {
+        self.set_member_only_confirmed(community, on, &[]).await
+    }
+
+    /// As `set_member_only`, going ahead for the listed devices in `confirmed`: the owner was told what those people
+    /// see until they update. A device that newly turned up is still refused.
+    pub async fn set_member_only_confirmed(&self, community: CommunityId, on: bool, confirmed: &[DeviceId]) -> Result<()> {
         let owner = self
             .read()
             .communities
@@ -482,13 +484,7 @@ impl Engine {
             return Err(CoreError::Rejected("NoPermission".into()));
         }
         if on {
-            let status = self.member_only_status(community).await?;
-            if !status.can_enable {
-                return Err(CoreError::Invalid(format!(
-                    "{} member device(s) need to update",
-                    status.waiting
-                )));
-            }
+            self.gate_status(community, GateProbe::MemberSealed(community)).await.check(confirmed)?;
         }
         self.author_publish(community, ChannelId::CONTROL, Payload::MemberOnlyControl { on })
             .await?;
@@ -497,19 +493,19 @@ impl Engine {
 
     /// Sets which past control content a new member is given keys for. Owner and admins only. The
     /// default is `All`. A member who joined before the change keeps what it already holds.
-    pub async fn set_history_visibility(
+    pub async fn set_history_visibility(&self, community: CommunityId, setting: HistorySetting) -> Result<()> {
+        self.set_history_visibility_confirmed(community, setting, &[]).await
+    }
+
+    /// As `set_history_visibility`, going ahead for the listed devices in `confirmed`.
+    pub async fn set_history_visibility_confirmed(
         &self,
         community: CommunityId,
         setting: HistorySetting,
+        confirmed: &[DeviceId],
     ) -> Result<()> {
         // Gated like the switch: a member device that predates this setting cannot read the events.
-        let status = self.member_only_status(community).await?;
-        if !status.can_enable {
-            return Err(CoreError::Invalid(format!(
-                "{} member device(s) need to update",
-                status.waiting
-            )));
-        }
+        self.gate_status(community, GateProbe::MemberSealed(community)).await.check(confirmed)?;
         self.author_publish(
             community,
             ChannelId::CONTROL,

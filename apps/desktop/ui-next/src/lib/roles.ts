@@ -1,5 +1,5 @@
 // Custom roles and bots (Server Settings, Roles). See `dissent_core::custom_roles`.
-import type { Id } from './types';
+import type { GateStatus, Id } from './types';
 
 export interface RoleView {
   id: Id;
@@ -61,5 +61,6 @@ export const rolesApi = {
   assign: (communityId: Id, userId: Id, roleId: Id, on: boolean) => invoke<void>('assign_role', { communityId, userId, roleId, on }),
   createBot: (communityId: Id, name: string, roleIds: Id[]) => invoke<{ root_id: Id; token: string }>('create_bot', { communityId, name, roleIds }),
   unregisterBot: (communityId: Id, userId: Id) => invoke<void>('unregister_bot', { communityId, userId }),
-  setHonored: (communityId: Id, on: boolean) => invoke<void>('set_custom_role_perms', { communityId, on }),
+  setHonored: (communityId: Id, on: boolean, confirmed: string[] = []) => invoke<void>('set_custom_role_perms', { communityId, on, confirmed }),
+  honoredStatus: (communityId: Id) => invoke<GateStatus>('custom_role_perms_status', { communityId }),
 };

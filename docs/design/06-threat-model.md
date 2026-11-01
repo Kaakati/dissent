@@ -793,6 +793,26 @@ their profile. Results are kept for this run only, so the first profile opened a
 again. The resolver itself is whatever the system uses, often the ISP's, and the lookup is plain DNS unless the
 system is set up for encrypted DNS.
 
+## Switches older apps cannot follow: what one member can hold back
+
+`CustomRolePerms`, member-only control and the history setting change what an older app can follow
+(`14-file-tracker.md`). They used to wait for every member device, so one person who never updates or never logs in
+again could stop an owner from ever turning on member-only control, which is a privacy feature. Now an offline device does
+not hold them back, and an online device that answers too old does until the owner overrides it.
+
+What that costs, and who decides it: the owner chooses, by device, after being told who is affected.
+
+- **Member-only control turned on over an old device.** That device stops reading control events and shows them as locked.
+  It does not leak anything new: it still holds what it could read before, and the switch does not hide past events. A
+  device that pretends to be old only blinds itself.
+- **`CustomRolePerms` turned on over an old device.** That device keeps the old rules and refuses what a custom role did, so
+  a person banned through a custom role is still a member on that app, and a message deleted through one still shows.
+  Enforcement elsewhere is unaffected. It lasts until the app updates.
+- **The probe's answer is the device's word.** A modified client may answer yes or no as it likes, as before. Lying yes
+  makes it the same as a client that diverges by choice. Lying silent or old makes the owner confirm one more name.
+- **Names in the warning** are what the owner can already read in the member list. The probe tells the owner which member
+  devices are online right now, as any request to them does.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

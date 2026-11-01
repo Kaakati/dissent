@@ -125,10 +125,27 @@ export interface CommunityView extends CommunitySummary {
 
 // Whether member-only control is on, and whether the owner may turn it on now: every other member device must say it
 // supports it, and `waiting` counts the ones that did not (offline, or on an older version).
+// A member device that did not say yes to a compatibility check (`GateDevice` in dissent-core).
+export interface GateDevice {
+  device: string;
+  root_id: string;
+  name: string;
+}
+
+// Who could not follow a switch: `offline` gave no answer, `outdated` answered and is too old.
+export interface GateStatus {
+  ready: number;
+  offline: GateDevice[];
+  outdated: GateDevice[];
+}
+
 export interface MemberOnlyStatus {
   on: boolean;
+  // No device that answered is too old.
   can_enable: boolean;
   waiting: number;
+  offline: GateDevice[];
+  outdated: GateDevice[];
 }
 
 // A category in a server's channel layout. `id` is 32 hex digits from the engine; the sidebar gives a category the

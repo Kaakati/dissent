@@ -588,6 +588,13 @@ if (!window.__TAURI__) {
   };
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
+  // Member devices that would not follow a switch, as `GateStatus` in dissent-core: see `window.__mockGate`.
+  const gateStatus = () => ({ ready: 1, offline: window.__mockGate?.offline ?? [], outdated: window.__mockGate?.outdated ?? [] });
+  const needConfirmed = (confirmed) => {
+    const gate = gateStatus();
+    const left = [...gate.offline, ...gate.outdated].filter((d) => !(confirmed ?? []).includes(d.device));
+    if (left.length > 0) throw `${left.length} member device(s) must be confirmed first, since they may not follow this: ${left.map((d) => d.name).join(', ')}`;
+  };
   const need = (cond, reason) => {
     if (!cond) throw reason;
   };
@@ -1112,9 +1119,11 @@ if (!window.__TAURI__) {
       delete c.bots?.[userId];
       return null;
     },
-    set_custom_role_perms: ({ communityId, on }) => {
+    custom_role_perms_status: () => gateStatus(),
+    set_custom_role_perms: ({ communityId, on, confirmed }) => {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'NoPermission');
+      if (on) needConfirmed(confirmed);
       c.rolesHonored = on;
       return null;
     },
@@ -1385,23 +1394,25 @@ if (!window.__TAURI__) {
       m.deleted = true;
       return null;
     },
-    // `window.__mockMemberOnlyWaiting = n` makes n member devices not answer, so the switch cannot turn on.
+    // `window.__mockGate = { offline: [...], outdated: [...] }` lists member devices that would not follow a switch.
     member_only_status: ({ communityId }) => {
       const c = servers[communityId];
-      const waiting = window.__mockMemberOnlyWaiting ?? 0;
-      return { on: Boolean(c.memberOnly), can_enable: waiting === 0, waiting };
+      const gate = gateStatus();
+      const waiting = gate.offline.length + gate.outdated.length;
+      return { on: Boolean(c.memberOnly), can_enable: gate.outdated.length === 0, waiting, offline: gate.offline, outdated: gate.outdated };
     },
-    set_member_only: ({ communityId, on }) => {
+    set_member_only: ({ communityId, on, confirmed }) => {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'Only the owner can hide server details');
-      const waiting = window.__mockMemberOnlyWaiting ?? 0;
-      need(!on || waiting === 0, `${waiting} member device(s) need to update`);
+      if (on) needConfirmed(confirmed);
       c.memberOnly = Boolean(on);
       return null;
     },
-    set_history_visibility: ({ communityId }) => {
+    set_history_visibility: ({ communityId, setting, confirmed }) => {
       const c = servers[communityId];
       need(canMod(c), 'Only owner or admin can change history');
+      needConfirmed(confirmed);
+      c.history = setting;
       return null;
     },
     moderate: ({ communityId, action, user }) => {

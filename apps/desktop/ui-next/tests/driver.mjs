@@ -641,6 +641,26 @@ check('RL4 adding a bot shows its token once and lists the bot', (await ev(`docu
 await ev(`${ssButton('Done')}.click()`);
 await sleep(200);
 check('RL5 Done hides the token', (await ev(`!document.querySelector('${SS} [data-bot-token]')`)) === true);
+// An old app holds the permissions switch back and an offline member does not; the owner overrides by name.
+await ev(`window.__mockGate = { outdated: [{ device: 'dev-lena', root_id: 'r3', name: 'Lena' }], offline: [{ device: 'dev-maya', root_id: 'r1', name: 'Maya' }] }`);
+await ev(`${ssButton('Files')}.click()`);
+await sleep(200);
+await ev(`${ssButton('Roles')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('${SS} [data-roles-gate]')`)) === true, 3000);
+const rolesGate = () => ev(`document.querySelector('${SS} [data-roles-gate]')?.textContent ?? ''`);
+const honoredBox = `[...document.querySelectorAll('${SS} label')].find((l) => l.textContent.startsWith('Let custom roles manage')).querySelector('input')`;
+check('RL6 the warning names who is old and who is offline', (await rolesGate()).includes('needs to update the app: Lena') && (await rolesGate()).includes('did not answer') && (await rolesGate()).includes('Maya'), await rolesGate());
+check('RL6 an old app disables the switch', (await ev(`${honoredBox}.disabled`)) === true);
+await ev(`${ssButton('Turn on anyway…')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('[role="alertdialog"]')`)) === true, 3000);
+check('RL7 the override says what those people will see', (await ev(`document.querySelector('[role="alertdialog"]').textContent`)).includes('they see a different server'));
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Turn on').click()`);
+await until(async () => (await ev(`${honoredBox}.checked`)) === true, 3000);
+check('RL7 confirming turns it on', (await ev(`${honoredBox}.checked`)) === true);
+await ev(`window.__mockGate = null`);
+await ev(`${honoredBox}.click()`);
+await until(async () => (await ev(`${honoredBox}.checked`)) === false, 3000);
+check('RL8 turning it off asks nothing', (await ev(`!document.querySelector('[role="alertdialog"]')`)) === true);
 // Files (the tracker): the owner makes a category in Server Settings, then lists files from the Files area. A picked file
 // whose type the category refuses is shown so and left out; picking listed files again seeds them instead.
 await ev(`${ssButton('Files')}.click()`);
@@ -5197,21 +5217,56 @@ await ev(`document.querySelector('${BOX}').click()`);
 await sleep(600);
 check('Q3 unchecking turns it off again', (await engineOn()) === false && (await ev(`document.querySelector('${BOX}').checked`)) === false);
 
-// Two member devices have not answered: the switch waits, and says why.
-await ev(`window.__mockMemberOnlyWaiting = 2`);
-await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again')?.click()`);
-await sleep(200);
-// Check again shows only while waiting, so the page is reopened to read the new status.
-await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
-await sleep(400);
-await openPrivacy('Open Source Arabic');
-await until(async () => (await statusText()).startsWith('2 member devices'), 5000);
-check('Q4 while member devices have not answered the switch is disabled', (await ev(`document.querySelector('${BOX}').disabled`)) === true);
-check('Q4 and the status counts them and says why', (await statusText()).startsWith('2 member devices have not confirmed they support this.'), await statusText());
-await ev(`window.__mockMemberOnlyWaiting = 0`);
-await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again').click()`);
+// Two members are offline: the switch stays usable, names them, and asks before it goes ahead.
+const GATE_OFFLINE = `[{ device: 'dev-maya', root_id: 'r1', name: 'Maya' }, { device: 'dev-omar', root_id: 'r2', name: 'Omar' }]`;
+const GATE_OLD = `[{ device: 'dev-lena', root_id: 'r3', name: 'Lena' }]`;
+const reopenPrivacy = async () => {
+  await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await sleep(400);
+  await openPrivacy('Open Source Arabic');
+};
+const answerAlert = (label) => ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+const alertText = () => ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`);
+await ev(`window.__mockGate = { offline: ${GATE_OFFLINE} }`);
+await reopenPrivacy();
+await until(async () => (await statusText()).includes('did not answer'), 5000);
+check('Q4 an offline member does not disable the switch', (await ev(`document.querySelector('${BOX}').disabled`)) === false, await statusText());
+check('Q4 the warning counts and names them', (await statusText()).includes('2 member devices did not answer') && (await statusText()).includes('Maya and Omar'), await statusText());
+await ev(`document.querySelector('${BOX}').click()`);
+await until(async () => (await alertText()) !== '', 3000);
+check('Q4 turning it on asks first and says what those people will see', (await alertText()).includes('Maya and Omar') && (await alertText()).includes('show as locked') && (await alertText()).includes('Updating the app catches them up'), await alertText());
+check('Q4 nothing changed before the answer', (await engineOn()) === false);
+await answerAlert('Cancel');
+await sleep(300);
+check('Q4 Cancel leaves it off', (await engineOn()) === false);
+check('Q4 the engine refuses without the names', (await ev(`window.__TAURI__.core.invoke('set_member_only', { communityId: 'c2', on: true }).then(() => 'on', (e) => String(e))`)).includes('must be confirmed'));
+await ev(`document.querySelector('${BOX}').click()`);
+await until(async () => (await alertText()) !== '', 3000);
+await answerAlert('Turn on');
+await until(engineOn, 3000);
+check('Q4 confirming turns it on', (await engineOn()) === true);
+await ev(`document.querySelector('${BOX}').click()`);
 await sleep(500);
-check('Q5 Check again enables it once every device answers', (await ev(`document.querySelector('${BOX}').disabled`)) === false && (await statusText()) === 'Every member device supports this.', await statusText());
+check('Q4 turning it off asks nothing', (await engineOn()) === false && (await alertText()) === '');
+
+// An online device on an old app holds it back until the owner overrides it.
+await ev(`window.__mockGate = { outdated: ${GATE_OLD} }`);
+await reopenPrivacy();
+await until(async () => (await statusText()).includes('need'), 5000);
+check('Q5 an old device disables the switch and names who', (await ev(`document.querySelector('${BOX}').disabled`)) === true && (await statusText()).includes('1 member device needs to update the app: Lena'), await statusText());
+const clickSS = (label) => ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+await clickSS('Turn on anyway…');
+await until(async () => (await alertText()) !== '', 3000);
+check('Q5 the override states what they will see', (await alertText()).includes('Lena') && (await alertText()).includes('show as locked'), await alertText());
+await answerAlert('Turn on');
+await until(engineOn, 3000);
+check('Q5 the override turns it on', (await engineOn()) === true);
+await ev(`document.querySelector('${BOX}').click()`);
+await sleep(500);
+await ev(`window.__mockGate = null`);
+await clickSS('Check again');
+await sleep(500);
+check('Q6 Check again clears it once they answer', (await ev(`document.querySelector('${BOX}').disabled`)) === false && (await statusText()) === 'Every member device supports this.', await statusText());
 await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 await sleep(400);
 

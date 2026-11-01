@@ -7,10 +7,11 @@ import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/se
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { copyText } from '@/lib/clipboard';
+import { confirmGate, gateSummary } from '@/lib/gate';
 import { PERM_LABELS, rolesApi, type RoleDraft, type RolesView, type RoleView } from '@/lib/roles';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
-import type { CommunityView, Id } from '@/lib/types';
+import type { CommunityView, GateStatus, Id } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 const MAX_NAME = 32; // the engine's limit, in characters
@@ -103,30 +104,78 @@ export function RolesSection({ community }: { community: CommunityView }) {
       {token ? <TokenNotice token={token} onClose={() => setToken(null)} /> : null}
 
       {community.my_role === 'owner' ? (
-        <Block title="Roles grant permissions">
-          <CheckRow>
-            <input
-              type="checkbox"
-              className={CHECK_CLASS}
-              checked={view.honored}
-              onChange={async (e) => {
-                try {
-                  await rolesApi.setHonored(community.id, e.target.checked);
-                  await reload();
-                } catch (err) {
-                  toast(err);
-                }
-              }}
-            />
-            Let custom roles manage channels, messages, bans and the server
-          </CheckRow>
-          <Hint>
-            Until this is on, custom roles count only for files, bots and other roles. It can be turned on once every member’s
-            app understands custom roles; members on older versions would otherwise disagree about who may do what.
-          </Hint>
-        </Block>
+        <RolesGrantBlock community={community} honored={view.honored} onChange={reload} />
       ) : null}
     </div>
+  );
+}
+
+const ROLES_SEEN =
+  'Until they update, their app keeps the old rules: channels, deletions and bans made through a custom role do not show there, so they see a different server.';
+
+// The owner's switch. A device on an old app holds it back until the owner overrides it, and an offline one is named
+// when turning it on. Either way the owner confirms what those people see.
+function RolesGrantBlock({ community, honored, onChange }: { community: CommunityView; honored: boolean; onChange: () => Promise<unknown> }) {
+  const [status, setStatus] = useState<GateStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      setStatus(await rolesApi.honoredStatus(community.id));
+    } catch (err) {
+      toast(err);
+    }
+  }, [community.id]);
+  useEffect(() => {
+    let live = true;
+    if (!honored) rolesApi.honoredStatus(community.id).then((v) => live && setStatus(v), (err) => live && toast(err));
+    return () => {
+      live = false;
+    };
+  }, [community.id, honored]);
+  const change = async (on: boolean) => {
+    setBusy(true);
+    try {
+      // Asked afresh, since who is online changes while the page stays open.
+      const fresh = on ? await rolesApi.honoredStatus(community.id) : null;
+      if (fresh) setStatus(fresh);
+      const confirmed = fresh
+        ? await confirmGate(fresh, { title: 'Let custom roles grant these permissions?', okLabel: 'Turn on', seen: ROLES_SEEN })
+        : [];
+      if (confirmed) {
+        await rolesApi.setHonored(community.id, on, confirmed);
+        await onChange();
+      }
+    } catch (err) {
+      toast(err);
+    }
+    setBusy(false);
+  };
+  const outdated = !honored && (status?.outdated.length ?? 0) > 0;
+  const listed = !honored && status ? gateSummary(status) : '';
+  return (
+    <Block title="Roles grant permissions">
+      <CheckRow>
+        <input
+          type="checkbox"
+          className={CHECK_CLASS}
+          checked={honored}
+          disabled={busy || outdated}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        Let custom roles manage channels, messages, bans and the server
+      </CheckRow>
+      <Hint>
+        Until this is on, custom roles count only for files, bots and other roles. A member on an older app would disagree
+        about who may do what until they update, so you are told who that is before it turns on.
+      </Hint>
+      {listed ? <p data-roles-gate role="status" className="text-sm text-muted-foreground">{listed}</p> : null}
+      {outdated || listed ? (
+        <div className="flex gap-s-2">
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void load()}>Check again</Button>
+          {outdated ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => void change(true)}>Turn on anyway…</Button> : null}
+        </div>
+      ) : null}
+    </Block>
   );
 }
 
