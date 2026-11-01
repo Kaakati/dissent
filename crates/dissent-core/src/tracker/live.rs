@@ -69,6 +69,13 @@ impl Meter {
         self.total.saturating_sub(self.total_at(at))
     }
 
+    /// What the device at the other end holds by now, given its last answer and when it came. That answer may be up to
+    /// the answerer's cache old, so this may fall short for a moment. It must not overshoot, so a share only grows.
+    fn holds(&self, heard: Option<(u64, u64)>) -> u64 {
+        let (bytes, at) = heard.unwrap_or((0, 0));
+        self.total.max(bytes.saturating_add(self.since(at)))
+    }
+
     fn idle(&self, now: u64) -> bool {
         self.samples.back().is_none_or(|(at, _)| now.saturating_sub(*at) > IDLE_MS)
     }
@@ -88,6 +95,7 @@ type SentTo = (DeviceId, u64, u64);
 #[derive(Clone, Debug, Serialize)]
 pub struct LivePeer {
     pub root_id: String,
+    pub name: String,
     /// What this device receives from them, in bytes per second.
     pub from_bps: u64,
     /// What this device sends them, in bytes per second.
@@ -176,9 +184,7 @@ impl Engine {
                     m.sent
                         .iter()
                         .map(|(d, meter)| {
-                            // An answer may be as old as the answerer's cache, so bytes are counted from that far back.
-                            let from = heard.get(d).map_or(0, |(_, at)| at.saturating_sub(super::swarm::HOLDINGS_CACHE.as_millis() as u64));
-                            let holds = heard.get(d).map_or(0, |(bytes, _)| *bytes).saturating_add(meter.since(from));
+                            let holds = meter.holds(heard.get(d).copied());
                             (*d, meter.rate(now), holds)
                         })
                         .collect(),
@@ -198,7 +204,7 @@ impl Engine {
         let mut peers: BTreeMap<RootId, LivePeer> = BTreeMap::new();
         {
             let w = self.read();
-            let blank = |root: RootId| LivePeer { root_id: root.to_string(), from_bps: 0, to_bps: 0, has: 0.0 };
+            let blank = |root: RootId| LivePeer { root_id: root.to_string(), name: w.display_name(&root), from_bps: 0, to_bps: 0, has: 0.0 };
             for (device, rate, holds) in &sent {
                 if let Some(root) = w.directory.root_of(device) {
                     let peer = peers.entry(root).or_insert_with(|| blank(root));
@@ -206,7 +212,7 @@ impl Engine {
                     peer.has = peer.has.max((*holds as f64 / size.max(1) as f64).min(1.0));
                 }
             }
-            for (device, rate) in &received {
+            for (device, rate) in received.iter().filter(|_| downloading) {
                 if let Some(root) = w.directory.root_of(device) {
                     peers.entry(root).or_insert_with(|| blank(root)).from_bps += *rate;
                 }
@@ -214,9 +220,11 @@ impl Engine {
         }
         if let Some(progress) = progress {
             let me = self.inner.me;
-            peers.entry(me).or_insert_with(|| LivePeer { root_id: me.to_string(), from_bps: 0, to_bps: 0, has: 0.0 }).has = progress;
+            let name = self.read().display_name(&me);
+            peers.entry(me).or_insert_with(|| LivePeer { root_id: me.to_string(), name, from_bps: 0, to_bps: 0, has: 0.0 }).has = progress;
         }
-        let down_bps: u64 = received.iter().map(|(_, r)| *r).sum();
+        // A finished download's rate is not left to fade.
+        let down_bps: u64 = received.iter().filter(|_| downloading).map(|(_, r)| *r).sum();
         let up_bps: u64 = sent.iter().map(|(_, r, _)| *r).sum();
         let eta_s = progress
             .filter(|_| down_bps > 0)
@@ -266,6 +274,18 @@ mod tests {
         assert_eq!(m.since(10_000), 100);
         assert_eq!(m.since(1_000), 200);
         assert_eq!(m.since(0), 300);
+    }
+
+    #[test]
+    fn a_fresh_answer_does_not_make_a_peers_share_jump() {
+        let mut m = Meter::default();
+        for s in 1..=20u64 {
+            m.add(s * 1000, 1_000);
+        }
+        assert_eq!(m.holds(None), 20_000, "with no answer, what it was sent");
+        assert_eq!(m.holds(Some((20_000, 20_000))), 20_000, "an answer just now adds nothing to itself");
+        assert_eq!(m.holds(Some((5_000, 10_000))), 20_000, "an old answer does not lower it");
+        assert_eq!(m.holds(Some((50_000, 10_000))), 60_000, "it had more from elsewhere, plus what came since");
     }
 
     #[test]

@@ -126,7 +126,14 @@ function Row({ row: r, open, onToggle, communityId, act }: { row: SeedRowView; o
         </button>
         <span className="flex justify-end gap-1">
           <Tip label={active ? 'Pause seeding' : 'Resume seeding'}>
-            <Button variant="ghost" size="icon" aria-label={active ? 'Pause seeding' : 'Resume seeding'} onClick={() => void act(() => seedingApi.pause(communityId, r.blob, active))}>
+            <Button variant="ghost" size="icon" aria-label={active ? 'Pause seeding' : 'Resume seeding'} onClick={() => {
+              // A limit is worked out from the counters, so resuming would do nothing: the limit is what can change.
+              if (r.limit_reached) {
+                if (!open) onToggle();
+                return;
+              }
+              void act(() => seedingApi.pause(communityId, r.blob, active));
+            }}>
               {active ? <Pause className="size-4" /> : <Play className="size-4" />}
             </Button>
           </Tip>
@@ -160,6 +167,7 @@ function LimitEditor({ row, onApply, onCancel }: { row: SeedRowView; onApply: (l
   return (
     <div role="dialog" aria-label="Seed this file for" data-limit-editor className="mb-s-2 ml-auto flex w-[320px] flex-col gap-1 rounded-lg border border-border bg-elevated p-s-2 text-ui">
       <span className="px-s-2 text-meta font-semibold text-muted-foreground uppercase">Seed this file for…</span>
+      {row.limit_reached ? <p data-limit-reached className="m-0 px-s-2 text-sm text-warn">This file reached its limit, so it won’t resume until you raise the limit or choose Forever.</p> : null}
       {option('forever', 'Forever')}
       {option('ratio', 'Until ratio', <Input aria-label="Ratio" className="h-7 w-20" value={ratio} onChange={(e) => setRatio(e.target.value)} />)}
       {option('hours', 'For', <Input aria-label="Hours" className="h-7 w-20" value={hours} onChange={(e) => setHours(e.target.value)} />)}

@@ -23,7 +23,7 @@ const HOLDINGS_KEPT_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// How long a partial holding counts as a leecher.
 const LEECHING_MS: u64 = 3 * 60 * 1000;
 /// How long this device reuses its own holdings answer.
-pub(crate) const HOLDINGS_CACHE: Duration = Duration::from_secs(10);
+const HOLDINGS_CACHE: Duration = Duration::from_secs(10);
 /// How often an open file page asks for holdings, at most, while its file moves. A device's answer is at most
 /// `HOLDINGS_CACHE` old, so asking faster would learn nothing.
 const HOLDINGS_EVERY_MOVING: Duration = Duration::from_secs(10);

@@ -42,6 +42,8 @@ use crate::world::World;
 const REBUILD_GAP: Duration = Duration::from_secs(2);
 /// The shortest time between two certificate asks to one device.
 const INTRODUCE_GAP: Duration = Duration::from_secs(10);
+/// What the blob server sends at most per progress report, for the first report of a request, whose start it does not say.
+const CHUNK_GROUP_BYTES: u64 = 16 * 1024;
 /// Messages the blob server may queue for the gate before it waits.
 const GATE_QUEUE: usize = 64;
 
@@ -461,18 +463,22 @@ async fn count_served(
     sending: Sending,
     mut updates: RequestUpdates,
 ) {
-    let mut current: Option<([u8; 32], u64)> = None;
+    // The blob, and where its last progress ended. Each request's offsets are in the whole blob, not from its own start.
+    let mut current: Option<([u8; 32], Option<u64>)> = None;
     while let Ok(Some(update)) = updates.recv().await {
         match update {
             RequestUpdate::Started(started) => {
                 let hash = *started.hash.as_bytes();
-                current = Some((hash, 0));
+                current = Some((hash, None));
                 sending.lock().unwrap_or_else(PoisonError::into_inner).insert(key, (device, hash));
             }
             RequestUpdate::Progress(progress) => {
-                if let Some((hash, sent)) = current.as_mut() {
-                    let delta = progress.end_offset.saturating_sub(*sent);
-                    *sent = progress.end_offset.max(*sent);
+                if let Some((hash, last)) = current.as_mut() {
+                    let delta = match *last {
+                        Some(last) => progress.end_offset.saturating_sub(last),
+                        None => progress.end_offset.min(CHUNK_GROUP_BYTES),
+                    };
+                    *last = Some(progress.end_offset.max(last.unwrap_or(0)));
                     if delta > 0 {
                         engine.on_served(device, *hash, delta);
                     }

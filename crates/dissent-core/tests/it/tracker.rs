@@ -586,6 +586,14 @@ async fn a_download_shows_live_figures_on_both_sides_and_moves_faster_than_a_tim
         let mb_per_s = (1.0 - held) * 64.0 / from.elapsed().as_secs_f64();
         assert!(mb_per_s > 4.0, "{mb_per_s:.1} MB/s");
         assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+        // Each slice's offsets are in the whole file: the seeder counts what it sent once, not each slice from zero.
+        let size = bytes.len() as u64;
+        until_event(&alice.engine, Duration::from_secs(10), "alice counts what she sent", || {
+            alice.engine.files_view(id).ok().filter(|v| v.standing.uploaded >= size * 9 / 10)
+        })
+        .await;
+        let uploaded = alice.engine.files_view(id).unwrap().standing.uploaded;
+        assert!(uploaded <= size * 12 / 10, "uploaded {uploaded} of {size}");
         let _ = std::fs::remove_dir_all(&dir);
         finish(vec![alice, bob]).await;
     })

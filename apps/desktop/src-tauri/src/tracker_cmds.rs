@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use dissent_core::tracker::catalog::{AddItem, CandidateView, CategoryInput, FilesView};
+use dissent_core::tracker::live::LiveSwarm;
 use dissent_core::tracker::swarm::SwarmView;
 use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
 use dissent_core::{CommunityId, RootId, TransferView};
@@ -159,6 +160,13 @@ pub async fn listing_swarm(state: State<'_, AppState>, community_id: String, lis
     let community: CommunityId = parse("community id", &community_id)?;
     let id: EventId = parse("listing id", &listing_id)?;
     engine(&state).await?.listing_swarm(community, id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn listing_live(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<LiveSwarm, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.listing_live(community, id).await.map_err(err)
 }
 
 #[tauri::command]

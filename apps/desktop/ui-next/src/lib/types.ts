@@ -335,6 +335,8 @@ export interface TransferItem {
   status_text?: string;
   error?: string;
   local_path?: string | null;
+  message_id?: string;
+  rate_bps?: number; // bytes per second coming in now
 }
 
 export interface TransferRates {
