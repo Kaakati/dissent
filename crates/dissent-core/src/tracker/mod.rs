@@ -133,6 +133,9 @@ pub(crate) struct TrackerState {
     pub(crate) settings: Option<seeding::SeedingSettings>,
 }
 
+/// One line of `files_keys.bin`: a generation, its key, and the restricted category it belongs to, if any.
+type KeyEntry = (u64, [u8; 32], Option<CategoryId>);
+
 fn keys_path(paths: &Paths, id: &CommunityId) -> PathBuf {
     paths.community_dir(id).join("files_keys.bin")
 }
@@ -143,7 +146,7 @@ fn book_path(paths: &Paths, id: &CommunityId) -> PathBuf {
 
 impl Local {
     fn load(paths: &Paths, id: &CommunityId) -> Self {
-        let keys = paths.read_guarded::<Vec<(u64, [u8; 32], Option<CategoryId>)>>(&keys_path(paths, id));
+        let keys = paths.read_guarded::<Vec<KeyEntry>>(&keys_path(paths, id));
         let book = paths.read_guarded::<LocalBook>(&book_path(paths, id));
         let found = keys.value.unwrap_or_default();
         Self {
@@ -159,7 +162,7 @@ impl Local {
     }
 
     /// The key file's contents, or `None` while the file could not be read and must not be replaced.
-    fn keys_to_save(&self) -> Option<Vec<(u64, [u8; 32], Option<CategoryId>)>> {
+    fn keys_to_save(&self) -> Option<Vec<KeyEntry>> {
         self.keys_writable.then(|| self.keys.iter().map(|(g, k)| (*g, *k, self.scopes.get(g).copied())).collect())
     }
 
