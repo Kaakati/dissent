@@ -178,7 +178,7 @@ export async function openServerMenu(communityId: Id, x: number, y: number): Pro
         }
       : null,
     manage ? { label: 'Create Channel', icon: Plus, onPick: () => openCreateChannelDialog(view.id) } : null,
-    manage && has('channel_categories') ? { label: 'Create category', icon: FolderPlus, onPick: () => openCreateCategoryDialog() } : null,
+    manage && has('channel_categories') ? { label: 'Create Category', icon: FolderPlus, onPick: () => openCreateCategoryDialog() } : null,
     manage && has('avatars') ? { label: 'Server Icon', icon: ImageIcon, onPick: () => openServerIconDialog(view) } : null,
     { label: 'Claim Handle', icon: AtSign, onPick: () => openClaimHandleDialog(view.id) },
     {
@@ -192,4 +192,35 @@ export async function openServerMenu(communityId: Id, x: number, y: number): Pro
     view.my_role !== 'owner' ? { label: 'Leave Server', icon: LogOut, danger: true, onPick: () => void leave(view) } : null,
   ];
   openContextMenu(x, y, entries);
+}
+
+// The menu for the channel list itself: right-click on its empty space. Channel and category rows have their own.
+export async function openChannelListMenu(e: MouseEvent<HTMLElement>, communityId: Id): Promise<void> {
+  e.preventDefault();
+  const { clientX: x, clientY: y } = e;
+  let view: CommunityView;
+  try {
+    view = await viewOf(communityId);
+  } catch (err) {
+    toast(err);
+    return;
+  }
+  const withPrefs = has('server_prefs');
+  if (withPrefs) await loadServerPrefs(communityId);
+  const prefs = prefsOf(communityId);
+  const manage = view.my_role === 'owner' || view.my_role === 'admin';
+  openContextMenu(x, y, [
+    withPrefs
+      ? {
+          label: 'Hide Muted Channels',
+          checkbox: true,
+          checked: prefs.hide_muted_channels,
+          onPick: () => void updateServerPrefs(view.id, { hide_muted_channels: !prefs.hide_muted_channels }),
+        }
+      : null,
+    withPrefs ? 'sep' : null,
+    manage ? { label: 'Create Channel', onPick: () => openCreateChannelDialog(view.id) } : null,
+    manage && has('channel_categories') ? { label: 'Create Category', onPick: () => openCreateCategoryDialog() } : null,
+    { label: 'Invite to Server', onPick: () => openInviteDialog(view.id) },
+  ]);
 }

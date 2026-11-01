@@ -3824,13 +3824,13 @@ await ev(`document.querySelector('${SIDE} button[aria-label="Open Source Arabic 
 await pressKey('Enter', 13, 0);
 await sleep(400);
 const serverItems = await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
-check('O3 the server menu offers Create category to an owner', serverItems.includes('Create category'), JSON.stringify(serverItems));
-await ev(`${menuItem('Create category')}.click()`);
+check('O3 the server menu offers Create Category to an owner', serverItems.includes('Create Category'), JSON.stringify(serverItems));
+await ev(`${menuItem('Create Category')}.click()`);
 await sleep(400);
 await typeInto('[role="dialog"] input[aria-label="Category name"]', 'Projects');
 await pressKey('Enter', 13, 0);
 await sleep(500);
-check('O3 Create category adds an empty category at the end', (await tree()).at(-1) === 'Projects[]', JSON.stringify(await tree()));
+check('O3 Create Category adds an empty category at the end', (await tree()).at(-1) === 'Projects[]', JSON.stringify(await tree()));
 check('O3 the new category is sent without an id, for the engine to make one', JSON.parse(await lastLayout()).at(-1).id === undefined);
 
 // Drag events onto the empty Projects header.
@@ -4856,6 +4856,29 @@ for (const role of ['owner', 'admin', 'member']) {
   check(`K4c ${role}: the expected items, Leave Server ${role === 'owner' ? 'hidden' : 'offered'}`, missing.length === 0 && leaveOk && manageOk, JSON.stringify({ shown, missing }));
 }
 await ev(`window.__mockSetMyRole('c2', 'owner')`);
+// The channel list's own menu, on its empty space. A row keeps its own menu.
+const listMenu = async () => {
+  await ev(`(() => { const n = document.querySelector('[data-sidebar-list]'); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.bottom - 10 })); })()`);
+  await sleep(500);
+  const shown = await items();
+  await press('Escape');
+  await sleep(200);
+  return shown;
+};
+const ownerList = await listMenu();
+check('K4d the channel list menu, for the owner', JSON.stringify(ownerList) === JSON.stringify(['Hide Muted Channels', 'Create Channel', 'Create Category', 'Invite to Server']), JSON.stringify(ownerList));
+await ev(`window.__mockSetMyRole('c2', 'member')`);
+await sleep(400);
+const memberList = await listMenu();
+check('K4e a member gets no create items in it', JSON.stringify(memberList) === JSON.stringify(['Hide Muted Channels', 'Invite to Server']), JSON.stringify(memberList));
+await ev(`window.__mockSetMyRole('c2', 'owner')`);
+await sleep(400);
+await ev(`(() => { const n = document.querySelector('[data-sidebar-list] button[aria-current], [data-sidebar-list] button'); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 5 })); })()`);
+await sleep(500);
+const rowMenu = await items();
+await press('Escape');
+await sleep(200);
+check('K4f a channel row keeps its own menu', !rowMenu.includes('Create Category') || rowMenu.includes('Move Up'), JSON.stringify(rowMenu));
 await sleep(800);
 
 // (b) Bans: a banned member has Unban, which asks first and then lifts the ban.

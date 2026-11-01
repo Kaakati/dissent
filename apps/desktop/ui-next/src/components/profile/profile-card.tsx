@@ -135,7 +135,7 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
 
   return (
     <>
-      <div data-profile-banner className="h-[60px]" style={{ background: bannerBackground(userId, view) }} />
+      <div data-profile-banner className="h-[105px]" style={{ background: bannerBackground(userId, view) }} />
       <div className="relative px-s-4 pb-s-4">
         <UserAvatar
           name={view.display_name}

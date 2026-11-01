@@ -335,6 +335,7 @@ pub fn run() {
             attachments::reveal_attachment,
             attachments::open_attachment,
             commands::set_network_settings,
+            commands::set_ui_zoom,
             commands::relay_status,
             part6::capabilities,
             part6::set_note,

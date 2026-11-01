@@ -173,6 +173,12 @@ pub fn get_network_settings(state: State<'_, AppState>) -> crate::network::Netwo
     crate::network::load(&state.data_dir)
 }
 
+/// Applies the font scale as the webview's own zoom.
+#[tauri::command]
+pub fn set_ui_zoom(webview: tauri::Webview, scale: f64) -> Result<(), String> {
+    webview.set_zoom(scale.clamp(0.9, 1.1)).map_err(|e| e.to_string())
+}
+
 /// Saves the relay settings and restarts the engine on them. Invalid settings are rejected before anything changes.
 #[tauri::command]
 pub async fn set_network_settings(
