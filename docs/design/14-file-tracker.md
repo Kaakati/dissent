@@ -262,7 +262,9 @@ Appended after the roles payloads, pinned in `wire_order.rs`, carried (`carry_se
   are listed, or their level is at least `min_level` (0 = no level path). `MANAGE_FILES` always may. "Admins, CI
   bot" is `min_rank = 2` plus the bot's role; "Members (Lv 5+)" is `min_rank = NO_RANK, min_level = 5`.
 - Replay keeps who wrote each category's spec in force (`CategoryState.author`), since its sealed body names them.
-- A listing update's body is sealed by the lister's app only; a file manager may remove a listing but not rewrite it.
+- A listing update's body is sealed with the lister in its associated data, whoever writes it, so every reader opens it the
+  same way. The lister and holders of `MANAGE_FILES` may write one, as replay checks; the listing's page has the control.
+  The listing still shows its lister, and does not say who edited it last.
 - Bounds: sealed fields at most 16 KiB, at most 256 roles or members in a spec, 64 credits per receipt, a receipt at
   most 11 GiB in total, at most 10 levels.
 - **Replay checks the outer layer only.** The view checks the inner layer and hides a listing whose type is not

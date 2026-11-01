@@ -793,6 +793,13 @@ their profile. Results are kept for this run only, so the first profile opened a
 again. The resolver itself is whatever the system uses, often the ISP's, and the lookup is plain DNS unless the
 system is set up for encrypted DNS.
 
+## Listing edits: who can change what a listing says
+
+A holder of `MANAGE_FILES` may rewrite another member's listing tags and description. Replay always allowed that event; the
+app now writes it. The page keeps naming the original lister and does not say who edited last, so a file manager can put words
+under someone's listing. The signed event in the log names the editor. The name, type, size, fingerprint and blob cannot
+change this way, so an edit cannot swap the file.
+
 ## Switches older apps cannot follow: what one member can hold back
 
 `CustomRolePerms`, member-only control and the history setting change what an older app can follow

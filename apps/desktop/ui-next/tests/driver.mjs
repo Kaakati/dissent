@@ -5371,6 +5371,35 @@ await ev(`${folderButton('Cancel')}.click()`);
 await sleep(200);
 await ev(`window.__mockFolder = null`);
 
+// Editing a listing from its page.
+await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('e.png')).click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-file-page]')`)) === true, 2000);
+const pageBtn = (t) => `[...document.querySelectorAll('[data-file-page] button')].find((n) => n.textContent.trim() === ${JSON.stringify(t)})`;
+const setInput = (selector, proto, value) => ev(`(() => { const n = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(${proto}.prototype, 'value').set.call(n, ${JSON.stringify(value)}); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`${pageBtn('Edit tags and description')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-edit-listing]')`)) === true, 2000);
+await setInput('[data-edit-listing] input', 'HTMLInputElement', '#fresh #Tags');
+await setInput('[data-edit-listing] textarea', 'HTMLTextAreaElement', 'A new description');
+// A failure keeps the dialog and what was typed.
+await ev(`window.__mockListFails = 'no connection'`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await toastHas('no connection');
+check('FE1 a failed save says why and keeps the edits', (await ev(`document.querySelector('[data-edit-listing] input')?.value`)) === '#fresh #Tags' && (await ev(`document.querySelector('[data-edit-listing] textarea').value`)) === 'A new description');
+await ev(`window.__mockListFails = null`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await until(async () => (await ev(`!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+const pageText = () => ev(`document.querySelector('[data-file-page]').textContent`);
+check('FE2 saving shows the new tags and description', (await pageText()).includes('#fresh') && (await pageText()).includes('#tags') && (await pageText()).includes('A new description'), (await pageText()).slice(0, 200));
+await ev(`window.__mockRemoteEdit('c2', 'e.png', ['remote'], 'Edited elsewhere')`);
+await until(async () => (await pageText()).includes('#remote'), 3000);
+check('FE3 someone else\'s edit shows without reloading', (await pageText()).includes('Edited elsewhere'));
+await ev(`window.__mockCannotEdit('c2', 'e.png')`);
+await ev(`window.__mockRemoteEdit('c2', 'e.png', ['remote'], 'Edited elsewhere')`);
+await until(async () => (await ev(`!${pageBtn('Edit tags and description')}`)) === true, 3000);
+check('FE4 someone who may not edit gets no control', true);
+await ev(`${pageBtn('Files')}.click()`);
+await sleep(200);
+
 // Off the Files page a drop still attaches to the chat.
 await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => /general/i.test(b.textContent))?.click()`);
 await sleep(500);

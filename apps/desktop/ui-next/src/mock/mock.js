@@ -1080,7 +1080,8 @@ if (!window.__TAURI__) {
     },
     update_listing: ({ communityId, listingId, tags, description }) => {
       const l = servers[communityId].files.listings.find((x) => x.id === listingId);
-      Object.assign(l, { tags, description });
+      if (window.__mockListFails) throw window.__mockListFails;
+      Object.assign(l, { tags: tags.map((t) => t.replace(/^#/, '').toLowerCase()), description });
       return null;
     },
     remove_listing: ({ communityId, listingId }) => {
@@ -2380,6 +2381,13 @@ if (!window.__TAURI__) {
     const l = servers[communityId].files.listings.find((x) => x.name === name);
     Object.assign(l, { lister: LINUS, lister_name: people[LINUS], mine: false, local: 'none', local_path: null, progress: 0 });
   };
+  // Someone else edits a listing: this page hears of it as a change to the server.
+  window.__mockRemoteEdit = (communityId, name, tags, description) => {
+    Object.assign(servers[communityId].files.listings.find((x) => x.name === name), { tags, description });
+    emit({ kind: 'community_updated', community_id: communityId });
+  };
+  // Takes away the edit right, as replay would for someone who is neither lister nor file manager.
+  window.__mockCannotEdit = (communityId, name) => { servers[communityId].files.listings.find((x) => x.name === name).can_edit = false; };
   window.__mockDragOver = () => emitTo('dissent://drag-over', null);
   window.__mockDragLeave = () => emitTo('dissent://drag-leave', null);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.

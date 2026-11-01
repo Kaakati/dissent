@@ -827,28 +827,29 @@ impl Engine {
     /// Replaces a listing's tags and description.
     pub async fn update_listing(&self, community: CommunityId, listing: EventId, tags: Vec<String>, description: String) -> Result<()> {
         let body = ListingUpdateBody { tags: clean_tags(&tags)?, description: clean_description(&description)? };
-        // The update opens with the lister's author in its associated data, so only the lister's own app writes it.
-        let lister = self
+        // Every reader opens an update with the lister in its associated data, whoever wrote it, so a file manager's edit
+        // is sealed that way too. Replay decides who may publish one: the lister or a holder of `MANAGE_FILES`.
+        let (lister, category) = self
             .read()
             .communities
             .get(&community)
-            .and_then(|c| c.state().files.listings.get(&listing).map(|l| l.lister))
+            .and_then(|c| {
+                let st = c.state();
+                let l = st.files.listings.get(&listing)?;
+                let restricted = st.files.categories.get(&l.category).filter(|s| s.visible.is_some()).map(|_| l.category);
+                Some((l.lister, restricted))
+            })
             .ok_or_else(|| CoreError::NotFound(format!("listing {listing}")))?;
-        if lister != self.inner.me {
-            return Err(CoreError::Invalid("only the lister edits a listing; file managers may remove it".into()));
+        let me = self.inner.me;
+        let allowed = lister == me || self.read().communities.get(&community).is_some_and(|c| c.state().perms_of(&me).contains(Perms::MANAGE_FILES));
+        if !allowed {
+            return Err(CoreError::Rejected("NoPermission".into()));
         }
-        let category = self.read().communities.get(&community).and_then(|c| {
-            let st = c.state();
-            let cat = st.files.listings.get(&listing)?.category;
-            st.files.categories.get(&cat).filter(|s| s.visible.is_some()).map(|_| cat)
-        });
-        let inner = match category {
-            Some(cat) => {
-                let (generation, key) = self.newest_category_key(community, cat).await?;
-                seal(&key, generation, &community, &self.inner.me, BodyKind::ListingUpdate, &body)?
-            }
-            None => self.seal_files_body(community, BodyKind::ListingUpdate, &body, false).await?,
+        let (generation, key) = match category {
+            Some(cat) => self.newest_category_key(community, cat).await?,
+            None => self.newest_files_key(community, false).await?,
         };
+        let inner = seal(&key, generation, &community, &lister, BodyKind::ListingUpdate, &body)?;
         self.author_publish(community, ChannelId::CONTROL, Payload::FileListingUpdate { listing, inner }).await?;
         Ok(())
     }

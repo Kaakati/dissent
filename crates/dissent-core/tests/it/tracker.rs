@@ -372,6 +372,56 @@ async fn a_folder_is_scanned_and_seeded_in_place_with_no_copy() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
+async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
+    heavy(3, async {
+        let alice = peer("tracker-edit-owner").await;
+        let bob = peer("tracker-edit-lister").await;
+        let carol = peer("tracker-edit-other").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the category", || {
+            bob.engine.files_view(id).ok().filter(|v| v.categories.iter().any(|c| c.readable)).map(|_| ())
+        })
+        .await;
+        let dir = scratch("tracker-edit-src");
+        let msi = write(&dir, "app.msi", &sample(20_000, 11));
+        bob.engine.prepare_listing(id, cat, vec![msi.clone()]).await.unwrap();
+        let listed = bob.engine.list_files(id, cat, vec![item(&msi, &["first"])], SeedLimit::Forever).await.expect("listed");
+        let listing = listed[0].parse().unwrap();
+        let seen = |engine: &dissent_core::Engine, tag: &str| engine.files_view(id).ok().filter(|v| v.listings.first().is_some_and(|l| l.tags == vec![tag.to_string()])).map(|_| ());
+        for p in [&alice, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the listing arrives", || seen(&p.engine, "first")).await;
+        }
+
+        // The lister edits, and the others see it with no reload.
+        bob.engine.update_listing(id, listing, vec!["#Second".into()], "Newer".into()).await.expect("the lister edits");
+        for p in [&alice, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the edit arrives", || seen(&p.engine, "second")).await;
+        }
+        assert_eq!(carol.engine.files_view(id).unwrap().listings[0].description, "Newer");
+
+        // A file manager edits someone else's listing, and every member opens it.
+        assert!(alice.engine.files_view(id).unwrap().listings[0].can_edit);
+        alice.engine.update_listing(id, listing, vec!["third".into()], "By a manager".into()).await.expect("a manager edits");
+        for p in [&bob, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the manager's edit arrives", || seen(&p.engine, "third")).await;
+        }
+
+        // Anyone else may not, and nothing changes.
+        assert!(!carol.engine.files_view(id).unwrap().listings[0].can_edit);
+        assert!(carol.engine.update_listing(id, listing, vec!["nope".into()], String::new()).await.is_err());
+        assert!(alice.engine.update_listing(id, listing, vec!["two words".into()], String::new()).await.is_err(), "a bad tag fails");
+        assert_eq!(bob.engine.files_view(id).unwrap().listings[0].tags, vec!["third"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
     heavy(2, async {
         let alice = peer("tracker-alice").await;

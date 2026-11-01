@@ -2,7 +2,7 @@
 // file page, My seeding and Uploads. Opened from the server sidebar. See docs/design/14-file-tracker.md.
 import { useMemo, useState } from 'react';
 import { create } from 'zustand';
-import { ArrowLeft, Download, FolderOpen, FolderPlus, Link2, Lock, Plus, Search, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, FolderOpen, FolderPlus, Link2, Lock, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tip } from '@/components/ui/tip';
@@ -17,7 +17,7 @@ import { DangerNote } from '@/components/chat/attachments';
 import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
 import { openAddFolder } from './add-folder-dialog';
-import { FilesDropOverlay } from './file-adds';
+import { FilesDropOverlay, openEditListing } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
 import { SwarmPanel } from './swarm-panel';
 
@@ -449,6 +449,11 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
             </Button>
           )}
           <span className="text-meta text-muted-foreground">From {l.seeders} {l.seeders === 1 ? 'seeder' : 'seeders'}</span>
+          {l.can_edit ? (
+            <Button variant="ghost" onClick={() => openEditListing(community.id, l)}>
+              <Pencil className="size-4" /> Edit tags and description
+            </Button>
+          ) : null}
           {l.can_edit ? (
             <Button variant="ghost" onClick={() => void remove()}>
               <Trash2 className="size-4" /> Remove listing
