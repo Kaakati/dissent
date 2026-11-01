@@ -159,8 +159,8 @@ function AddFiles({ community, view, category, found, close }: { community: Comm
       <label className="flex items-center gap-s-3 text-ui text-text-strong">
         <input type="checkbox" checked={seed} onChange={() => setSeed(!seed)} />
         <span className="flex flex-col">
-          <span>Seed after adding</span>
-          <span className="text-sm text-muted-foreground">Members can download as soon as the listing is up.</span>
+          <span>Keep seeding after one full copy has gone out</span>
+          <span className="text-sm text-muted-foreground">Off: stops once members have received one full copy from you.</span>
         </span>
       </label>
       <div className="flex items-center gap-s-2">

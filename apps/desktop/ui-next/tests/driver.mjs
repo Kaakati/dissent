@@ -704,6 +704,7 @@ await ev(`window.__mockCheckMs = 60`);
 await ev(`${filesButton('Add files')}.click()`);
 await until(async () => (await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`)) === JSON.stringify(['ready', 'ready', 'type_not_allowed']), 3000);
 const states = await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`);
+check('FL4b the seeding choice says what off does', (await ev(`document.querySelector('[data-add-files]').textContent`)).includes('Keep seeding after one full copy has gone out') && (await ev(`document.querySelector('[data-add-files]').textContent`)).includes('Off: stops once members have received one full copy from you.'));
 check('FL4 the picked files show ready, ready and type not allowed', states === JSON.stringify(['ready', 'ready', 'type_not_allowed']), states);
 await ev(`${filesButton('Add 2 files')}.click()`);
 await sleep(600);
