@@ -84,6 +84,8 @@ pub struct ListingView {
     /// "seeding", "paused", "downloading", "downloaded", "failed" or "none".
     pub local: String,
     pub local_path: Option<String>,
+    /// Why this file can run code, by its name, type or, once it is on this device, its content. See `dissent_files::received`.
+    pub danger: Option<dissent_files::Danger>,
     pub progress: f64,
     pub can_edit: bool,
 }
@@ -361,6 +363,12 @@ impl Engine {
             let seeders = seeding_roots.len() as u32;
             let leechers = swarm.leechers.iter().filter(|r| **r != me).count() as u32 + u32::from(local == "downloading");
             let completed = book.completed.get(&first.body.blob).map_or(0, |c| c.iter().filter(|r| !holders.contains(r)).count()) as u32;
+            // A file on its way is not read: only a whole one says what it is by its content.
+            let whole = matches!(local.as_str(), "seeding" | "paused" | "downloaded");
+            let danger = dissent_files::danger_of_name(&first.body.name, &first.body.mime).or_else(|| {
+                let path = local_path.as_deref().filter(|_| whole)?;
+                w.content_danger(&format!("listing:{}", first.id), path)
+            });
             listings.push(ListingView {
                 id: first.id.to_string(),
                 category: first.category.to_string(),
@@ -384,6 +392,7 @@ impl Engine {
                 mine: group.iter().any(|o| o.lister == me),
                 local,
                 local_path: local_path.map(|p| p.to_string_lossy().into_owned()),
+                danger,
                 progress,
                 can_edit: first.lister == me || manage,
             });

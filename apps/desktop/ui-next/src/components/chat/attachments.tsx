@@ -12,7 +12,7 @@ import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat
 import { openFileDetail } from '@/lib/right';
 import { pictureSrc } from '@/lib/pictures';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
-import type { Attachment, Id, ThumbView } from '@/lib/types';
+import type { Attachment, FileDanger, Id, ThumbView } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { IconBtn } from './parts';
 import type { StagedFile } from '@/lib/chat';
@@ -120,6 +120,16 @@ function CardActions({ a, communityId, messageId }: { a: Attachment; communityId
 
 // One file as a card: its icon, name, size, state and buttons. A picture that is not here yet is a card too, never an
 // empty or broken image. `unshown` marks a downloaded picture the webview could not show.
+// The warning on a file that can run code, on an attachment card and on a file page.
+export function DangerNote({ danger }: { danger: FileDanger }) {
+  return (
+    <div className="att-danger" role="note">
+      <TriangleAlert aria-hidden="true" />
+      <span>{`${DANGER_TEXT[danger] ?? DANGER_TEXT.unchecked} Dissent will not open it for you, and has not scanned it. Run it only if you trust the sender.`}</span>
+    </div>
+  );
+}
+
 function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachment; communityId: Id | null; messageId: Id; unshown?: boolean }) {
   const name = String(a.name ?? 'file');
   const ext = extOf(name);
@@ -154,12 +164,7 @@ function FileCard({ a, communityId, messageId, unshown = false }: { a: Attachmen
           <LockGlyph />
           <StateNode a={a} unshown={unshown} />
         </div>
-        {a.danger ? (
-          <div className="att-danger" role="note">
-            <TriangleAlert aria-hidden="true" />
-            <span>{`${DANGER_TEXT[a.danger] ?? DANGER_TEXT.unchecked} Dissent will not open it for you, and has not scanned it. Run it only if you trust the sender.`}</span>
-          </div>
-        ) : null}
+        {a.danger ? <DangerNote danger={a.danger} /> : null}
         {failed && a.error ? <div className="att-error">{a.error}</div> : null}
         {moving ? <ProgressBar value={progress} thin className="att-progress" /> : null}
         {a.state === 'waiting' && a.note ? <div className="piece-note">{a.note}</div> : null}

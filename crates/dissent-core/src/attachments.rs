@@ -756,7 +756,7 @@ impl World {
     }
 
     /// What a file on this device is, by its content. Read once and remembered until the file is downloaded again.
-    fn content_danger(&self, id: &str, path: &Path) -> Option<dissent_files::Danger> {
+    pub(crate) fn content_danger(&self, id: &str, path: &Path) -> Option<dissent_files::Danger> {
         let mut checks = self.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         *checks.entry(id.to_string()).or_insert_with(|| dissent_files::danger_of_path(path))
     }

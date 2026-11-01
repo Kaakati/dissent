@@ -949,6 +949,7 @@ if (!window.__TAURI__) {
           size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: pick.fingerprint,
           tags: item.tags.map((t) => t.replace(/^#/, '').toLowerCase()), description: item.description, lister: ME, lister_name: people[ME], added_ms: Date.now(),
           also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine: true, local: 'seeding', local_path: item.path, progress: 1, can_edit: true,
+          danger: pick.kind === 'Installer' ? 'installer' : null,
         };
         f.listings.push(listing);
         return listing.id;

@@ -1,7 +1,7 @@
 // The server file tracker (Files area, Server Settings > Files). See `dissent_core::tracker`.
 import { useEffect } from 'react';
 import { create } from 'zustand';
-import type { Id, TransferItem } from './types';
+import type { FileDanger, Id, TransferItem } from './types';
 
 export interface DownloadRules {
   min_ratio_milli: number | null;
@@ -59,6 +59,7 @@ export interface ListingView {
   mine: boolean;
   local: LocalState;
   local_path: string | null;
+  danger?: FileDanger | null; // the file can run code: the page warns
   progress: number;
   can_edit: boolean;
 }

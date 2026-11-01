@@ -682,6 +682,7 @@ await ev(`${filesButton('Cancel')}.click()`);
 await sleep(300);
 await ev(`document.querySelector('[data-files] [data-listing]').click()`);
 await sleep(300);
+check('FL7b an installer\'s page warns that it can run code', (await ev(`document.querySelector('[data-file-page] .att-danger')?.textContent`))?.includes('This is an installer.'));
 check('FL7 a file page shows its fingerprint and the server key', (await ev(`document.querySelector('[data-file-facts]')?.textContent`))?.includes('b3:9f2c41') && (await ev(`document.querySelector('[data-file-facts]').textContent.includes('AES-256-GCM, server key')`)) === true);
 await sleep(300);
 check('FL9 the file page shows piece availability and the swarm', (await ev(`document.querySelectorAll('[data-pieces] [role="img"] span').length > 0 && document.querySelector('[data-swarm]')?.textContent.includes('Jonas')`)) === true);

@@ -67,6 +67,7 @@ async fn an_owner_makes_a_category_lists_files_and_a_second_copy_dedupes() {
         assert_eq!(l.tags, vec!["stable", "windows"]);
         assert_eq!(l.size, bytes.len() as u64);
         assert_eq!(l.local, "seeding");
+        assert_eq!(l.danger, Some(dissent_core::Danger::Installer), "an installer is flagged");
         assert!(l.mine && l.can_edit);
         assert_eq!(view.categories[0].files, 1);
 

@@ -13,6 +13,8 @@ import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { CommunityView } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { DangerNote } from '@/components/chat/attachments';
+import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
 import { SeedingPanel } from './seeding-panel';
 import { SwarmPanel } from './swarm-panel';
@@ -440,6 +442,7 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
           ) : null}
         </div>
       </header>
+      {l.danger ? <DangerNote danger={l.danger} /> : null}
       {l.description ? <p className="m-0 max-w-[760px] text-body text-text whitespace-pre-wrap">{l.description}</p> : null}
       <dl data-file-facts className="m-0 grid max-w-[760px] grid-cols-[160px_1fr] gap-x-s-4 gap-y-s-2">
         {facts.map(([k, v, mono]) => (
