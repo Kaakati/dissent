@@ -214,16 +214,21 @@ async fn the_roster_lists_each_person_once_and_shows_who_speaks() {
         let (alice_root, bob_root) = (alice.identity.root_id().to_string(), bob.identity.root_id().to_string());
         // Counted as they arrive: the event buffer is bounded, and on a slow machine a read at the end has lost them.
         let speaking_events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lagged = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut events = alice.engine.subscribe();
         let counter = {
             let speaking_events = speaking_events.clone();
+            let lagged = lagged.clone();
             tokio::spawn(async move {
                 loop {
                     match events.recv().await {
                         Ok(dissent_core::EngineEvent::CallSpeaking) => {
                             speaking_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            lagged.fetch_add(n as usize, std::sync::atomic::Ordering::Relaxed);
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -275,10 +280,21 @@ async fn the_roster_lists_each_person_once_and_shows_who_speaks() {
         eventually("alice no longer speaks", || alice.engine.call_state().filter(|v| !v.self_speaking)).await;
 
         // The window heard of each change through `CallSpeaking`, within a check or two.
-        eventually("speaking changes are announced", || {
-            (speaking_events.load(std::sync::atomic::Ordering::Relaxed) >= 2).then_some(())
-        })
-        .await;
+        // A lag may have dropped them, which says nothing about whether they were sent.
+        let announced = || {
+            speaking_events.load(std::sync::atomic::Ordering::Relaxed) >= 2 || lagged.load(std::sync::atomic::Ordering::Relaxed) > 0
+        };
+        let deadline = std::time::Instant::now() + scaled(std::time::Duration::from_secs(60));
+        while !announced() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for speaking changes to be announced: speaking events {}, lagged {}, {}",
+                speaking_events.load(std::sync::atomic::Ordering::Relaxed),
+                lagged.load(std::sync::atomic::Ordering::Relaxed),
+                crate::calls::call_summary(&alice),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         counter.abort();
         finish(vec![alice, bob]).await;
     })

@@ -440,14 +440,10 @@ async fn ten_engines_in_a_voice_channel_go_forwarded() {
             .expect("join the voice channel");
     }
 
-    for p in &everyone {
-        eventually_within(Duration::from_secs(60), "a forwarded call with nine others", || {
-            p.engine
-                .call_state()
-                .filter(|v| v.participants.len() == 9 && v.topology == Topology::Forwarded)
-        })
-        .await;
-    }
+    every_device(&everyone, Duration::from_secs(60), "a forwarded call with nine others", |p| {
+        p.engine.call_state().is_some_and(|v| v.participants.len() == 9 && v.topology == Topology::Forwarded)
+    })
+    .await;
 
     // The forwarder relays between the leaves, and its own speech goes through its own relay, so
     // every engine, the forwarder included, hears the others.
@@ -546,14 +542,10 @@ async fn banned_member_of_a_forwarded_call_loses_audio_after_the_rekey() {
     for p in &everyone {
         p.engine.join_call(community, channel).await.expect("join");
     }
-    for p in &everyone {
-        eventually_within(Duration::from_secs(60), "a forwarded call with six others", || {
-            p.engine
-                .call_state()
-                .filter(|v| v.participants.len() == 6 && v.topology == Topology::Forwarded && v.frames_received > 0)
-        })
-        .await;
-    }
+    every_device(&everyone, Duration::from_secs(60), "a forwarded call with six others", |p| {
+        p.engine.call_state().is_some_and(|v| v.participants.len() == 6 && v.topology == Topology::Forwarded && v.frames_received > 0)
+    })
+    .await;
 
     // Find the forwarder from any engine that is not it. Ban a member that is neither the
     // forwarder nor the banning owner, so the call keeps its relay.
@@ -704,14 +696,10 @@ async fn a_call_grows_from_three_to_eight_and_back_to_four_without_dropping_audi
     for p in &everyone[3..] {
         p.engine.join_call(community, channel).await.expect("join");
     }
-    for p in &everyone {
-        eventually_within(Duration::from_secs(150), "a forwarded call of eight", || {
-            p.engine
-                .call_state()
-                .filter(|v| v.participants.len() == 7 && v.topology == Topology::Forwarded && v.frames_received > 0)
-        })
-        .await;
-    }
+    every_device(&everyone, Duration::from_secs(150), "a forwarded call of eight", |p| {
+        p.engine.call_state().is_some_and(|v| v.participants.len() == 7 && v.topology == Topology::Forwarded && v.frames_received > 0)
+    })
+    .await;
 
     // Shrink to four: the call moves back to a mesh.
     for p in &everyone[4..] {
@@ -1229,16 +1217,25 @@ pub(crate) async fn boosted_call(count: usize, level: u8, kbps: u32) -> (Vec<Pee
 
 /// Waits until every peer in `peers` sees a call of `peers.len()` at `topology`, with audio.
 pub(crate) async fn all_see(peers: &[Peer], topology: Topology, what: &str) {
-    let seen = |p: &Peer| {
+    every_device(peers, Duration::from_secs(150), what, |p| {
         p.engine.call_state().is_some_and(|v| {
             v.participants.len() == peers.len() - 1 && v.topology == topology && v.frames_received > 0
         })
-    };
+    })
+    .await;
+}
+
+/// Waits until each device in `peers`, in turn, meets `seen`. A timeout names every device's call, and marks the ones not
+/// there yet, so a failure shows which device is stuck and how.
+pub(crate) async fn every_device<P: std::borrow::Borrow<Peer>>(peers: &[P], limit: Duration, what: &str, seen: impl Fn(&Peer) -> bool) {
     for p in peers {
-        let deadline = std::time::Instant::now() + scaled(Duration::from_secs(150));
-        while !seen(p) {
+        let deadline = std::time::Instant::now() + scaled(limit);
+        while !seen(p.borrow()) {
             if std::time::Instant::now() >= deadline {
-                let lines: Vec<String> = peers.iter().map(|p| format!("{} {}", if seen(p) { "  " } else { "!!" }, call_summary(p))).collect();
+                let lines: Vec<String> = peers
+                    .iter()
+                    .map(|p| format!("{} {}", if seen(p.borrow()) { "  " } else { "!!" }, call_summary(p.borrow())))
+                    .collect();
                 panic!("timed out waiting for {what}. Each device, marked if it is not there yet:\n{}", lines.join("\n"));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1720,12 +1717,18 @@ async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_vi
             viewer.engine.set_video_tile(&root(s), false, 1920);
         }
     }
-    eventually_within(Duration::from_secs(60), "every viewer gets both cameras, each at its layer", || {
-        let wide_ok = layer_of(wide, new_sender).is_some_and(|l| l > 0) && layer_of(wide, old_sender) == Some(0);
-        let old_ok = layer_of(old_viewer, new_sender) == Some(0) && layer_of(old_viewer, old_sender) == Some(0);
-        (wide_ok && old_ok).then_some(())
-    })
-    .await;
+    let deadline = std::time::Instant::now() + scaled(Duration::from_secs(60));
+    loop {
+        let layers = [layer_of(wide, new_sender), layer_of(wide, old_sender), layer_of(old_viewer, new_sender), layer_of(old_viewer, old_sender)];
+        if layers[0].is_some_and(|l| l > 0) && layers[1] == Some(0) && layers[2] == Some(0) && layers[3] == Some(0) {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let lines: Vec<String> = everyone.iter().map(call_summary).collect();
+            panic!("timed out waiting for every viewer to get both cameras at its layer. Layers wide/new, wide/old, old/new, old/old: {layers:?}\n{}", lines.join("\n"));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(
         dissent_core::test_support::wanted_layers(&old_sender.engine, false),
         None,
