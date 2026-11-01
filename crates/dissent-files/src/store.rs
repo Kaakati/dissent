@@ -774,12 +774,13 @@ impl Files {
         // partial output instead of moving it into place.
         let cancelled = Arc::new(AtomicBool::new(false));
         let _cancel = CancelOnDrop(Arc::clone(&cancelled));
+        // The ciphertext is copied out first. The store's reader passes 1 KiB per message, which took minutes for a large
+        // file after its last byte had come in.
+        self.check_space(fref.cipher_size + fref.size).await?;
+        let copy = RemoveOnDrop(std::path::absolute(self.staging_path())?);
+        self.store.blobs().export(hash, &copy.0).await.map_err(store_err)?;
         let job = DecryptJob {
-            reader: StoreReader {
-                handle: Handle::current(),
-                reader: self.store.blobs().reader(hash),
-                read: 0,
-            },
+            ciphertext: copy,
             partial: self.staging_path(),
             dest_dir: dest_dir.to_path_buf(),
             name: fref.safe_name(),
@@ -883,9 +884,17 @@ impl Write for ChannelWriter {
     }
 }
 
-/// How much one read of a stored blob asks for when decrypting it. Each read is one request to the store, so a small
-/// one made a large file take minutes after its last byte came in.
-const DECRYPT_READ_BYTES: usize = 4 * 1024 * 1024;
+/// How much one read of a ciphertext copy takes when decrypting it.
+const DECRYPT_READ_BYTES: usize = 1024 * 1024;
+
+/// Removes a staging file when dropped, however the work on it ended.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 /// Reads a stored blob from a blocking thread. Each read is one request to the store, so the
 /// blob never has to be exported to a file first.
@@ -916,7 +925,7 @@ impl Drop for CancelOnDrop {
 
 /// The decrypt-and-place step, run on a blocking thread.
 struct DecryptJob {
-    reader: StoreReader,
+    ciphertext: RemoveOnDrop,
     partial: PathBuf,
     dest_dir: PathBuf,
     name: String,
@@ -942,11 +951,15 @@ impl DecryptJob {
 
     fn decrypt_to_partial(&mut self) -> Result<()> {
         let mut output = BufWriter::new(File::create(&self.partial)?);
-        let mut input = BufReader::with_capacity(DECRYPT_READ_BYTES, &mut self.reader);
+        let file = File::open(&self.ciphertext.0)?;
+        if file.metadata()?.len() != self.cipher_size {
+            return Err(FilesError::Decrypt);
+        }
+        let mut input = BufReader::with_capacity(DECRYPT_READ_BYTES, file);
         let plain_len = crypt::decrypt_stream(&mut input, &mut output, &self.key)?;
         output.flush()?;
         drop(output);
-        if plain_len != self.size || self.reader.read != self.cipher_size {
+        if plain_len != self.size {
             return Err(FilesError::Decrypt);
         }
         Ok(())
