@@ -128,6 +128,7 @@ impl Engine {
         }
         if view.state == "ready" || view.state == "already_listed" {
             self.with_tracker(community, |l| l.offered.insert(path.to_path_buf()));
+            self.remember_candidate(community, path, &view);
         }
         self.emit(EngineEvent::FileCheck { job, path: text, done: total, total, result: Some(view) });
     }

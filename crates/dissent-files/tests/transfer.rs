@@ -1155,6 +1155,78 @@ async fn disk_checks_refuse_before_any_work() {
     );
 }
 
+fn staged(data: &Path) -> Vec<std::path::PathBuf> {
+    fs::read_dir(data.join("tmp")).unwrap().map(|e| e.unwrap().path()).collect()
+}
+
+/// Decrypting a download copies its ciphertext to the staging folder first. The copy never outlives the work.
+#[tokio::test]
+async fn the_ciphertext_copy_is_removed_however_the_decrypt_ends() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let alice = Peer::new().await;
+    let fref = alice
+        .files
+        .add(Input::Bytes {
+            name: "c.bin".into(),
+            mime: "application/octet-stream".into(),
+            data: sample(8 * MIB),
+        })
+        .await
+        .unwrap();
+    let endpoint = loopback_endpoint().await;
+
+    // A disk that fills up during the download: the second check is the decrypt's.
+    let dir = TestDir::new();
+    let data = dir.path().join("data");
+    let downloads = dir.path().join("downloads");
+    let checks = AtomicUsize::new(0);
+    let files = Files::open(&data).await.unwrap().with_free_space(move |_: &Path| {
+        Ok(if checks.fetch_add(1, Ordering::SeqCst) == 0 { u64::MAX } else { 1024 })
+    });
+    let err = files.fetch(&endpoint, &[alice.addr()], &fref, &downloads, |_, _| {}).await.unwrap_err();
+    assert!(matches!(err, FilesError::DiskFull { .. }), "{err:?}");
+    assert!(staged(&data).is_empty(), "nothing is left in the staging folder");
+    assert!(!downloads.exists() || fs::read_dir(&downloads).unwrap().next().is_none(), "no partial file is placed");
+
+    // A decrypt that fails.
+    let dir = TestDir::new();
+    let data = dir.path().join("data");
+    let downloads = dir.path().join("downloads");
+    let files = Files::open(&data).await.unwrap();
+    let mut wrong = fref.clone();
+    wrong.key = [7; 32];
+    let err = files.fetch(&endpoint, &[alice.addr()], &wrong, &downloads, |_, _| {}).await.unwrap_err();
+    assert!(matches!(err, FilesError::Decrypt), "{err:?}");
+    assert!(staged(&data).is_empty(), "nothing is left after a failed decrypt");
+    assert!(!downloads.exists() || fs::read_dir(&downloads).unwrap().next().is_none(), "no bad file is placed");
+
+    // A decrypt that is cancelled. The blob is whole by now, so the fetch goes straight to it.
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(1),
+        files.fetch(&endpoint, &[alice.addr()], &fref, &downloads, |_, _| {}),
+    )
+    .await;
+    assert!(cancelled.is_err() || cancelled.is_ok_and(|r| r.is_ok()));
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !staged(&data).is_empty() {
+        assert!(std::time::Instant::now() < until, "a cancelled decrypt left {:?}", staged(&data));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // A decrypt that succeeds.
+    let out = files.fetch(&endpoint, &[alice.addr()], &fref, &downloads, |_, _| {}).await.unwrap();
+    assert_eq!(fs::read(out).unwrap(), sample(8 * MIB));
+    assert!(staged(&data).is_empty(), "nothing is left after a good decrypt");
+
+    // A crash left a copy: the next start clears it.
+    let dir = TestDir::new();
+    let data = dir.path().join("data");
+    fs::create_dir_all(data.join("tmp")).unwrap();
+    fs::write(data.join("tmp").join("left-by-a-crash.part"), b"ciphertext").unwrap();
+    let _files = Files::open(&data).await.unwrap();
+    assert!(staged(&data).is_empty(), "a start clears the staging folder");
+}
+
 #[tokio::test]
 async fn mirror_policy_refuses_before_moving_bytes() {
     let alice = Peer::new().await;

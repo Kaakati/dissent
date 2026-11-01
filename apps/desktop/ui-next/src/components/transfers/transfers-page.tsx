@@ -152,7 +152,7 @@ function TransferRow({ transfer: t }: { transfer: TransferItem }) {
       </div>
       <div role="cell" className="flex min-w-0 flex-col items-start gap-1">
         {showBar ? <ProgressBar value={pct / 100} thin className="w-full" /> : null}
-        <span className="text-[12px] leading-[18px] tabular-nums">{t.status_text ?? ''}</span>
+        <span data-transfer-status className="text-[12px] leading-[18px] tabular-nums">{t.status_text ?? (t.state === 'active' ? `${pct}%${t.rate_bps ? ` · ${formatBytes(t.rate_bps)}/s` : ''}` : '')}</span>
       </div>
       <div role="cell" className="flex justify-end gap-1.5">
         <TransferActions transfer={t} />

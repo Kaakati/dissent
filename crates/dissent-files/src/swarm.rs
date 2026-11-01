@@ -26,6 +26,9 @@ const SLICE_CHUNKS: u64 = 4096;
 pub const MAX_PARALLEL: usize = 8;
 /// A provider that fails this many slices is dropped from the download.
 const MAX_FAILURES: u32 = 2;
+/// The shortest time between two reports of a download. Bytes arrive per 16 KiB, thousands of times a second on a fast
+/// link, and each report takes a lock and may reach the UI.
+const REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A shared download cap: bytes per second for every swarm download together, or none.
 #[derive(Default)]
@@ -165,6 +168,7 @@ impl Files {
         let mut held = base;
         let mut last_error = String::from("no provider had the blob");
         let mut failed: Vec<usize> = Vec::new();
+        let mut reported = std::time::Instant::now();
         while let Some(event) = rx.recv().await {
             match event {
                 Event::Bytes { provider, bytes } => {
@@ -172,8 +176,11 @@ impl Files {
                     let c = &mut counts[provider];
                     c.bytes += bytes;
                     c.pieces = c.bytes / PIECE_BYTES;
-                    progress(held, cipher_size);
-                    sources(&counts);
+                    if reported.elapsed() >= REPORT_EVERY {
+                        reported = std::time::Instant::now();
+                        progress(held, cipher_size);
+                        sources(&counts);
+                    }
                 }
                 Event::Failed { provider, error } => {
                     if !failed.contains(&provider) {
@@ -184,6 +191,9 @@ impl Files {
             }
         }
         while workers.join_next().await.is_some() {}
+        // The last report is always made: receipts credit these counts.
+        progress(held, cipher_size);
+        sources(&counts);
         if self.is_complete(HashAndFormat::raw(hash)).await? {
             Ok(failed)
         } else {
@@ -193,6 +203,25 @@ impl Files {
 }
 
 impl Files {
+    /// The whole 64 KiB pieces of `hash` this store holds, as (start, end) runs.
+    pub async fn held_pieces(&self, hash: [u8; 32], cipher_size: u64) -> Result<Vec<(u64, u64)>> {
+        let missing = missing(&self.store, Hash::from_bytes(hash)).await?;
+        let chunks = cipher_size.div_ceil(1024);
+        let per_piece = PIECE_BYTES / 1024;
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for i in 0..crate::tally::pieces_of(cipher_size) {
+            let piece = ChunkRanges::chunks(i * per_piece..((i + 1) * per_piece).min(chunks));
+            if !(piece & missing.clone()).is_empty() {
+                continue;
+            }
+            match runs.last_mut() {
+                Some((_, end)) if *end == i => *end = i + 1,
+                _ => runs.push((i, i + 1)),
+            }
+        }
+        Ok(runs)
+    }
+
     /// Which 64 KiB pieces of `hash` the provider at `addr` holds, from its first answer to an observe request. A piece
     /// counts as held only when all of it is.
     pub async fn piece_map(&self, endpoint: &Endpoint, addr: EndpointAddr, hash: [u8; 32], cipher_size: u64) -> Result<Vec<bool>> {

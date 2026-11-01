@@ -101,12 +101,32 @@ export interface FilesView {
 
 export interface SwarmPeerView {
   root_id: Id;
+  you: boolean;
   name: string;
   role: string;
   storage: boolean;
   online: boolean;
   has: number; // 0 to 1
   level: number;
+}
+
+// What is moving for a listing now, as this device sees it. Read each second while its page is open.
+export interface LivePeer {
+  root_id: Id;
+  name: string;
+  from_bps: number; // what this device receives from them
+  to_bps: number; // what this device sends them
+  has: number; // 0 to 1, their last answer plus what they were sent since
+}
+
+export interface LiveSwarm {
+  active: boolean;
+  down_bps: number;
+  up_bps: number;
+  eta_s: number | null;
+  progress: number | null; // this device's own download, 0 to 1
+  own_pieces: [number, number][]; // the pieces this device's download holds, as start and end
+  peers: LivePeer[];
 }
 
 export interface SwarmView {
@@ -235,6 +255,7 @@ export const filesApi = {
   removeListing: (communityId: Id, listingId: Id) => invoke<void>('remove_listing', { communityId, listingId }),
   download: (communityId: Id, listingId: Id) => invoke<TransferItem>('download_listing', { communityId, listingId }),
   swarm: (communityId: Id, listingId: Id) => invoke<SwarmView>('listing_swarm', { communityId, listingId }),
+  live: (communityId: Id, listingId: Id) => invoke<LiveSwarm>('listing_live', { communityId, listingId }),
   setRules: (communityId: Id, rules: ReputationRules) => invoke<void>('set_reputation_rules', { communityId, rules }),
   resetReputation: (communityId: Id, userId: Id) => invoke<void>('reset_reputation', { communityId, userId }),
 };
@@ -349,6 +370,7 @@ export interface SeedRowView {
   folder: string | null;
   path: string | null;
   state: SeedState;
+  limit_reached: boolean; // Resume alone cannot start it: its limit has to change
   note: string;
   size: number;
   uploaded: number;

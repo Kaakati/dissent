@@ -836,3 +836,124 @@ async fn a_book_that_does_not_read_is_kept_and_its_seeds_keep_their_pins() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_download_shows_live_figures_on_both_sides_and_moves_faster_than_a_timer_tick_per_chunk() {
+    heavy(2, async {
+        let alice = peer("tracker-live-alice").await;
+        let bob = peer("tracker-live-bob").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let invite = alice.engine.create_invite(id).await.unwrap();
+        join_ready(&alice, &bob, &invite).await;
+        let dir = scratch("tracker-live-src");
+        // Large enough to outlast a timer tick per 16 KiB by far, small enough for CI.
+        let bytes = sample(64 * 1024 * 1024, 5);
+        let zip = write(&dir, "large.zip", &bytes);
+        alice.engine.prepare_listing(id, cat, vec![zip.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&zip, &[])], SeedLimit::Forever).await.unwrap();
+        let listing = listed[0].parse().unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listed[0]))
+        })
+        .await;
+
+        // The seeder sees itself in the swarm before anyone downloads, and counts once.
+        let own = alice.engine.listing_swarm(id, listing).await.unwrap();
+        assert_eq!(own.seeders, 1);
+        assert!(own.peers.iter().any(|p| p.you && p.has >= 1.0), "{:?}", own.peers);
+        // The downloader sees the lister before it has answered for itself.
+        let seen = bob.engine.listing_swarm(id, listing).await.unwrap();
+        let alice_root = alice.engine.me().root_id;
+        assert!(seen.peers.iter().any(|p| p.root_id == alice_root && !p.you && p.has >= 1.0), "{:?}", seen.peers);
+
+        // A cap keeps the download long enough to read its figures. It says nothing of the uncapped speed below.
+        let settings = bob.engine.seeding_settings();
+        bob.engine.set_seeding_settings(dissent_core::tracker::seeding::SeedingSettings { download_bps: Some(8_000_000), ..settings.clone() }).unwrap();
+        bob.engine.download_listing(id, listing).await.expect("download starts");
+        let moving = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let down = bob.engine.listing_live(id, listing).await.unwrap();
+                let up = alice.engine.listing_live(id, listing).await.unwrap();
+                let sent = up.peers.iter().find(|p| p.has > 0.0 && p.to_bps > 0).cloned();
+                if let (true, true, Some(sent)) = (down.down_bps > 0 && down.eta_s.is_some(), !down.own_pieces.is_empty(), sent) {
+                    return (down, up, sent);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("both sides report the transfer while it runs");
+        assert!(moving.0.active && moving.1.active);
+        assert!(moving.1.up_bps > 0);
+        assert!(moving.2.has < 1.0, "bob is not done: {:?}", moving.2);
+        let row = bob.engine.transfers().into_iter().find(|t| t.message_id.contains(&listed[0])).expect("a row");
+        assert!(row.rate_bps > 0, "the transfer's row has a speed");
+        // The downloader's own row shows its progress.
+        let mine = bob.engine.listing_swarm(id, listing).await.unwrap();
+        assert!(mine.peers.iter().any(|p| p.you && p.has < 1.0), "{:?}", mine.peers);
+        bob.engine.pause_transfer(&row.id).unwrap();
+
+        // Uncapped, this must beat one 16 KiB chunk per timer tick, which was about 1.6 MB/s.
+        bob.engine.set_seeding_settings(settings).unwrap();
+        let held = bob.engine.transfers().into_iter().find(|t| t.id == row.id).unwrap().progress;
+        let from = std::time::Instant::now();
+        bob.engine.resume_transfer(&row.id).unwrap();
+        let path = until_event(&bob.engine, Duration::from_secs(120), "the download finishes and seeds", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.local == "seeding")).and_then(|l| l.local_path)
+        })
+        .await;
+        let mb_per_s = (1.0 - held) * 64.0 / from.elapsed().as_secs_f64();
+        assert!(mb_per_s > 4.0, "{mb_per_s:.1} MB/s");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+        // Each slice's offsets are in the whole file: the seeder counts what it sent once, not each slice from zero.
+        let size = bytes.len() as u64;
+        until_event(&alice.engine, Duration::from_secs(10), "alice counts what she sent", || {
+            alice.engine.files_view(id).ok().filter(|v| v.standing.uploaded >= size * 9 / 10)
+        })
+        .await;
+        let uploaded = alice.engine.files_view(id).unwrap().standing.uploaded;
+        assert!(uploaded <= size * 12 / 10, "uploaded {uploaded} of {size}");
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_upload_cap_still_holds_now_that_no_cap_means_no_wait() {
+    heavy(2, async {
+        let alice = peer("tracker-cap-alice").await;
+        let bob = peer("tracker-cap-bob").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let invite = alice.engine.create_invite(id).await.unwrap();
+        join_ready(&alice, &bob, &invite).await;
+        let dir = scratch("tracker-cap-src");
+        let zip = write(&dir, "capped.zip", &sample(16 * 1024 * 1024, 6));
+        alice.engine.prepare_listing(id, cat, vec![zip.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&zip, &[])], SeedLimit::Forever).await.unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listed[0]))
+        })
+        .await;
+        let settings = alice.engine.seeding_settings();
+        alice.engine.set_seeding_settings(dissent_core::tracker::seeding::SeedingSettings { upload_bps: Some(2_000_000), ..settings }).unwrap();
+        let from = std::time::Instant::now();
+        bob.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download starts");
+        until_event(&bob.engine, Duration::from_secs(60), "the capped download finishes", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.local == "seeding"))
+        })
+        .await;
+        // 16 MiB at 2 MB/s, less the one second the bucket starts with.
+        let took = from.elapsed().as_secs_f64();
+        assert!(took > 6.0, "the cap did not hold: {took:.1} s");
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}

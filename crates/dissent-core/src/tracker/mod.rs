@@ -18,6 +18,7 @@ pub mod folders;
 pub(crate) mod gate;
 pub(crate) mod restricted;
 pub(crate) mod scan;
+pub mod live;
 pub mod seeding;
 pub mod swarm;
 
@@ -113,6 +114,9 @@ pub(crate) struct Local {
     pub(crate) offered: BTreeSet<PathBuf>,
     /// Paths to seed from where they are, with no copy, as a linked folder's files are. See `folders`. In memory only.
     pub(crate) in_place: BTreeSet<PathBuf>,
+    /// Fingerprints made this run, by path, with the file's size and modification time then. Adding a file reads it once
+    /// less. The encrypt pass still checks the bytes against the fingerprint.
+    pub(crate) fingerprints: BTreeMap<PathBuf, (u64, Option<u64>, [u8; 32])>,
     /// This device's last holdings answer and when it was made, so a member asking in a loop costs one build per
     /// `HOLDINGS_CACHE`. In memory only.
     pub(crate) answer: Option<(Instant, Vec<swarm::Holding>)>,
@@ -141,6 +145,8 @@ pub(crate) struct TrackerState {
     /// The fingerprint checks running, by job, with what stops each.
     pub(crate) checks: BTreeMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) next_check: u64,
+    /// What moves through each blob now. See `live`.
+    pub(crate) meters: std::collections::HashMap<[u8; 32], live::BlobMeters>,
 }
 
 /// One line of `files_keys.bin`: a generation, its key, and the restricted category it belongs to, if any.
@@ -154,15 +160,46 @@ fn book_path(paths: &Paths, id: &CommunityId) -> PathBuf {
     paths.community_dir(id).join("tracker.bin")
 }
 
+/// Present once a community's upload counters are known good. v0.1.22 counted each slice from the start of the file, so
+/// every counter it saved is too high, and a seed under a ratio limit looked finished. A marker, and not a field in the
+/// book, so the book keeps the format v0.1.22 wrote.
+fn counters_path(paths: &Paths, id: &CommunityId) -> PathBuf {
+    paths.community_dir(id).join("tracker_counters.bin")
+}
+
+/// Sets the upload counters v0.1.22 saved back to zero, once. A seed's pause and stop are the person's own and stay: a
+/// limit never set them, it is worked out from the counter, so such a seed serves again by itself. Nothing is marked
+/// until the book is saved, so a failed save is tried again at the next start. A book that could not be read is left alone.
+fn reset_old_counters(paths: &Paths, id: &CommunityId, book: &mut LocalBook, writable: bool) {
+    if !writable || !matches!(paths.read_bin::<u32>(&counters_path(paths, id)), Ok(None)) {
+        return;
+    }
+    let old = book.seeds.values().any(|s| s.uploaded > 0);
+    for seed in book.seeds.values_mut() {
+        seed.uploaded = 0;
+    }
+    if old {
+        if let Err(e) = paths.write_bin(&book_path(paths, id), book) {
+            warn!(community = %id, error = %e, "could not save the reset upload counters");
+            return;
+        }
+    }
+    if let Err(e) = paths.write_bin(&counters_path(paths, id), &1u32) {
+        warn!(community = %id, error = %e, "could not mark the upload counters");
+    }
+}
+
 impl Local {
     fn load(paths: &Paths, id: &CommunityId) -> Self {
         let keys = paths.read_guarded::<Vec<KeyEntry>>(&keys_path(paths, id));
         let book = paths.read_guarded::<LocalBook>(&book_path(paths, id));
         let found = keys.value.unwrap_or_default();
+        let mut loaded_book = book.value.unwrap_or_else(|| LocalBook { receipt_secret: rand::random(), ..LocalBook::default() });
+        reset_old_counters(paths, id, &mut loaded_book, book.may_write);
         Self {
             scopes: found.iter().filter_map(|(g, _, s)| s.map(|c| (*g, c))).collect(),
             keys: found.into_iter().map(|(g, k, _)| (g, k)).collect(),
-            book: book.value.unwrap_or_else(|| LocalBook { receipt_secret: rand::random(), ..LocalBook::default() }),
+            book: loaded_book,
             keys_writable: keys.may_write,
             book_writable: book.may_write,
             book_damaged: book.damaged,
@@ -401,6 +438,71 @@ impl Engine {
 mod sealing_tests {
     use super::*;
     use dissent_identity::Vault;
+
+    /// A book as v0.1.22 wrote it, byte by byte: one seed under a ratio limit with an over-counted upload, one paused by
+    /// hand, one stopped by hand. Frozen: the format of `tracker.bin` must keep reading.
+    fn book_of_v0_1_22() -> Vec<u8> {
+        let seed = |blob: u8, limit: &[u8], paused: u8, stopped: u8| {
+            let mut out = vec![blob; 32]; // the blob
+            out.extend([9u8; 32]); // listing
+            out.push(0); // path: none
+            out.extend(limit);
+            out.extend([paused, stopped, 0, 0]); // paused, stopped, linked, modified_ms: none
+            out.extend([0x80, 0x80, 0x80, 0x80, 0x80, 0x20]); // uploaded: 1 TiB, as varint (2^40 / 2^35 = 32)
+            out.extend([0xE8, 0x07]); // since_ms: 1000
+            out.push(0); // downloaded
+            out
+        };
+        let mut out = vec![7u8; 32]; // receipt_secret
+        out.extend([0, 0, 3]); // no folders, no auto_import, three seeds
+        out.extend(seed(1, &[1, 0xE8, 0x07], 0, 0)); // Ratio(1000)
+        out.extend(seed(2, &[0], 1, 0)); // Forever, paused
+        out.extend(seed(3, &[0], 0, 1)); // Forever, stopped
+        out.push(0); // nothing in completed
+        out
+    }
+
+    #[test]
+    fn a_book_from_v0_1_22_has_its_counters_reset_once_and_keeps_pauses_and_stops() {
+        let dir = profile("counters");
+        let paths = Paths::for_test(dir);
+        let id = CommunityId([4; 32]);
+        std::fs::create_dir_all(paths.community_dir(&id)).unwrap();
+        let old: LocalBook = postcard::from_bytes(&book_of_v0_1_22()).expect("the v0.1.22 format reads");
+        assert_eq!(postcard::to_allocvec(&old).unwrap(), book_of_v0_1_22(), "the format has not moved");
+        assert_eq!(old.seeds[&[1; 32]].uploaded, 1 << 40);
+        assert!(seeding::limit_reached(&old.seeds[&[1; 32]], 1 << 30, 0), "it looks finished");
+        paths.write_bin(&book_path(&paths, &id), &old).unwrap();
+
+        let mut local = Local::load(&paths, &id);
+        let seeds = &local.book.seeds;
+        assert!(seeds.values().all(|s| s.uploaded == 0), "every counter is reset");
+        assert!(!seeding::limit_reached(&seeds[&[1; 32]], 1 << 30, 0), "the seed under a ratio limit serves again");
+        assert!(seeds[&[2; 32]].paused && !seeds[&[2; 32]].stopped, "a pause stays");
+        assert!(seeds[&[3; 32]].stopped && !seeds[&[3; 32]].paused, "a stop stays");
+        assert_eq!(local.book.receipt_secret, [7; 32], "nothing else moves");
+        let read: LocalBook = paths.read_bin(&book_path(&paths, &id)).unwrap().unwrap();
+        assert!(read.seeds.values().all(|s| s.uploaded == 0), "the reset is saved");
+
+        // Counters made after it are real, and stay.
+        local.book.seeds.get_mut(&[1; 32]).unwrap().uploaded = 500;
+        paths.write_bin(&book_path(&paths, &id), &local.book).unwrap();
+        assert_eq!(Local::load(&paths, &id).book.seeds[&[1; 32]].uploaded, 500, "only the first load resets");
+    }
+
+    #[test]
+    fn a_new_community_is_marked_so_its_first_counters_stay() {
+        let paths = Paths::for_test(profile("counters-new"));
+        let id = CommunityId([5; 32]);
+        std::fs::create_dir_all(paths.community_dir(&id)).unwrap();
+        let mut local = Local::load(&paths, &id);
+        assert!(local.book.seeds.is_empty());
+        let mut seed: LocalBook = postcard::from_bytes(&book_of_v0_1_22()).unwrap();
+        seed.seeds.get_mut(&[1; 32]).unwrap().uploaded = 42;
+        local.book = seed;
+        paths.write_bin(&book_path(&paths, &id), &local.book).unwrap();
+        assert_eq!(Local::load(&paths, &id).book.seeds[&[1; 32]].uploaded, 42);
+    }
 
     fn profile(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("dissent-tracker-sealing-{tag}-{}-{}", std::process::id(), crate::engine::now_ms()));

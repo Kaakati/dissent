@@ -304,6 +304,7 @@ pub fn run() {
             tracker_cmds::remove_listing,
             tracker_cmds::download_listing,
             tracker_cmds::listing_swarm,
+            tracker_cmds::listing_live,
             tracker_cmds::seeding_view,
             tracker_cmds::set_seeding_settings,
             tracker_cmds::set_seed_limit,

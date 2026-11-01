@@ -688,6 +688,7 @@ if (!window.__TAURI__) {
   };
   // My seeding: the settings and a record per seeded listing.
   const seeding = { settings: null, records: {} };
+  const liveReads = {};
   const handlers = {
     disclaimer_accepted: () => disclaimerSaved(),
     accept_disclaimer: ({ updated }) => {
@@ -1102,7 +1103,15 @@ if (!window.__TAURI__) {
       const pieces = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
       return {
         seeders: l.seeders, downloading: l.leechers, asked: 8, pieces,
-        peers: [{ root_id: LINUS, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
+        peers: [{ root_id: LINUS, you: false, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
+      };
+    },
+    // A download moves on each read, so a check can see the figures change.
+    listing_live: ({ listingId }) => {
+      const reads = (liveReads[listingId] = (liveReads[listingId] ?? 0) + 1);
+      return {
+        active: true, down_bps: 1000000 + reads * 300000, up_bps: 0, eta_s: 60, progress: Math.min(1, reads / 100),
+        own_pieces: [[0, reads * 8]], peers: [{ root_id: LINUS, name: people[LINUS], from_bps: 1000000 + reads * 300000, to_bps: 0, has: 1 }],
       };
     },
     // My seeding, as `dissent_core::tracker::seeding` reports it. The mock keeps a record per seeded listing.
@@ -1111,11 +1120,13 @@ if (!window.__TAURI__) {
       const s = (seeding.settings ??= { upload_bps: null, download_bps: null, alt: null, alt_on: false, max_active: 5, unmetered_only: true, pause_on_battery: false });
       const rows = f.listings.filter((l) => l.local === 'seeding' || l.local === 'paused').map((l) => {
         const r = (seeding.records[l.id] ??= { limit: 'forever', paused: false, stopped: false });
-        const state = r.stopped ? 'stopped' : r.paused ? 'paused' : 'seeding';
-        const note = { seeding: 'Serving now', paused: 'Paused by you', stopped: 'Stopped by you' }[state];
+        // A check sets this to show a seed under a limit it has reached.
+        const reached = !!window.__seedLimitReached && r.limit !== 'forever';
+        const state = r.stopped || reached ? 'stopped' : r.paused ? 'paused' : 'seeding';
+        const note = reached ? 'Seed limit reached' : { seeding: 'Serving now', paused: 'Paused by you', stopped: 'Stopped by you' }[state];
         return {
           blob: l.id, listing: l.id, name: l.name, ext: l.ext, kind: l.kind, category: l.category, folder: null, path: l.local_path,
-          state, note, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
+          state, note, limit_reached: reached, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
         };
       });
       return { rows, seeding: rows.filter((r) => r.state === 'seeding').length, uploaded: 0, settings: s, conditions: { metered: false, on_battery: false, metered_known: true }, caps_now: [s.upload_bps, s.download_bps], held_back: false };

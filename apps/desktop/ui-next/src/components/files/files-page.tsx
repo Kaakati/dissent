@@ -56,7 +56,9 @@ const dateOf = (ms: number) => new Date(ms).toLocaleDateString(undefined, { mont
 function useCommunityFiles(): { community: CommunityView | null; view: FilesView | null } {
   const community = useShell((s) => (s.route.kind === 'server' ? s.community : null));
   const transfers = useShell((s) => s.transfers);
-  const view = useFilesOf(community?.id ?? null, community, transfers);
+  // Only a change of state reloads the whole view: a running download's figures come from its own row.
+  const transferStates = transfers.map((t) => `${t.id}:${t.state}`).join();
+  const view = useFilesOf(community?.id ?? null, community, transferStates);
   return { community, view };
 }
 
@@ -387,6 +389,7 @@ function Standing({ view }: { view: FilesView }) {
 function FilePage({ community, view, listing: l }: { community: CommunityView; view: FilesView; listing: ListingView }) {
   const category = view.categories.find((c) => c.id === l.category);
   const [busy, setBusy] = useState(false);
+  const own = useShell((s) => s.transfers.find((t) => t.message_id === `files:${community.id}:${l.id}`));
   const download = async () => {
     setBusy(true);
     try {
@@ -442,7 +445,7 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
           {l.local === 'downloaded' || l.local === 'seeding' || l.local === 'paused' ? (
             <span className="text-sm font-semibold text-success-text">{l.local === 'downloaded' ? 'Downloaded' : l.local === 'paused' ? 'Seeding paused' : 'You seed this file'}</span>
           ) : l.local === 'downloading' ? (
-            <span className="text-sm font-semibold text-text">Downloading · {Math.round(l.progress * 100)}%</span>
+            <span data-download-progress className="text-sm font-semibold text-text tabular-nums">Downloading · {Math.round((own?.progress ?? l.progress) * 100)}%{own?.rate_bps ? ` · ${formatBytes(own.rate_bps)}/s` : ''}</span>
           ) : (
             <Button disabled={busy} onClick={() => void download()}>
               <Download className="size-4" /> Download · {formatBytes(l.size)}

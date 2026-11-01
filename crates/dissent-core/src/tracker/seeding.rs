@@ -155,6 +155,8 @@ pub(crate) fn states(
 #[derive(Clone, Debug, Serialize)]
 pub struct SeedRowView {
     pub blob: String,
+    /// Its own limit is reached, so Resume alone cannot start it: the limit has to change.
+    pub limit_reached: bool,
     pub listing: String,
     pub name: String,
     pub ext: String,
@@ -303,6 +305,7 @@ impl Engine {
             };
             let name = o.body.name.clone();
             rows.push(SeedRowView {
+                limit_reached: limit_reached(record, o.body.cipher_size, now),
                 blob: data_encoding::BASE32_NOPAD.encode(blob).to_lowercase(),
                 listing: o.id.to_string(),
                 ext: name.rsplit_once('.').map(|(_, e)| e.to_ascii_uppercase()).unwrap_or_default(),
