@@ -28,6 +28,7 @@ fn realistic_720p_encode_ms_per_frame() {
                 fps,
                 bitrate_kbps: 1_000,
                 keyframe_interval: 300,
+                screen: false,
             },
         )
         .unwrap();
@@ -63,6 +64,7 @@ fn realistic_720p_decode_ms_per_frame() {
                 fps,
                 bitrate_kbps: 1_000,
                 keyframe_interval: 300,
+                screen: false,
             },
         )
         .unwrap();
@@ -100,6 +102,7 @@ fn realistic_1080p_encode_ms_per_frame() {
                     fps,
                     bitrate_kbps: kbps,
                     keyframe_interval: 300,
+                    screen: false,
                 },
             )
             .unwrap();

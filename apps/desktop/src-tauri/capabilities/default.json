@@ -20,6 +20,8 @@
     "core:window:allow-start-dragging",
     "core:window:allow-is-maximized",
     "core:window:allow-is-minimized",
-    "core:window:allow-is-focused"
+    "core:window:allow-is-focused",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-always-on-top"
   ]
 }

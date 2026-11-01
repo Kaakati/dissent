@@ -244,7 +244,7 @@ Status: **phase 1 built**, in `crates/dissent-video`. The crate holds the captur
 
 - **AV1 encoder: SVT-AV1 v4.2.0**, through `svt-av1-sys`. The source is the `third_party/SVT-AV1` git submodule, pinned to commit `9292ec8e32bce26f781f277ec8739b53426c4300` (tag v4.2.0). `svt-av1-sys` builds it with CMake and generates bindings with bindgen, and `dissent-video` wraps the raw API. The old `shiguredo_svt_av1` crate is gone, because it fetched the source by tag at build time. The crate clones SVT-AV1 at build time with `git clone --depth 1 --branch v4.2.0` from gitlab.com. The tag is not checked against a commit or hash, so the source is pinned only as far as that tag is trusted. It builds with CMake, which the crate downloads from Kitware's GitHub releases and checks against a SHA-256 pinned in `shiguredo_cmake` 4.4.0. SVT needs NASM for its x86 assembly. The encoder sits behind the `svt-av1` cargo feature, which is off by default, so a plain build needs no NASM, libclang or CMake download. Without the feature a call offers H.264 only. Real-time coding at preset 12 is the measured choice for calls. rav1e is removed. It was 10 to 20 times slower and had no non-real-time use here.
 - **AV1 decoder: rav1d 1.1.** A pure Rust port of dav1d, built for 8-bit with no assembly. dav1d's C library needs meson and NASM, so the Rust port is used instead. One thread and no frame delay, so a chunk yields its frame on the same call. The only `unsafe` in the crate is in `decode/av1.rs`, which wraps rav1d's dav1d-shaped API.
-- **H.264 encoder and decoder: OpenH264** through the `openh264` crate. Its `openh264-sys2` build compiles the bundled OpenH264 source with `cc`. The build is pure C here: `OPENH264_NO_ASM=1`. Its NASM path compiles the assembly, but the objects never reach the static library. The link then fails with unresolved SSE symbols on MSVC. Pure C is slower, so H.264 is kept to the lowest rung, 360p.
+- **H.264 encoder and decoder: OpenH264** through the `openh264` crate. Its `openh264-sys2` build compiles the bundled OpenH264 source with `cc`. The build is pure C here: `OPENH264_NO_ASM=1`. Its NASM path compiles the assembly, but the objects never reach the static library. The link then fails with unresolved SSE symbols on MSVC. Pure C is slower, so a camera with AV1 available keeps H.264 to the lowest rung, 360p. A screen in a call without AV1 runs at its own size on H.264 (see "Screen share").
 - **VP8: not built.** H.264 is the fallback instead.
 - **Negotiation.** `codec::negotiate(ours, theirs)` returns the codecs both sides support, in preference order. AV1 comes first whenever both sides have it. H.264 is picked when a peer lacks AV1. An empty result means no call. `VideoAdapter::with_codecs` keeps only the rungs for the negotiated codecs.
 
@@ -277,7 +277,9 @@ Reference numbers for SVT-AV1 and the old encoder, measured on the same host:
 - ffmpeg's `libsvtav1` at preset 12 on the easier `testsrc2` content took 2.9 ms at 720p, 300 frames. The gap to 9.9 ms is the content, plus the wrapper overhead.
 - Linux Docker, 14 cores: `libsvtav1` took 2 ms at 360p and 5 ms at 720p. Its numbers are not from the integrated path.
 
-**Quality and rate.** At 160x90 and 30 fps, the default test drops from 65 kbps to 17 kbps within a second of a `set_bitrate(40)` call. The encoder spends well under a low target at this size, so the test checks the relative drop instead of the absolute rate. rate control is fixed when SVT-AV1 is created, so `set_bitrate` finishes the old encoder, keeps its chunks, and builds a new one. The new encoder starts on a keyframe. OpenH264 is rebuilt the same way.
+**Quality and rate.** At 160x90 and 30 fps, the default test drops from 65 kbps to 17 kbps within a second of a `set_bitrate(40)` call. The encoder spends well under a low target at this size, so the test checks the relative drop instead of the absolute rate. `set_bitrate` changes the rate in place on both encoders, with no keyframe: SVT-AV1 takes a `RATE_CHANGE_EVENT` with the next picture (real-time low-delay CBR only, as here), and OpenH264 takes `ENCODER_OPTION_BITRATE`, after a higher `ENCODER_OPTION_MAX_BITRATE` when the rate rises. A rebuild, as before, sent a keyframe each time the estimate moved 10%, and a screen's keyframe is up to a megabyte.
+
+**Two encoders in one process.** SVT-AV1 trips an assertion in its resource manager, which aborts the process, when one instance is set up or torn down during another's. A camera and a screen can do that together, so `encode/svt.rs` holds a lock for those two steps.
 
 ### Capture
 
@@ -302,12 +304,88 @@ budget        = max(0, available - audio_reserve)
 | Content | Ladder, best first (size, fps, bitrate range) |
 | --- | --- |
 | Camera | AV1 720p 30 fps, 1000-2500 kbps; AV1 720p 15 fps, 600-1000 kbps; AV1 360p 15 fps, 250-600 kbps; H.264 360p 15 fps, 150-400 kbps |
-| Screen | AV1 1080p 15 fps, 1500-3000; AV1 1080p 10 fps, 1000-1500; AV1 1080p 5 fps, 700-1000; AV1 720p 10 fps, 400-700; AV1 720p 5 fps, 250-400; H.264 360p 10 fps, 150-250 kbps |
+| Screen | Built for the source, see "Screen share" |
 
 - **Order of steps.** Bitrate moves first within a rung. Then frame rate drops. Then resolution drops. Screen content drops frame rate before resolution, so text stays sharp.
 - **Pause.** Below the lowest rung's minimum, which is 150 kbps for both camera and screen, video pauses at once. It does not wait for a streak, so audio is protected immediately.
 - **Hysteresis.** A step down needs three samples below the rung's minimum. A step up needs five samples above the minimum plus 20%. A bitrate increase needs a 10% change, while decreases apply on the same sample. A budget that hovers at a threshold therefore does not flap. The unit tests cover this.
 - **Invariant.** A non-paused plan never sends more than `budget`, so video plus the audio reserve never exceeds the available bandwidth.
+
+### Screen share
+
+A share goes out at the source's own size: a 1080p screen at 1080p, a 1440p screen at 1440p, a window at the window's size. It is never scaled up, and both sides are even. The bound is 3840x2160, because OpenH264 refuses anything larger (its level 5.2) and a call must be able to fall back to H.264. A larger source is scaled to fit, keeping its shape.
+
+**Following the source.** `VideoSource::native_size` reports the picture's size on each frame. The capture thread passes a change to the budget, which builds the ladder again (`screen_ladder`), and the new plan applies without reopening anything, through `VideoSource::set_format`. A resize waits at most 2 s, so a dragged window does not send a keyframe for each step. The share's first move, from its 360p start, does not wait.
+
+**The ladder.** Frame rates at the source's size, then 720p, then H.264 at 360p:
+
+| Step | 1080p needs (kbps) | Note |
+| --- | --- | --- |
+| 60 fps | 3000 | AV1 only, and only up to 1080p's pixels. 1440p takes about 30 ms a frame on AV1, over the 16.7 ms a frame has. |
+| 30 fps | 1600 | |
+| 15 fps | 1200 | |
+| 10 fps | 800 | |
+| 5 fps | 500 | |
+| 720p 10 fps, then 5 fps | 400, 250 | Only for a source larger than 720p. |
+| 360p 10 fps, H.264 | 150 | For a slow encoder or a thin link. Never larger than the source. |
+
+A step's need follows the square root of its pixels, so 1440p needs 4/3 of these, because screen content does not cost in proportion to its size.
+
+**The bitrate.** A slider in the Screen Share dialog, which Stream settings opens during a share, chooses 1500 to 6000 kbps, 3000 by default, in steps of 250. The window keeps the choice in local storage and sends it to `Engine::set_screen_bitrate` a moment after the slider stops moving. It applies at once, with no keyframe unless it changes the frame rate. No step sends more than the choice, and a step the choice cannot reach, with the climb margin, is left out: 1500 kbps gives a 1440p screen 10 fps and a 1080p screen 15 fps. A screen that needs less than its bitrate, such as a still page, sends less.
+
+**When the link can't carry it.** The target is the smaller of the choice and what the link leaves after the audio reserve. As the budget falls, the bitrate falls first, on the same sample. Then the frame rate steps down. The size goes only when 5 fps no longer fits, so text stays sharp. On a 1440p screen that is below about 670 kbps. Audio keeps its reserve throughout.
+
+**Finding the link's size.** str0m's estimate never rises far above what was acknowledged, and a screen often sends far less than its bitrate, so a share believing the estimate would stay on low rungs however fat the link is. `ScreenLink` handles this. A share believes the estimate for its first 5 s, so that its first keyframe is made at a rate the link is known to carry. After that it picks its rung for its chosen rate, while its encoder stays at the estimate less the audio reserve (`Budget::held_to_link`) and raises the estimate by filling it. Without that hold, frames queued behind the pacer and the picture fell many seconds behind. An estimate that falls by 15% between samples means the link pushed back: the share believes the estimate for 10 s, doubling with each push back up to two minutes, until five minutes pass without one. A thin link therefore sees a retry at most that often.
+
+Probing with `set_desired_bitrate` is not used. Measured before the timer fix below, it took the estimate from 1000 kbps to about 450 with no loss. It has not been tried since.
+
+**Windows timers.** Windows wakes a sleeping thread only every 15.6 ms unless a process asks for better, and str0m's pacer sends one packet per wake-up when it runs behind. So every call on Windows carried about 800 kbps of video, whatever the link could do. A 650 KB keyframe took 6.4 s, and every frame behind it waited. Each `Call` now holds `timeBeginPeriod(1)` for as long as it lives. The same keyframe takes 1.3 s and a megabyte takes 1.4 s on loopback. This helps cameras too.
+
+**The call loop.** Each 20 ms tick read and sent packets for only 1 ms, so a call topped out near 2 Mbps of video, on any platform. While video flows the tick now works the links for up to 10 ms (`VIDEO_PUMP`), and with none it stays at 1 ms. The forwarder's own pump is unchanged: it renews its 1 ms for each packet, so it does not have this limit.
+
+**Keyframes.** A page of text is the worst case for a keyframe: 610 KB on H.264 at 1440p, and from 335 KB at 1500 kbps to 1.06 MB at 6000 kbps on AV1. So:
+- A screen has a keyframe every 30 s, not every 2 s, since a receiver that lost a frame or just joined asks for its own.
+- A request is answered no sooner than the last keyframe could have been sent at the current rate, from 200 ms to 10 s (`KEYFRAME_GAP_*`). A receiver asks again every 200 ms until one arrives, so without this one large keyframe would be followed by more.
+- str0m keeps 4000 packets to send and resend (its default of 1000 is about a megabyte) and waits 15 s for the rest of a frame (its default is 2 s, after which a large keyframe is lost for good).
+- Frames travel in order, so frames behind a keyframe wait for it. On a thin link this is a visible stall each time a keyframe is needed. No size cap exists yet: OpenH264 has no keyframe-only QP, and SVT-AV1's `max_qp_allowed` applies to every frame.
+
+**H.264.** A screen uses OpenH264's screen-content mode. On a scrolling page at 1440p and 3000 kbps its camera mode codes 5 of 90 frames, each about 200 KB, and skips the rest to stay on rate. The screen mode codes 43 of 90, each about 10 KB. It costs far more CPU: see the table below. Thread settings make no difference, since the crate leaves one slice per frame.
+
+**Decoding.** The window configures its decoders with level 5.1 strings (`avc1.42E033`, `av01.0.13M.08`), so that they cover any share up to 4K.
+
+**Ceilings.** A DM or group call has no screen ceiling: it costs nobody but its members. A server's voice channel keeps its boost ceiling (`12-boosts.md`), and a source larger than the ceiling is scaled to fit it rather than dropping to 720p. So at level 0 a 1440p screen is sent at 1080p and 15 fps.
+
+**Forwarded calls.** A direct call or a mesh gets the whole stream. In a forwarded call the layers are 180p, a middle layer, and the top rung, which is the source's size. The wire allows three layers and does not change, since the layer table is already (width, kbps). A screen taller than 720p uses 720p at 1000 kbps as its middle layer, because 360p text cannot be read and a viewer whose budget can't fit the top should still read the page. Lower layers run in OpenH264's camera mode and cost extra CPU on the sender's capture thread, which the governor sees.
+
+**Measured.** On this 24-thread Windows machine with other work running, in a release build, using the scrolling-page test picture only (`crates/dissent-video/tests/screen_cost.rs`, and `a_1080p_screen_is_shared_at_1080p`, `a_1440p_screen_is_shared_at_1440p` in `tests/it/video.rs`). No real screen was captured.
+
+Encoding only, frames not paced, mean ms per frame, in the screen configuration:
+
+| Picture | AV1 1080p | AV1 1440p | H.264 1080p | H.264 1440p |
+| --- | --- | --- | --- | --- |
+| Scrolling page, 6000 kbps | 12 | 29 | 62 | 106 |
+| Noise, 6000 kbps | 20 | 31 | 36 | 73 |
+
+Whole share through a DM call on loopback, what Bob received over 10 s of a scrolling page. The CPU governor sets the frame rate here:
+
+| Stream | Chosen bitrate | Frame rate received | kbps received |
+| --- | --- | --- | --- |
+| AV1 1080p | 3000 | 30.0 | 3103 |
+| AV1 1080p | 6000 | 30.0 | 4112 |
+| AV1 1080p | 1500 | 14.9 | 1384 |
+| AV1 1440p | 3000 | 14.9 | 2783 |
+| AV1 1440p | 6000 | 14.9 | 4499 |
+| AV1 1440p | 1500 | 10.0 | 1155 |
+| H.264 1080p | any | 10 | 340 to 750 |
+| H.264 1440p | any | 5 to 7.5 | 210 to 1120 |
+
+So 1080p30 holds on AV1. 1440p on AV1 costs about 30 ms a frame, over the governor's 80% of 33 ms, so a scrolling page runs at 15 fps here. H.264 does not reach 30 fps at either size on moving text: this build has no assembly, and screen-content mode is slow. A still screen costs much less than this. The real fix is a hardware encoder or OpenH264's assembly, both still open.
+
+**On the stage.** `screen-stage.tsx`: a shared screen takes the stage by itself, whole (`object-contain`) on black, with everyone as a strip below, which can be hidden and which a short stage gives up. Others' shares come before your own, a second sharer does not take the stage, and a viewer picks from the strip. Full screen is a button or a double-click, using the browser's full screen and the window's. Escape comes back. A stay-on-top button pins the window. Both a DM call's divider and a voice channel's (new, drag, arrow keys, double-click to reset) resize the stage. A person shows LIVE on their tile and in the voice roster. That comes from `ParticipantView.screen`: a screen frame within the last 8 s, or a paused screen. There is no wire message for it, so a share shows as over 8 s after it stops.
+
+**The dialog.** `share-dialog.tsx`: Applications and Screens tabs with thumbnails (`Engine::share_thumbnail`), then what is streaming, where to, and the quality: a preset (Better Readability is the source at 30 fps, Smoother Video is 1080p at 60), resolution 720, 1080, 1440 or Source, frame rate 15, 30 or 60, and the bitrate. During a share the same dialog changes any of these and the source without stopping.
+
+**Not verified.** Real capture: xcap's grab time at 1440p is not in these numbers, since it was never run on a real screen. It runs on the capture thread, so a slow grab lowers the frame rate. A real WebView2 decoding a 1440p stream over WebCodecs: only the mock UI ran. A real thin link: every call measurement here is on loopback, so the pushback path is covered by unit tests only.
 
 ### Runtime downgrade
 

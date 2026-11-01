@@ -391,6 +391,31 @@ pub async fn set_screen_share(
     engine(&state).await?.set_screen_share(on, target).map_err(err)
 }
 
+/// Sets the bitrate of a screen share, in kbps, for a running share and the next one. Returns what was set.
+#[tauri::command]
+pub async fn set_screen_bitrate(state: State<'_, AppState>, kbps: u32) -> Result<u32, String> {
+    Ok(engine(&state).await?.set_screen_bitrate(kbps))
+}
+
+/// Sets the tallest picture and highest frame rate of a screen share. `None` is the source's size, or no limit.
+#[tauri::command]
+pub async fn set_screen_quality(state: State<'_, AppState>, max_height: Option<u32>, max_fps: Option<u32>) -> Result<(), String> {
+    engine(&state).await?.set_screen_quality(max_height, max_fps);
+    Ok(())
+}
+
+/// A small JPEG of a display or window for the share picker, base64 encoded. Off the async threads, since a grab blocks.
+#[tauri::command]
+pub async fn share_thumbnail(state: State<'_, AppState>, target: dissent_core::ShareTarget) -> Result<String, String> {
+    use base64::Engine as _;
+    let engine = engine(&state).await?;
+    let jpeg = tauri::async_runtime::spawn_blocking(move || engine.share_thumbnail(target))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(jpeg))
+}
+
 /// The displays and windows a share can pick from.
 #[tauri::command]
 pub async fn list_share_sources() -> Result<Vec<dissent_core::ShareSource>, String> {

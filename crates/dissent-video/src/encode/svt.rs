@@ -3,6 +3,7 @@
 //! Real-time coding at preset 12 is the measured choice for calls. The "Video" section of
 //! `docs/design/04-calls.md` has the timings.
 
+use std::sync::Mutex;
 use std::{mem, ptr, slice};
 
 use svt_av1_sys as sys;
@@ -13,6 +14,11 @@ use crate::frame::Frame;
 
 /// SVT-AV1 preset. 0 is the best quality and 13 the fastest. 12 is real-time.
 pub const ENC_MODE: i8 = 12;
+
+/// SVT's setup and teardown share state across instances, and two at once trip an assertion in its
+/// resource manager, which aborts the process. A camera and a screen each hold an encoder, so they
+/// can open and close together. Each takes this lock for those two steps, and encoding runs free.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
 
 /// SVT reads `SVT_LOG` once, when its first encoder is created. Level 2 is error only, so the
 /// per-encoder `Svt[info]` lines stay off the console. A value the caller already set wins.
@@ -32,7 +38,8 @@ pub struct SvtEncoder {
     /// Frames submitted to the current encoder. SVT hands each one back by this index.
     submitted: i64,
     pts: PtsQueue,
-    pending: Vec<EncodedChunk>,
+    /// A new rate in bits per second, which goes to SVT with the next picture.
+    rate_change: Option<u32>,
 }
 
 /// One SVT-AV1 encoder instance. Dropping it closes the handle.
@@ -68,6 +75,7 @@ fn check(error: sys::EbErrorType) -> Result<()> {
 
 impl Encoder {
     fn open(config: &EncoderConfig) -> Result<Self> {
+        let _lifecycle = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         let mut handle = ptr::null_mut();
         // SAFETY: SVT writes a fresh handle into `handle` and fills the configuration with its
         // defaults. The configuration is boxed, because SVT keeps its address, so it moves into
@@ -106,8 +114,9 @@ impl Encoder {
 
     /// Queues one I420 picture. `keyframe` makes SVT code it as a key frame. As the SVT reference
     /// app does, the buffer points at an `EbSvtIOFormat` naming the three planes, and the filled
-    /// length is the frame's byte count, which SVT checks against the configured size.
-    fn send(&mut self, y: &[u8], u: &[u8], v: &[u8], keyframe: bool, pts: i64) -> Result<()> {
+    /// length is the frame's byte count, which SVT checks against the configured size. `rate` changes
+    /// the target bitrate from this picture on, in bits per second.
+    fn send(&mut self, y: &[u8], u: &[u8], v: &[u8], keyframe: bool, pts: i64, rate: Option<u32>) -> Result<()> {
         let stride = self.width;
         let chroma_stride = self.width / 2;
         let mut planes = sys::EbSvtIOFormat {
@@ -131,8 +140,21 @@ impl Encoder {
         } else {
             sys::EbAv1PictureType_EB_AV1_INVALID_PICTURE
         };
-        // SAFETY: the handle is open. SVT copies the planes out before this call returns, so the
-        // borrowed slices and `planes` only need to live for the call.
+        let mut rate_info = sys::SvtAv1RateInfo {
+            seq_qp: 0,
+            target_bit_rate: rate.unwrap_or(0),
+        };
+        let mut rate_node = sys::EbPrivDataNode {
+            node_type: sys::PrivDataType_RATE_CHANGE_EVENT,
+            data: (&mut rate_info as *mut sys::SvtAv1RateInfo).cast(),
+            size: mem::size_of::<sys::SvtAv1RateInfo>() as u32,
+            next: ptr::null_mut(),
+        };
+        if rate.is_some() {
+            header.p_app_private = (&mut rate_node as *mut sys::EbPrivDataNode).cast();
+        }
+        // SAFETY: the handle is open. SVT copies the planes and the rate node out before this call
+        // returns, so the borrowed slices, `planes` and the node only need to live for the call.
         check(unsafe { sys::svt_av1_enc_send_picture(self.handle, &mut header) })
     }
 
@@ -193,6 +215,7 @@ impl Drop for Encoder {
                 }
             }
         }
+        let _lifecycle = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: the handle is open until this drop, and is closed exactly once here.
         unsafe {
             let _ = sys::svt_av1_enc_deinit(self.handle);
@@ -211,7 +234,7 @@ impl SvtEncoder {
             keyframe_pending: false,
             submitted: 0,
             pts: PtsQueue::new(),
-            pending: Vec::new(),
+            rate_change: None,
         })
     }
 
@@ -252,12 +275,9 @@ impl VideoEncoder for SvtEncoder {
 
         let keyframe = std::mem::take(&mut self.keyframe_pending);
         self.pts.push(frame.pts_us());
-        self.encoder.send(y, u, v, keyframe, self.submitted)?;
+        self.encoder.send(y, u, v, keyframe, self.submitted, self.rate_change.take())?;
         self.submitted += 1;
-
-        let mut out = std::mem::take(&mut self.pending);
-        out.extend(Self::drain(&mut self.encoder, &mut self.pts, false)?);
-        Ok(out)
+        Self::drain(&mut self.encoder, &mut self.pts, false)
     }
 
     fn request_keyframe(&mut self) {
@@ -271,19 +291,9 @@ impl VideoEncoder for SvtEncoder {
         if kbps == self.config.bitrate_kbps {
             return Ok(());
         }
-        let next = EncoderConfig {
-            bitrate_kbps: kbps,
-            ..self.config
-        };
-        // SVT-AV1 fixes its rate control at creation. Flush the old encoder so no look-ahead frame
-        // is lost, and keep its packets for the next call.
-        self.encoder.end()?;
-        let flushed = Self::drain(&mut self.encoder, &mut self.pts, true)?;
-        self.pending.extend(flushed);
-        self.encoder = Encoder::open(&next)?;
-        self.config = next;
-        self.submitted = 0;
-        self.pts = PtsQueue::new();
+        // SVT takes a new rate with a picture when it runs real-time low-delay CBR, as here.
+        self.rate_change = Some(kbps * 1_000);
+        self.config.bitrate_kbps = kbps;
         Ok(())
     }
 }

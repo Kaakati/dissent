@@ -124,6 +124,7 @@ cmake = "0.1"
 shiguredo_cmake = "4.4"
 # H.264 fallback. The crate bundles OpenH264 source and compiles it with cc.
 openh264 = "0.9"
+openh264-sys2 = "0.9"
 rav1d = { version = "1", default-features = false, features = ["bitdepth_8"] }
 # Pure-Rust demuxers for video thumbnails: the first frame of an MP4 or MOV, and of a WebM or MKV.
 re_mp4 = "0.5"

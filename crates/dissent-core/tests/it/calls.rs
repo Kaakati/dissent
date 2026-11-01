@@ -1452,6 +1452,40 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
     }).await;
 }
 
+/// A forwarded 1440p screen: a wide tile gets the top layer, a narrow one the base, and a viewer whose
+/// budget cannot fit the top gets 720p, which it can still read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
+    heavy(7, async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
+    only_senders_speak(&everyone, &[others[0]]).await;
+    dissent_core::test_support::use_link_estimates(&everyone[forwarder].engine, false).await;
+    // A forwarded call in a server keeps its boost ceiling, so this one is at the top level.
+    dissent_core::test_support::set_boost_level(&sender.engine, Some(3));
+    sender.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
+    sender.engine.set_screen_bitrate(6_000);
+    sender.engine.set_screen_share(true, None).expect("screen share on");
+    narrow.engine.set_video_tile(&root(sender), true, 200);
+    wide.engine.set_video_tile(&root(sender), true, 2400);
+
+    let received = |viewer: &Peer| dissent_core::test_support::received_layer(&viewer.engine, &root(sender), true);
+    eventually_within(Duration::from_secs(90), "the narrow tile gets the base and the wide one a higher layer", || {
+        (received(narrow) == Some(0) && received(wide).is_some_and(|l| l > 0)).then_some(())
+    })
+    .await;
+    assert!(dissent_core::test_support::set_viewer_budget(&everyone[forwarder].engine, &root(wide), 1_200).await);
+    eventually_within(Duration::from_secs(60), "the constrained viewer moves to the middle layer", || {
+        (received(wide) == Some(1)).then_some(())
+    })
+    .await;
+    sender.engine.set_screen_share(false, None).expect("screen share off");
+    finish(everyone).await;
+    }).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_the_others() {

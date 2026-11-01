@@ -68,6 +68,68 @@ const BARS: [(u8, u8, u8); 8] = [
     (16, 16, 16),
 ];
 
+/// A page of text that scrolls: dark marks in lines on white, moved up 6 pixels each frame. This is
+/// the hard case of a screen, unlike noise: every sharp edge moves, and a keyframe costs the most.
+pub fn scrolling_document(width: u32, height: u32, index: u64) -> Frame {
+    let mut rgba = vec![255u8; (width * height * 4) as usize];
+    for y in 0..height {
+        let page_y = y as u64 + index * 6;
+        let (line, row) = (page_y / 24, page_y % 24);
+        if row >= 14 {
+            continue;
+        }
+        for x in 0..width {
+            let glyph = (x as u64 / 9).wrapping_mul(2_654_435_761).wrapping_add(line.wrapping_mul(40_503));
+            if (glyph >> 7) & 3 != 0 && x % 9 < 6 && (glyph >> (row % 8)) & 1 == 1 {
+                let at = ((y * width + x) * 4) as usize;
+                rgba[at..at + 3].copy_from_slice(&[24, 24, 28]);
+            }
+        }
+    }
+    from_packed_rgb(width, height, 4, index * 33_333, &rgba).expect("the buffer has the size of the frame")
+}
+
+/// Stands in for a screen or window of a given size: a scrolling document drawn at the format, which
+/// reports its own size as the native one. Tests change that size through `native` to resize it.
+pub struct DocumentSource {
+    format: CaptureFormat,
+    native: std::sync::Arc<std::sync::Mutex<(u32, u32)>>,
+    index: u64,
+    next_due: std::time::Instant,
+}
+
+impl DocumentSource {
+    pub fn new(format: CaptureFormat, native: std::sync::Arc<std::sync::Mutex<(u32, u32)>>) -> Self {
+        Self { format, native, index: 0, next_due: std::time::Instant::now() }
+    }
+}
+
+impl VideoSource for DocumentSource {
+    fn format(&self) -> CaptureFormat {
+        self.format
+    }
+
+    fn next_frame(&mut self) -> Result<Frame> {
+        // On a clock of its own, as a screen is, so a slow encoder does not lower the rate by more.
+        let now = std::time::Instant::now();
+        if now < self.next_due {
+            std::thread::sleep(self.next_due - now);
+        }
+        self.next_due = std::time::Instant::now().max(self.next_due) + Duration::from_micros(1_000_000 / self.format.fps.max(1) as u64);
+        self.index += 1;
+        Ok(scrolling_document(self.format.width, self.format.height, self.index))
+    }
+
+    fn native_size(&self) -> Option<(u32, u32)> {
+        Some(*self.native.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn set_format(&mut self, format: CaptureFormat) -> bool {
+        self.format = format;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

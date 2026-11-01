@@ -181,6 +181,16 @@ pub async fn planned_layer(engine: &crate::Engine, viewer_root: &str, sender_roo
     engine.planned_layer_now(viewer_root, sender_root, screen).await
 }
 
+/// The bitrate `engine`'s screen share may reach now, in kbps.
+pub fn screen_target(engine: &crate::Engine) -> Option<u32> {
+    engine.screen_target_now()
+}
+
+/// What `engine`'s screen share sends now, as (width, height, fps, kbps).
+pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
+    engine.screen_plan_now()
+}
+
 /// On the forwarder `engine`: the root id of the active speaker, whom a tight budget keeps sharp.
 pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
     engine.active_speaker_now().await

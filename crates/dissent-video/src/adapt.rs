@@ -109,76 +109,6 @@ const CAMERA: [Rung; 6] = [
     },
 ];
 
-/// Screen steps, best first. Frame rate drops first, and resolution holds until the bitrate
-/// runs out, so text stays sharp. The lowest rung is H.264 at 360p. 1080p60 and 1080p30 are AV1
-/// only, for the same reason as the camera's.
-const SCREEN: [Rung; 8] = [
-    Rung {
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 60,
-        min_kbps: 3000,
-        max_kbps: 6000,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 30,
-        min_kbps: 2000,
-        max_kbps: 3000,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 15,
-        min_kbps: 1500,
-        max_kbps: 3000,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 10,
-        min_kbps: 1000,
-        max_kbps: 1500,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1920,
-        height: 1080,
-        fps: 5,
-        min_kbps: 700,
-        max_kbps: 1000,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1280,
-        height: 720,
-        fps: 10,
-        min_kbps: 400,
-        max_kbps: 700,
-    },
-    Rung {
-        codec: Codec::Av1,
-        width: 1280,
-        height: 720,
-        fps: 5,
-        min_kbps: 250,
-        max_kbps: 400,
-    },
-    Rung {
-        codec: Codec::H264,
-        width: 640,
-        height: 360,
-        fps: 10,
-        min_kbps: 150,
-        max_kbps: 250,
-    },
-];
-
 /// Camera steps when AV1 is off: H.264 at 720p, then the 360p fallback. The AV1 ladder cannot
 /// hold an H.264 720p rung, because the AV1 360p rung falls back to H.264 360p in cost order, and
 /// H.264 720p costs more per frame than AV1 720p, so it would be a step up in cost.
@@ -201,19 +131,200 @@ const CAMERA_H264: [Rung; 2] = [
     },
 ];
 
-pub fn ladder(content: Content) -> &'static [Rung] {
-    match content {
-        Content::Camera => &CAMERA,
-        Content::Screen => &SCREEN,
+/// The lowest screen bitrate a person can choose, in kbps.
+pub const SCREEN_MIN_KBPS: u32 = 1_500;
+/// The highest screen bitrate a person can choose, in kbps.
+pub const SCREEN_MAX_KBPS: u32 = 6_000;
+/// The screen bitrate until a person chooses one, in kbps. It reaches 30 fps on a 1440p screen.
+pub const SCREEN_DEFAULT_KBPS: u32 = 3_000;
+/// The largest screen frame. OpenH264 refuses anything above 3840x2160, which is its level 5.2, and a
+/// call must be able to fall back to H.264. A larger source is scaled to fit.
+pub const SCREEN_MAX_SIZE: (u32, u32) = (3840, 2160);
+
+const P1080_PIXELS: u32 = 1920 * 1080;
+/// The frame rates a screen steps through at its own size, with what each needs at 1080p, in kbps.
+const SCREEN_RATES: [(u32, u32); 5] = [(60, 3_000), (30, 1_600), (15, 1_200), (10, 800), (5, 500)];
+/// The steps after the native size is used up: 720p, as (fps, min kbps).
+const SCREEN_720: [(u32, u32); 2] = [(10, 400), (5, 250)];
+
+/// What a screen ladder is built from: the source's size, the bitrate chosen for the share, and the
+/// largest frame the call allows, if it has a ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScreenSpec {
+    pub source: (u32, u32),
+    pub target_kbps: u32,
+    /// (width, height, fps), a server's boost ceiling.
+    pub ceiling: Option<(u32, u32, u32)>,
+    /// The tallest picture chosen for the share, or `None` for the source's own size.
+    pub max_height: Option<u32>,
+    /// The highest frame rate chosen for the share, or `None` for no limit.
+    pub max_fps: Option<u32>,
+}
+
+impl Default for ScreenSpec {
+    fn default() -> Self {
+        Self {
+            source: (1920, 1080),
+            target_kbps: SCREEN_MAX_KBPS,
+            ceiling: None,
+            max_height: None,
+            max_fps: None,
+        }
     }
 }
 
-/// The table an adapter built for `codecs` draws its rungs from. Calls without AV1 get the H.264
-/// camera ladder, and everything else gets the full ladder.
-fn table_for(content: Content, codecs: &[Codec]) -> &'static [Rung] {
-    match content {
-        Content::Camera if !codecs.contains(&Codec::Av1) => &CAMERA_H264,
-        _ => ladder(content),
+/// `width` by `height` scaled down to fit inside `max`, keeping its shape. Never scaled up. Both
+/// sides come out even, as the encoders need, and at least 2.
+pub fn fit_within(width: u32, height: u32, max: (u32, u32)) -> (u32, u32) {
+    let (w, h) = (u64::from(width.max(2)), u64::from(height.max(2)));
+    let (max_w, max_h) = (u64::from(max.0), u64::from(max.1));
+    // The smaller of the two scales, kept as a fraction so the arithmetic stays exact.
+    let (num, den) = if w * max_h > h * max_w { (max_w, w) } else { (max_h, h) };
+    let (w, h) = if num >= den { (w, h) } else { (w * num / den, h * num / den) };
+    ((w as u32 & !1).max(2), (h as u32 & !1).max(2))
+}
+
+/// The screen steps for `spec`, best first. The top steps keep the source's own size and only lower
+/// the frame rate, so text stays sharp until the link cannot carry 5 fps of it. Then 720p, then H.264
+/// at 360p, for a slow encoder or a thin link.
+///
+/// A step's minimum follows the square root of its pixels, because screen content does not cost in
+/// proportion to its size. A step the chosen bitrate cannot reach is left out, and no step sends more
+/// than it. 60 fps is AV1 up to 1080p only: 1440p took about 30 ms a frame with AV1 on the
+/// measuring machine, over the 16.7 ms a frame has. H.264 stops at 30 fps. See "Screen share" in
+/// `docs/design/04-calls.md`.
+pub fn screen_ladder(spec: ScreenSpec, codecs: &[Codec]) -> Vec<Rung> {
+    let (ceiling_size, ceiling_fps) = match spec.ceiling {
+        Some((width, height, fps)) => ((width, height), fps),
+        None => (SCREEN_MAX_SIZE, u32::MAX),
+    };
+    let ceiling_fps = ceiling_fps.min(spec.max_fps.unwrap_or(u32::MAX));
+    let max = (SCREEN_MAX_SIZE.0.min(ceiling_size.0), SCREEN_MAX_SIZE.1.min(ceiling_size.1).min(spec.max_height.unwrap_or(u32::MAX)));
+    let (width, height) = fit_within(spec.source.0, spec.source.1, max);
+    let target = spec.target_kbps;
+    let codec = if codecs.contains(&Codec::Av1) { Codec::Av1 } else { Codec::H264 };
+    let scale = (f64::from(width * height) / f64::from(P1080_PIXELS)).sqrt().max(0.4);
+    let bottom_size = fit_within(width, height, (640, 360));
+
+    let mut rungs: Vec<Rung> = SCREEN_RATES
+        .iter()
+        .filter(|(fps, _)| match codec {
+            Codec::Av1 => *fps < 60 || width * height <= P1080_PIXELS,
+            Codec::H264 => *fps <= 30,
+        })
+        .map(|(fps, min)| Rung {
+            codec,
+            width,
+            height,
+            fps: *fps,
+            min_kbps: (f64::from(*min) * scale) as u32,
+            max_kbps: target,
+        })
+        // A climb needs the margin above a rung's minimum, so a rung without it could never be reached.
+        .filter(|rung| meets(target, rung.min_kbps, UP_MARGIN_PERCENT))
+        .collect();
+    let (w720, h720) = fit_within(width, height, (1280, 720));
+    if (w720, h720) != (width, height) {
+        rungs.extend(SCREEN_720.iter().map(|(fps, min)| Rung {
+            codec,
+            width: w720,
+            height: h720,
+            fps: *fps,
+            min_kbps: *min,
+            max_kbps: target,
+        }));
+    }
+    rungs.push(Rung {
+        codec: Codec::H264,
+        width: bottom_size.0,
+        height: bottom_size.1,
+        fps: 10,
+        min_kbps: 150,
+        max_kbps: 250,
+    });
+    // Each step must need less than the one above, whatever shape the source has.
+    let mut last = u32::MAX;
+    rungs.retain(|rung| {
+        let keep = rung.min_kbps < last && rung.fps <= ceiling_fps.max(10) && codecs.contains(&rung.codec);
+        if keep {
+            last = rung.min_kbps;
+        }
+        keep
+    });
+    rungs
+}
+
+/// How much the estimate must fall between two samples to count as the link pushing back.
+const CONGESTION_FALL_PERCENT: u32 = 15;
+/// How long a new share believes the estimate. Its first keyframe is its largest, up to a megabyte at
+/// 1440p and 6000 kbps. Made at the rate the link is known to carry it is about a third of that.
+const TRUST_START: Duration = Duration::from_secs(5);
+/// How long a share believes the estimate after the link pushes back. It doubles each time the link
+/// pushes back again, and starts over after `TRUST_RESET` with no push back.
+const TRUST_HOLD: Duration = Duration::from_secs(10);
+const TRUST_HOLD_MAX: Duration = Duration::from_secs(120);
+const TRUST_RESET: Duration = Duration::from_secs(300);
+
+/// Decides how much of the link a share may plan for.
+///
+/// The estimator never rises far above what was acknowledged, and a screen often sends far less than
+/// its bitrate, so a share of a still page would stay on the low rungs however fat the link is. So a
+/// share picks its rung for its chosen rate, while its encoder stays at the estimate and raises it by
+/// filling it. When the estimate falls the link has pushed back, and the estimate is believed for a while. See "Screen share" in `docs/design/04-calls.md`.
+#[derive(Debug)]
+pub struct ScreenLink {
+    last_estimate: u32,
+    believe_until: Option<Instant>,
+    last_push_back: Option<Instant>,
+    hold: Duration,
+}
+
+impl Default for ScreenLink {
+    fn default() -> Self {
+        Self {
+            last_estimate: 0,
+            believe_until: None,
+            last_push_back: None,
+            hold: TRUST_HOLD,
+        }
+    }
+}
+
+impl ScreenLink {
+    /// What to plan for, in kbps, from the estimate now and what the share wants to send.
+    pub fn available(&mut self, now: Instant, estimate: u32, wanted: u32) -> u32 {
+        if self.last_estimate == 0 {
+            self.believe_until = Some(now + TRUST_START);
+        }
+        if self.last_push_back.is_some_and(|at| now.duration_since(at) >= TRUST_RESET) {
+            self.hold = TRUST_HOLD;
+            self.last_push_back = None;
+        }
+        let fell = u64::from(estimate) * 100 < u64::from(self.last_estimate) * u64::from(100 - CONGESTION_FALL_PERCENT);
+        self.last_estimate = estimate;
+        if fell {
+            // Only one push back counts per hold, as the estimate falls over several samples.
+            if self.believe_until.is_none_or(|until| now >= until) {
+                self.believe_until = Some(now + self.hold);
+                self.hold = (self.hold * 2).min(TRUST_HOLD_MAX);
+                self.last_push_back = Some(now);
+            }
+            return estimate;
+        }
+        if self.believe_until.is_some_and(|until| now < until) {
+            return estimate;
+        }
+        estimate.max(wanted)
+    }
+}
+
+/// The camera table an adapter built for `codecs` draws its rungs from. Calls without AV1 get the
+/// H.264 camera ladder.
+fn camera_table(codecs: &[Codec]) -> &'static [Rung] {
+    if codecs.contains(&Codec::Av1) {
+        &CAMERA
+    } else {
+        &CAMERA_H264
     }
 }
 
@@ -222,7 +333,7 @@ fn table_for(content: Content, codecs: &[Codec]) -> &'static [Rung] {
 pub struct VideoPlan {
     /// Codec for the encoder, or `None` while paused.
     pub codec: Option<Codec>,
-    /// Index into `ladder(content)`, or `None` while paused.
+    /// Index into the adapter's rungs, or `None` while paused.
     pub rung: Option<usize>,
     pub width: u32,
     pub height: u32,
@@ -257,6 +368,8 @@ pub struct VideoAdapter {
     /// a lower rung, so the effective rung is the larger of the two indices.
     cpu_floor: usize,
     target_kbps: u32,
+    /// What the link left for video at the last sample.
+    budget: u32,
     down_streak: u32,
     up_streak: u32,
 }
@@ -271,22 +384,54 @@ impl VideoAdapter {
     /// Starts paused, with rungs only for `codecs`. `None` when no rung uses one of them,
     /// which means the peers share no video codec.
     pub fn with_codecs(content: Content, codecs: &[Codec]) -> Option<Self> {
-        let ladder: Vec<Rung> = table_for(content, codecs)
-            .iter()
-            .copied()
-            .filter(|rung| codecs.contains(&rung.codec))
-            .collect();
-        if ladder.is_empty() {
+        let ladder = match content {
+            Content::Camera => camera_table(codecs).iter().copied().filter(|rung| codecs.contains(&rung.codec)).collect(),
+            Content::Screen => screen_ladder(ScreenSpec::default(), codecs),
+        };
+        Self::from_rungs(ladder)
+    }
+
+    /// Starts paused, on `rungs`, best first. `None` when there are none.
+    pub fn from_rungs(rungs: Vec<Rung>) -> Option<Self> {
+        if rungs.is_empty() {
             return None;
         }
         Some(Self {
-            ladder,
+            ladder: rungs,
             rung: None,
             cpu_floor: 0,
             target_kbps: 0,
+            budget: 0,
             down_streak: 0,
             up_streak: 0,
         })
+    }
+
+    /// Moves to new rungs without pausing, as when a shared window resizes or a person chooses another
+    /// bitrate. The stream takes the best new rung the last budget clears, and a CPU floor stays at
+    /// the same step, so a slow encoder does not climb because of this. An empty list is ignored.
+    pub fn set_rungs(&mut self, rungs: Vec<Rung>) {
+        if rungs.is_empty() {
+            return;
+        }
+        let (top, floor) = (self.ladder[0], self.ladder[self.cpu_floor]);
+        let was_stepped = self.cpu_floor > 0;
+        let at_full_size = (floor.width, floor.height) == (top.width, top.height);
+        self.ladder = rungs;
+        let last = self.ladder.len() - 1;
+        self.cpu_floor = if !was_stepped {
+            0
+        } else if at_full_size {
+            // Encode time barely grows with a screen's size, so the same frame rate is the same step.
+            self.ladder.iter().position(|rung| rung.fps <= floor.fps).unwrap_or(last)
+        } else {
+            self.ladder.iter().position(|rung| pixel_rate(*rung) <= pixel_rate(floor)).unwrap_or(last)
+        };
+        if self.rung.is_some() {
+            self.rung = Some(best_rung(&self.ladder, self.budget, 0));
+        }
+        self.reset_streaks();
+        self.retarget(self.budget, true);
     }
 
     /// The rungs this adapter moves between, best first.
@@ -331,6 +476,7 @@ impl VideoAdapter {
     pub fn update(&mut self, available_kbps: u32, audio_target_kbps: u32) -> VideoPlan {
         let ladder = &self.ladder;
         let budget = available_kbps.saturating_sub(audio_reserve_kbps(audio_target_kbps));
+        self.budget = budget;
         let floor = ladder[ladder.len() - 1].min_kbps;
         let before = self.rung;
 
@@ -653,8 +799,8 @@ mod tests {
 
     #[test]
     fn ladders_step_down_in_order() {
-        for content in [Content::Camera, Content::Screen] {
-            let steps = ladder(content);
+        let screen = screen_ladder(ScreenSpec::default(), &Codec::ALL);
+        for (content, steps) in [(Content::Camera, &CAMERA[..]), (Content::Screen, &screen[..])] {
             for pair in steps.windows(2) {
                 let (hi, lo) = (pair[0], pair[1]);
                 assert!(lo.min_kbps < hi.min_kbps, "{content:?}: bitrate must fall");
@@ -678,7 +824,7 @@ mod tests {
 
     #[test]
     fn screen_drops_frame_rate_before_resolution() {
-        let steps = ladder(Content::Screen);
+        let steps = screen_ladder(ScreenSpec::default(), &Codec::ALL);
         let first_720 = steps.iter().position(|r| r.height == 720).unwrap();
         assert!(steps[..first_720].iter().all(|r| r.height == 1080));
         assert!(steps[..first_720].windows(2).all(|p| p[0].fps > p[1].fps));
@@ -813,7 +959,7 @@ mod tests {
 
     #[test]
     fn slow_encoder_triggers_a_downgrade_after_a_sustained_run() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for sample in 1..=CPU_SLOW_SAMPLES {
             let verdict = governor.observe(60.0, steps, 0);
@@ -831,7 +977,7 @@ mod tests {
 
     #[test]
     fn a_single_slow_frame_does_not_downgrade() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for _ in 0..200 {
             governor.observe(5.0, steps, 0);
@@ -844,7 +990,7 @@ mod tests {
 
     #[test]
     fn the_lowest_rung_cannot_downgrade() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for _ in 0..100 {
             assert_eq!(
@@ -856,7 +1002,7 @@ mod tests {
 
     #[test]
     fn a_fast_encoder_upgrades_after_sustained_headroom() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for sample in 1..=CPU_FAST_SAMPLES {
             let verdict = governor.observe(5.0, steps, CAM_720_30);
@@ -870,7 +1016,7 @@ mod tests {
 
     #[test]
     fn a_fast_encoder_at_the_top_rung_never_downgrades() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for _ in 0..1_000 {
             assert_eq!(governor.observe(5.0, steps, 0), CpuVerdict::Keep);
@@ -879,7 +1025,7 @@ mod tests {
 
     #[test]
     fn cost_near_the_threshold_does_not_flap() {
-        let steps = ladder(Content::Camera);
+        let steps = &CAMERA[..];
         let mut governor = CpuGovernor::new();
         for i in 0..500 {
             let cost = if i % 2 == 0 { 20.0 } else { 30.0 };
@@ -1037,6 +1183,188 @@ mod tests {
             adapter.apply_cpu(CpuVerdict::Downgrade);
         }
         run(&mut adapter, RESERVE + 2_000, 10);
-        assert_eq!(adapter.plan().rung, Some(SCREEN.len() - 1));
+        assert_eq!(adapter.plan().rung, Some(adapter.rungs().len() - 1));
+    }
+
+    fn screen(source: (u32, u32), target_kbps: u32) -> Vec<Rung> {
+        screen_ladder(ScreenSpec { source, target_kbps, ..ScreenSpec::default() }, &Codec::ALL)
+    }
+
+    fn screen_h264(source: (u32, u32), target_kbps: u32) -> Vec<Rung> {
+        screen_ladder(ScreenSpec { source, target_kbps, ..ScreenSpec::default() }, &[Codec::H264])
+    }
+
+    #[test]
+    fn a_screen_streams_at_its_own_size_and_is_never_scaled_up() {
+        for (source, expected) in [
+            ((1920, 1080), (1920, 1080)),
+            ((2560, 1440), (2560, 1440)),
+            ((3440, 1440), (3440, 1440)),
+            ((3840, 2160), (3840, 2160)),
+            ((1280, 800), (1280, 800)),
+            ((1366, 768), (1366, 768)),
+            ((801, 601), (800, 600)),
+            ((5120, 2880), (3840, 2160)),
+        ] {
+            for rungs in [screen(source, 3_000), screen_h264(source, 3_000)] {
+                let top = rungs[0];
+                assert_eq!((top.width, top.height), expected, "the top rung of {source:?}");
+                assert!(rungs.iter().all(|r| r.width <= expected.0 && r.height <= expected.1 && r.width % 2 == 0 && r.height % 2 == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn fit_within_keeps_the_shape_and_even_sides() {
+        assert_eq!(fit_within(1920, 1200, (1280, 720)), (1152, 720));
+        assert_eq!(fit_within(1000, 3000, (1280, 720)), (240, 720));
+        assert_eq!(fit_within(640, 360, (1920, 1080)), (640, 360));
+        assert_eq!(fit_within(1, 1, (640, 360)), (2, 2));
+    }
+
+    #[test]
+    fn every_source_gets_an_ordered_ladder_ending_in_h264() {
+        for source in [(1920, 1080), (2560, 1440), (3840, 2160), (900, 722), (720, 1400), (640, 360), (320, 180), (120, 80), (5120, 1440)] {
+            for target in [SCREEN_MIN_KBPS, SCREEN_DEFAULT_KBPS, SCREEN_MAX_KBPS] {
+                let rungs = screen(source, target);
+                assert_eq!(rungs.last().unwrap().codec, Codec::H264, "{source:?} at {target}");
+                for pair in rungs.windows(2) {
+                    assert!(pair[1].min_kbps < pair[0].min_kbps, "{source:?} at {target}: {rungs:?}");
+                    assert!(pair[1].width * pair[1].height <= pair[0].width * pair[0].height);
+                }
+                assert!(rungs.iter().all(|r| r.max_kbps <= target && r.min_kbps <= r.max_kbps), "{source:?} at {target}: {rungs:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_chosen_bitrate_limits_what_the_stream_sends_and_its_frame_rate() {
+        // 6000 at 1440p reaches 30 fps. 1500 keeps the size and drops to 10 fps.
+        let fps = |rungs: &[Rung]| rungs[0].fps;
+        assert_eq!(fps(&screen((2560, 1440), 6_000)), 30);
+        assert_eq!(fps(&screen((2560, 1440), 3_000)), 30);
+        assert_eq!(fps(&screen((2560, 1440), 1_500)), 10);
+        assert_eq!(fps(&screen((1920, 1080), 6_000)), 60);
+        assert_eq!(fps(&screen((1920, 1080), 1_500)), 15);
+        assert_eq!(fps(&screen_h264((1920, 1080), 6_000)), 30, "H.264 stops at 30 fps");
+
+        let mut adapter = VideoAdapter::from_rungs(screen((2560, 1440), 3_000)).unwrap();
+        let plan = run(&mut adapter, RESERVE + 50_000, 10);
+        assert_eq!((plan.width, plan.height, plan.fps, plan.target_kbps), (2560, 1440, 30, 3_000), "a fat link sends the chosen rate, no more");
+    }
+
+    #[test]
+    fn a_congested_link_lowers_the_bitrate_then_the_frame_rate_and_keeps_the_size() {
+        let mut adapter = VideoAdapter::from_rungs(screen((2560, 1440), 6_000)).unwrap();
+        let plan = run(&mut adapter, RESERVE + 50_000, 10);
+        assert_eq!((plan.height, plan.fps, plan.target_kbps), (1440, 30, 6_000));
+
+        let plan = run(&mut adapter, RESERVE + 3_000, 10);
+        assert_eq!((plan.height, plan.fps, plan.target_kbps), (1440, 30, 3_000), "the bitrate moves first");
+        let plan = run(&mut adapter, RESERVE + 1_500, 10);
+        assert_eq!((plan.height, plan.fps), (1440, 10), "then the frame rate, at the same size");
+        let plan = run(&mut adapter, RESERVE + 900, 10);
+        assert_eq!((plan.height, plan.fps), (1440, 5));
+        let plan = run(&mut adapter, RESERVE + 600, 10);
+        assert_eq!(plan.height, 720, "the size goes only when 5 fps does not fit");
+    }
+
+    #[test]
+    fn new_rungs_keep_the_stream_running_at_the_new_size_and_rate() {
+        let mut adapter = VideoAdapter::from_rungs(screen((2560, 1440), 6_000)).unwrap();
+        run(&mut adapter, RESERVE + 50_000, 10);
+        adapter.set_rungs(screen((1600, 900), 6_000));
+        let plan = adapter.plan();
+        assert!(!plan.is_paused(), "a resize does not pause the stream");
+        assert_eq!((plan.width, plan.height, plan.target_kbps), (1600, 900, 6_000));
+
+        adapter.set_rungs(screen((1600, 900), 2_000));
+        assert_eq!(adapter.plan().target_kbps, 2_000, "a lower choice applies at once");
+        adapter.set_rungs(screen((1600, 900), 5_000));
+        assert_eq!(adapter.plan().target_kbps, 5_000, "and so does a higher one");
+    }
+
+    #[test]
+    fn a_cpu_floor_keeps_its_cost_when_the_rungs_change() {
+        let mut adapter = VideoAdapter::from_rungs(screen_h264((2560, 1440), 6_000)).unwrap();
+        run(&mut adapter, RESERVE + 50_000, 10);
+        adapter.apply_cpu(CpuVerdict::Downgrade);
+        let plan = adapter.update(RESERVE + 50_000, AUDIO);
+        assert_eq!((plan.height, plan.fps), (1440, 15), "a slow H.264 encoder keeps 1440p at 15 fps");
+        adapter.set_rungs(screen_h264((2560, 1440), 5_000));
+        assert_eq!(adapter.plan().fps, 15, "choosing a bitrate does not lift the floor");
+    }
+
+    #[test]
+    fn a_boost_ceiling_scales_a_larger_screen_rather_than_dropping_to_720p() {
+        let rungs = screen_ladder(ScreenSpec { source: (2560, 1440), target_kbps: 6_000, ceiling: Some((1920, 1080, 15)), ..ScreenSpec::default() }, &Codec::ALL);
+        assert_eq!((rungs[0].width, rungs[0].height, rungs[0].fps), (1920, 1080, 15));
+    }
+
+    #[test]
+    fn the_lowest_rung_of_a_small_source_is_not_stretched() {
+        let rungs = screen((320, 180), SCREEN_DEFAULT_KBPS);
+        let bottom = rungs.last().unwrap();
+        assert_eq!((bottom.width, bottom.height), (320, 180));
+    }
+
+    #[test]
+    fn a_share_plans_for_its_rate_until_the_link_pushes_back() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut link = ScreenLink::default();
+        assert_eq!(link.available(at(0), 1_000, 3_000), 1_000, "a new share starts on what the link is known to carry");
+        assert_eq!(link.available(at(5), 1_000, 3_000), 3_000, "then a low estimate from a quiet stream is not a limit");
+        assert_eq!(link.available(at(6), 1_100, 3_000), 3_000);
+        assert_eq!(link.available(at(7), 5_000, 3_000), 5_000, "the estimate wins when it is higher");
+
+        assert_eq!(link.available(at(8), 1_500, 3_000), 1_500, "a fall means the link pushed back");
+        assert_eq!(link.available(at(10), 1_600, 3_000), 1_600, "and the estimate holds for a while");
+        assert_eq!(link.available(at(17), 1_600, 3_000), 1_600);
+        assert_eq!(link.available(at(18), 1_600, 3_000), 3_000, "then the share tries again");
+
+        assert_eq!(link.available(at(19), 1_000, 3_000), 1_000, "a second push back");
+        assert_eq!(link.available(at(38), 1_000, 3_000), 1_000, "holds twice as long");
+        assert_eq!(link.available(at(39), 1_000, 3_000), 3_000);
+    }
+
+    #[test]
+    fn a_link_that_keeps_pushing_back_is_tried_less_and_less_often() {
+        let t0 = Instant::now();
+        let mut link = ScreenLink::default();
+        link.available(t0, 5_000, 3_000);
+        let (mut now, mut holds) = (5u64, Vec::new());
+        for _ in 0..6 {
+            link.available(t0 + Duration::from_secs(now), 5_000, 3_000);
+            now += 1;
+            link.available(t0 + Duration::from_secs(now), 1_000, 3_000);
+            let start = now;
+            while link.available(t0 + Duration::from_secs(now), 1_000, 3_000) == 1_000 {
+                now += 1;
+            }
+            holds.push(now - start);
+        }
+        assert_eq!(holds, [10, 20, 40, 80, 120, 120]);
+    }
+
+    #[test]
+    fn a_quiet_spell_forgets_the_push_backs() {
+        let t0 = Instant::now();
+        let mut link = ScreenLink::default();
+        link.available(t0, 5_000, 3_000);
+        link.available(t0 + Duration::from_secs(6), 1_000, 3_000);
+        link.available(t0 + Duration::from_secs(400), 5_000, 3_000);
+        link.available(t0 + Duration::from_secs(401), 1_000, 3_000);
+        assert_eq!(link.available(t0 + Duration::from_secs(410), 1_000, 3_000), 1_000);
+        assert_eq!(link.available(t0 + Duration::from_secs(411), 1_000, 3_000), 3_000, "back to a 10 s hold");
+    }
+
+    #[test]
+    fn a_chosen_resolution_and_frame_rate_hold_the_ladder() {
+        let spec = ScreenSpec { source: (2560, 1440), target_kbps: 6_000, max_height: Some(720), max_fps: Some(15), ..ScreenSpec::default() };
+        let rungs = screen_ladder(spec, &Codec::ALL);
+        assert_eq!((rungs[0].width, rungs[0].height, rungs[0].fps), (1280, 720, 15));
+        let small = ScreenSpec { source: (1280, 720), target_kbps: 6_000, max_height: Some(1080), ..ScreenSpec::default() };
+        assert_eq!(screen_ladder(small, &Codec::ALL)[0].height, 720, "a chosen height never scales up");
     }
 }

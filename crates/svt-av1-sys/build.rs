@@ -43,7 +43,7 @@ fn main() {
         .header(header.to_str().expect("the header path is UTF-8"))
         .clang_arg(format!("-I{}", api.display()))
         .allowlist_function("svt_av1_enc_.*")
-        .allowlist_type("EbSvt.*|EbComponentType|EbBufferHeaderType|EbErrorType|EbAv1PictureType|EbColorFormat|EbSvtAv1EncConfiguration|PredStructure|SvtAv1RcMode|SvtAv1IntraRefreshType")
+        .allowlist_type("EbSvt.*|EbComponentType|EbBufferHeaderType|EbErrorType|EbAv1PictureType|EbColorFormat|EbSvtAv1EncConfiguration|PredStructure|SvtAv1RcMode|SvtAv1IntraRefreshType|EbPrivDataNode|PrivDataType|SvtAv1RateInfo")
         .allowlist_var("EB_.*|SVT_AV1_.*")
         .derive_debug(false)
         .layout_tests(false)

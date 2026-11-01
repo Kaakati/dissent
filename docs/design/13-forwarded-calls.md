@@ -170,6 +170,7 @@ Built in phase 2, except where it says otherwise.
   encoder fed a box-scaled copy of the frame (`Frame::scaled_i420`). Each layer numbers its frames
   on its own. The lower layers cost about 150 and 400 kbps, which come off the uplink budget before
   the top rung is planned, so the CPU governor and the ladder see the whole cost.
+- **A screen's middle layer.** A screen taller than 720p sends 720p at 1000 kbps in place of 360p, so a viewer whose budget cannot fit the top can still read it. Its top layer is the source's size, up to 3840x2160 (`04-calls.md`, "Screen share"). Choosing a layer needs nothing new: the forwarder reads widths and rates from the table.
 - **AV1 is simulcast too, for now.** The top rung may be AV1, as before, but the lower layers are
   always H.264. SVT-AV1 has no real-time SVC mode in this build, and a second SVT encoder per layer
   costs too much CPU. A layer's codec rides in each frame's header, and a receiver keys its decoders

@@ -75,6 +75,7 @@ fn a_slow_encoder_triggers_the_governor_downgrade() {
                 fps: 30,
                 bitrate_kbps: 800,
                 keyframe_interval: 60,
+                screen: false,
             },
         )
         .unwrap(),

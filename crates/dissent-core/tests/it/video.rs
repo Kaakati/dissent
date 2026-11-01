@@ -234,3 +234,132 @@ async fn a_camera_in_a_dm_call_is_encoded_with_av1_when_both_sides_agree() {
     .await;
 }
 
+/// What Bob received of a share over a span.
+#[derive(Debug)]
+struct Received {
+    fps: f64,
+    kbps: f64,
+    largest_key: usize,
+}
+
+fn measure(frames: &[EncodedVideo], seconds: f64) -> Received {
+    let bytes: usize = frames.iter().map(|f| f.payload.len()).sum();
+    Received {
+        fps: frames.len() as f64 / seconds,
+        kbps: bytes as f64 * 8.0 / seconds / 1_000.0,
+        largest_key: frames.iter().filter(|f| f.keyframe).map(|f| f.payload.len()).max().unwrap_or(0),
+    }
+}
+
+/// Decodes `frame`, a keyframe, and returns the size of its picture.
+fn keyframe_size(frame: &EncodedVideo) -> Option<(u32, u32)> {
+    let codec = if frame.av1 { dissent_video::Codec::Av1 } else { dissent_video::Codec::H264 };
+    let mut decoder = dissent_video::decode::open(codec).ok()?;
+    let pictures = decoder.decode(&frame.payload, 0).ok()?;
+    pictures.last().map(|p| (p.width(), p.height()))
+}
+
+/// A share of a screen of `size` in a DM call: Bob gets it at that size, with the whole stream, and the
+/// bitrate slider moves it during the share.
+async fn share_reaches_its_own_size(size: (u32, u32)) {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    make_contacts_ready(&alice, &bob).await;
+
+    let (tx, rx) = std::sync::mpsc::channel::<EncodedVideo>();
+    bob.engine.set_encoded_video_sink(Some(Arc::new(move |frame| {
+        tx.send(frame).is_ok()
+    })));
+    let mut bob_events = bob.engine.subscribe();
+    alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
+    accept_incoming(&bob.engine, &mut bob_events).await;
+    eventually("the call is up on both sides", || {
+        alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+    })
+    .await;
+
+    alice.engine.set_test_capture(TestCapture::Document { width: size.0, height: size.1 });
+    assert_eq!(alice.engine.set_screen_bitrate(3_000), 3_000);
+    alice.engine.set_screen_share(true, None).expect("screen share on");
+
+    let started = Instant::now();
+    let mut native_at = None;
+    while started.elapsed() < Duration::from_secs(45) {
+        let Ok(frame) = rx.recv_timeout(Duration::from_secs(1)) else {
+            continue;
+        };
+        if frame.keyframe && keyframe_size(&frame) == Some(size) {
+            native_at = Some(started.elapsed());
+            println!("SHARE keyframe of {} bytes, AV1 {}", frame.payload.len(), frame.av1);
+            break;
+        }
+    }
+    let sharing = eventually("Bob sees that Alice shares", || {
+        bob.engine.call_state().filter(|c| c.participants.iter().any(|p| p.screen))
+    })
+    .await;
+    assert_eq!(sharing.participants.len(), 1);
+    let native_at = native_at.unwrap_or_else(|| panic!("Bob never got a {size:?} keyframe"));
+    println!("SHARE {size:?}: at its own size after {:.1} s", native_at.as_secs_f64());
+
+    let span = |seconds: u64| {
+        let until = Instant::now() + Duration::from_secs(seconds);
+        let mut frames = Vec::new();
+        while Instant::now() < until {
+            frames.extend(rx.recv_timeout(Duration::from_millis(200)));
+        }
+        measure(&frames, seconds as f64)
+    };
+    let plan = || dissent_core::test_support::screen_plan(&alice.engine).expect("a share runs");
+    // The share climbs off its start, on the rate the link is known to carry.
+    span(10);
+    let at_3000 = span(10);
+    println!("SHARE {size:?} at 3000 kbps: {:?} {at_3000:?}", plan());
+    assert_eq!((plan().0, plan().1), size, "the share stays at its own size");
+    assert!(plan().3 <= 3_000, "and at its bitrate: {:?}", plan());
+    assert!(at_3000.fps >= 3.0, "and keeps moving: {at_3000:?}");
+    assert!(at_3000.largest_key < 2_000_000, "and a keyframe fits what str0m keeps to send: {at_3000:?}");
+    assert!(at_3000.kbps <= 3_000.0 * 1.5, "and sends near its bitrate at most: {at_3000:?}");
+
+    alice.engine.set_screen_bitrate(6_000);
+    span(5);
+    let at_6000 = span(10);
+    println!("SHARE {size:?} at 6000 kbps: {:?} {at_6000:?}", plan());
+    let target = || dissent_core::test_support::screen_target(&alice.engine);
+    assert_eq!(target(), Some(6_000), "the slider raises the share's rate during a share");
+
+    alice.engine.set_screen_bitrate(1_500);
+    span(5);
+    let at_1500 = span(10);
+    println!("SHARE {size:?} at 1500 kbps: {:?} {at_1500:?}", plan());
+    assert_eq!(target(), Some(1_500), "and lowers it");
+    assert!(plan().3 <= 1_500, "and the encoder follows: {:?}", plan());
+    assert_eq!((plan().0, plan().1), size, "without touching the size");
+    assert!(at_1500.kbps <= 1_500.0 * 1.5, "the share stays near a lowered bitrate: {at_1500:?}");
+
+    alice.engine.set_screen_share(false, None).expect("screen share off");
+    eventually_within(Duration::from_secs(20), "Bob sees that the share ended", || {
+        bob.engine.call_state().filter(|c| c.participants.iter().all(|p| !p.screen))
+    })
+    .await;
+    bob.engine.set_encoded_video_sink(None);
+    finish(vec![alice, bob]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_1080p_screen_is_shared_at_1080p() {
+    // SERIAL first, as the other tests here take it: they hold it while they wait for the run lock.
+    let _serial = SERIAL.lock().await;
+    // Encoding a large picture takes the CPU of many engines, so it does not run beside them.
+    heavy(7, share_reaches_its_own_size((1920, 1080))).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_1440p_screen_is_shared_at_1440p() {
+    // SERIAL first, as the other tests here take it: they hold it while they wait for the run lock.
+    let _serial = SERIAL.lock().await;
+    // Encoding a large picture takes the CPU of many engines, so it does not run beside them.
+    heavy(7, share_reaches_its_own_size((2560, 1440))).await;
+}

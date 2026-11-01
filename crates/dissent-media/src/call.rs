@@ -43,6 +43,48 @@ const PLI_RETRY: Duration = Duration::from_millis(200);
 /// first estimate arrives.
 pub(crate) const BWE_INITIAL_KBPS: u64 = 1_000;
 
+/// Packets str0m keeps to send and resend. A keyframe of a page of text at 1440p can reach a megabyte,
+/// which is about 900 packets, and frames keep arriving behind it. Its default is 1,000.
+const SEND_BUFFER_VIDEO: usize = 4_000;
+/// How long str0m waits for the rest of a frame before it gives the frame up. A large keyframe can take
+/// seconds to pace out on a thin link. After its default of 2 s the keyframe would be lost for good, and
+/// the sender asked for another, just as large.
+const REORDERING_TIMEOUT_VIDEO: Duration = Duration::from_secs(15);
+
+/// Windows wakes a sleeping thread only every 15.6 ms unless a process asks for better. str0m's pacer
+/// sends one packet per wake-up once it runs behind, so without this a call on Windows carries about
+/// 800 kbps of video, whatever the link can do. Held for as long as a call lives.
+struct FineTimer;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(period_ms: u32) -> u32;
+    fn timeEndPeriod(period_ms: u32) -> u32;
+}
+
+impl FineTimer {
+    fn new() -> Self {
+        // SAFETY: both only set a process-wide timer resolution. Windows counts them, so calls may overlap,
+        // and each is paired with one in `Drop`.
+        #[cfg(windows)]
+        unsafe {
+            timeBeginPeriod(1);
+        }
+        Self
+    }
+}
+
+impl Drop for FineTimer {
+    fn drop(&mut self) {
+        // SAFETY: as in `new`.
+        #[cfg(windows)]
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
 /// How often str0m reports peer and media statistics.
 const STATS_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -135,6 +177,7 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     keyframe_requested: bool,
     video_replay: VideoReplay,
     /// The latest bandwidth estimate from str0m, in kbps, and the callback that hears it.
+    _fine_timer: FineTimer,
     video_available_kbps: Option<u32>,
     video_available_cb: Option<Box<dyn FnMut(u32) + Send>>,
     started: Instant,
@@ -172,6 +215,8 @@ fn new_rtc(start: Instant, max_datagram: Option<usize>) -> Result<Rtc> {
         .enable_h264(true)
         .enable_av1(true)
         .enable_bwe(Some(Bitrate::kbps(BWE_INITIAL_KBPS)))
+        .set_send_buffer_video(SEND_BUFFER_VIDEO)
+        .set_reordering_timeout_video(Some(REORDERING_TIMEOUT_VIDEO))
         .set_stats_interval(Some(STATS_INTERVAL));
     if let Some(max) = max_datagram {
         if !(MTU_MIN..=MTU_MAX).contains(&max) {
@@ -391,6 +436,7 @@ impl<T: PacketTransport> Call<T> {
             last_pli: None,
             keyframe_requested: false,
             video_replay: VideoReplay::default(),
+            _fine_timer: FineTimer::new(),
             video_available_kbps: None,
             video_available_cb: None,
             started: now,

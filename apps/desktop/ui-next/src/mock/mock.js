@@ -5,6 +5,17 @@ import { toast } from '../lib/toasts';
 import disclaimerText from '../../../../../DISCLAIMER.md?raw';
 
 // The bundled notice's date, which the mock counts as accepted unless a page asks otherwise (?disclaimer=).
+// A plain JPEG of a given size, base64 encoded, for the mock's screens and thumbnails.
+function fakeJpeg(width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#20406a';
+  g.fillRect(0, 0, width, height);
+  return canvas.toDataURL('image/jpeg').split(',')[1];
+}
+
 const DISCLAIMER_UPDATED = /^Last updated:\s*(.+)$/m.exec(disclaimerText)?.[1].trim() ?? '';
 
 if (!window.__TAURI__) {
@@ -1748,6 +1759,10 @@ if (!window.__TAURI__) {
       return null;
     },
     set_screen_share: ({ on }) => { if (calls.current) calls.current.screen = on; return null; },
+    // The bitrate is kept on window, so the driver can check what reached the engine.
+    set_screen_bitrate: ({ kbps }) => { window.__screenBitrate = kbps; return kbps; },
+    set_screen_quality: ({ maxHeight, maxFps }) => { window.__screenQuality = [maxHeight, maxFps]; return null; },
+    share_thumbnail: () => fakeJpeg(320, 180),
     list_share_sources: () => [
       { target: { kind: 'display', id: 1 }, name: 'Built-in display', primary: true },
       { target: { kind: 'window', id: 2 }, name: 'Notes · Draft', primary: false },
@@ -1990,6 +2005,13 @@ if (!window.__TAURI__) {
 
   // Sound previews. Each helper makes the event the engine would send, so the join, leave, missed and group sounds play.
   // Participants are replaced as a new array, the way the engine's serialised state arrives.
+  // A person in the call starts or stops sharing a screen of this size, as the engine would report it.
+  window.__mockShare = (root, on, width = 2560, height = 1440) => {
+    if (!calls.current) return;
+    calls.current.participants = calls.current.participants.map((p) => (p.root_id === root ? { ...p, screen: on } : p));
+    emitTo('dissent://call-state', { ...calls.current });
+    if (on) emit({ kind: 'video_frame', sender: 1, root_id: root, screen: true, width, height, jpeg: fakeJpeg(width, height) });
+  };
   window.__mockCallPeople = (change = 'join') => {
     if (!calls.current) return;
     const others = calls.current.participants.filter((p) => p.root_id !== RADIA);

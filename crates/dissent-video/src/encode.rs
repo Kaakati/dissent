@@ -21,6 +21,8 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     /// Frames between forced keyframes. A keyframe is always the first frame.
     pub keyframe_interval: u32,
+    /// Whether the picture is a screen or a window, which OpenH264 codes in its screen-content mode.
+    pub screen: bool,
 }
 
 /// One compressed unit of video, ready for the packet queue.
@@ -43,8 +45,7 @@ pub trait VideoEncoder: Send {
     /// Makes the next encoded frame a keyframe.
     fn request_keyframe(&mut self);
 
-    /// Changes the target bitrate. The change applies from the next frame. Backends that
-    /// cannot change rate in place rebuild their encoder, which emits a keyframe.
+    /// Changes the target bitrate. The change applies from the next frame, with no keyframe.
     fn set_bitrate(&mut self, kbps: u32) -> Result<()>;
 }
 

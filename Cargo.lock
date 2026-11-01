@@ -2693,6 +2693,7 @@ dependencies = [
  "matroska-demuxer",
  "nokhwa",
  "openh264",
+ "openh264-sys2",
  "rav1d",
  "re_mp4",
  "svt-av1-sys",

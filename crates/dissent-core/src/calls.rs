@@ -689,6 +689,10 @@ pub(crate) struct CallHub {
     encoded_sink: Mutex<Option<EncodedSink>>,
     /// Where this engine's camera, lobby preview and screen take their pictures from. A device, unless a test set it.
     test_capture: Mutex<crate::call_video::TestCapture>,
+    /// The tallest picture and highest frame rate chosen for a screen share on this device. `None` is no limit.
+    screen_quality: Mutex<(Option<u32>, Option<u32>)>,
+    /// The bitrate chosen for a screen share on this device, in kbps.
+    screen_kbps: std::sync::atomic::AtomicU32,
     /// This device's camera while the lobby previews it, before a call. A call takes the camera
     /// over, so the preview is dropped when the call's camera turns on.
     lobby_camera: Mutex<Option<Sending>>,
@@ -718,6 +722,8 @@ impl CallHub {
         Self {
             tiles: Mutex::new(HashMap::new()),
             test_capture: Mutex::new(crate::call_video::TestCapture::Device),
+            screen_quality: Mutex::new((None, None)),
+            screen_kbps: std::sync::atomic::AtomicU32::new(dissent_video::adapt::SCREEN_DEFAULT_KBPS),
             encoded_sink: Mutex::new(None),
             lobby_camera: Mutex::new(None),
             current: Mutex::new(None),
@@ -774,6 +780,8 @@ pub struct ParticipantView {
     pub video_paused: bool,
     /// The same for their shared screen.
     pub screen_paused: bool,
+    /// Their screen is reaching this device, or is paused for it.
+    pub screen: bool,
 }
 
 /// Whether a participant's link goes straight, or through a relay.
@@ -1156,6 +1164,19 @@ impl Room {
         lock(slot).as_ref().map(|sending| sending.layers().into_iter().map(|l| (l.width, l.kbps)).collect())
     }
 
+    /// What this device's screen sends now, for tests: width, height, fps and kbps.
+    pub(crate) fn screen_plan(&self) -> Option<(u32, u32, u32, u32)> {
+        lock(&self.screen).as_ref().map(|sending| {
+            let plan = sending.applied_plan();
+            (plan.width, plan.height, plan.fps, plan.kbps)
+        })
+    }
+
+    /// The bitrate this device's screen may reach now, for tests.
+    pub(crate) fn screen_target(&self) -> Option<u32> {
+        lock(&self.screen).as_ref().map(|sending| sending.budget.top_kbps())
+    }
+
     /// The layers this device's camera or screen was asked for, `None` for one stream.
     pub(crate) fn wanted_layers(&self, screen: bool) -> Option<u8> {
         let slot = if screen { &self.screen } else { &self.camera };
@@ -1329,6 +1350,10 @@ fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, previ
 fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
     use crate::call_video::{LARGE_PREVIEW_INTERVAL, PREVIEW_INTERVAL};
     room.with_layers(|l| l.received.insert((frame.sender, frame.screen), frame.layer));
+    room.with_layers(|l| l.video_at = Some(Instant::now()));
+    if frame.screen && room.with_layers(|l| l.screen_seen.insert(frame.sender, Instant::now()).is_none()) {
+        engine.emit(EngineEvent::CallUpdated);
+    }
     let root_id = lock(&room.peers)
         .get(&frame.sender)
         .map(|peer| peer.root.to_string())
@@ -1364,8 +1389,43 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
     }
 }
 
+/// How long each 20 ms tick works the links for video while any flows. Packets are only read and sent while the
+/// tick waits here, so this sets what a call can carry: at 1 ms a call topped out near 2 Mbps, and the frames
+/// beyond that queued for seconds. The rest of the tick stays free for audio.
+const VIDEO_PUMP: Duration = Duration::from_millis(10);
+/// The same with no video, which only needs to notice the first frame.
+const IDLE_PUMP: Duration = Duration::from_millis(1);
+/// How long after the last received frame video counts as flowing.
+const VIDEO_FLOWING: Duration = Duration::from_secs(2);
+
+fn video_pump_window(room: &Room) -> Duration {
+    let sending = lock(&room.camera).is_some() || lock(&room.screen).is_some();
+    let receiving = room.with_layers(|l| l.video_at.is_some_and(|at| at.elapsed() < VIDEO_FLOWING));
+    if sending || receiving {
+        VIDEO_PUMP
+    } else {
+        IDLE_PUMP
+    }
+}
+
+/// How long after a screen's last frame the share counts as over. Longer than a large keyframe takes on a thin link.
+const SCREEN_GONE: Duration = Duration::from_secs(8);
+
+/// Forgets a peer's share once its frames have stopped for `SCREEN_GONE`, and tells the window.
+fn expire_screens(engine: &Engine, room: &Room) {
+    let gone = room.with_layers(|l| {
+        let before = l.screen_seen.len();
+        l.screen_seen.retain(|_, seen| seen.elapsed() < SCREEN_GONE);
+        l.screen_seen.len() != before
+    });
+    if gone {
+        engine.emit(EngineEvent::CallUpdated);
+    }
+}
+
 /// Sends this device's camera and screen through the mesh, and shows the peers' frames.
 async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTransport>) {
+    expire_screens(engine, room);
     if room.keyframe_wanted.swap(false, Ordering::Relaxed) {
         mesh.request_keyframes();
     }
@@ -1393,9 +1453,8 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
     if mesh.take_keyframe_request() {
         request_keyframes(room);
     }
-    while let Ok(Ok(Some(frame))) =
-        tokio::time::timeout(Duration::from_millis(1), mesh.next_video_frame()).await
-    {
+    let until = tokio::time::Instant::now() + video_pump_window(room);
+    while let Ok(Ok(Some(frame))) = tokio::time::timeout_at(until, mesh.next_video_frame()).await {
         lock(&room.quality).frames_received += 1;
         show_video(engine, room, &frame);
     }
@@ -1405,6 +1464,7 @@ async fn pump_video_mesh(engine: &Engine, room: &Room, mesh: &mut Mesh<LinkTrans
 /// Sends this device's camera and screen to its forwarder, and shows the frames the forwarder
 /// relays.
 async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Participant<CallLink>) {
+    expire_screens(engine, room);
     if room.keyframe_wanted.swap(false, Ordering::Relaxed) {
         participant.request_keyframes();
     }
@@ -1433,9 +1493,8 @@ async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Partici
     if participant.take_keyframe_request() {
         request_keyframes(room);
     }
-    while let Ok(Ok(Some(frame))) =
-        tokio::time::timeout(Duration::from_millis(1), participant.next_video_frame()).await
-    {
+    let until = tokio::time::Instant::now() + video_pump_window(room);
+    while let Ok(Ok(Some(frame))) = tokio::time::timeout_at(until, participant.next_video_frame()).await {
         lock(&room.quality).frames_received += 1;
         show_video(engine, room, &frame);
     }
@@ -2987,12 +3046,59 @@ impl Engine {
                 *screen = None;
             } else {
                 let mut sending = Sending::new(crate::call_video::Capture::screen(target, self.test_capture())?);
-                sending.budget.cap(self.room_ceilings(&room).screen);
+                sending.set_screen_target(self.inner.calls.screen_kbps.load(Ordering::Relaxed));
+                let (height, fps) = *lock(&self.inner.calls.screen_quality);
+                sending.set_screen_quality(height, fps);
+                // A server's boost level sets its calls' ceiling. A DM or group call has none: it costs
+                // nobody but the two ends, so it shares the screen at its own size.
+                if matches!(room.scope, Scope::Channel { .. }) {
+                    sending.budget.cap(self.room_ceilings(&room).screen);
+                }
                 *screen = Some(sending);
             }
         }
         self.emit(EngineEvent::CallUpdated);
         Ok(())
+    }
+
+    /// Sets the bitrate of a screen share, in kbps, held to 1500 to 6000. It applies at once to a share
+    /// that is running, and to the next one. Returns the bitrate that was set. The link can still hold
+    /// the stream below it: see "Screen share" in `docs/design/04-calls.md`.
+    pub fn set_screen_bitrate(&self, kbps: u32) -> u32 {
+        let kbps = crate::call_video::clamp_screen_kbps(kbps);
+        self.inner.calls.screen_kbps.store(kbps, Ordering::Relaxed);
+        if let Some(room) = lock(&self.inner.calls.current).clone() {
+            if let Some(sending) = lock(&room.screen).as_mut() {
+                sending.set_screen_target(kbps);
+            }
+        }
+        kbps
+    }
+
+    /// Sets the tallest picture and the highest frame rate of a screen share, for a running share and the
+    /// next one. `None` is the source's own size, or no limit on the rate.
+    pub fn set_screen_quality(&self, max_height: Option<u32>, max_fps: Option<u32>) {
+        *lock(&self.inner.calls.screen_quality) = (max_height, max_fps);
+        if let Some(room) = lock(&self.inner.calls.current).clone() {
+            if let Some(sending) = lock(&room.screen).as_mut() {
+                sending.set_screen_quality(max_height, max_fps);
+            }
+        }
+    }
+
+    /// A small JPEG of a display or window, for the share picker.
+    pub fn share_thumbnail(&self, target: crate::call_video::ShareTarget) -> Result<Vec<u8>> {
+        crate::call_video::share_thumbnail(target, self.test_capture())
+    }
+
+    /// For tests: the bitrate this device's screen may reach now.
+    pub(crate) fn screen_target_now(&self) -> Option<u32> {
+        lock(&self.inner.calls.current).clone()?.screen_target()
+    }
+
+    /// For tests: what this device's screen sends now, as (width, height, fps, kbps).
+    pub(crate) fn screen_plan_now(&self) -> Option<(u32, u32, u32, u32)> {
+        lock(&self.inner.calls.current).clone()?.screen_plan()
     }
 
     /// Sends text to the call's conversation: the voice channel's messages, or a direct message
@@ -3059,6 +3165,7 @@ impl Engine {
         // Read before the peer lock, so `live` is never taken under it.
         let forwarder = room.forwarder_device();
         let paused = room.with_layers(|l| l.paused_here.clone());
+        let screens: Vec<u64> = room.with_layers(|l| l.screen_seen.keys().copied().collect());
         let reported = self.self_reported_deafen();
         let quality = lock(&room.quality);
         let now = Instant::now();
@@ -3079,6 +3186,7 @@ impl Engine {
                 path: room.path_of(&p.device, forwarder.as_ref()),
                 video_paused: paused.contains(&(*sid, false)),
                 screen_paused: paused.contains(&(*sid, true)),
+                screen: screens.contains(sid) || paused.contains(&(*sid, true)),
             })
             .collect();
         // Two devices in all make a direct link. Three or more make a mesh.

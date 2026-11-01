@@ -47,6 +47,10 @@ pub(crate) struct LayerSignals {
     pub told_paused: BTreeMap<u64, Vec<(u64, bool)>>,
     /// The streams this device's forwarder pauses for it, as (sender id, screen).
     pub paused_here: Vec<(u64, bool)>,
+    /// When each sender's screen last sent a frame here. A share has no signal of its own, so a recent frame means sharing.
+    pub screen_seen: BTreeMap<u64, std::time::Instant>,
+    /// When any video frame last arrived here.
+    pub video_at: Option<std::time::Instant>,
 }
 
 impl Engine {

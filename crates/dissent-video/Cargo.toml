@@ -11,6 +11,7 @@ svt-av1 = ["dep:svt-av1-sys", "svt-av1-sys/build"]
 [dependencies]
 svt-av1-sys = { workspace = true, optional = true }
 openh264.workspace = true
+openh264-sys2.workspace = true
 rav1d.workspace = true
 re_mp4.workspace = true
 matroska-demuxer.workspace = true

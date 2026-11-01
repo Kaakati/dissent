@@ -7,7 +7,7 @@ import { api } from './api';
 import { EncodedTiles, type CanvasLike, type DecoderLike } from './video-decoders';
 
 const SETTING = 'dissent.hardwareVideo';
-const H264 = 'avc1.42E01F';
+const H264 = 'avc1.42E033';
 const ASK_EVERY_MS = 1000;
 
 // Tauri's Channel, as the global exposes it. The app's global type does not declare it.

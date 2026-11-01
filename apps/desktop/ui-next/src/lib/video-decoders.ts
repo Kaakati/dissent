@@ -104,7 +104,8 @@ export class EncodedTiles {
       return;
     }
     if (packet.keyframe) {
-      this.startDecoder(tile, packet.av1 ? 'av01.0.08M.08' : 'avc1.42E01F');
+      // Level 5.1 for both, so the strings cover any shared screen up to 4K, whatever the frame's size.
+      this.startDecoder(tile, packet.av1 ? 'av01.0.13M.08' : 'avc1.42E033');
       tile.keyAt = now;
       tile.drawn = false;
     } else if (!tile.decoder || tile.decoder.state !== 'configured') {

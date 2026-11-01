@@ -100,6 +100,7 @@ fn webcam_encode_ms(codec: Codec, width: u32, height: u32, fps: u32, kbps: u32) 
             fps,
             bitrate_kbps: kbps,
             keyframe_interval: fps * 2,
+            screen: false,
         },
     )
     .expect("encoder opens");

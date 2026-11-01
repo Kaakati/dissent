@@ -93,6 +93,8 @@ One table, `boosts::CEILINGS`, indexed by level:
 Level 0 is exactly what the app allowed before boosts. Voice could already be set to 96 kbps, and the
 screen ladder already reached 1080p15. So no level ever lowers a ceiling.
 
+The screen ceilings apply to a server's voice channels. A DM or group call has none, and shares at the source's own size (`04-calls.md`, "Screen share"). In a voice channel a larger source is scaled to fit the ceiling.
+
 - **Voice.** Level 0 keeps 96 kbps, the most a voice channel could be set to before boosts, so no
   server loses anything. A voice channel's bitrate setting may be up to 256 kbps in replay. An older
   client rejects a setting above 96 as malformed and keeps the old value. When a call starts,

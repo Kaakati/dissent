@@ -15,7 +15,7 @@ use dissent_media::{VideoCodec, VideoFrame};
 use crate::error::{CoreError, Result};
 
 use dissent_video::Codec;
-use dissent_video::adapt::{Content, CpuRecovery, VideoAdapter};
+use dissent_video::adapt::{screen_ladder, Content, CpuRecovery, ScreenLink, ScreenSpec, VideoAdapter, SCREEN_MAX_KBPS, SCREEN_MIN_KBPS};
 
 /// What a screen share shows: a whole display, or one window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -100,6 +100,8 @@ pub enum TestCapture {
     Pattern,
     /// No camera or screen. Turning one on is an error.
     Unavailable,
+    /// A scrolling document, in place of a screen or window of this size. A camera gets the pattern.
+    Document { width: u32, height: u32 },
 }
 
 /// Starts the camera for an engine, from `source`.
@@ -142,12 +144,16 @@ pub(crate) struct LayerInfo {
 /// The layers below the top rung, as (height, kbps): 180p and 360p. Each is sent only while it is shorter than the top
 /// rung, at the top rung's aspect.
 const LOWER_LAYERS: [(u32, u32); 2] = [(180, 150), (360, 400)];
+/// The same for a screen taller than 720p. There are only three layers, and 360p text cannot be read, so a viewer whose
+/// budget cannot fit the full screen gets 720p.
+const LOWER_SCREEN_LAYERS: [(u32, u32); 2] = [(180, 150), (720, 1_000)];
 
 /// The simulcast layers of a capture whose top rung is `top`, smallest first. The top rung is the last, so a capture on
 /// the 360p rung sends two layers and one on the bottom rung sends one. Lower layers are always H.264: a second AV1
 /// encoder per layer costs too much CPU (`docs/design/13-forwarded-calls.md`).
-pub(crate) fn simulcast_layers(top: Plan) -> Vec<LayerInfo> {
-    let mut out: Vec<LayerInfo> = LOWER_LAYERS
+pub(crate) fn simulcast_layers(top: Plan, screen: bool) -> Vec<LayerInfo> {
+    let lower = if screen && top.height > 720 { &LOWER_SCREEN_LAYERS } else { &LOWER_LAYERS };
+    let mut out: Vec<LayerInfo> = lower
         .iter()
         .filter(|(height, _)| *height < top.height)
         .map(|(height, kbps)| LayerInfo {
@@ -180,6 +186,11 @@ impl Sending {
         self.capture.set_layers(mask.map(|m| m | 1));
     }
 
+    /// The plan the capture is sending now.
+    pub(crate) fn applied_plan(&self) -> Plan {
+        self.capture.applied_plan()
+    }
+
     /// The layers the forwarder wants, or `None` in the mesh mode.
     pub(crate) fn wanted_layers(&self) -> Option<u8> {
         self.wanted
@@ -187,7 +198,7 @@ impl Sending {
 
     /// The layers this sender can send, smallest first: 180p and 360p below the top rung the capture sends now.
     pub(crate) fn layers(&self) -> Vec<LayerInfo> {
-        simulcast_layers(self.capture.applied_plan())
+        simulcast_layers(self.capture.applied_plan(), self.capture.kind() == CaptureKind::Screen)
     }
 
     /// What the lower layers being sent cost, in kbps. The top rung is planned in what is left.
@@ -211,15 +222,20 @@ impl Sending {
         if let Some(share) = self.capture.take_cpu_share() {
             self.budget.observe_cpu(Instant::now(), share);
         }
+        if let Some(size) = self.capture.take_native_size() {
+            self.budget.set_screen_source(size);
+        }
         let Some(available) = available_kbps else {
             return;
         };
         // The lower layers come out of the same uplink as the top rung.
-        let available = available.saturating_sub(self.lower_layers_kbps());
+        let lower = self.lower_layers_kbps();
+        let estimate = available;
+        let available = self.budget.trusted_kbps(estimate, audio_kbps, lower).saturating_sub(lower);
         match self.budget.update(available, audio_kbps) {
             Some(plan) => {
                 self.paused = false;
-                self.capture.set_plan(plan);
+                self.capture.set_plan(self.budget.held_to_link(plan, estimate, audio_kbps, lower));
             }
             None => self.paused = true,
         }
@@ -228,6 +244,22 @@ impl Sending {
     /// Whether every peer can decode AV1. The budget plans AV1 only when they all can.
     pub(crate) fn set_av1(&mut self, on: bool) {
         self.budget.set_av1(on);
+    }
+
+    /// The resolution and frame rate chosen for a screen share, which apply at the next reshape.
+    pub(crate) fn set_screen_quality(&mut self, max_height: Option<u32>, max_fps: Option<u32>) {
+        self.budget.set_screen_quality(max_height, max_fps);
+        if let Some(plan) = self.budget.plan() {
+            self.capture.set_plan(plan);
+        }
+    }
+
+    /// The bitrate chosen for a screen share, which applies at once.
+    pub(crate) fn set_screen_target(&mut self, kbps: u32) {
+        self.budget.set_screen_target(kbps);
+        if let Some(plan) = self.budget.plan() {
+            self.capture.set_plan(plan);
+        }
     }
 }
 
@@ -260,6 +292,18 @@ mod capture {
     const RESHAPE_INTERVAL: Duration = Duration::from_secs(5);
     /// Frames whose encode time is averaged into one report of the encoder's speed.
     const SLOW_FRAMES: u32 = 30;
+    /// The same for a screen. A window that is being dragged must not start over at a keyframe many
+    /// times, but a screen has no device to reopen, so the wait is shorter and the first move is free.
+    const SCREEN_RESHAPE_INTERVAL: Duration = Duration::from_secs(2);
+    /// Keyframes of a screen every this many seconds. A page of text makes a large keyframe, up to a
+    /// megabyte at 1440p, and a screen has few other uses for one: a receiver that lost a frame or just
+    /// joined asks for its own.
+    const SCREEN_KEYFRAME_SECONDS: u32 = 30;
+    /// The least time between two keyframes that were asked for. The longest wait is for a keyframe
+    /// so large it takes this long to send at the target rate. A receiver asks again every 200 ms until
+    /// one arrives, so without a limit a large keyframe would be followed by more.
+    const KEYFRAME_GAP_MIN: Duration = Duration::from_millis(200);
+    const KEYFRAME_GAP_MAX: Duration = Duration::from_secs(10);
     /// Start rate before the first bandwidth estimate, in kbps. Inside the H.264 rung's range.
     const START_KBPS: u32 = 300;
 
@@ -302,6 +346,8 @@ mod capture {
         layers: Arc<Mutex<Option<u8>>>,
         /// The encoder's latest share of the frame interval, for the call loop to judge.
         cpu: Arc<Mutex<Option<f64>>>,
+        /// The picture's own size, when the thread saw it change and the call loop has not read it.
+        native: Arc<Mutex<Option<(u32, u32)>>>,
         rx: Receiver<Encoded>,
         previews: Receiver<Preview>,
         thread: Option<JoinHandle<()>>,
@@ -322,6 +368,7 @@ mod capture {
             let applied_plan = Arc::new(Mutex::new(initial));
             let layers = Arc::new(Mutex::new(None));
             let cpu = Arc::new(Mutex::new(None));
+            let native = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::sync_channel::<Encoded>(QUEUE * usize::from(MAX_LAYERS));
             let (preview_tx, previews) = mpsc::sync_channel::<Preview>(1);
             let screen = kind == CaptureKind::Screen;
@@ -332,6 +379,7 @@ mod capture {
             let thread_applied = applied_plan.clone();
             let thread_layers = layers.clone();
             let thread_cpu = cpu.clone();
+            let thread_native = native.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("dissent-{kind:?}").to_lowercase())
                 .spawn(move || {
@@ -343,7 +391,7 @@ mod capture {
                             return;
                         }
                     };
-                    let mut encoder = match encode::open(applied.codec, encoder_config(applied)) {
+                    let mut encoder = match encode::open(applied.codec, encoder_config(applied, screen)) {
                         Ok(encoder) => encoder,
                         Err(e) => {
                             let _ = ready_tx.send(Err(capture_err(e)));
@@ -361,7 +409,18 @@ mod capture {
                     let mut captured = 0u32;
                     let mut period = frame_period(applied.fps);
                     let mut due = Instant::now();
-                    let mut last_reshape = Instant::now();
+                    let reshape_interval = if screen { SCREEN_RESHAPE_INTERVAL } else { RESHAPE_INTERVAL };
+                    // A screen moves to its own size as soon as the budget knows it.
+                    let mut last_reshape = if screen {
+                        Instant::now().checked_sub(reshape_interval).unwrap_or_else(Instant::now)
+                    } else {
+                        Instant::now()
+                    };
+                    let mut native_seen: Option<(u32, u32)> = None;
+                    // A keyframe was asked for and not sent yet, and when the last one went out.
+                    let mut key_pending = false;
+                    let mut last_key: Option<Instant> = None;
+                    let mut key_gap = KEYFRAME_GAP_MIN;
                     // The encoder's speed over the frames since the last verdict or reshape.
                     let mut ewma_ms: Option<f64> = None;
                     let mut timed = 0u32;
@@ -374,13 +433,15 @@ mod capture {
                         }
                         // A size or rate change reopens the camera, so it waits for the interval. A codec change
                         // only reopens the encoder, which is quick, so it applies at once.
-                        let may_reshape = !resized(wanted, applied) || last_reshape.elapsed() >= RESHAPE_INTERVAL;
+                        let may_reshape = !resized(wanted, applied) || last_reshape.elapsed() >= reshape_interval;
                         if reshaped(wanted, applied) && may_reshape {
                             if resized(wanted, applied) {
                                 last_reshape = Instant::now();
                             }
-                            if let Ok(fresh) = encode::open(wanted.codec, encoder_config(wanted)) {
-                                let moved = if resized(wanted, applied) {
+                            if let Ok(fresh) = encode::open(wanted.codec, encoder_config(wanted, screen)) {
+                                let in_place = resized(wanted, applied)
+                                    && source.as_mut().is_some_and(|source| source.set_format(format_of(wanted)));
+                                let moved = if resized(wanted, applied) && !in_place {
                                     // A camera may be held by one open handle, so the old source goes first.
                                     drop(source.take());
                                     match open(format_of(wanted)) {
@@ -416,6 +477,10 @@ mod capture {
                         let Ok(frame) = source.next_frame() else {
                             break;
                         };
+                        if let Some(size) = source.native_size().filter(|size| native_seen != Some(*size)) {
+                            native_seen = Some(size);
+                            *lock(&thread_native) = Some(size);
+                        }
                         due += period;
                         let now = Instant::now();
                         if due > now {
@@ -441,7 +506,7 @@ mod capture {
                         // With layers, the main encoder sends the top one and the lower ones encode
                         // scaled copies. Without, the main encoder is the one stream, layer 0.
                         let mask = *lock(&thread_layers);
-                        let table = mask.map(|_| simulcast_layers(applied)).unwrap_or_default();
+                        let table = mask.map(|_| simulcast_layers(applied, screen)).unwrap_or_default();
                         let top = u8::try_from(table.len().saturating_sub(1)).unwrap_or(0);
                         let send_top = mask.is_none_or(|m| m & (1 << top) != 0);
                         let started = Instant::now();
@@ -492,6 +557,12 @@ mod capture {
                             // The lower layers are H.264 whatever the top rung is.
                             let codec = if layer == top { wire_codec(applied.codec) } else { VideoCodec::H264 };
                             for chunk in chunks {
+                                if chunk.keyframe && layer == top {
+                                    let takes_ms = chunk.data.len() as u64 * 8 / u64::from(applied.kbps.max(1));
+                                    key_gap = Duration::from_millis(takes_ms).clamp(KEYFRAME_GAP_MIN, KEYFRAME_GAP_MAX);
+                                    last_key = Some(Instant::now());
+                                    key_pending = false;
+                                }
                                 let frame_id = &mut frame_ids[usize::from(layer)];
                                 let encoded = Encoded {
                                     frame_id: *frame_id,
@@ -510,7 +581,9 @@ mod capture {
                                 }
                             }
                         }
-                        if thread_key.swap(false, Ordering::Relaxed) || resync {
+                        key_pending |= thread_key.swap(false, Ordering::Relaxed) || resync;
+                        if key_pending && last_key.is_none_or(|at| at.elapsed() >= key_gap) {
+                            key_pending = false;
                             encoder.request_keyframe();
                             for lower in lower.iter_mut().flatten() {
                                 lower.encoder.request_keyframe();
@@ -530,6 +603,7 @@ mod capture {
                 applied: applied_plan,
                 layers,
                 cpu,
+                native,
                 rx,
                 previews,
                 thread: Some(thread),
@@ -549,6 +623,14 @@ mod capture {
         pub(crate) fn fake(kind: CaptureKind, source: super::TestCapture) -> Result<Self> {
             match source {
                 super::TestCapture::Pattern => Self::test_pattern(kind),
+                super::TestCapture::Document { .. } if kind == CaptureKind::Camera => Self::test_pattern(kind),
+                super::TestCapture::Document { width, height } => {
+                    let native = Arc::new(Mutex::new((width, height)));
+                    Self::start(kind, SCREEN_START, move |format| {
+                        let source = dissent_video::pattern::DocumentSource::new(format, native.clone());
+                        Ok(Box::new(source) as Box<dyn VideoSource>)
+                    })
+                }
                 _ => Err(CoreError::Invalid("no capture device: a test made it unavailable".into())),
             }
         }
@@ -627,6 +709,11 @@ mod capture {
             };
         }
 
+        /// The picture's own size, if it changed since the last call.
+        pub(crate) fn take_native_size(&self) -> Option<(u32, u32)> {
+            lock(&self.native).take()
+        }
+
         /// The encoder's share of the frame interval since the last call, if it has reported one.
         pub(crate) fn take_cpu_share(&self) -> Option<f64> {
             lock(&self.cpu).take()
@@ -662,6 +749,7 @@ mod capture {
                 fps,
                 bitrate_kbps: layer.kbps.max(1),
                 keyframe_interval: fps * KEYFRAME_SECONDS,
+                screen: false,
             };
             let reopen = slot.as_ref().is_none_or(|l| {
                 (l.config.width, l.config.height, l.config.fps) != (config.width, config.height, config.fps)
@@ -691,13 +779,15 @@ mod capture {
         }
     }
 
-    fn encoder_config(plan: Plan) -> EncoderConfig {
+    fn encoder_config(plan: Plan, screen: bool) -> EncoderConfig {
+        let seconds = if screen { SCREEN_KEYFRAME_SECONDS } else { KEYFRAME_SECONDS };
         EncoderConfig {
             width: plan.width,
             height: plan.height,
             fps: plan.fps,
             bitrate_kbps: plan.kbps,
-            keyframe_interval: plan.fps * KEYFRAME_SECONDS,
+            keyframe_interval: plan.fps * seconds,
+            screen,
         }
     }
 
@@ -725,6 +815,9 @@ mod capture {
     }
 }
 
+/// The least a screen's encoder is held to while its rung runs, in kbps. The bottom rung's minimum.
+const MIN_HELD_KBPS: u32 = 150;
+
 /// The video budget of one capture: the plan that fits the link's estimate, after the audio
 /// reservation. AV1 is in the ladder only while every peer can decode it.
 pub(crate) struct Budget {
@@ -733,6 +826,12 @@ pub(crate) struct Budget {
     av1: bool,
     ceiling: Option<crate::boosts::VideoCeiling>,
     recovery: CpuRecovery,
+    /// What a screen's ladder is built from. A camera has a fixed ladder.
+    screen: ScreenSpec,
+    /// How much of the link a screen may plan for.
+    screen_link: ScreenLink,
+    /// The last plan, while one is running.
+    last: Option<Plan>,
 }
 
 impl Budget {
@@ -748,7 +847,79 @@ impl Budget {
             av1: false,
             ceiling: None,
             recovery: CpuRecovery::new(),
+            screen: ScreenSpec { target_kbps: dissent_video::adapt::SCREEN_DEFAULT_KBPS, ..ScreenSpec::default() },
+            screen_link: ScreenLink::default(),
+            last: None,
         }
+    }
+
+    /// What this capture may plan for from the link's estimate, in kbps. A camera believes the estimate.
+    /// A screen plans for what it wants to send, until the link pushes back. See `ScreenLink`.
+    fn trusted_kbps(&mut self, estimate: u32, audio_kbps: u32, lower_kbps: u32) -> u32 {
+        if self.content != Content::Screen {
+            return estimate;
+        }
+        let wanted = self.top_kbps() + lower_kbps + dissent_video::adapt::audio_reserve_kbps(audio_kbps);
+        self.screen_link.available(Instant::now(), estimate, wanted)
+    }
+
+    /// A screen's rung comes from its chosen rate, but its encoder never outruns the estimate. str0m paces
+    /// at about the estimate, so more would queue up behind the pacer and the picture would fall seconds
+    /// behind. A share that fills the estimate raises it, so the rate climbs as the link allows.
+    fn held_to_link(&self, plan: Plan, estimate: u32, audio_kbps: u32, lower_kbps: u32) -> Plan {
+        if self.content != Content::Screen {
+            return plan;
+        }
+        let left = estimate.saturating_sub(lower_kbps + dissent_video::adapt::audio_reserve_kbps(audio_kbps));
+        Plan { kbps: plan.kbps.min(left.max(MIN_HELD_KBPS)), ..plan }
+    }
+
+    /// The codecs this budget plans with.
+    fn codecs(&self) -> &'static [Codec] {
+        if self.av1 {
+            Codec::ENCODABLE
+        } else {
+            &[Codec::H264]
+        }
+    }
+
+    /// Builds the screen's ladder again after what it depends on changed, without pausing the stream.
+    fn rebuild_screen(&mut self) {
+        if self.content == Content::Screen {
+            self.adapter.set_rungs(screen_ladder(self.screen, self.codecs()));
+            self.last = plan_of(self.adapter.plan());
+        }
+    }
+
+    /// The tallest picture and the highest frame rate chosen for the share. `None` is no limit.
+    pub(crate) fn set_screen_quality(&mut self, max_height: Option<u32>, max_fps: Option<u32>) {
+        self.screen.max_height = max_height;
+        self.screen.max_fps = max_fps;
+        self.rebuild_screen();
+    }
+
+    /// The size of the screen or window being shared.
+    pub(crate) fn set_screen_source(&mut self, source: (u32, u32)) {
+        if self.screen.source != source {
+            self.screen.source = source;
+            self.rebuild_screen();
+        }
+    }
+
+    /// The bitrate chosen for the share, held to the range a person can choose from.
+    pub(crate) fn set_screen_target(&mut self, kbps: u32) {
+        self.screen.target_kbps = clamp_screen_kbps(kbps);
+        self.rebuild_screen();
+    }
+
+    /// The plan as of the last update, if video is running.
+    pub(crate) fn plan(&self) -> Option<Plan> {
+        self.last
+    }
+
+    /// The most the best rung sends, in kbps.
+    pub(crate) fn top_kbps(&self) -> u32 {
+        self.adapter.rungs()[0].max_kbps
     }
 
     /// Plans AV1 when `on` and this build can encode it, and H.264 otherwise.
@@ -757,6 +928,10 @@ impl Budget {
             return;
         }
         self.av1 = on;
+        if self.content == Content::Screen {
+            self.rebuild_screen();
+            return;
+        }
         self.adapter = adapter_for(self.content, on);
         if let Some(ceiling) = self.ceiling {
             self.adapter.cap(ceiling.width, ceiling.height, ceiling.fps);
@@ -766,6 +941,11 @@ impl Budget {
     /// Holds the ladder to a server's boost ceiling. See `boosts`.
     pub(crate) fn cap(&mut self, ceiling: crate::boosts::VideoCeiling) {
         self.ceiling = Some(ceiling);
+        if self.content == Content::Screen {
+            self.screen.ceiling = Some((ceiling.width, ceiling.height, ceiling.fps));
+            self.rebuild_screen();
+            return;
+        }
         self.adapter.cap(ceiling.width, ceiling.height, ceiling.fps);
     }
 
@@ -781,16 +961,19 @@ impl Budget {
     /// kbps. Returns the plan the capture should follow, or `None` while the budget is too small
     /// for video at all, which pauses the video.
     pub(crate) fn update(&mut self, available_kbps: u32, audio_target_kbps: u32) -> Option<Plan> {
-        let plan = self.adapter.update(available_kbps, audio_target_kbps);
-        let codec = plan.codec?;
-        Some(Plan {
-            kbps: plan.target_kbps,
-            codec,
-            width: plan.width,
-            height: plan.height,
-            fps: plan.fps,
-        })
+        self.last = plan_of(self.adapter.update(available_kbps, audio_target_kbps));
+        self.last
     }
+}
+
+fn plan_of(plan: dissent_video::adapt::VideoPlan) -> Option<Plan> {
+    Some(Plan {
+        kbps: plan.target_kbps,
+        codec: plan.codec?,
+        width: plan.width,
+        height: plan.height,
+        fps: plan.fps,
+    })
 }
 
 /// The adapter for a camera or a screen. AV1 rungs are kept only when `av1` is set, and this
@@ -798,6 +981,26 @@ impl Budget {
 fn adapter_for(content: Content, av1: bool) -> VideoAdapter {
     let codecs: &[Codec] = if av1 { Codec::ENCODABLE } else { &[Codec::H264] };
     VideoAdapter::with_codecs(content, codecs).expect("every content ladder has an H.264 rung")
+}
+
+/// A JPEG thumbnail of `target` for the share picker. A test engine gets a test picture, so no test opens a display.
+pub(crate) fn share_thumbnail(target: ShareTarget, source: TestCapture) -> Result<Vec<u8>> {
+    const WIDTH: u32 = 320;
+    let (width, height, rgb) = if source == TestCapture::Device {
+        let target = match target {
+            ShareTarget::Display { id } => dissent_video::screen::ScreenTarget::Display(id),
+            ShareTarget::Window { id } => dissent_video::screen::ScreenTarget::Window(id),
+        };
+        dissent_video::screen::thumbnail(target, WIDTH).map_err(camera_error)?
+    } else {
+        dissent_video::pattern::scrolling_document(WIDTH, 180, 0).to_rgb_preview(WIDTH)
+    };
+    encode_jpeg(width, height, &rgb).ok_or_else(|| CoreError::Invalid("capture: the thumbnail did not encode".into()))
+}
+
+/// A share's bitrate as a person can choose it, in kbps.
+pub(crate) fn clamp_screen_kbps(kbps: u32) -> u32 {
+    kbps.clamp(SCREEN_MIN_KBPS, SCREEN_MAX_KBPS)
 }
 
 /// The decoders of the peers' cameras and screens, one per sender and kind.
@@ -985,7 +1188,7 @@ mod tests {
     #[test]
     fn layers_sit_below_the_top_rung_at_its_aspect() {
         let plan = |width, height, kbps| Plan { kbps, codec: Codec::H264, width, height, fps: 30 };
-        let sizes = |top| simulcast_layers(top).iter().map(|l| (l.width, l.height, l.kbps)).collect::<Vec<_>>();
+        let sizes = |top| simulcast_layers(top, false).iter().map(|l| (l.width, l.height, l.kbps)).collect::<Vec<_>>();
         assert_eq!(sizes(plan(1280, 720, 1500)), [(320, 180, 150), (640, 360, 400), (1280, 720, 1500)]);
         assert_eq!(sizes(plan(640, 360, 300)), [(320, 180, 150), (640, 360, 300)], "a 360p top has one layer below it");
         assert_eq!(sizes(plan(320, 180, 100)), [(320, 180, 100)], "the bottom rung is one layer");
@@ -1113,7 +1316,7 @@ mod tests {
         let mut src = PatternSource::new(CaptureFormat { width: w, height: h, fps }, 7);
         let mut enc = encode::open(
             Codec::H264,
-            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 2_000, keyframe_interval: 60 },
+            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 2_000, keyframe_interval: 60, screen: false },
         )
         .unwrap();
         let mut chunks = Vec::new();
@@ -1164,7 +1367,7 @@ mod tests {
         let mut src = PatternSource::new(CaptureFormat { width: w, height: h, fps }, 7);
         let mut enc = encode::open(
             Codec::H264,
-            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 800, keyframe_interval: 60 },
+            EncoderConfig { width: w, height: h, fps, bitrate_kbps: 800, keyframe_interval: 60, screen: false },
         )
         .unwrap();
         let mut chunks = Vec::new();
@@ -1200,5 +1403,108 @@ mod tests {
         let jpeg = encode_jpeg(320, 180, &rgb).expect("encodes");
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "a JPEG starts with SOI");
         assert!(jpeg.len() < 40_000, "a flat preview is tiny: {} bytes", jpeg.len());
+    }
+
+    #[test]
+    fn a_tall_screen_has_a_720p_layer_a_viewer_can_still_read() {
+        let top = Plan { kbps: 6_000, codec: Codec::H264, width: 2560, height: 1440, fps: 30 };
+        let sizes: Vec<_> = simulcast_layers(top, true).iter().map(|l| (l.width, l.height, l.kbps)).collect();
+        assert_eq!(sizes, [(320, 180, 150), (1280, 720, 1_000), (2560, 1440, 6_000)]);
+        let small = Plan { width: 1280, height: 720, kbps: 1_500, ..top };
+        assert_eq!(simulcast_layers(small, true)[1].height, 360, "a 720p top keeps the 360p layer");
+    }
+
+    fn fed_budget(source: (u32, u32), target: u32) -> Budget {
+        let mut budget = Budget::new(capture::CaptureKind::Screen);
+        budget.set_screen_source(source);
+        budget.set_screen_target(target);
+        budget
+    }
+
+    #[test]
+    fn a_screen_budget_plans_the_source_size_and_the_chosen_bitrate() {
+        for (source, kbps) in [((1920, 1080), 2_500), ((2560, 1440), 6_000)] {
+            let mut budget = fed_budget(source, kbps);
+            let mut plan = None;
+            for _ in 0..40 {
+                plan = budget.update(50_000, 32);
+            }
+            let plan = plan.expect("video on a fat link");
+            assert_eq!((plan.width, plan.height, plan.kbps), (source.0, source.1, kbps));
+        }
+    }
+
+    #[test]
+    fn a_chosen_bitrate_is_held_to_the_range() {
+        let mut budget = fed_budget((1920, 1080), 100);
+        assert_eq!(budget.top_kbps(), SCREEN_MIN_KBPS);
+        budget.set_screen_target(50_000);
+        assert_eq!(budget.top_kbps(), SCREEN_MAX_KBPS);
+    }
+
+    #[test]
+    fn turning_av1_on_does_not_pause_a_running_share() {
+        let mut budget = fed_budget((2560, 1440), 3_000);
+        for _ in 0..40 {
+            budget.update(50_000, 32);
+        }
+        budget.set_av1(true);
+        assert!(budget.plan().is_some(), "the share keeps running through the change of ladder");
+    }
+
+    #[test]
+    fn a_capture_follows_a_window_that_resizes() {
+        let native = Arc::new(Mutex::new((1600u32, 900u32)));
+        let source_native = native.clone();
+        let capture = capture::Capture::start(
+            capture::CaptureKind::Screen,
+            Plan { kbps: 300, codec: Codec::H264, width: 640, height: 360, fps: 10 },
+            move |format| Ok(Box::new(dissent_video::pattern::DocumentSource::new(format, source_native.clone())) as Box<dyn VideoSource>),
+        )
+        .expect("the capture starts");
+        let mut sending = Sending::new(capture);
+        let settled = |sending: &mut Sending, size: (u32, u32)| {
+            wait_for(Duration::from_secs(15), || {
+                sending.fit(Some(50_000), 32);
+                while sending.capture.try_next().is_some() {}
+                let plan = sending.capture.applied_plan();
+                (plan.width, plan.height) == size
+            })
+        };
+        assert!(settled(&mut sending, (1600, 900)), "the share moves to the window's size: {:?}", sending.capture.applied_plan());
+        *native.lock().unwrap() = (1001, 701);
+        assert!(settled(&mut sending, (1000, 700)), "and follows it, with even sides: {:?}", sending.capture.applied_plan());
+        *native.lock().unwrap() = (2560, 1440);
+        assert!(settled(&mut sending, (2560, 1440)), "up as well as down: {:?}", sending.capture.applied_plan());
+    }
+
+    #[test]
+    fn a_stream_of_keyframe_requests_does_not_make_a_stream_of_large_keyframes() {
+        let top = Plan { kbps: 1_500, codec: Codec::H264, width: 1920, height: 1080, fps: 10 };
+        let native = Arc::new(Mutex::new((1920u32, 1080u32)));
+        let capture = capture::Capture::start(capture::CaptureKind::Screen, top, move |format| {
+            Ok(Box::new(dissent_video::pattern::DocumentSource::new(format, native.clone())) as Box<dyn VideoSource>)
+        })
+        .expect("the capture starts");
+        let (mut keys, started) = (0, Instant::now());
+        while started.elapsed() < Duration::from_secs(4) {
+            capture.request_keyframe();
+            while let Some(frame) = capture.try_next() {
+                keys += u32::from(frame.keyframe);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // 10 fps would allow 40. A keyframe near 350 KB takes about 1.9 s at 1500 kbps.
+        assert!((1..=5).contains(&keys), "keyframes are spaced by what they take to send: {keys}");
+    }
+
+    #[test]
+    fn a_screen_encoder_never_outruns_the_estimate_but_keeps_its_rung() {
+        let budget = fed_budget((2560, 1440), 6_000);
+        let plan = Plan { kbps: 6_000, codec: Codec::H264, width: 2560, height: 1440, fps: 30 };
+        assert_eq!(budget.held_to_link(plan, 2_056, 32, 0), Plan { kbps: 2_000, ..plan }, "the estimate less the audio reserve");
+        assert_eq!(budget.held_to_link(plan, 50_000, 32, 0), plan, "a fat link gets the chosen rate");
+        let camera = Budget::new(capture::CaptureKind::Camera);
+        assert_eq!(camera.held_to_link(plan, 2_056, 32, 0), plan, "a camera's plan already follows the estimate");
     }
 }

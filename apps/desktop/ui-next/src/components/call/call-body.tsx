@@ -3,7 +3,7 @@
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MonitorOff, MessageCircle, Pause, PhoneOff, Settings2, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import { Composer } from '@/components/chat/composer';
 import { listKey, rowsFor } from '@/components/chat/message-list';
@@ -18,10 +18,12 @@ import { callConversationOf, chatTargetOf, conversationKey, loadCallChat, useCal
 import { api } from '@/lib/api';
 import { hueOf } from '@/lib/identity';
 import { useShell } from '@/lib/store';
-import type { CallState, Id, ShareSource, VoiceParticipant } from '@/lib/types';
+import type { CallState, Id, VoiceParticipant } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import './call.css';
 import { DmCallSplit } from './dm-call-split';
+import { ScreenStage, type Sharer } from './screen-stage';
+import { openShareDialog } from './share-dialog';
 
 // The name of the open call: the voice channel, or the person or group of a direct or group call.
 function useCallName(): string {
@@ -66,6 +68,11 @@ const NEAR_BOTTOM_PX = 80; // within this distance of the end, a new message kee
 const SIDE_CHAT_MIN_PANE = 1000;
 // Where the call chat's open or closed state is kept, on this device.
 const CHAT_OPEN_KEY = 'dissent.callChatOpen';
+// Where a dragged size of the call chat is kept, on this device.
+const CHAT_SIZE_KEY = 'dissent.callChatSize';
+// What dragging the divider leaves each side at least, in px.
+const CHAT_MIN_PX = 200;
+const STAGE_MIN_PX = 320;
 // The space between tiles, in px. Matches gap-s-3.
 const TILE_GAP = 12;
 
@@ -82,6 +89,24 @@ function writeChatOpen(open: boolean): void {
     localStorage.setItem(CHAT_OPEN_KEY, String(open));
   } catch {
     // A window without storage keeps the choice for the session.
+  }
+}
+
+function readChatSize(): number | null {
+  try {
+    const saved = Number(localStorage.getItem(CHAT_SIZE_KEY));
+    return saved > 0 ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeChatSize(size: number | null): void {
+  try {
+    if (size === null) localStorage.removeItem(CHAT_SIZE_KEY);
+    else localStorage.setItem(CHAT_SIZE_KEY, String(Math.round(size)));
+  } catch {
+    // A window without storage keeps the size for the session.
   }
 }
 
@@ -111,8 +136,13 @@ export function CallBody() {
   }, []);
   const call = useShell((s) => s.call);
   const root = useRef<HTMLDivElement>(null);
-  const { width } = useSize(root);
+  const { width, height } = useSize(root);
   const [chatOpen, setChatOpen] = useState(readChatOpen);
+  const [chatSize, setChatSize] = useState(readChatSize);
+  const saveChatSize = useCallback((size: number | null) => {
+    setChatSize(size);
+    writeChatSize(size);
+  }, []);
   const toggleChat = useCallback(() => {
     setChatOpen((open) => {
       writeChatOpen(!open);
@@ -124,6 +154,22 @@ export function CallBody() {
   // call chat, since its board is not a text channel.
   if (call.scope !== 'channel') return <DmCallSplit call={call} />;
   const side = width >= SIDE_CHAT_MIN_PANE;
+  // The chat's width beside the video or height below it, when dragged. Each keeps the other side at least its minimum.
+  const room = side ? width : height;
+  const chatPx = chatSize === null ? null : Math.max(CHAT_MIN_PX, Math.min(chatSize, room - STAGE_MIN_PX));
+  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    const box = root.current?.getBoundingClientRect();
+    if (box) saveChatSize(side ? box.right - e.clientX : box.bottom - e.clientY);
+  };
+  const dividerKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const grow = side ? 'ArrowLeft' : 'ArrowUp';
+    const shrink = side ? 'ArrowRight' : 'ArrowDown';
+    if (e.key !== grow && e.key !== shrink) return;
+    e.preventDefault();
+    const now = chatPx ?? root.current?.querySelector('[aria-label="Call chat"]')?.getBoundingClientRect()[side ? 'width' : 'height'] ?? 300;
+    saveChatSize(now + (e.key === grow ? 32 : -32));
+  };
   return (
     <div
       ref={root}
@@ -132,7 +178,24 @@ export function CallBody() {
       className={cn('flex min-h-0 min-w-0 gap-s-2 p-s-2', side ? 'flex-row' : 'flex-col')}
     >
       <CallStage call={call} chatOpen={chatOpen} onToggleChat={toggleChat} />
-      {chatOpen ? <CallChat side={side} onClose={toggleChat} /> : null}
+      {chatOpen ? (
+        <div
+          role="separator"
+          aria-orientation={side ? 'vertical' : 'horizontal'}
+          aria-label="Resize the call and its chat"
+          tabIndex={0}
+          data-call-chat-divider
+          onPointerDown={(e) => {
+            e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={onDividerMove}
+          onDoubleClick={() => saveChatSize(null)}
+          onKeyDown={dividerKey}
+          className={cn('shrink-0 rounded-full bg-transparent hover:bg-elevated-hover focus-visible:outline-2 focus-visible:outline-ring', side ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize')}
+        />
+      ) : null}
+      {chatOpen ? <CallChat side={side} size={chatPx} onClose={toggleChat} /> : null}
     </div>
   );
 }
@@ -187,12 +250,33 @@ export function CallStage({
   const toggleMuted = useShell((s) => s.toggleMuted);
   const toggleDeafened = useShell((s) => s.toggleDeafened);
   const toggleCamera = useShell((s) => s.toggleCamera);
+  const toggleScreenShare = useShell((s) => s.toggleScreenShare);
   const leaveCall = useShell((s) => s.leaveCall);
   const me = useShell((s) => s.me);
   const ownPreviews = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
-  const ownScreen = useShell((s) => (me ? s.videoFrames[`${me.root_id}:screen`] : undefined));
-  // You always have a tile, as in Discord: your video while you share it, else your avatar.
+  const name = useCallName();
+  // You always have a tile, as in Discord: your camera while it is on, else your avatar.
   const selfTile = Boolean(me);
+  // Whoever shares a screen, others first, so a viewer's stage shows what someone else is sharing before their own.
+  const sharers: Sharer[] = call.participants.filter((p) => p.screen).map((p) => ({ rootId: p.root_id, name: p.display_name, self: false }));
+  if (call.screen && me) sharers.push({ rootId: me.root_id, name: me.display_name, self: true });
+  const tiles = (
+    <>
+      {selfTile && me ? (
+        <SelfTile
+          name={me.display_name}
+          rootId={me.root_id}
+          preview={call.camera ? ownPreviews : undefined}
+          speaking={Boolean(call.self_speaking)}
+          muted={call.muted}
+          live={Boolean(call.screen)}
+        />
+      ) : null}
+      {call.participants.map((p) => (
+        <Tile key={p.root_id} person={p} />
+      ))}
+    </>
+  );
   return (
     <section
       className={cn(
@@ -217,21 +301,13 @@ export function CallStage({
         </ul>
       ) : (
         <>
-          <RouteBanner call={call} />
-          <TileGrid count={call.participants.length + (selfTile ? 1 : 0)}>
-            {selfTile && me ? (
-              <SelfTile
-                name={me.display_name}
-                rootId={me.root_id}
-                preview={call.camera || call.screen ? (call.screen ? ownScreen ?? ownPreviews : ownPreviews) : undefined}
-                speaking={Boolean(call.self_speaking)}
-                muted={call.muted}
-              />
-            ) : null}
-            {call.participants.map((p) => (
-              <Tile key={p.root_id} person={p} />
-            ))}
-          </TileGrid>
+          {/* The screen needs the room. The route is still in the call's details. */}
+          {sharers.length ? <span /> : <RouteBanner call={call} />}
+          {sharers.length ? (
+            <ScreenStage sharers={sharers} people={tiles} />
+          ) : (
+            <TileGrid count={call.participants.length + (selfTile ? 1 : 0)}>{tiles}</TileGrid>
+          )}
         </>
       )}
       <div className="flex items-center justify-center gap-s-3">
@@ -256,7 +332,27 @@ export function CallStage({
         >
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
         </ControlButton>
-        <ShareButton sharing={Boolean(call.screen)} />
+        {call.screen ? (
+          <>
+            <ControlButton label="Stream settings" onClick={() => openShareDialog(name, true)}>
+              <Settings2 className="size-7" />
+            </ControlButton>
+            <Tip label="Stop streaming">
+              <button
+                type="button"
+                aria-label="Stop streaming"
+                onClick={() => void toggleScreenShare()}
+                className="grid size-14 place-items-center rounded-full bg-danger text-white hover:bg-danger-hover focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <MonitorOff className="size-7" aria-hidden="true" />
+              </button>
+            </Tip>
+          </>
+        ) : (
+          <ControlButton label="Share screen" onClick={() => openShareDialog(name, false)}>
+            <Monitor className="size-7" />
+          </ControlButton>
+        )}
         {onToggleChat ? (
           <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
             <MessageCircle className="size-7" />
@@ -326,7 +422,7 @@ async function previewBitmap(jpeg: string): Promise<ImageBitmap> {
 }
 
 // Draws each new preview onto a canvas at the picture's own size; the canvas is scaled to the tile by CSS.
-function VideoImage({ preview, label }: { preview: { jpeg: string }; label: string }) {
+export function VideoImage({ preview, label }: { preview: { jpeg: string }; label: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     let live = true;
@@ -350,8 +446,8 @@ function VideoImage({ preview, label }: { preview: { jpeg: string }; label: stri
   return <canvas ref={ref} role="img" aria-label={label} className="absolute inset-0 size-full object-contain" />;
 }
 
-// This device's own tile. It shows the shared screen when there is one, else the camera.
-function SelfTile({ name, rootId, preview, speaking, muted }: { name: string; rootId: Id; preview?: { jpeg: string }; speaking: boolean; muted: boolean }) {
+// This device's own tile: the camera, or the avatar. A shared screen has the stage to itself.
+function SelfTile({ name, rootId, preview, speaking, muted, live }: { name: string; rootId: Id; preview?: { jpeg: string }; speaking: boolean; muted: boolean; live: boolean }) {
   return (
     <div
       data-self-tile
@@ -368,15 +464,16 @@ function SelfTile({ name, rootId, preview, speaking, muted }: { name: string; ro
         {muted ? <MicOff className="size-3.5 text-danger-text" aria-hidden="true" /> : null}
         {`${name} (you)`}
       </span>
+      {live ? <span data-tile-live className="absolute top-2.5 right-2.5 inline-flex h-5 items-center rounded bg-danger px-1.5 text-[11px] font-bold tracking-wide text-white">LIVE</span> : null}
     </div>
   );
 }
 
 // Tells the engine how wide the tile is drawn, so its preview is made that wide. Reported again on resize.
-function useTileWidth(ref: React.RefObject<HTMLElement | null>, rootId: string, screen: boolean) {
+export function useTileWidth(ref: React.RefObject<HTMLElement | null>, rootId: string, screen: boolean, skip = false) {
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || skip) return;
     const report = () => void api.setVideoTile(rootId, screen, Math.round(el.clientWidth * window.devicePixelRatio)).catch(() => {});
     report();
     const observer = new ResizeObserver(report);
@@ -385,21 +482,18 @@ function useTileWidth(ref: React.RefObject<HTMLElement | null>, rootId: string, 
       observer.disconnect();
       void api.setVideoTile(rootId, screen, 0).catch(() => {});
     };
-  }, [ref, rootId, screen]);
+  }, [ref, rootId, screen, skip]);
 }
 
 function Tile({ person }: { person: VoiceParticipant }) {
-  const camera = useShell((s) => s.videoFrames[person.root_id]);
-  const screen = useShell((s) => s.videoFrames[`${person.root_id}:screen`]);
-  const preview = screen ?? camera;
+  const preview = useShell((s) => s.videoFrames[person.root_id]);
   // The forwarder pauses a stream for this device when its bandwidth cannot fit it. The last frame stays, marked as paused.
-  const paused = screen ? person.screen_paused : person.video_paused;
+  const paused = person.video_paused;
   const encoded = useEncodedVideoOn(person.root_id);
   // Stable callbacks, so a re-render does not detach the canvases: a canvas is released only when its tile goes.
   const cameraRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(person.root_id, el), [person.root_id]);
-  const screenRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(`${person.root_id}:screen`, el), [person.root_id]);
   const ref = useRef<HTMLDivElement>(null);
-  useTileWidth(ref, person.root_id, Boolean(screen));
+  useTileWidth(ref, person.root_id, false);
   return (
     <div
       ref={ref}
@@ -409,21 +503,8 @@ function Tile({ person }: { person: VoiceParticipant }) {
       style={{ backgroundColor: `oklch(26% 0.03 ${hueOf(person.root_id)})` }}
     >
       {encoded ? (
-        // Decoded here: the camera, then the screen on top of it, which stays hidden until its first frame.
-        <>
-          <canvas
-            ref={cameraRef}
-            aria-label={`${person.display_name}'s video`}
-            hidden
-            className="absolute inset-0 size-full object-contain"
-          />
-          <canvas
-            ref={screenRef}
-            aria-label={`${person.display_name}'s screen`}
-            hidden
-            className="absolute inset-0 size-full object-contain"
-          />
-        </>
+        // Decoded here. The camera stays hidden until its first frame, and a shared screen has its own tile on the stage.
+        <canvas ref={cameraRef} aria-label={`${person.display_name}'s video`} hidden className="absolute inset-0 size-full object-contain" />
       ) : null}
       {encoded || preview ? null : <UserAvatar name={person.display_name} seed={person.root_id} size="xl" speaking={person.speaking} className="aspect-square h-[min(6rem,55%)] w-auto text-[clamp(11px,2.2vh,31px)]" />}
       {encoded || !preview ? null : <VideoImage preview={preview} label={`${person.display_name}'s video`} />}
@@ -437,59 +518,9 @@ function Tile({ person }: { person: VoiceParticipant }) {
           Paused to save bandwidth
         </span>
       ) : null}
+      {person.screen ? <span data-tile-live className={cn('absolute right-2.5 inline-flex h-5 items-center rounded bg-danger px-1.5 text-[11px] font-bold tracking-wide text-white', person.forwarder ? 'top-10' : 'top-2.5')}>LIVE</span> : null}
       {person.forwarder ? (
         <span className="absolute top-2.5 right-2.5 inline-flex h-[26px] items-center rounded-md bg-black/55 px-2.5 text-meta text-text">Forwarding</span>
-      ) : null}
-    </div>
-  );
-}
-
-// The screen share control. Sharing stops with one press. Starting opens a list of the displays and windows to share.
-function ShareButton({ sharing }: { sharing: boolean }) {
-  const toggleScreenShare = useShell((s) => s.toggleScreenShare);
-  const [open, setOpen] = useState(false);
-  const [sources, setSources] = useState<ShareSource[]>([]);
-  const [failed, setFailed] = useState<string | null>(null);
-  if (sharing) {
-    return (
-      <ControlButton label="Stop sharing screen" pressed onClick={() => void toggleScreenShare()}>
-        <Monitor className="size-7" />
-      </ControlButton>
-    );
-  }
-  const openPicker = async () => {
-    setOpen(true);
-    try {
-      setSources(await api.listShareSources());
-      setFailed(null);
-    } catch (e) {
-      setSources([]);
-      setFailed(String(e));
-    }
-  };
-  return (
-    <div className="relative">
-      <ControlButton label="Share screen" onClick={() => (open ? setOpen(false) : void openPicker())}>
-        <Monitor className="size-7" />
-      </ControlButton>
-      {open ? (
-        <div role="menu" aria-label="Share what" className="absolute bottom-full right-0 mb-s-2 grid min-w-64 gap-s-1 rounded-lg border border-border bg-sidebar p-s-2 shadow-lg">
-          {failed ? <p className="px-s-2 py-s-1 text-meta text-muted-foreground">{failed}</p> : null}
-          {sources.map((source) => (
-            <button
-              key={`${source.target.kind}-${source.target.id}`}
-              type="button"
-              role="menuitem"
-              className="rounded-md px-s-2 py-s-1 text-left text-[13px] text-text hover:bg-elevated-hover"
-              onClick={() => {
-                setOpen(false);
-                void toggleScreenShare(source.target);
-              }}
-            >
-              {source.primary ? `${source.name} (primary)` : source.name}
-            </button>
-          ))}
-        </div>
       ) : null}
     </div>
   );
@@ -535,7 +566,7 @@ function ControlButton({
 // The call chat: the messages of the conversation the call sends into, and its composer. Rows and composer are the chat's
 // own (message-list.tsx, message-row.tsx, composer.tsx), so a message reads and acts the same here as in the chat:
 // formatting, mentions, link previews, invite cards, files, replies, reactions and the message menu.
-function CallChat({ side, onClose }: { side: boolean; onClose: () => void }) {
+function CallChat({ side, size, onClose }: { side: boolean; size: number | null; onClose: () => void }) {
   const view = useCallChatView();
   const audience = view ? audienceOf(view) : null;
   // The conversation the call sends into: its messages are the call chat's. Read again when the call moves to another one.
@@ -551,6 +582,7 @@ function CallChat({ side, onClose }: { side: boolean; onClose: () => void }) {
         // Beside the video it is a column; below it, it takes at most a third of the pane, so the video keeps the rest.
         side ? 'w-[360px]' : 'h-[min(33%,300px)] min-h-[200px]',
       )}
+      style={size === null ? undefined : side ? { width: size } : { height: size }}
       aria-label="Call chat"
     >
       <div className="flex h-12 shrink-0 items-center gap-s-2 pr-s-2 pl-s-4 shadow-[inset_0_-1px_0_var(--border)]">

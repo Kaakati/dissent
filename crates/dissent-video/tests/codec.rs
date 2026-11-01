@@ -30,6 +30,7 @@ fn config(kbps: u32) -> EncoderConfig {
         fps: FPS,
         bitrate_kbps: kbps,
         keyframe_interval: 60,
+        screen: false,
     }
 }
 
@@ -151,5 +152,42 @@ fn encoders_reject_zero_bitrate_and_wrong_sizes() {
             enc.encode(&wrong).is_err(),
             "{codec:?} must reject a frame of the wrong size"
         );
+    }
+}
+
+/// A new bitrate moves the stream without a keyframe, which at 1440p would be a large one. Runs for
+/// each codec this build can encode.
+#[test]
+fn a_bitrate_change_needs_no_keyframe() {
+    use dissent_video::pattern::scrolling_document;
+    for codec in Codec::ENCODABLE.iter().copied() {
+        for screen in [false, true] {
+            let config = EncoderConfig { width: 640, height: 360, fps: 30, bitrate_kbps: 4_000, keyframe_interval: 100_000, screen };
+            let mut enc = encode::open(codec, config).unwrap();
+            let mut bytes = [0usize; 2];
+            let mut keys = 0;
+            for index in 0..120u64 {
+                if index == 60 {
+                    enc.set_bitrate(300).unwrap();
+                    assert_eq!(enc.config().bitrate_kbps, 300);
+                }
+                for chunk in enc.encode(&scrolling_document(640, 360, index)).unwrap() {
+                    keys += u32::from(chunk.keyframe);
+                    // The second half skips the first frames after the change, while the rate settles.
+                    if index < 60 {
+                        bytes[0] += chunk.data.len();
+                    } else if index >= 75 {
+                        bytes[1] += chunk.data.len();
+                    }
+                }
+            }
+            eprintln!("{codec:?} screen={screen}: {} bytes at 4000 kbps, then {} at 300, {keys} keyframes", bytes[0], bytes[1]);
+            assert_eq!(keys, 1, "{codec:?}: only the first frame is a keyframe");
+            assert!(bytes[1] < bytes[0] / 2, "{codec:?}: the rate falls: {bytes:?}");
+            // Up as well as down: an encoder must take a rate above the one it started with.
+            enc.set_bitrate(8_000).unwrap();
+            enc.encode(&scrolling_document(640, 360, 120)).unwrap();
+            assert_eq!(enc.config().bitrate_kbps, 8_000);
+        }
     }
 }

@@ -202,3 +202,60 @@ async fn video_and_audio_share_a_call_without_losing_audio() {
     assert_eq!(audio_got, 60, "audio is untouched by the video carrier");
     assert_eq!(video_got, 30);
 }
+
+/// One keyframe of `key_bytes` followed by small deltas at 30 fps, as a screen of text starts. Returns
+/// when the receiver holds the keyframe and the last delta, and how long the keyframe took.
+async fn large_keyframe_crosses(key_bytes: usize) -> Duration {
+    const DELTAS: u32 = 90;
+    let (mut caller, mut callee) = connect_pair(key(7), key(7)).await;
+    let frame = move |id: u32| {
+        let len = if id == 0 { key_bytes } else { 6_000 };
+        (0..len).map(|i| ((i * 7 + id as usize * 13) % 251) as u8).collect::<Vec<u8>>()
+    };
+    let screen_meta = |id: u32| VideoMeta { frame_id: id, keyframe: id == 0, codec: VideoCodec::Av1, screen: true, layer: 0 };
+    let sender = tokio::spawn(async move {
+        caller.wait_connected().await.unwrap();
+        let mut ticker = interval(Duration::from_millis(33));
+        let mut sent = 0;
+        let until = tokio::time::Instant::now() + Duration::from_secs(40);
+        while tokio::time::Instant::now() < until {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if sent <= DELTAS {
+                        caller.send_video(&frame(sent), screen_meta(sent)).await.unwrap();
+                        sent += 1;
+                    }
+                }
+                _ = caller.next_video_frame() => {}
+            }
+        }
+    });
+    callee.wait_connected().await.unwrap();
+    let started = std::time::Instant::now();
+    let mut key_took = None;
+    let mut last = 0;
+    let got = timeout(Duration::from_secs(35), async {
+        while last < DELTAS {
+            let got = callee.next_video_frame().await.unwrap().expect("the call stays up");
+            if got.frame_id == 0 {
+                assert_eq!(got.payload, frame(0), "the keyframe arrives whole");
+                key_took = Some(started.elapsed());
+            }
+            last = got.frame_id;
+        }
+    })
+    .await;
+    sender.abort();
+    let took = key_took.expect("the keyframe arrives");
+    assert!(got.is_ok(), "frames keep coming after the keyframe, up to {last}");
+    println!("KEY {key_bytes} bytes: {took:?}");
+    took
+}
+
+/// A keyframe of a page of text at 1440p is about 600 KB on H.264 and up to a megabyte on AV1. It must
+/// fit the send buffer and arrive whole, even at the 1000 kbps a call starts on, where it takes seconds.
+#[tokio::test]
+async fn a_screen_keyframe_of_a_megabyte_crosses_a_call() {
+    large_keyframe_crosses(650_000).await;
+    large_keyframe_crosses(1_100_000).await;
+}

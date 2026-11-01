@@ -327,6 +327,9 @@ export const api = {
   // The tiles that have fallen back to JPEG previews, by root id. The engine previews their frames.
   setJpegTiles: (roots: string[]) => call<void>('set_jpeg_tiles', { roots }),
   setScreenShare: (on: boolean, target?: ShareSource['target']) => call<void>('set_screen_share', { on, target: target ?? null }),
+  setScreenBitrate: (kbps: number) => call<number>('set_screen_bitrate', { kbps }),
+  setScreenQuality: (maxHeight: number | null, maxFps: number | null) => call<void>('set_screen_quality', { maxHeight, maxFps }),
+  shareThumbnail: (target: ShareSource['target']) => call<string>('share_thumbnail', { target }),
   listShareSources: () => call<ShareSource[]>('list_share_sources'),
   sendCallMessage: (text: string) => call<unknown>('send_call_message', { text }),
   acceptCall: (callId: string) => call<unknown>('accept_call', { callId }),

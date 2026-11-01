@@ -101,6 +101,8 @@ pub struct ScreenSource {
     period: Duration,
     next_due: Instant,
     started: Instant,
+    /// The size of the last picture, before scaling.
+    native: Option<(u32, u32)>,
 }
 
 /// Where the pictures come from.
@@ -166,6 +168,7 @@ impl ScreenSource {
             period: Duration::from_micros(1_000_000 / format.fps.max(1) as u64),
             next_due: now,
             started: now,
+            native: None,
         })
     }
 }
@@ -194,6 +197,16 @@ impl VideoSource for ScreenSource {
         self.format
     }
 
+    fn native_size(&self) -> Option<(u32, u32)> {
+        self.native
+    }
+
+    fn set_format(&mut self, format: CaptureFormat) -> bool {
+        self.format = format;
+        self.period = Duration::from_micros(1_000_000 / format.fps.max(1) as u64);
+        true
+    }
+
     fn next_frame(&mut self) -> Result<Frame> {
         let now = Instant::now();
         if now < self.next_due {
@@ -210,6 +223,7 @@ impl VideoSource for ScreenSource {
             #[cfg(target_os = "linux")]
             Feed::Stream(stream) => stream.newest()?,
         };
+        self.native = Some(picture.dimensions());
         let (w, h) = (self.format.width, self.format.height);
         let scaled = if picture.dimensions() == (w, h) {
             Cow::Borrowed(picture)
@@ -219,6 +233,16 @@ impl VideoSource for ScreenSource {
         let pts_us = self.started.elapsed().as_micros() as u64;
         from_packed_rgb(w, h, 4, pts_us, scaled.as_raw())
     }
+}
+
+/// A small picture of `target` for the share picker, at most `max_width` wide, as packed RGB with its size.
+pub fn thumbnail(target: ScreenTarget, max_width: u32) -> Result<(u32, u32, Vec<u8>)> {
+    let picture = grab(target)?;
+    let width = max_width.min(picture.width()).max(1);
+    let height = (u64::from(picture.height()) * u64::from(width) / u64::from(picture.width().max(1))).max(1) as u32;
+    let small = image::imageops::resize(&picture, width, height, FilterType::Triangle);
+    let rgb = small.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    Ok((width, height, rgb))
 }
 
 fn find_monitor(id: u32) -> Result<xcap::Monitor> {

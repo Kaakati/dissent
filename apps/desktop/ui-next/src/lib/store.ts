@@ -1,6 +1,7 @@
 // Single source of shell state. Ported from the old UI's state.js and the navigation, status, call, transfer and engine-event
 // actions in the old UI's actions.js. Views read the store; actions below call the backend and then update it. Message lists,
 // composers and dialogs are not here yet: the batch that ports each view adds its slice.
+import { savedShareSettings, sendShareQuality } from './share-settings';
 import { create } from 'zustand';
 import { api } from './api';
 import { has } from './features';
@@ -558,6 +559,7 @@ export const useShell = create<ShellState>()((set, get) => ({
       const { call } = get();
       if (!call) return;
       const next = target !== undefined || !call.screen;
+      if (next) await sendShareQuality(savedShareSettings());
       await api.setScreenShare(next, target);
       set({ call: { ...call, screen: next } });
     });
