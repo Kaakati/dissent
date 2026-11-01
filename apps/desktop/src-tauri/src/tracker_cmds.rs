@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use dissent_core::tracker::catalog::{AddItem, CandidateView, CategoryInput, FilesView};
+use dissent_core::tracker::adding::PickedView;
+use dissent_core::tracker::catalog::{AddItem, CategoryInput, FilesView};
 use dissent_core::tracker::swarm::SwarmView;
 use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
 use dissent_core::{CommunityId, RootId, TransferView};
@@ -85,30 +86,40 @@ pub async fn set_category_auto_import(
     engine(&state).await?.set_category_auto_import(community, id, on).map_err(err)
 }
 
-/// Opens a file picker and reports what adding the picked files would do.
+/// Opens a file picker and reports what was picked, without reading the files. See `start_file_check`.
 #[tauri::command]
-pub async fn pick_files_for_category(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    community_id: String,
-    category_id: String,
-) -> Result<Vec<CandidateView>, String> {
+pub async fn pick_listing_files(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Vec<PickedView>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let community: CommunityId = parse("community id", &community_id)?;
-    let id: CategoryId = parse("category id", &category_id)?;
     let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
         .await
         .map_err(|e| e.to_string())?;
     let paths: Vec<PathBuf> = picked.unwrap_or_default().into_iter().filter_map(|f| f.into_path().ok()).collect();
-    engine(&state).await?.prepare_listing(community, id, paths).await.map_err(err)
+    let engine = engine(&state).await?;
+    engine.allow_paths(paths.iter().cloned());
+    Ok(engine.describe_paths(&paths))
 }
 
-/// The files in the category's linked folder this computer does not seed yet, and what adding each would do.
+/// The files in the category's linked folder this computer does not seed yet, without reading them.
 #[tauri::command]
-pub async fn scan_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<Vec<CandidateView>, String> {
+pub async fn scan_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<Vec<PickedView>, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
-    engine(&state).await?.scan_category_folder(community, id).await.map_err(err)
+    let engine = engine(&state).await?;
+    let found = engine.new_files_in_folder(community, id).await.map_err(err)?;
+    Ok(engine.describe_paths(&found))
+}
+
+/// Fingerprints chosen files in the background, each reported as a `file_check` event. Returns the job.
+#[tauri::command]
+pub async fn start_file_check(state: State<'_, AppState>, community_id: String, paths: Vec<PathBuf>) -> Result<u64, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.start_file_check(community, paths).map_err(err)
+}
+
+#[tauri::command]
+pub async fn cancel_file_check(state: State<'_, AppState>, job: u64) -> Result<(), String> {
+    engine(&state).await?.cancel_file_check(job);
+    Ok(())
 }
 
 /// `limit` is `forever`, `ratio:<thousandths>`, `hours:<n>` or `until:<ms>`.

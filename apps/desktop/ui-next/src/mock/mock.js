@@ -588,6 +588,14 @@ if (!window.__TAURI__) {
   };
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
+  // What the mock's OS picker holds. See `pick_listing_files`.
+  const mockPicks = () => window.__mockPickFiles ?? [
+    { name: 'dissent-0.4.1-windows-x64.msi', ext: 'MSI', kind: 'Installer', size: 88_700_000 },
+    { name: 'dissent-0.4.1-macos-arm64.dmg', ext: 'DMG', kind: 'Installer', size: 96_400_000 },
+    { name: 'RELEASE-NOTES-draft.txt', ext: 'TXT', kind: 'Document', size: 6_000 },
+  ].map((p) => ({ ...p, path: `D:\\Dissent\\releases\\${p.name}` }));
+  let mockCheckJob = 0;
+  const mockCheckTimers = new Map();
   // Member devices that would not follow a switch, as `GateStatus` in dissent-core: see `window.__mockGate`.
   const gateStatus = () => ({ ready: 1, offline: window.__mockGate?.offline ?? [], outdated: window.__mockGate?.outdated ?? [] });
   const needConfirmed = (confirmed) => {
@@ -954,32 +962,58 @@ if (!window.__TAURI__) {
       cat.auto_import = Boolean(cat.folder) && on;
       return null;
     },
-    pick_files_for_category: ({ communityId, categoryId }) => {
+    // The picks the mock's OS picker gives. `window.__mockPickFiles` replaces them; `window.__mockCheckMs` is how long each
+    // file's fingerprint takes. `window.__mockChecks` records what each check job did, for the driver.
+    pick_listing_files: () => mockPicks().map(({ path, name, ext, kind, size }) => ({ path, name, ext, kind, size, is_dir: false })),
+    scan_category_folder: ({ communityId, categoryId }) => {
       const f = servers[communityId].files;
       const cat = f.categories.find((x) => x.id === categoryId);
-      const kinds = { msi: 'Installer', dmg: 'Installer', txt: 'Document' };
-      const names = ['dissent-0.4.1-windows-x64.msi', 'dissent-0.4.1-macos-arm64.dmg', 'RELEASE-NOTES-draft.txt'];
-      return names.map((name, i) => {
-        const ext = name.split('.').pop();
-        const kind = kinds[ext];
-        const listed = f.listings.find((l) => l.name === name);
-        const state = cat.types.length && !cat.types.includes(kind) ? 'type_not_allowed' : listed ? 'already_listed' : 'ready';
-        return {
-          path: `D:\\Dissent\\releases\\${name}`, name, ext: ext.toUpperCase(), kind, size: [88_700_000, 96_400_000, 6_000][i], state,
-          fingerprint: `9f2c41${String(i).repeat(52)}e07e1a`, listed_by: listed?.lister_name ?? null, listing: listed?.id ?? null,
-        };
-      });
-    },
-    scan_category_folder: ({ communityId, categoryId }) => {
-      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
       need(Boolean(cat?.folder), 'this category is not linked to a folder here');
-      return handlers.pick_files_for_category({ communityId, categoryId }).filter((f) => f.state !== 'already_listed');
+      return handlers.pick_listing_files().filter((p) => !f.listings.some((l) => l.name === p.name));
+    },
+    start_file_check: ({ communityId, paths }) => {
+      const f = servers[communityId].files;
+      const job = ++mockCheckJob;
+      const record = { job, paths, reported: 0, cancelled: false };
+      (window.__mockChecks ??= []).push(record);
+      mockCheckTimers.set(job, record);
+      const ms = window.__mockCheckMs ?? 60;
+      let left = paths.length;
+      paths.forEach((path, i) => {
+        const pick = mockPicks().find((p) => p.path === path);
+        const size = pick?.size ?? 0;
+        setTimeout(() => {
+          if (!record.cancelled) emit({ kind: 'file_check', job, path, done: Math.floor(size / 2), total: size, result: null });
+        }, ms / 2);
+        setTimeout(() => {
+          left -= 1;
+          if (!record.cancelled) {
+            const listed = f.listings.find((l) => l.name === pick?.name);
+            record.reported += 1;
+            emit({
+              kind: 'file_check', job, path, done: size, total: size,
+              result: {
+                path, name: pick?.name ?? '', ext: pick?.ext ?? '', kind: pick?.kind ?? 'Other', size,
+                state: pick?.state ?? (listed ? 'already_listed' : 'ready'),
+                fingerprint: `9f2c41${String(i).repeat(52)}e07e1a`, listed_by: listed?.lister_name ?? null, listing: listed?.id ?? null,
+              },
+            });
+          }
+          if (left === 0) emit({ kind: 'file_check_done', job });
+        }, ms);
+      });
+      return job;
+    },
+    cancel_file_check: ({ job }) => {
+      const record = mockCheckTimers.get(job);
+      if (record) record.cancelled = true;
+      return null;
     },
     list_files: ({ communityId, categoryId, items }) => {
       const f = servers[communityId].files;
-      const picks = handlers.pick_files_for_category({ communityId, categoryId });
+      const picks = mockPicks();
       return items.map((item) => {
-        const name = item.path.split('\\').pop();
+        const name = item.path.split(/[\\/]/).pop();
         const old = f.listings.find((l) => l.name === name);
         if (old) {
           old.local = 'seeding';
@@ -988,7 +1022,7 @@ if (!window.__TAURI__) {
         const pick = picks.find((x) => x.name === name);
         const listing = {
           id: id(`listing${f.listings.length}x${Date.now()}`), category: categoryId, name, ext: pick.ext, kind: pick.kind, mime: 'application/octet-stream',
-          size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: pick.fingerprint,
+          size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: `9f2c41${String(f.listings.length).repeat(52)}e07e1a`,
           tags: item.tags.map((t) => t.replace(/^#/, '').toLowerCase()), description: item.description, lister: ME, lister_name: people[ME], added_ms: Date.now(),
           also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine: true, local: 'seeding', local_path: item.path, progress: 1, can_edit: true,
           danger: pick.kind === 'Installer' ? 'installer' : null,

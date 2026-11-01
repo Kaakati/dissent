@@ -151,7 +151,7 @@ pub struct ReaderSpecView {
 }
 
 /// A file found for adding, and what adding it would do.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CandidateView {
     pub path: String,
     pub name: String,
@@ -213,7 +213,7 @@ fn spec_of(view: &AddSpecView) -> Result<AddSpec> {
     })
 }
 
-fn ext_of(name: &str) -> String {
+pub(super) fn ext_of(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_uppercase()).filter(|e| e.len() <= 5).unwrap_or_default()
 }
 
@@ -618,7 +618,7 @@ impl Engine {
         let opened = self.opened_listings(community);
         let mut out = Vec::new();
         for path in paths {
-            let view = self.candidate(&path, &types, &opened).await;
+            let view = self.candidate(&path, &types, &opened, |_| true).await;
             if view.state == "ready" || view.state == "already_listed" {
                 self.with_tracker(community, |l| l.offered.insert(path.clone()));
             }
@@ -627,7 +627,9 @@ impl Engine {
         Ok(out)
     }
 
-    async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened]) -> CandidateView {
+    /// What adding the file at `path` would do. `progress` gets the bytes fingerprinted so far, and stops the pass when it
+    /// returns false.
+    pub(super) async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened], progress: impl FnMut(u64) -> bool + Send + 'static) -> CandidateView {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let kind = FileType::of_name(&name);
         let mut view = CandidateView {
@@ -657,7 +659,7 @@ impl Engine {
             return view;
         }
         let owned = path.to_path_buf();
-        let fingerprint = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true)).await;
+        let fingerprint = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, progress)).await;
         let Ok(Ok((fp, _))) = fingerprint else {
             view.state = "unreadable".into();
             return view;

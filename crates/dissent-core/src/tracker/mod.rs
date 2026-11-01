@@ -11,6 +11,7 @@
 //!   files: linked folders, auto-import, what it seeds, and the secret its receipt tags are keyed with.
 
 pub(crate) mod bodies;
+pub mod adding;
 pub mod catalog;
 pub(crate) mod gate;
 pub(crate) mod restricted;
@@ -131,6 +132,11 @@ pub(crate) struct TrackerState {
     pub(crate) upload: gate::UploadBucket,
     /// The seeding settings as last read or saved.
     pub(crate) settings: Option<seeding::SeedingSettings>,
+    /// Paths the person chose this run, through the OS picker or a native drop. See `adding`.
+    pub(crate) allowed: BTreeSet<PathBuf>,
+    /// The fingerprint checks running, by job, with what stops each.
+    pub(crate) checks: BTreeMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) next_check: u64,
 }
 
 /// One line of `files_keys.bin`: a generation, its key, and the restricted category it belongs to, if any.

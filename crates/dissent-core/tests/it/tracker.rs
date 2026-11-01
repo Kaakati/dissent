@@ -137,6 +137,66 @@ async fn an_old_app_or_an_offline_member_does_not_stop_a_server_sharing_files() 
     .await;
 }
 
+/// Waits for a check job to finish, and returns what it reported.
+async fn checked(events: &mut tokio::sync::broadcast::Receiver<dissent_core::EngineEvent>, job: u64) -> Vec<dissent_core::tracker::catalog::CandidateView> {
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), events.recv()).await.expect("the check finishes") {
+            Ok(dissent_core::EngineEvent::FileCheck { job: j, result: Some(view), .. }) if j == job => out.push(view),
+            Ok(dissent_core::EngineEvent::FileCheckDone { job: j }) if j == job => return out,
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_check_reports_each_file_and_only_for_chosen_paths() {
+    heavy(1, async {
+        let alice = peer("tracker-check").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let dir = scratch("tracker-check-src");
+        let bytes = sample(150_000, 3);
+        let msi = write(&dir, "a.msi", &bytes);
+        let other = write(&dir, "b.msi", &sample(150_000, 4));
+
+        // A path nobody chose goes nowhere: it is not checked, and it does not become listable.
+        let refused = alice.engine.start_file_check(id, vec![msi.clone()]);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.is_err());
+
+        let mut events = alice.engine.subscribe();
+        alice.engine.allow_paths([msi.clone(), other.clone()]);
+        let job = alice.engine.start_file_check(id, vec![msi.clone(), other.clone()]).expect("chosen paths");
+        let mut views = checked(&mut events, job).await;
+        views.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].state, "ready");
+        assert_eq!(views[0].fingerprint, data_encoding::HEXLOWER.encode(blake3::hash(&bytes).as_bytes()));
+        let listed = alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.expect("checked, so listable");
+
+        // The same bytes under another name read as already listed.
+        let copy = write(&dir, "copy.msi", &bytes);
+        alice.engine.allow_paths([copy.clone()]);
+        let job = alice.engine.start_file_check(id, vec![copy]).unwrap();
+        let views = checked(&mut events, job).await;
+        assert_eq!((views[0].state.as_str(), views[0].listing.as_deref()), ("already_listed", Some(listed[0].as_str())));
+
+        // A cancelled check stops, reports nothing more, and makes nothing listable.
+        let big = write(&dir, "big.msi", &sample(40_000_000, 5));
+        alice.engine.allow_paths([big.clone()]);
+        let job = alice.engine.start_file_check(id, vec![big.clone()]).unwrap();
+        alice.engine.cancel_file_check(job);
+        let views = checked(&mut events, job).await;
+        assert!(views.is_empty(), "{views:?}");
+        assert!(alice.engine.list_files(id, cat, vec![item(&big, &[])], SeedLimit::Forever).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {

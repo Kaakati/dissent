@@ -393,6 +393,8 @@ export type TypingTarget =
 // the store's switch and is ignored.
 export type EngineEvent =
   | { kind: 'communities_changed' }
+  | { kind: 'file_check'; job: number; path: string; done: number; total: number; result: import('./files').CandidateView | null }
+  | { kind: 'file_check_done'; job: number }
   | { kind: 'community_updated'; community_id: Id }
   | { kind: 'storage_grant_asked'; community_id: Id; community_name: string; root_id: Id; display_name: string }
   | { kind: 'inbox_host_changed'; root_id: Id; display_name: string; device_id: Id; on: boolean }

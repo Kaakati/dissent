@@ -317,6 +317,18 @@ Attachments lose identifying details by default (`scrub`). A listing never does:
 disk, and a linked file is served in place, so a scrubbed copy would not match and could not be seeded from the folder.
 The Add files dialog says so; a member who wants a photo cleaned sends it as an attachment or cleans it first.
 
+## Adding files
+
+Adding must not make anyone wait on a file being read (`tracker::adding`). The picker's command returns what can be told
+without reading: name, size, type. The dialog opens from that at once, and `start_file_check` fingerprints each file in
+the background (four at a time), reporting with `EngineEvent::FileCheck`. Each row shows "Checking…" with its progress, and
+Add stays off until every ticked row is known. A type the chosen category refuses is known from the start and is not
+waited for. Closing the dialog cancels the job at the next read of each file.
+
+**Whose paths.** A page cannot name a file by itself. Only the OS picker and the app's native drop handler call
+`Engine::allow_paths`, and `start_file_check` refuses anything else. A file reaches `offered`, which `list_files` requires, only
+when its check says it can be added, so a tricked page cannot publish a file nobody chose, as before.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).
@@ -333,7 +345,7 @@ Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inp
   changed on disk fails at the first changed group, and nothing of it is sent. A file whose modification time
   changed is refused before reading. After a restart the app relinks its linked seeds (`reconcile_linked`).
 - **Scanning**: Files › Scan folder lists the files under the linked folder (4 levels, at most 500) that this device
-  does not seed yet, with the same states as a pick. Auto-import lists them on its own every 10 minutes, with the
+  does not seed yet, with the same states as a pick, checked as "Adding files" says. Auto-import lists them on its own every 10 minutes, with the
   category's default tags. Live file-system watching is not built.
 - **Limits per listing**: Forever, until ratio r, for n hours, until a date. States, worked out from the record, the
   settings and the time: Stopped (by hand, or limit reached), Paused, Scheduled (a metered network, battery, or an

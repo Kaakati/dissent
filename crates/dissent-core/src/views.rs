@@ -451,6 +451,16 @@ pub enum EngineEvent {
     GroupJoinRequest { conversation: String, user: String },
     /// A download or upload moved. Matches `dissent://transfers`.
     TransfersChanged,
+    /// A file in a background check moved, or finished when `result` is there. See `tracker::adding`.
+    FileCheck {
+        job: u64,
+        path: String,
+        done: u64,
+        total: u64,
+        result: Option<crate::tracker::catalog::CandidateView>,
+    },
+    /// A background check has nothing more to report.
+    FileCheckDone { job: u64 },
     /// An attachment's thumbnail arrived. The UI re-reads the open conversation, without an alert.
     AttachmentChanged { message_id: String, attachment_id: String },
     /// A guardian answered the recovery on this device, or it finished or was cancelled. The recovery screen re-reads it.
