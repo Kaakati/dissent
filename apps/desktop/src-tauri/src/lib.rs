@@ -44,10 +44,20 @@ use tracing_subscriber::EnvFilter;
 /// Debug builds, or any build with the `fake-capture` feature: `DISSENT_FAKE_CAPTURE=1` makes this engine's camera and screen a
 /// test picture, so a live check can run two instances without a camera or a display. Other release builds ignore it.
 pub(crate) fn fake_capture(engine: &dissent_core::Engine) {
-    if (cfg!(debug_assertions) || cfg!(feature = "fake-capture")) && std::env::var_os("DISSENT_FAKE_CAPTURE").is_some_and(|v| v == "1") {
-        tracing::warn!("fake capture is on (DISSENT_FAKE_CAPTURE=1): the camera and the screen are a test picture");
-        engine.set_test_capture(dissent_core::TestCapture::Pattern);
+    if !(cfg!(debug_assertions) || cfg!(feature = "fake-capture")) {
+        return;
     }
+    let Some(value) = std::env::var("DISSENT_FAKE_CAPTURE").ok() else {
+        return;
+    };
+    // `1` is the test pattern. `2560x1440` makes the screen a scrolling document of that size.
+    let source = match value.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
+        Some((width, height)) => dissent_core::TestCapture::Document { width, height },
+        None if value == "1" => dissent_core::TestCapture::Pattern,
+        None => return,
+    };
+    tracing::warn!("fake capture is on (DISSENT_FAKE_CAPTURE={value}): the camera and the screen are a test picture");
+    engine.set_test_capture(source);
 }
 
 /// The node config: the saved network settings, or loopback-only when `DISSENT_LOOPBACK=1`.
@@ -369,6 +379,7 @@ pub fn run() {
             part6::set_screen_bitrate,
             part6::set_screen_quality,
             part6::share_thumbnail,
+            part6::set_encoded_cameras,
             part6::open_stream_window,
             part6::subscribe_stream_window,
             part6::close_stream_window,

@@ -1,7 +1,8 @@
-// Hardware video decoding. Received camera and screen frames arrive still encoded, over a binary Channel, and this window
-// decodes them with WebCodecs and draws each tile to its canvas (see video-decoders.ts). Off by default until it is measured
-// in release builds; the viewer can turn it on. Without WebCodecs, or without H.264 in it, the engine keeps sending JPEG previews and nothing here runs. A tile
-// that fails to decode falls back to JPEG previews for the rest of the call.
+// Video decoded in this window with WebCodecs. Received frames arrive still encoded, over a binary Channel, and each tile draws to
+// its canvas (see video-decoders.ts). A shared screen always comes this way when the window can decode it: JPEG previews cost
+// about twice the CPU at native size and can freeze the window on AV1 (docs/design/04-calls.md, "Screen share"). Cameras come this
+// way only if the viewer turned that on. Without WebCodecs, or without H.264 in it, the engine sends JPEG previews and nothing here
+// runs. A tile that fails to decode falls back to JPEG previews for the rest of the call.
 import { useSyncExternalStore } from 'react';
 import { api } from './api';
 import { EncodedTiles, type CanvasLike, type DecoderLike } from './video-decoders';
@@ -14,6 +15,7 @@ const ASK_EVERY_MS = 1000;
 type ChannelConstructor = new <T>() => { onmessage: (message: T) => void };
 
 let listening = false;
+let cameras = false;
 let lastAsk = 0;
 const listeners = new Set<() => void>();
 
@@ -37,12 +39,13 @@ const tiles = new EncodedTiles({
   switchedToJpeg: (root, reason) => {
     console.warn(`Dissent: video from ${root} uses JPEG previews for the rest of this call (${reason}).`);
     notify();
-    void api.setJpegTiles([...tiles.fallbacks()]).catch(() => {});
+    // The engine's decoder starts at a keyframe, and H.264 sends one only when asked.
+    void api.setJpegTiles([...tiles.fallbacks()]).then(() => requestKeyframes(true)).catch(() => {});
   },
 });
 
-/** The saved choice, off by default: the window decodes received video itself only when the viewer turned that on. Stored
- *  per viewer, because it only changes how this window decodes. */
+/** The saved choice, off by default: the window decodes cameras itself only when the viewer turned that on. Stored per viewer,
+ *  because it only changes how this window decodes. */
 export function hardwareVideoWanted(): boolean {
   try {
     return localStorage.getItem(SETTING) === '1';
@@ -59,15 +62,21 @@ export function saveHardwareVideoWanted(on: boolean) {
   }
 }
 
-/** Whether a peer's tiles draw canvases: frames are reaching this window encoded, and that peer has not fallen back. */
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/** Whether a peer's camera tile draws a canvas: this window decodes cameras, and that peer has not fallen back. */
 export function useEncodedVideoOn(root: string): boolean {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => listening && !tiles.fallbacks().has(root),
-  );
+  return useSyncExternalStore(subscribe, () => listening && cameras && !tiles.fallbacks().has(root));
+}
+
+/** Whether a peer's shared screen draws a canvas: this window decodes, and that peer has not fallen back. */
+export function useEncodedScreenOn(root: string): boolean {
+  return useSyncExternalStore(subscribe, () => listening && !tiles.fallbacks().has(root));
 }
 
 /** Whether this window can decode H.264 itself, which needs the desktop app and WebCodecs. A window without hardware
@@ -82,9 +91,10 @@ export async function webcodecsSupported(): Promise<boolean> {
   }
 }
 
-/** Turns the encoded path on or off in the engine. On only when this window can decode H.264. Resolves to what is on. */
-export async function applyHardwareVideo(on: boolean): Promise<boolean> {
-  if (!on || !(await webcodecsSupported())) {
+/** Starts the encoded path, which shared screens always use when this window can decode H.264, and sets whether cameras use it
+ *  too. Resolves to whether cameras do. */
+export async function applyHardwareVideo(camerasOn: boolean): Promise<boolean> {
+  if (!(await webcodecsSupported())) {
     await stopListening();
     return false;
   }
@@ -99,10 +109,12 @@ export async function applyHardwareVideo(on: boolean): Promise<boolean> {
       return false;
     }
     listening = true;
-    notify();
-    requestKeyframes(true);
   }
-  return true;
+  await api.setEncodedCameras(camerasOn).catch(() => {});
+  cameras = camerasOn;
+  notify();
+  requestKeyframes(true);
+  return camerasOn;
 }
 
 /** Starts a new call with every tile on the encoded path again. */

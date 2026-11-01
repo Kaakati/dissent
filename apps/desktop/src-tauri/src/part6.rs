@@ -354,18 +354,24 @@ fn install_encoded_sink(engine: &dissent_core::Engine) {
             bytes.extend_from_slice(&frame.payload);
             InvokeResponseBody::Raw(bytes)
         };
+        // A channel is cloned out of its lock before it is used. Sending can wait on the window's main thread, and
+        // when a window closes that thread takes these locks, so sending under one froze the whole app.
         if frame.screen {
-            if let Some((root, stream)) = lock_stream_window().as_ref() {
-                if *root == frame.root_id {
-                    let _ = stream.send(framed());
-                    return true;
-                }
+            let stream = lock_stream_window().as_ref().filter(|(root, _)| *root == frame.root_id).map(|(_, channel)| channel.clone());
+            if let Some(stream) = stream {
+                let _ = stream.send(framed());
+                return true;
             }
         }
         if lock_jpeg_tiles().contains(&frame.root_id) {
             return false;
         }
-        match lock_main_channel().as_ref() {
+        // A camera comes here only if the viewer turned that on. A shared screen always does.
+        if !frame.screen && !ENCODED_CAMERAS.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        let main = lock_main_channel().clone();
+        match main {
             Some(channel) => {
                 let _ = channel.send(framed());
                 true
@@ -374,6 +380,15 @@ fn install_encoded_sink(engine: &dissent_core::Engine) {
         }
     });
     engine.set_encoded_video_sink(Some(sink));
+}
+
+/// Whether the main window decodes cameras too. It always decodes shared screens, when it can.
+static ENCODED_CAMERAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the window's decoding of cameras on or off. Off, they use JPEG previews.
+#[tauri::command]
+pub fn set_encoded_cameras(on: bool) {
+    ENCODED_CAMERAS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The main window's channel, while it decodes frames itself.
@@ -428,11 +443,12 @@ pub async fn subscribe_stream_window(state: State<'_, AppState>, root_id: String
 
 /// Closes the pop-out window, when the share or the call ends or the viewer brings it back.
 #[tauri::command]
-pub fn close_stream_window(app: tauri::AppHandle) {
+pub async fn close_stream_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(STREAM_LABEL) {
         let _ = window.close();
     }
     *lock_stream_window() = None;
+    Ok(())
 }
 
 /// Replaces the tiles that use JPEG previews instead of the encoded path. The window sends the whole list each time.

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { ChevronDown, ChevronUp, ExternalLink, Maximize, Minimize, Monitor, Pin, PinOff, Volume2, VolumeX } from 'lucide-react';
 import { api, listenTo } from '@/lib/api';
 import { Tip } from '@/components/ui/tip';
-import { registerCanvas, useEncodedVideoOn, webcodecsSupported } from '@/lib/webcodecs';
+import { registerCanvas, useEncodedScreenOn, webcodecsSupported } from '@/lib/webcodecs';
 import { useShell } from '@/lib/store';
 import { cn } from '@/lib/utils';
 import { useTileWidth, VideoImage } from './call-body';
@@ -80,7 +80,7 @@ function setWindow(command: 'set_fullscreen' | 'set_always_on_top', value: boole
 function ScreenPicture({ sharer, onSize }: { sharer: Sharer; onSize?: (height: number) => void }) {
   const key = `${sharer.rootId}:screen`;
   const preview = useShell((s) => s.videoFrames[key]);
-  const encoded = useEncodedVideoOn(sharer.rootId) && !sharer.self;
+  const encoded = useEncodedScreenOn(sharer.rootId) && !sharer.self;
   const box = useRef<HTMLDivElement>(null);
   const canvasRef = useCallback((el: HTMLCanvasElement | null) => registerCanvas(key, el), [key]);
   useTileWidth(box, sharer.rootId, true, sharer.self);

@@ -343,6 +343,7 @@ export const api = {
   setScreenVolume: (rootId: string, percent: number) => call<void>('set_screen_volume', { rootId, percent }),
   openStreamWindow: (rootId: string, name: string) => call<void>('open_stream_window', { rootId, name }),
   subscribeStreamWindow: (rootId: string, channel: unknown) => call<void>('subscribe_stream_window', { rootId, channel }),
+  setEncodedCameras: (on: boolean) => call<void>('set_encoded_cameras', { on }),
   closeStreamWindow: () => call<void>('close_stream_window'),
   shareThumbnail: (target: ShareSource['target']) => call<string>('share_thumbnail', { target }),
   listShareSources: () => call<ShareSource[]>('list_share_sources'),

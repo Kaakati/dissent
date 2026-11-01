@@ -351,7 +351,16 @@ Probing with `set_desired_bitrate` is not used. Measured before the timer fix be
 
 **H.264.** A screen uses OpenH264's screen-content mode. On a scrolling page at 1440p and 3000 kbps its camera mode codes 5 of 90 frames, each about 200 KB, and skips the rest to stay on rate. The screen mode codes 43 of 90, each about 10 KB. It costs far more CPU: see the table below. Thread settings make no difference, since the crate leaves one slice per frame.
 
-**Decoding.** The window configures its decoders with level 5.1 strings (`avc1.42E033`, `av01.0.13M.08`), so that they cover any share up to 4K.
+**Decoding.** The window configures its decoders with level 5.1 strings (`avc1.42E033`, `av01.0.13M.08`), so that they cover any share up to 4K. A shared screen decodes in the window by default, because JPEG previews do not hold up at native size. Measured in the release app's real WebView2, two instances on loopback with the scrolling-page test picture, at the sharer's 6000 kbps, CPU of the viewer's whole process tree:
+
+| Stream | WebCodecs: fps, CPU | JPEG previews: fps, CPU |
+| --- | --- | --- |
+| H.264 1080p | 11.9, 44% | 10.8, 122% |
+| H.264 1440p | 6.4, 40% | 3.7, 86% |
+| AV1 1080p | 31.5, about 60% | page frozen |
+| AV1 1440p | 16.9, about 60 to 70% | page frozen |
+
+No decoder errors in any run, and the picture came out at the full size. Edge energy, which measures sharpness on this picture, was within 4% between the two on H.264, so JPEG at the tile's full width is about as sharp while it runs. The cost is what rules it out. On AV1 the page stopped answering within 12 s of switching to previews. WebCodecs on AV1 output two pictures per frame in these runs, for a reason not found: frames are not lost, but each is drawn twice. The JPEG figures come from a test page drawing previews as the stage does, not the stage itself.
 
 **Ceilings.** Nothing caps a share below its source. Server boosts set camera ceilings only (`12-boosts.md`), so a level 0 voice channel shares 1440p at 1440p, as a mesh and forwarded.
 
@@ -594,7 +603,7 @@ A voice channel call starts as a mesh and moves between tiers as its live roster
 
 Migration is per device, so two devices can reach the same tier a little apart. The generation id and the tier message keep them in step.
 
-## Webview decode with WebCodecs (built, off by default)
+## Webview decode with WebCodecs (built, on for shared screens)
 
 **Why.** Today a remote frame is decoded in Rust, scaled by the box filter, encoded as a JPEG, base64-encoded into an event, and decoded again by the webview. Measured on one 720p30 H.264 tile, the Rust part (decode, scale and JPEG) costs 53 to 59% of a core at 1280 px, and the webview's base64 and image decode cost 5 to 7 ms per frame on its main thread. The JPEG step exists only to get pictures into the webview. `VideoDecoder` can decode the encoded frame in the webview, on the GPU or a hardware decoder, so the picture never needs a Rust decode, a scale or a JPEG.
 
@@ -664,6 +673,6 @@ The window's own bench ran inside the desktop app's WebView2 (Chromium with a GP
 
 The two H.264 variants are within the noise of each other, so the simpler `drawImage` stays. Each frame is closed as soon as it is drawn, so no decoder waits on a frame the page still holds.
 
-**Current state.** The code has this off unless the viewer turns on the setting in Settings › Voice (`hardwareVideoWanted`), so most windows use JPEG previews. An earlier decision here made it the default, and the code does not do that. On a GPU-backed window this path costs about a third of the JPEG path's CPU, and the engine saves 16 to 20 ms a frame in Rust on top. Without WebCodecs or H.264 the window keeps the JPEG previews.
+**Current state.** A shared screen always decodes in the window when it can, and falls back to JPEG previews if the decoder or codec fails. Cameras do so only if the viewer turns on the setting in Settings › Voice (`hardwareVideoWanted`). An earlier decision here made it the default for all video, and the code never did that. On a GPU-backed window this path costs about a third of the JPEG path's CPU, and the engine saves 16 to 20 ms a frame in Rust on top. Without WebCodecs or H.264 the window keeps the JPEG previews.
 
 **Not measured.** Two instances in a live DM call with fake capture, and the app's whole-process CPU in that call. The desktop app has no fake capture switch, and the second instance needs contacts set up. The figures above come from the bench inside the app's own WebView2, plus the engine costs measured in Rust.

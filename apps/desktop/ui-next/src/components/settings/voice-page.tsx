@@ -222,8 +222,8 @@ function CustomBlocks({ settings }: { settings: VoiceSettings }) {
   );
 }
 
-// Hardware video decoding: this window decodes received video with WebCodecs, which costs about a third of the CPU of the
-// JPEG previews. Off by default until measured in release builds; turning it on is opt-in.
+// Cameras decoded in this window with WebCodecs, which costs about a third of the CPU of the JPEG previews. Opt-in. Shared
+// screens always decode here when the window can (see lib/webcodecs.ts).
 function VideoBlock() {
   const [on, setOn] = useState(hardwareVideoWanted);
   const [status, setStatus] = useState<string | null>(null);

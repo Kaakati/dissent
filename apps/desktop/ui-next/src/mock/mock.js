@@ -2075,6 +2075,7 @@ if (!window.__TAURI__) {
     subscribe_encoded_video: () => null,
     unsubscribe_encoded_video: () => null,
     set_jpeg_tiles: () => null,
+    set_encoded_cameras: () => null,
     request_video_keyframes: () => null,
     open_stream_window: ({ rootId }) => { window.__streamWindow = rootId; return null; },
     subscribe_stream_window: () => null,
