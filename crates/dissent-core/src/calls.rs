@@ -3078,11 +3078,6 @@ impl Engine {
                 sending.set_screen_target(self.inner.calls.screen_kbps.load(Ordering::Relaxed));
                 let (height, fps) = *lock(&self.inner.calls.screen_quality);
                 sending.set_screen_quality(height, fps);
-                // A server's boost level sets its calls' ceiling. A DM or group call has none: it costs
-                // nobody but the two ends, so it shares the screen at its own size.
-                if matches!(room.scope, Scope::Channel { .. }) {
-                    sending.budget.cap(self.room_ceilings(&room).screen);
-                }
                 if self.inner.calls.screen_sound_on.load(Ordering::Relaxed) {
                     // A share without sound is better than none. `set_screen_audio` already told the sharer if this cannot work.
                     match crate::call_screen_audio::ScreenAudio::start(self.test_capture()) {

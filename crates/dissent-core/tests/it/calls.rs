@@ -1452,6 +1452,33 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
     }).await;
 }
 
+/// A voice channel on a level 0 server, as a mesh: a 1440p screen goes out at its own size, while the
+/// camera keeps its boost ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_level_zero_voice_channel_shares_a_1440p_screen_at_its_own_size() {
+    heavy(3, async {
+    let (everyone, community, channel) = boosted_call(3, 0, 5_000).await;
+    for p in &everyone {
+        p.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Mesh, "a mesh of three").await;
+    let sender = &everyone[0];
+    sender.engine.set_screen_share(true, None).expect("screen share on");
+    eventually_within(Duration::from_secs(30), "the share reaches 2560x1440", || {
+        dissent_core::test_support::screen_plan(&sender.engine).filter(|plan| (plan.0, plan.1) == (2560, 1440))
+    })
+    .await;
+    eventually_within(Duration::from_secs(30), "and it reaches the others", || {
+        everyone[1].engine.call_state().filter(|c| c.participants.iter().any(|p| p.root_id == root(sender) && p.screen))
+    })
+    .await;
+    sender.engine.set_screen_share(false, None).expect("screen share off");
+    finish(everyone).await;
+    }).await;
+}
+
 /// A forwarder passes a screen's sound to everyone, though it holds no key. The source is a test tone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
@@ -1491,8 +1518,6 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
     only_senders_speak(&everyone, &[others[0]]).await;
     dissent_core::test_support::use_link_estimates(&everyone[forwarder].engine, false).await;
-    // A forwarded call in a server keeps its boost ceiling, so this one is at the top level.
-    dissent_core::test_support::set_boost_level(&sender.engine, Some(3));
     sender.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
     sender.engine.set_screen_bitrate(6_000);
     sender.engine.set_screen_share(true, None).expect("screen share on");
@@ -1504,6 +1529,9 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
         (received(narrow) == Some(0) && received(wide).is_some_and(|l| l > 0)).then_some(())
     })
     .await;
+    // A level 0 server: no boost ceiling applies to a screen.
+    let plan = dissent_core::test_support::screen_plan(&sender.engine).expect("a share runs");
+    assert_eq!((plan.0, plan.1), (2560, 1440), "the top layer is the screen's own size");
     assert!(dissent_core::test_support::set_viewer_budget(&everyone[forwarder].engine, &root(wide), 1_200).await);
     eventually_within(Duration::from_secs(60), "the constrained viewer moves to the middle layer", || {
         (received(wide) == Some(1)).then_some(())

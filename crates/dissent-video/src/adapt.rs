@@ -147,14 +147,12 @@ const SCREEN_RATES: [(u32, u32); 5] = [(60, 3_000), (30, 1_600), (15, 1_200), (1
 /// The steps after the native size is used up: 720p, as (fps, min kbps).
 const SCREEN_720: [(u32, u32); 2] = [(10, 400), (5, 250)];
 
-/// What a screen ladder is built from: the source's size, the bitrate chosen for the share, and the
-/// largest frame the call allows, if it has a ceiling.
+/// What a screen ladder is built from: the source's size, and the bitrate, resolution and frame rate chosen
+/// for the share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenSpec {
     pub source: (u32, u32),
     pub target_kbps: u32,
-    /// (width, height, fps), a server's boost ceiling.
-    pub ceiling: Option<(u32, u32, u32)>,
     /// The tallest picture chosen for the share, or `None` for the source's own size.
     pub max_height: Option<u32>,
     /// The highest frame rate chosen for the share, or `None` for no limit.
@@ -166,7 +164,6 @@ impl Default for ScreenSpec {
         Self {
             source: (1920, 1080),
             target_kbps: SCREEN_MAX_KBPS,
-            ceiling: None,
             max_height: None,
             max_fps: None,
         }
@@ -194,12 +191,8 @@ pub fn fit_within(width: u32, height: u32, max: (u32, u32)) -> (u32, u32) {
 /// measuring machine, over the 16.7 ms a frame has. H.264 stops at 30 fps. See "Screen share" in
 /// `docs/design/04-calls.md`.
 pub fn screen_ladder(spec: ScreenSpec, codecs: &[Codec]) -> Vec<Rung> {
-    let (ceiling_size, ceiling_fps) = match spec.ceiling {
-        Some((width, height, fps)) => ((width, height), fps),
-        None => (SCREEN_MAX_SIZE, u32::MAX),
-    };
-    let ceiling_fps = ceiling_fps.min(spec.max_fps.unwrap_or(u32::MAX));
-    let max = (SCREEN_MAX_SIZE.0.min(ceiling_size.0), SCREEN_MAX_SIZE.1.min(ceiling_size.1).min(spec.max_height.unwrap_or(u32::MAX)));
+    let max_fps = spec.max_fps.unwrap_or(u32::MAX);
+    let max = (SCREEN_MAX_SIZE.0, SCREEN_MAX_SIZE.1.min(spec.max_height.unwrap_or(u32::MAX)));
     let (width, height) = fit_within(spec.source.0, spec.source.1, max);
     let target = spec.target_kbps;
     let codec = if codecs.contains(&Codec::Av1) { Codec::Av1 } else { Codec::H264 };
@@ -245,7 +238,7 @@ pub fn screen_ladder(spec: ScreenSpec, codecs: &[Codec]) -> Vec<Rung> {
     // Each step must need less than the one above, whatever shape the source has.
     let mut last = u32::MAX;
     rungs.retain(|rung| {
-        let keep = rung.min_kbps < last && rung.fps <= ceiling_fps.max(10) && codecs.contains(&rung.codec);
+        let keep = rung.min_kbps < last && rung.fps <= max_fps.max(10) && codecs.contains(&rung.codec);
         if keep {
             last = rung.min_kbps;
         }
@@ -1296,12 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn a_boost_ceiling_scales_a_larger_screen_rather_than_dropping_to_720p() {
-        let rungs = screen_ladder(ScreenSpec { source: (2560, 1440), target_kbps: 6_000, ceiling: Some((1920, 1080, 15)), ..ScreenSpec::default() }, &Codec::ALL);
-        assert_eq!((rungs[0].width, rungs[0].height, rungs[0].fps), (1920, 1080, 15));
-    }
-
-    #[test]
     fn the_lowest_rung_of_a_small_source_is_not_stretched() {
         let rungs = screen((320, 180), SCREEN_DEFAULT_KBPS);
         let bottom = rungs.last().unwrap();
@@ -1361,7 +1348,7 @@ mod tests {
 
     #[test]
     fn a_chosen_resolution_and_frame_rate_hold_the_ladder() {
-        let spec = ScreenSpec { source: (2560, 1440), target_kbps: 6_000, max_height: Some(720), max_fps: Some(15), ..ScreenSpec::default() };
+        let spec = ScreenSpec { source: (2560, 1440), target_kbps: 6_000, max_height: Some(720), max_fps: Some(15) };
         let rungs = screen_ladder(spec, &Codec::ALL);
         assert_eq!((rungs[0].width, rungs[0].height, rungs[0].fps), (1280, 720, 15));
         let small = ScreenSpec { source: (1280, 720), target_kbps: 6_000, max_height: Some(1080), ..ScreenSpec::default() };

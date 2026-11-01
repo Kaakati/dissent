@@ -83,24 +83,24 @@ The thresholds live in one table, `boosts::LEVEL_HOSTS`:
 
 One table, `boosts::CEILINGS`, indexed by level:
 
-| Level | Voice bitrate cap | Camera | Screen share | Mesh before forwarding |
-|---|---|---|---|---|
-| 0 | 96 kbps | 720p30 | 1080p15 | 6 |
-| 1 | 96 kbps | 1080p30 | 1080p30 | 6 |
-| 2 | 128 kbps | 1080p30 | 1080p30 | 8 |
-| 3 | 256 kbps | 1080p60 | 1080p60 | 10 |
+| Level | Voice bitrate cap | Camera | Mesh before forwarding |
+|---|---|---|---|
+| 0 | 96 kbps | 720p30 | 6 |
+| 1 | 96 kbps | 1080p30 | 6 |
+| 2 | 128 kbps | 1080p30 | 8 |
+| 3 | 256 kbps | 1080p60 | 10 |
 
-Level 0 is exactly what the app allowed before boosts. Voice could already be set to 96 kbps, and the
-screen ladder already reached 1080p15. So no level ever lowers a ceiling.
+Level 0 is exactly what the app allowed before boosts: voice could already be set to 96 kbps. So no
+level ever lowers a ceiling.
 
-The screen ceilings apply to a server's voice channels. A DM or group call has none, and shares at the source's own size (`04-calls.md`, "Screen share"). In a voice channel a larger source is scaled to fit the ceiling.
+Boosts do not touch screen sharing. At every level, and in DM and group calls, a share goes out at the source's own size (`04-calls.md`, "Screen share").
 
 - **Voice.** Level 0 keeps 96 kbps, the most a voice channel could be set to before boosts, so no
   server loses anything. A voice channel's bitrate setting may be up to 256 kbps in replay. An older
   client rejects a setting above 96 as malformed and keeps the old value. When a call starts,
   this app sends at the lower of the channel's setting and its level's cap. The settings page offers
   values up to the cap.
-- **Video.** The sender's adaptation ladder skips rungs above the level's frame size and frame rate.
+- **Camera.** The sender's adaptation ladder skips rungs above the level's frame size and frame rate.
   A rung may be missing, as when the ladder has no 1080p60 rung. Then the ceiling has no effect until
   one is added. Calls own the ladder.
 - **Mesh.** A call stays a mesh up to the level's limit, then is forwarded. Forwarded calls already

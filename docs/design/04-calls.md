@@ -353,7 +353,7 @@ Probing with `set_desired_bitrate` is not used. Measured before the timer fix be
 
 **Decoding.** The window configures its decoders with level 5.1 strings (`avc1.42E033`, `av01.0.13M.08`), so that they cover any share up to 4K.
 
-**Ceilings.** A DM or group call has no screen ceiling: it costs nobody but its members. A server's voice channel keeps its boost ceiling (`12-boosts.md`), and a source larger than the ceiling is scaled to fit it rather than dropping to 720p. So at level 0 a 1440p screen is sent at 1080p and 15 fps.
+**Ceilings.** Nothing caps a share below its source. Server boosts set camera ceilings only (`12-boosts.md`), so a level 0 voice channel shares 1440p at 1440p, as a mesh and forwarded.
 
 **Forwarded calls.** A direct call or a mesh gets the whole stream. In a forwarded call the layers are 180p, a middle layer, and the top rung, which is the source's size. The wire allows three layers and does not change, since the layer table is already (width, kbps). A screen taller than 720p uses 720p at 1000 kbps as its middle layer, because 360p text cannot be read and a viewer whose budget can't fit the top should still read the page. Lower layers run in OpenH264's camera mode and cost extra CPU on the sender's capture thread, which the governor sees.
 

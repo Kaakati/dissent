@@ -949,11 +949,6 @@ impl Budget {
     /// Holds the ladder to a server's boost ceiling. See `boosts`.
     pub(crate) fn cap(&mut self, ceiling: crate::boosts::VideoCeiling) {
         self.ceiling = Some(ceiling);
-        if self.content == Content::Screen {
-            self.screen.ceiling = Some((ceiling.width, ceiling.height, ceiling.fps));
-            self.rebuild_screen();
-            return;
-        }
         self.adapter.cap(ceiling.width, ceiling.height, ceiling.fps);
     }
 

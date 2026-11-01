@@ -88,9 +88,6 @@ pub struct Ceilings {
     pub voice_kbps: u32,
     /// The largest camera frame, and its frame rate.
     pub video: VideoCeiling,
-    /// The largest screen-share frame, and its frame rate. Level 0's is the 1080p15 the screen ladder
-    /// already had, so a boost never lowers screen sharing.
-    pub screen: VideoCeiling,
     /// The most people a call keeps as a mesh before it is forwarded.
     pub mesh_limit: usize,
 }
@@ -104,17 +101,16 @@ pub struct VideoCeiling {
 }
 
 const P720_30: VideoCeiling = VideoCeiling { width: 1280, height: 720, fps: 30 };
-const P1080_15: VideoCeiling = VideoCeiling { width: 1920, height: 1080, fps: 15 };
 const P1080_30: VideoCeiling = VideoCeiling { width: 1920, height: 1080, fps: 30 };
 const P1080_60: VideoCeiling = VideoCeiling { width: 1920, height: 1080, fps: 60 };
 
 /// The ceilings of each level, indexed by level. One table, so the levels and limits stay together.
 pub const CEILINGS: [Ceilings; 4] = [
     // Level 0 keeps today's 96 kbps, the most a voice channel could be set to before boosts.
-    Ceilings { voice_kbps: 96, video: P720_30, screen: P1080_15, mesh_limit: 6 },
-    Ceilings { voice_kbps: 96, video: P1080_30, screen: P1080_30, mesh_limit: 6 },
-    Ceilings { voice_kbps: 128, video: P1080_30, screen: P1080_30, mesh_limit: 8 },
-    Ceilings { voice_kbps: 256, video: P1080_60, screen: P1080_60, mesh_limit: 10 },
+    Ceilings { voice_kbps: 96, video: P720_30, mesh_limit: 6 },
+    Ceilings { voice_kbps: 96, video: P1080_30, mesh_limit: 6 },
+    Ceilings { voice_kbps: 128, video: P1080_30, mesh_limit: 8 },
+    Ceilings { voice_kbps: 256, video: P1080_60, mesh_limit: 10 },
 ];
 
 /// The level `hosts` verified hosts earn.
