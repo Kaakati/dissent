@@ -46,6 +46,20 @@ pub async fn delete_category(state: State<'_, AppState>, community_id: String, c
     engine(&state).await?.delete_category(community, id).await.map_err(err)
 }
 
+/// Asks for a folder through the OS picker. `None` when it is cancelled. See the `test-folder-hook` feature.
+async fn ask_folder(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    #[cfg(feature = "test-folder-hook")]
+    if let Some(file) = std::env::var_os("DISSENT_TEST_PICK_FOLDER_FILE") {
+        let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+        return Ok(Some(PathBuf::from(text.trim())));
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    picked.map(|f| f.into_path().map_err(err)).transpose()
+}
+
 /// Opens a folder picker and links the chosen folder to the category on this computer. Returns the path, or `None`
 /// when the picker was cancelled.
 #[tauri::command]
@@ -55,16 +69,11 @@ pub async fn pick_category_folder(
     community_id: String,
     category_id: String,
 ) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
-    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(picked) = picked else {
+    let Some(folder) = ask_folder(app).await? else {
         return Ok(None);
     };
-    let folder: PathBuf = picked.into_path().map_err(err)?;
     engine(&state).await?.set_category_folder(community, id, Some(folder.clone())).map_err(err)?;
     Ok(Some(folder.to_string_lossy().into_owned()))
 }
@@ -127,11 +136,7 @@ pub async fn cancel_file_check(state: State<'_, AppState>, job: u64) -> Result<(
 /// Opens a folder picker for adding a whole folder. `None` when it is cancelled.
 #[tauri::command]
 pub async fn pick_listing_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<PathBuf>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(|e| e.to_string())?;
-    let folder = picked.and_then(|f| f.into_path().ok());
+    let folder = ask_folder(app).await?;
     if let Some(folder) = &folder {
         engine(&state).await?.allow_paths([folder.clone()]);
     }
