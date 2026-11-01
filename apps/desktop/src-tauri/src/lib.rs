@@ -255,6 +255,8 @@ pub fn run() {
             avatar_cmds::clear_avatar,
             avatar_cmds::set_profile_banner,
             avatar_cmds::set_profile_banner_preset,
+            avatar_cmds::set_profile_theme,
+            avatar_cmds::clear_profile_theme,
             avatar_cmds::clear_profile_banner,
             avatar_cmds::set_community_icon,
             avatar_cmds::clear_community_icon,

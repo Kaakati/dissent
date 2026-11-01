@@ -493,6 +493,7 @@ impl Engine {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid profile banner: {e}")),
             },
+            Request::ProfileTheme(st) => self.answer_profile_theme(conn_from, *st),
             Request::Typing(st) => match self.accept_typing(None, *st) {
                 Ok(()) => Response::Ack,
                 Err(e) => Response::Error(format!("invalid typing: {e}")),

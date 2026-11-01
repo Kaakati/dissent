@@ -19,6 +19,8 @@ pub struct MeView {
     pub banner_poster: Option<String>,
     /// The preset gradient the profile banner is, when it is one.
     pub banner_preset: Option<u8>,
+    /// The profile colours, when set. See `profile_themes`.
+    pub theme: Option<dissent_events::ProfileTheme>,
     /// True until the recovery phrase has been shown on a fresh device. See `capabilities`.
     pub first_run: bool,
 }
@@ -290,6 +292,8 @@ pub struct UserView {
     pub banner_poster: Option<String>,
     /// The preset gradient the profile banner is, when it is one. Neither set: the hue colour.
     pub banner_preset: Option<u8>,
+    /// The profile colours, when set. See `profile_themes`.
+    pub theme: Option<dissent_events::ProfileTheme>,
     pub is_contact: bool,
     pub handles: Vec<HandleView>,
     pub mutual_communities: Vec<CommunityRef>,

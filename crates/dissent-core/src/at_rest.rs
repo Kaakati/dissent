@@ -253,6 +253,7 @@ const KEEP_NAMES: &[&str] = &[
     "avatar.bin",
     "peer_avatars.bin",
     "banners.bin",
+    "themes.bin",
     "events.log",
     "mls_commits.log",
     "content.sealed",

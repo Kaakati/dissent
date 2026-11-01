@@ -16,6 +16,7 @@ import { startConversationCall } from '@/lib/calls';
 import { copyText } from '@/lib/clipboard';
 import { has } from '@/lib/features';
 import { openDialog } from '@/lib/dialog';
+import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { DirectSummary, Presence, UserProfileView } from '@/lib/types';
@@ -183,6 +184,7 @@ export async function openFullProfile(peer: string): Promise<void> {
   }
   openDialog({
     title: 'Profile',
+    surface: themeProps(view.theme),
     content: (close) => <FullProfileBody peer={peer} view={view} close={close} />,
   });
 }

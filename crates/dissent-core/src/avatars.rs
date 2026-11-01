@@ -589,6 +589,13 @@ pub(crate) fn picture_fetch_for(community: CommunityId, c: &Community, author: R
                 roots: c.state().members.keys().copied().collect(),
             })
         }
+        // No picture to fetch: this only tells the views the colours changed.
+        Payload::ProfileThemeSet { .. } => Some(PictureFetch {
+            owner: Owner::Person(author),
+            picture: None,
+            poster: None,
+            roots: Vec::new(),
+        }),
         Payload::CommunityBannerSet { banner } => {
             let current = c.state().banner.is_some_and(|(_, p)| p == *banner);
             current.then(|| PictureFetch {

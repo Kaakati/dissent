@@ -72,6 +72,7 @@ const V0111_PAYLOAD: &[&str] = &[
     "FileReceipt",
     "ReputationRulesSet",
     "ReputationReset",
+    "ProfileThemeSet",
 ];
 
 const LAYOUT_ENTRY: &[&str] = &["Channel", "Category"];

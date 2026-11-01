@@ -85,6 +85,11 @@
   --role-mod: #7cb7ff;
   --focus: #ff4f00;
   --motion: 150ms ease-out;
+  /* A themed profile (lib/profile-theme.ts checks its gradient against these two). --profile-panel is the grouped panel
+     on the own-profile card, which is a surface of its own without a theme. */
+  --profile-text: #ffffff;
+  --profile-muted: #e4e6ea;
+  --profile-panel: var(--panel);
 
   /* ---- spacing, 4 px grid ---- */
   --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px;
@@ -116,6 +121,50 @@
   --shadow-1: 0 2px 8px rgb(0 0 0 / 0.3);
   --shadow-2: 0 8px 24px rgb(0 0 0 / 0.4);
   --shadow-3: 0 16px 48px rgb(0 0 0 / 0.5);
+}
+
+/* A profile with its owner's colours: the gradient, a thin border that follows it, and the surface and text tokens every
+   component on the card reads. All the surfaces only darken the gradient, so text that passes on it passes on them. Its
+   colours come from themeProps, as numbers it has checked. */
+[data-profile-theme] {
+  --profile-panel: rgb(0 0 0 / 0.32);
+  --text: var(--profile-text);
+  --text-strong: var(--profile-text);
+  --foreground: var(--profile-text);
+  --popover-foreground: var(--profile-text);
+  --muted-foreground: var(--profile-muted);
+  --faint: var(--profile-muted);
+  --link: #cfe3ff;
+  --link-hover: #e3efff;
+  --accent-text: #ffc9b0;
+  --danger-text: #ffc0d2;
+  --success-text: #bff0d3;
+  /* The rings around the avatar and its presence dot. */
+  --ink: var(--profile-ring);
+  --chat: var(--profile-ring);
+  --panel: var(--profile-ring);
+  --presence-ring: var(--profile-ring);
+  --elevated: rgb(0 0 0 / 0.34);
+  --elevated-hover: rgb(0 0 0 / 0.48);
+  --input: rgb(0 0 0 / 0.34);
+  --input-border: rgb(255 255 255 / 0.28);
+  --hover: rgb(0 0 0 / 0.22);
+  --selected: rgb(0 0 0 / 0.34);
+  --sidebar: rgb(0 0 0 / 0.34);
+  --border: rgb(255 255 255 / 0.2);
+  --border-strong: rgb(0 0 0 / 0.42);
+  color: var(--profile-text);
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--profile-top), var(--profile-bottom)) padding-box,
+    linear-gradient(var(--profile-edge-top), var(--profile-edge-bottom)) border-box;
+}
+[data-profile-theme] [data-slot="button"][data-variant="outline"] {
+  border-color: rgb(255 255 255 / 0.4);
+  background: rgb(0 0 0 / 0.26);
+}
+[data-profile-theme] [data-slot="button"][data-variant="outline"]:hover {
+  background: rgb(0 0 0 / 0.42);
 }
 
 /* Tailwind utilities for the tokens above: bg-chat, text-faint, gap-s-2, text-body, rounded-r-2 and so on. */
@@ -151,6 +200,7 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
+  --color-profile-panel: var(--profile-panel);
   --color-rail: var(--rail);
   --color-chat: var(--chat);
   --color-panel: var(--panel);

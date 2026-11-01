@@ -65,6 +65,10 @@ impl Paths {
     pub fn banners(&self) -> PathBuf {
         self.root.join("banners.bin")
     }
+    /// This device's profile colours and the ones contacts sent directly. See `profile_themes`.
+    pub fn themes(&self) -> PathBuf {
+        self.root.join("themes.bin")
+    }
     /// Decrypted pictures, one file per content hash.
     pub fn avatars_dir(&self) -> PathBuf {
         self.root.join("avatars")

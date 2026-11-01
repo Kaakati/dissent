@@ -6,6 +6,7 @@ import { ProfileCardBody } from '@/components/profile/profile-card';
 import { useUserProfile } from '@/components/profile/use-user-profile';
 import { Block, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
 import { api } from '@/lib/api';
+import { themeProps } from '@/lib/profile-theme';
 import { setShellPrefs, useShellPrefs } from '@/lib/shell-prefs';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
@@ -17,7 +18,7 @@ function CardPreview() {
   if (!me) return null;
   if (load.status !== 'ready') return <p className="text-sm leading-[19px] text-muted-foreground">Loading preview…</p>;
   return (
-    <div className="w-[300px] overflow-hidden rounded-lg bg-ink">
+    <div className="w-[300px] overflow-hidden rounded-lg bg-ink" {...themeProps(load.view.theme)}>
       <ProfileCardBody view={load.view} userId={me.root_id} preview />
     </div>
   );

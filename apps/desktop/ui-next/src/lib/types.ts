@@ -25,6 +25,7 @@ export interface Me {
   banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
   banner_preset?: number | null; // the preset gradient (0-9), when it is one
   banner_poster?: string | null; // an animated banner's still frame
+  theme?: unknown; // the profile colours as the engine sent them: read through lib/profile-theme.ts
 }
 
 export interface CommunitySummary {
@@ -574,6 +575,7 @@ export interface UserProfileView {
   banner?: string | null; // the profile banner's picture URL, when it is an uploaded one
   banner_preset?: number | null; // the preset gradient (0-9); neither set means the hue colour
   banner_poster?: string | null; // an animated banner's still frame
+  theme?: unknown; // the profile colours from another person: read through lib/profile-theme.ts
   status?: Presence;
   online?: boolean;
   is_contact?: boolean;

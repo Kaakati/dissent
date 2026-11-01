@@ -366,6 +366,9 @@ pub enum Payload {
     ReputationRulesSet { rules: crate::tracker::ReputationRules },
     /// Clears a member's reputation, while the rules let admins reset. Needs `MANAGE_FILES`. Carried. Appended.
     ReputationReset { root: RootId },
+    /// Sets or clears the author's profile colours. Only the author sets their own, and the latest by HLC
+    /// wins. Carried, so an older client shows it as locked. Appended, see `core::profile_themes`.
+    ProfileThemeSet { theme: Option<crate::picture::ProfileTheme> },
 }
 
 /// One entry of a channel layout: a channel outside any category, or a category. Appended only: the variant
