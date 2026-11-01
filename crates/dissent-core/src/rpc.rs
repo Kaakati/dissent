@@ -206,6 +206,9 @@ pub(crate) enum Request {
         category: dissent_events::CategoryId,
         pairs: Vec<(u64, [u8; 32])>,
     },
+    /// The sender's signed profile colours, sent to a contact. Answered with `Response::ProfileTheme`, the
+    /// responder's own. A device from before this answers with an error. Appended, see `profile_themes`.
+    ProfileTheme(Box<crate::profile_themes::SignedTheme>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -296,6 +299,8 @@ pub(crate) enum Response {
     Holdings(Option<crate::tracker::swarm::HoldingsAnswer>),
     /// The answer to `Request::CategoryKeys`: `(generation, key)` pairs. Appended.
     CategoryKeys(Vec<(u64, [u8; 32])>),
+    /// The answer to `Request::ProfileTheme`: the responder's signed profile colours. Appended.
+    ProfileTheme(Box<crate::profile_themes::SignedTheme>),
 }
 
 impl Request {
@@ -461,10 +466,10 @@ mod wire_order_tests {
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_REQUEST: &[&str] =
-        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys"];
+        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys", "ProfileTheme"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys"];
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys", "ProfileTheme"];
 
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[

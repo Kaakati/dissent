@@ -1446,6 +1446,129 @@ check('the card suffix is the short address (dsu1…)', (await b.ev(`document.qu
 await b.press('Escape');
 await sleep(300);
 
+// ---- Profile colours on other people's profiles ----
+const THEMED = '[data-profile-theme]';
+const openCardOf = async (who) => {
+  await b.ev(`(() => { const n = [...document.querySelectorAll('button')].find(x => x.textContent.includes(${JSON.stringify(who)}) && !x.closest('main') && !x.closest('[aria-label="Active now"]')); const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await sleep(300);
+  await clickByText('[role="menuitem"]', 'Profile');
+  await sleep(500);
+};
+await openCardOf('Jonas');
+check('T1 a malformed theme from a peer shows as no theme', (await b.ev(`(() => { const c = document.querySelector('[role="dialog"][aria-label="User profile"]'); return !!c && !c.matches('${THEMED}') && getComputedStyle(document.body).display !== 'none'; })()`)) === true);
+await b.press('Escape');
+await sleep(300);
+// Contrast of two computed rgb() colours, with an alpha over a backdrop ignored: the surfaces only darken the gradient.
+const THEME_READ = `const parse = (s) => s.match(/[\\d.]+/g).slice(0, 3).map(Number);
+  const lum = (c) => { const [r, g, b] = c.map((n) => { const s = n / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+  const stops = (el) => [el.style.getPropertyValue('--profile-top'), el.style.getPropertyValue('--profile-bottom')].map(parse);`;
+await openCardOf('Leila');
+const leila = await b.ev(`(() => { ${THEME_READ}
+  const c = document.querySelector('[role="dialog"][aria-label="User profile"]${THEMED}');
+  if (!c) return null;
+  const [top, bottom] = stops(c);
+  const low = (el) => Math.min(ratio(parse(getComputedStyle(el).color), top), ratio(parse(getComputedStyle(el).color), bottom));
+  const name = [...c.querySelectorAll('div')].find((d) => d.textContent === 'Leila');
+  const tag = c.querySelector('.font-mono');
+  return { name: low(name), tag: low(tag), image: getComputedStyle(c).backgroundImage, border: getComputedStyle(c).borderTopWidth, buttons: [...c.querySelectorAll('button[data-slot="button"]')].length };
+})()`);
+check('T2 a bright theme fills the card with a gradient and a thin border', leila && leila.image.split('linear-gradient').length === 3 && leila.border === '1px', JSON.stringify(leila));
+check('T3 the name and tag pass AA on a yellow to white theme', leila && leila.name >= 4.5 && leila.tag >= 4.5, JSON.stringify(leila));
+await b.screenshot(`${SCRATCH}/shots/theme-card-bright.png`);
+await b.press('Escape');
+await sleep(300);
+// The DM panel fills the column on the gradient, with View Full Profile on it, and the full profile carries it too.
+await b.ev(`[...document.querySelectorAll('button')].find(x => x.textContent.includes('Leila') && !x.closest('main') && !x.closest('[aria-label="Active now"]')).click()`);
+await sleep(700);
+const dmTheme = await until(() => b.ev(`(() => { const p = document.querySelector('aside ${THEMED}, ${THEMED}'); if (!p) return null; const r = p.getBoundingClientRect(); const c = p.parentElement.getBoundingClientRect(); const view = [...p.querySelectorAll('button')].find((x) => x.textContent.includes('View Full Profile')); return { fills: Math.abs(r.bottom - c.bottom) <= 1, view: !!view }; })()`), 5000);
+check('T4 the DM panel fills its column on the gradient with View Full Profile on it', dmTheme?.fills === true && dmTheme?.view === true, JSON.stringify(dmTheme));
+await b.screenshot(`${SCRATCH}/shots/theme-dm-bright.png`);
+await b.ev(`[...document.querySelectorAll('${THEMED} button')].find((x) => x.textContent.includes('View Full Profile')).click()`);
+await sleep(500);
+check('T5 the full profile dialog carries the theme', (await b.ev(`!!document.querySelector('[role="dialog"]${THEMED}')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/theme-full-bright.png`);
+await b.press('Escape');
+await sleep(300);
+
+// ---- Your own profile card: above the bar, Edit Profile and the status submenu ----
+const OWN = '[data-own-profile]';
+const openOwn = async () => {
+  // Radix opens a menu on the pointer going down, not on a click.
+  await b.ev(`document.querySelector('button[aria-label$="Profile and status"]').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, ctrlKey: false }))`);
+  await sleep(400);
+};
+const realClick = async (text) => {
+  const at = await b.ev(`(() => { const n = [...document.querySelectorAll('[role^="menuitem"]')].find((x) => x.textContent.trim().startsWith(${JSON.stringify(text)})); const r = n.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await b.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+  await sleep(300);
+};
+await openOwn();
+const own = await b.ev(`(() => { const c = document.querySelector('${OWN}'); if (!c) return null; const r = c.getBoundingClientRect(); const bar = document.querySelector('[data-user-panel]').getBoundingClientRect(); return { w: Math.round(r.width), above: r.bottom <= bar.top + 1, banner: Math.round(c.querySelector('[data-profile-banner]').getBoundingClientRect().height), rows: [...c.querySelectorAll('[role^="menuitem"]')].map((n) => n.textContent.trim()), switchAccounts: c.textContent.includes('Switch') }; })()`);
+check('T6 your name opens a 300 px card above the bar, with a 105 px banner', own && own.w === 300 && own.above && own.banner === 105, JSON.stringify(own));
+check('T7 the card has Edit Profile and your status, and no invented rows', own && own.rows.length === 2 && own.rows[0] === 'Edit Profile' && own.rows[1] === 'Online' && !own.switchAccounts, JSON.stringify(own));
+await realClick('Online');
+const subs = await until(() => b.ev(`(() => { const t = [...document.querySelectorAll('[role="menu"]')].flatMap((m) => [...m.querySelectorAll('[role^="menuitem"]')].map((n) => n.textContent.trim())); return ['Idle', 'Do Not Disturb', 'Invisible'].every((l) => t.some((x) => x.startsWith(l))) ? t : null; })()`), 3000);
+check('T8 the status row opens every status the old menu had', !!subs, JSON.stringify(subs));
+await b.screenshot(`${SCRATCH}/shots/own-card-plain.png`);
+await realClick('Do Not Disturb');
+const durations = await until(() => b.ev(`[...document.querySelectorAll('[role="menuitem"]')].some((n) => n.textContent.trim() === 'For 1 hour')`), 3000);
+check('T9 a timed status still offers its durations', durations === true);
+await b.ev(`[...document.querySelectorAll('[role="menuitem"]')].find((n) => n.textContent.trim() === 'For 1 hour').click()`);
+await sleep(400);
+check('T10 picking one sets the status', (await b.ev(`document.querySelector('button[aria-label$="Profile and status"]').getAttribute('aria-label').includes('Do Not Disturb')`)) === true);
+await openOwn();
+await b.ev(`[...document.querySelectorAll('${OWN} [role="menuitem"]')].find((n) => n.textContent.trim() === 'Edit Profile').click()`);
+await sleep(500);
+const previewThemed = async () => b.ev(`!!document.querySelector('[data-theme-preview]${THEMED}')`);
+check('T11 Edit Profile opens your profile settings with the theme preview', (await previewThemed()) === true);
+
+// ---- Settings: pick, preview, save, clear ----
+const setPicker = (label, value) => b.ev(`(() => { const i = document.querySelector('input[aria-label="Profile ' + ${JSON.stringify(label)} + ' colour"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, ${JSON.stringify(value)}); i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const saveButton = `[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Save theme')`;
+await setPicker('primary', '#ffff00');
+await setPicker('accent', '#ffffff');
+await sleep(200);
+const previewTop = await b.ev(`document.querySelector('[data-theme-preview]').style.getPropertyValue('--profile-top')`);
+check('T12 the preview follows the pickers, darkened to stay readable', /^rgb\(\d+ \d+ 0\)$/.test(previewTop) && !previewTop.startsWith('rgb(255'), previewTop);
+check('T13 nothing is published until Save', (await b.ev(`![...document.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Clear')`)) === true);
+await b.ev(`${saveButton}.click()`);
+await sleep(400);
+await b.screenshot(`${SCRATCH}/shots/theme-settings.png`);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+check('T14 after Save your own card carries the theme', (await b.ev(`!!document.querySelector('${OWN}${THEMED}')`)) === true);
+await b.screenshot(`${SCRATCH}/shots/own-card-bright.png`);
+await b.press('Escape');
+await sleep(300);
+await b.press(',', 2);
+await sleep(500);
+await b.ev(`[...document.querySelectorAll('nav[aria-label="Settings sections"] button')].find((n) => n.textContent.trim() === 'My identity').click()`);
+await sleep(300);
+await setPicker('primary', '#101030');
+await setPicker('accent', '#7a1fa2');
+await sleep(200);
+await b.ev(`${saveButton}.click()`);
+await sleep(400);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+await b.screenshot(`${SCRATCH}/shots/own-card-dark.png`);
+await b.press('Escape');
+await sleep(300);
+await b.press(',', 2);
+await sleep(500);
+await b.ev(`[...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Clear').click()`);
+await sleep(400);
+check('T15 Clear removes the theme', (await b.ev(`![...document.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Clear')`)) === true);
+await b.press('Escape');
+await sleep(300);
+await openOwn();
+check('T16 with no theme your card has the plain look', (await b.ev(`(() => { const c = document.querySelector('${OWN}'); return !!c && !c.matches('${THEMED}'); })()`)) === true);
+await b.press('Escape');
+await sleep(300);
+
 // ---- Contacts & privacy: the card as others see it ----
 await b.press(',', 2);
 await sleep(400);

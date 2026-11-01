@@ -231,6 +231,13 @@ banner, those keep the person's hue.
   a profile copy re-seals with the other sealed files. The views carry `banner` (the file) and
   `banner_preset` on `MeView` and `UserView`. The newest banner from any community or the direct
   path wins.
+- **Profile colours.** A person's primary and accent, six RGB bytes, travel like a banner:
+  `Payload::ProfileThemeSet` (carried, so an older client shows it as locked) in each community, and
+  `Request::ProfileTheme` directly to contacts, answered with the responder's own, which also runs once
+  after the profile exchange, so a contact made after a change gets them. Own and direct colours are kept
+  sealed in `themes.bin`. `theme` on `MeView` and `UserView` holds the bytes. The UI validates them and
+  builds its CSS only from the numbers (`lib/profile-theme.ts`), darkening each gradient stop until the
+  card's text passes WCAG AA.
 - **Compatibility.** Older clients ignore it: they reject the sealed payload as forged, silently,
   and answer the direct request with an error.
 

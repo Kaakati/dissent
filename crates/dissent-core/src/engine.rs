@@ -431,6 +431,7 @@ impl Engine {
             banner,
             banner_poster,
             banner_preset,
+            theme: w.profile_theme(&self.inner.me),
             first_run: crate::local::first_run(&w),
         }
     }

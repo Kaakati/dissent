@@ -595,6 +595,12 @@ if (!window.__TAURI__) {
   const MAX_PICTURE = 256 * 1024;
   // Profile banners by root: { banner: url or null, preset: id or null }. Maya has a preset, so a card shows one.
   const profileBanners = { [GRACE]: { banner: null, preset: 7 } };
+  // Profile colours as the engine sends them: bytes. Leila's bright pick must stay readable; Jonas's is what a modified
+  // peer could send, and must show as no theme.
+  const profileThemes = {
+    [RADIA]: { primary: [255, 255, 0], accent: [255, 255, 255] },
+    [LINUS]: { primary: 'red;}body{display:none', accent: [1, 2, 3] },
+  };
   // Boosts. The mock verifies every published relay at once; the engine checks each one itself (boosts.rs).
   const LEVEL_HOSTS = [0, 1, 3, 5];
   const CEILINGS = [
@@ -701,7 +707,7 @@ if (!window.__TAURI__) {
       return null;
     },
     open_release_page: () => null,
-    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, banner: profileBanners[ME]?.banner ?? null, banner_preset: profileBanners[ME]?.preset ?? null, banner_poster: profileBanners[ME]?.poster ?? null, first_run: firstRunPending }),
+    me: () => ({ root_id: ME, device_id: id('medevice'), suffix: suffix(ME), display_name: people[ME], avatar: pictures[ME] ?? null, banner: profileBanners[ME]?.banner ?? null, banner_preset: profileBanners[ME]?.preset ?? null, banner_poster: profileBanners[ME]?.poster ?? null, theme: profileThemes[ME] ?? null, first_run: firstRunPending }),
     set_display_name: ({ name }) => {
       people[ME] = name;
       return null;
@@ -730,6 +736,18 @@ if (!window.__TAURI__) {
     },
     clear_profile_banner: () => {
       delete profileBanners[ME];
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    set_profile_theme: ({ primary, accent }) => {
+      const bytes = (c) => Array.isArray(c) && c.length === 3 && c.every((n) => Number.isInteger(n) && n >= 0 && n <= 255);
+      need(bytes(primary) && bytes(accent), 'a colour is three bytes');
+      profileThemes[ME] = { primary, accent };
+      emitTo('dissent://avatar-changed', { root_id: ME });
+      return null;
+    },
+    clear_profile_theme: () => {
+      delete profileThemes[ME];
       emitTo('dissent://avatar-changed', { root_id: ME });
       return null;
     },
@@ -1484,6 +1502,7 @@ if (!window.__TAURI__) {
         banner: profileBanners[user]?.banner ?? null,
         banner_poster: profileBanners[user]?.poster ?? null,
         banner_preset: profileBanners[user]?.preset ?? null,
+        theme: profileThemes[user] ?? null,
         is_contact: contactSet.has(user),
         key_changed_ms: user === GRACE && !PLAIN_DM ? Date.now() - DAY : null,
         verified_ms: user === GRACE ? (PLAIN_DM ? new Date(2026, 9, 12).getTime() : Date.now() - 2 * DAY) : null,

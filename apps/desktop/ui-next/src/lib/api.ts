@@ -100,6 +100,9 @@ export const api = {
   setProfileBanner: (bytes: string) => call<void>('set_profile_banner', { bytes }),
   setProfileBannerPreset: (preset: number) => call<void>('set_profile_banner_preset', { preset }),
   clearProfileBanner: () => call<void>('clear_profile_banner'),
+  // Profile colours, as RGB bytes.
+  setProfileTheme: (primary: number[], accent: number[]) => call<void>('set_profile_theme', { primary, accent }),
+  clearProfileTheme: () => call<void>('clear_profile_theme'),
   setCommunityIcon: (communityId: Id, bytes: string) => call<void>('set_community_icon', { communityId, bytes }),
   // An animated server icon: the engine crops it to a square and loops it, and the poster is its still frame.
   prepareAnimatedIcon: (bytes: string, crop: { x: number; y: number; w: number; h: number; rot: number }) =>

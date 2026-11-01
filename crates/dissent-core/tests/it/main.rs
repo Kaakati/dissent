@@ -40,6 +40,7 @@ mod part6;
 mod peer_exchange;
 mod presence;
 mod profile_banners;
+mod profile_themes;
 mod previews;
 mod picture_paths;
 mod reactions;

@@ -363,3 +363,5 @@ export const setProfileBannerPreset = (preset: number) => guarded(async () => (a
 export const setProfileBannerAnimated = (gif: string, poster: string) =>
   guarded(async () => (await api.setProfileBannerAnimated(gif, poster), afterProfileBanner()));
 export const clearProfileBanner = () => guarded(async () => (await api.clearProfileBanner(), afterProfileBanner()));
+export const setProfileTheme = (primary: number[], accent: number[]) => guarded(async () => (await api.setProfileTheme(primary, accent), afterProfileBanner()));
+export const clearProfileTheme = () => guarded(async () => (await api.clearProfileTheme(), afterProfileBanner()));

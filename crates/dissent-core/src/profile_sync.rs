@@ -59,6 +59,7 @@ impl Engine {
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&root);
             }
+            engine.exchange_themes(device).await;
         });
     }
 

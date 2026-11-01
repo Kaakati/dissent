@@ -28,6 +28,7 @@ function DialogFrame({ entry }: { entry: DialogEntry }) {
       <DialogContent
         wide={entry.wide}
         className={entry.className}
+        {...entry.surface}
         // Radix would give the focus to the trigger, which these dialogs do not have.
         onCloseAutoFocus={(e) => {
           e.preventDefault();

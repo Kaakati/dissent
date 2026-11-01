@@ -32,6 +32,14 @@ impl AnimatedIcon {
     }
 }
 
+/// A person's profile colours, drawn as a vertical gradient behind their card, the primary at the top. Plain RGB bytes:
+/// any value is valid, and the UI builds its CSS from the numbers, so a peer cannot put anything else in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileTheme {
+    pub primary: [u8; 3],
+    pub accent: [u8; 3],
+}
+
 /// A community banner: one of the preset gradients, which the UI draws, or an uploaded picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Banner {
@@ -413,6 +421,38 @@ mod tests {
         let st = replay_with(owner.id(), &dag_of(evs), &[]);
         assert_eq!(st.profile_banners[&bob.id()].1, None);
         assert_eq!(st.profile_banners[&owner.id()].1, Some(Banner::Preset(1)));
+    }
+
+    #[test]
+    fn a_profile_theme_is_the_authors_own_and_the_latest_wins() {
+        let theme = |tag| ProfileTheme { primary: [tag; 3], accent: [255, tag, 0] };
+        let owner = User::new();
+        let bob = User::new();
+        let mut evs = Vec::new();
+        chain(&mut evs, &owner, Payload::Join { display_name: "boss".into() });
+        chain(&mut evs, &bob, Payload::Join { display_name: "bob".into() });
+        chain(&mut evs, &owner, Payload::ProfileThemeSet { theme: Some(theme(1)) });
+        chain(&mut evs, &bob, Payload::ProfileThemeSet { theme: Some(theme(2)) });
+        let st = replay_with(owner.id(), &dag_of(evs.clone()), &[]);
+        assert_eq!(st.profile_themes[&owner.id()].1, Some(theme(1)));
+        assert_eq!(st.profile_themes[&bob.id()].1, Some(theme(2)));
+        chain(&mut evs, &bob, Payload::ProfileThemeSet { theme: None });
+        let st = replay_with(owner.id(), &dag_of(evs), &[]);
+        assert_eq!(st.profile_themes[&bob.id()].1, None);
+        assert_eq!(st.profile_themes[&owner.id()].1, Some(theme(1)));
+    }
+
+    #[test]
+    fn a_carried_profile_theme_opens_and_an_older_client_sees_it_locked() {
+        let bob = User::new();
+        let payload = Payload::ProfileThemeSet { theme: Some(ProfileTheme { primary: [1, 2, 3], accent: [4, 5, 6] }) };
+        let body = event(&bob, vec![], at(1), payload.clone()).body;
+        let carried = crate::carry_sealed(&seal(&SECRET, 0, &body).unwrap()).unwrap();
+        // The outer payload is a form every client decodes, and its generation has no secret.
+        assert!(matches!(carried, Payload::SealedControl { generation: crate::CARRIER_GENERATION, .. }));
+        let ev = Event::sign(EventBody { payload: carried, ..body }, &bob.device);
+        assert_eq!(crate::open_event(&ev, &[(0, SECRET)]).unwrap().body.payload, payload);
+        assert_eq!(crate::control::open(&[(0, SECRET)], &ev.body), Err(crate::OpenError::NoKey));
     }
 
     #[test]

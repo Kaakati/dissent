@@ -48,6 +48,17 @@ pub async fn clear_profile_banner(state: State<'_, AppState>) -> Result<(), Stri
     engine(&state).await?.clear_profile_banner().await.map_err(err)
 }
 
+/// The profile colours, as RGB bytes. Anything else fails to deserialise here.
+#[tauri::command]
+pub async fn set_profile_theme(state: State<'_, AppState>, primary: [u8; 3], accent: [u8; 3]) -> Result<(), String> {
+    engine(&state).await?.set_profile_theme(primary, accent).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn clear_profile_theme(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.clear_profile_theme().await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn set_community_icon(state: State<'_, AppState>, community_id: String, bytes: String) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;

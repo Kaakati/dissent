@@ -2,7 +2,7 @@
 // Open a dialog with openDialog({ title, content }); `content` is given the close function, so a form can close itself
 // after a successful action. confirm() resolves true on the action and false on Cancel, Escape or the scrim. The
 // DialogHost component (components/dialogs/dialog-host.tsx) renders whatever is open here.
-import type { ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { create } from 'zustand';
 
 export interface DialogOptions {
@@ -10,6 +10,8 @@ export interface DialogOptions {
   sub?: string | null;
   className?: string;
   wide?: boolean;
+  // A profile's colours on the whole dialog (lib/profile-theme.ts).
+  surface?: { 'data-profile-theme'?: ''; style?: CSSProperties };
   content: (close: () => void) => ReactNode;
   footer?: (close: () => void) => ReactNode;
   onClose?: () => void;
