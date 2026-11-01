@@ -2,7 +2,7 @@
 // file page, My seeding and Uploads. Opened from the server sidebar. See docs/design/14-file-tracker.md.
 import { useMemo, useState } from 'react';
 import { create } from 'zustand';
-import { ArrowLeft, Download, FolderOpen, Link2, Lock, Plus, Search, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, FolderOpen, FolderPlus, Link2, Lock, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tip } from '@/components/ui/tip';
@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 import { DangerNote } from '@/components/chat/attachments';
 import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
+import { openAddFolder } from './add-folder-dialog';
 import { FilesDropOverlay } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
 import { SwarmPanel } from './swarm-panel';
@@ -277,6 +278,11 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
         <Tip label={canAdd ? `Add files to ${target?.name}` : view.categories.length ? 'You cannot add to this category' : 'No categories yet'}>
           <Button disabled={!canAdd} onClick={() => target && openAddFiles(community, view, target)}>
             <Plus className="size-4" /> Add files
+          </Button>
+        </Tip>
+        <Tip label={view.categories.some((c) => c.can_add && c.readable) ? 'Add a whole folder, seeded where it is' : 'No category you can add to'}>
+          <Button variant="secondary" disabled={!view.categories.some((c) => c.can_add && c.readable)} onClick={() => void openAddFolder(community, view)}>
+            <FolderPlus className="size-4" /> Add folder
           </Button>
         </Tip>
         {canAdd && target?.folder ? (

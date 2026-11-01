@@ -176,6 +176,32 @@ export interface DropPlan {
   no_categories: boolean;
 }
 
+// One file found in a folder. `flag` says why it starts unticked, or cannot be ticked (`FolderFile` in dissent-core).
+export interface FolderFile {
+  path: string;
+  relative: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  flag: '' | 'hidden' | 'system' | 'credentials' | 'link' | 'too_large';
+}
+
+export interface FolderScan {
+  root: string;
+  name: string;
+  tag: string;
+  files: FolderFile[];
+  over_limit: number;
+  flagged_more: number;
+  too_deep: number;
+  hidden_dirs: string[];
+  stopped_early: boolean;
+  max_files: number;
+  max_depth: number;
+  category: Id | null;
+}
+
 export interface AddItem {
   path: string;
   tags: string[];
@@ -200,6 +226,8 @@ export const filesApi = {
   scanFolder: (communityId: Id, categoryId: Id) => invoke<PickedView[]>('scan_category_folder', { communityId, categoryId }),
   startCheck: (communityId: Id, paths: string[]) => invoke<number>('start_file_check', { communityId, paths }),
   cancelCheck: (job: number) => invoke<void>('cancel_file_check', { job }),
+  pickListingFolder: () => invoke<string | null>('pick_listing_folder', {}),
+  scanListingFolder: (communityId: Id, folder: string, filter: Id | null) => invoke<FolderScan>('scan_listing_folder', { communityId, folder, filter }),
   planDrop: (communityId: Id, paths: string[], filter: Id | null) => invoke<DropPlan>('plan_file_drop', { communityId, paths, filter }),
   list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string, inPlace = false) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit, inPlace }),
   updateListing: (communityId: Id, listingId: Id, tags: string[], description: string) =>

@@ -349,6 +349,19 @@ does not fire it for files while its own handler is on). A drop anywhere else st
   publishes to the whole server. A single-file drop also offers Add tags.
 - Listings stay unscrubbed ("Photo details"). The drop overlay says so once.
 
+**A whole folder**, from Add folder or a drop, always opens a dialog first (`tracker::folders`). It walks as a linked folder
+is walked (4 levels, 500 files), and is seeded in place, with no copy, as a linked folder is.
+
+- Category: the page's filter or the one the folder's most common type fits. Tag: the folder's name, editable. Tags
+  from the category's defaults apply too.
+- Ticked: what can be added. Unticked, and tickable: hidden and system files (dotfiles, desktop.ini, Thumbs.db, and on
+  Windows anything with the hidden or system attribute) and names that look like keys or passwords, which also get a warning.
+  Not tickable, with the reason: type not allowed, over the size limit, already listed, link not followed.
+- Every limit it hits is stated: files past 500 are counted, folders past 4 levels are counted, hidden folders such as `.git`
+  are named and not entered, and a walk that gave up (100,000 entries) says more may be in there. Nothing is dropped silently.
+- Add stays off until ticked rows are checked. Progress, Cancel and Undo are the drop's. What the dialog checked is not read again
+  by the batch, though `list_files` itself still reads the file.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).

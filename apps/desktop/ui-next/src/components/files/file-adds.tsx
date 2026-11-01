@@ -12,6 +12,7 @@ import { checkFiles, filesApi, reloadFiles, seedingApi, type CandidateView, type
 import { useShell } from '@/lib/store';
 import { toast, type ToastAction } from '@/lib/toasts';
 import { openAddFiles } from './add-files-dialog';
+import { openAddFolder } from './add-folder-dialog';
 import { useFilesUi } from './files-page';
 
 type RowState = 'waiting' | 'checking' | 'listing' | 'added' | 'seeded' | 'skipped' | 'failed';
@@ -95,7 +96,8 @@ async function undoBatch(communityId: string, rows: AddRow[]): Promise<void> {
 }
 
 // Checks and lists `rows` in the background, one listing at a time. A row that already has a `skip` is reported, not read.
-export function startAdds(communityId: string, rows: AddRow[], options: { tagsFor: (row: AddRow) => string[]; description?: string; inPlace?: boolean; quiet?: boolean } ): void {
+// `checked` holds what a dialog already checked, so nothing is read twice.
+export function startAdds(communityId: string, rows: AddRow[], options: { tagsFor: (row: AddRow) => string[]; description?: string; inPlace?: boolean; checked?: CandidateView[] }): void {
   const id = ++batchSeq;
   const todo = rows.filter((r) => !r.skip);
   const queue: CandidateView[] = [];
@@ -109,7 +111,6 @@ export function startAdds(communityId: string, rows: AddRow[], options: { tagsFo
     if (!batch) return;
     useFileAdds.setState((s) => ({ batches: s.batches.filter((b) => b.id !== id) }));
     void reloadFiles(communityId);
-    if (options.quiet && batch.rows.every((r) => r.state === 'skipped' && r.skip === 'cancelled')) return;
     const done = batch.rows.filter((r) => r.state === 'added' || r.state === 'seeded');
     const left = batch.rows.filter((r) => r.state === 'skipped' && r.skip !== 'cancelled' && r.skip !== 'duplicate');
     const actions: ToastAction[] = [];
@@ -174,6 +175,12 @@ export function startAdds(communityId: string, rows: AddRow[], options: { tagsFo
     maybeFinish();
     return;
   }
+  if (options.checked) {
+    queue.push(...options.checked);
+    checkDone = true;
+    void pump();
+    return;
+  }
   for (const r of todo) patch(id, r.path, { state: 'checking' });
   stopCheck = checkFiles(communityId, todo.map((r) => r.path), {
     progress: (path, done, total) => patch(id, path, { progress: total ? done / total : 0 }),
@@ -213,6 +220,10 @@ export async function dropOnFiles(paths: string[]): Promise<void> {
       toast('This server has no file categories yet. Someone who manages files needs to make one first.');
       return;
     }
+    if (plan.folders.length) {
+      const view = await filesApi.view(community.id);
+      for (const folder of plan.folders) void openAddFolder(community, view, folder);
+    }
     if (plan.created.length) toast(`Made ${plan.created.length === 1 ? 'a category' : 'categories'} for your files: ${plan.created.join(', ')}`, 'info');
     if (plan.items.length) {
       const view = await filesApi.view(community.id);
@@ -246,7 +257,7 @@ export function FilesDropOverlay() {
       <div className="drop-box">
         <Upload aria-hidden="true" />
         <p className="drop-title">Drop to add to this server</p>
-        <p className="muted">Each file goes to the category that fits its type, for every member to download. Files go exactly as they are, photo details included. You can undo it.</p>
+        <p className="muted">Each file goes to the category that fits its type, for every member to download. A folder asks first. Files go exactly as they are, photo details included. You can undo it.</p>
       </div>
     </div>
   );

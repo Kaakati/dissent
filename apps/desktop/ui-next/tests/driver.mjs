@@ -5320,6 +5320,57 @@ await drop(none);
 await toastHas('no file categories yet');
 check('FD14 a member on a server with no category gets a clear message', (await ev(`document.querySelectorAll('[data-files] [data-listing]').length`)) === 0);
 
+// A whole folder: a confirm dialog opens at once, with the picker's category, count, limits and per-file ticks.
+await openFilesOf('Open Source Arabic');
+const fileOf = (relative, kind, flag = '', size = 2000) => ({ path: `C:\\pics\\${relative.replaceAll('/', '\\')}`, relative, name: relative.split('/').pop(), ext: relative.split('.').pop().toUpperCase(), kind, size, flag });
+const folderFiles = [fileOf('p1.png', 'Image'), fileOf('p2.png', 'Image'), fileOf('sub/p3.png', 'Image'), fileOf('notes.txt', 'Document'), fileOf('.hidden', 'Other', 'hidden'), fileOf('desktop.ini', 'Other', 'system'), fileOf('.env', 'Other', 'credentials'), fileOf('id_rsa', 'Other', 'credentials'), fileOf('shortcut.png', 'Image', 'link', 0), fileOf('huge.mkv', 'Video', 'too_large', 11 * 1024 ** 3)];
+await ev(`window.__mockFolder = ${JSON.stringify({ files: folderFiles, tag: 'holiday-photos', over_limit: 12, too_deep: 2, hidden_dirs: ['.git'] })}`);
+await ev(`window.__mockPickFolder = 'C:\\\\pics'`);
+await ev(`window.__mockPickFiles = []`);
+await ev(`window.__mockCheckMs = 800`);
+const folderButton = (text) => `[...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim().startsWith(${JSON.stringify(text)}))`;
+await ev(`[...document.querySelectorAll('[data-files] button')].find((n) => n.textContent.trim() === 'Add folder').click()`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+const rowOf = (name) => `[...document.querySelectorAll('[data-add-folder] [data-folder-row]')].find((n) => n.textContent.includes(${JSON.stringify(name)}))`;
+check('FF1 a folder opens a dialog at once and Add waits for the check', (await ev(`${folderButton('Checking')}?.disabled`)) === true);
+const body = await ev(`document.querySelector('[data-add-folder]').textContent`);
+check('FF2 it says hidden and system files are left out, and which folders', body.includes('Hidden and system files start unticked') && body.includes('.git'), body.slice(0, 200));
+check('FF3 it warns on likely credentials', body.includes('look like passwords or keys'));
+check('FF4 it states the limits it exceeded', (await ev(`[...document.querySelectorAll('[data-folder-limit]')].map((n) => n.textContent).join('|')`)).includes('at most 500 files at once, so 12 more files') && body.includes('2 folders are more than 4 levels down'), body.slice(0, 300));
+const chooseFolderCategory = (name) => ev(`(() => { const box = document.querySelector('[data-add-folder] select[aria-label="Category"]'); const opt = [...box.options].find((o) => o.textContent === ${JSON.stringify(name)}); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(box, opt.value); box.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await chooseFolderCategory('Anything');
+await sleep(100);
+check('FF5 hidden, system and credentials rows start unticked but can be ticked', (await ev(`['.hidden', 'desktop.ini', '.env', 'id_rsa'].every((name) => { const box = ${rowOf('X').replace('"X"', 'name')}.querySelector('input'); return !box.checked && !box.disabled; })`)) === true);
+check('FF6 a link and an oversized file cannot be ticked, and say why', (await ev(`(() => { const a = ${rowOf('shortcut.png')}; const b = ${rowOf('huge.mkv')}; return a.querySelector('input').disabled && a.textContent.includes('not followed') && b.querySelector('input').disabled && b.textContent.includes('Over 10 GB'); })()`)) === true);
+check('FF7 the folder name is the default tag', (await ev(`document.querySelector('[data-add-folder] input[aria-label="Tag"]').value`)) === 'holiday-photos');
+await until(async () => (await ev(`!!${folderButton('Add 4')}`)) === true, 4000);
+check('FF8 the count and size follow the ticks', (await ev(`document.querySelector('[data-folder-count]').textContent`)).startsWith('4 files'), await ev(`document.querySelector('[data-folder-count]').textContent`));
+await ev(`${rowOf('notes.txt')}.querySelector('input').click()`);
+await sleep(100);
+check('FF8 unticking changes the count', (await ev(`document.querySelector('[data-folder-count]').textContent`)).startsWith('3 files'));
+// A category that refuses a type says so per file.
+await chooseFolderCategory('Documents');
+await sleep(100);
+check('FF9 a category that refuses a type leaves those files out', (await ev(`${rowOf('p1.png')}.dataset.folderRow`)) === 'type_not_allowed');
+await chooseFolderCategory('Images');
+await sleep(100);
+// Cancelling stops the check; adding seeds in place with the tag, with Undo.
+await ev(`${folderButton('Add 3')}.click()`);
+await toastHas('3 files added to Images', 4000);
+check('FF10 the batch is listed with the tag and seeded in place', (await ev(`window.__mockLastList.inPlace && window.__mockLastList.items[0].tags.includes('holiday-photos')`)) === true);
+await clickToast('Undo');
+await until(async () => !(await listed()).includes('p1.png'), 3000);
+check('FF11 Undo removes the batch', true);
+// A dropped folder opens the same dialog, whatever else came with it.
+await ev(`window.__mockCheckMs = 60`);
+await ev(`window.__mockPickFiles = ${JSON.stringify([{ path: 'C:\\pics', name: 'pics', ext: '', kind: 'Other', size: 0, is_dir: true }])}`);
+await ev(`window.__mockDropPaths(['C:\\\\pics'])`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+check('FF12 dropping a folder opens the dialog', true);
+await ev(`${folderButton('Cancel')}.click()`);
+await sleep(200);
+await ev(`window.__mockFolder = null`);
+
 // Off the Files page a drop still attaches to the chat.
 await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => /general/i.test(b.textContent))?.click()`);
 await sleep(500);

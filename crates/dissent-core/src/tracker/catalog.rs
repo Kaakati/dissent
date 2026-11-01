@@ -736,7 +736,9 @@ impl Engine {
             let mut existing = self.opened_listings(community).into_iter().find(|o| o.body.fingerprint == fp && scope_of(o));
             let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
             // A file in the category's linked folder is seeded from there; any other is copied into the store.
-            let linked = self.with_tracker(community, |l| l.book.folders.get(&category).cloned()).is_some_and(|dir| path.starts_with(dir));
+            let linked = self.with_tracker(community, |l| {
+                l.in_place.contains(&path) || l.book.folders.get(&category).is_some_and(|dir| path.starts_with(dir))
+            });
             let (generation, files_key, fref) = loop {
                 let generation = match &existing {
                     Some(o) => o.body.content_generation,

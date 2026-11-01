@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use dissent_core::tracker::adding::PickedView;
 use dissent_core::tracker::catalog::{AddItem, CategoryInput, FilesView};
 use dissent_core::tracker::drops::DropPlan;
+use dissent_core::tracker::folders::FolderScan;
 use dissent_core::tracker::swarm::SwarmView;
 use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
 use dissent_core::{CommunityId, RootId, TransferView};
@@ -123,6 +124,28 @@ pub async fn cancel_file_check(state: State<'_, AppState>, job: u64) -> Result<(
     Ok(())
 }
 
+/// Opens a folder picker for adding a whole folder. `None` when it is cancelled.
+#[tauri::command]
+pub async fn pick_listing_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    let folder = picked.and_then(|f| f.into_path().ok());
+    if let Some(folder) = &folder {
+        engine(&state).await?.allow_paths([folder.clone()]);
+    }
+    Ok(folder)
+}
+
+/// What a chosen or dropped folder holds, and what was left out and why.
+#[tauri::command]
+pub async fn scan_listing_folder(state: State<'_, AppState>, community_id: String, folder: PathBuf, filter: Option<String>) -> Result<FolderScan, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let filter: Option<CategoryId> = filter.map(|f| parse("category id", &f)).transpose()?;
+    engine(&state).await?.scan_folder(community, folder, filter).await.map_err(err)
+}
+
 /// What a drop on the Files page will do with `paths`. A server with no category gets them here, when this person may make
 /// them.
 #[tauri::command]
@@ -140,11 +163,17 @@ pub async fn list_files(
     category_id: String,
     items: Vec<AddItem>,
     limit: String,
+    in_place: Option<bool>,
 ) -> Result<Vec<String>, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
     let limit = parse_limit(&limit).map_err(err)?;
-    engine(&state).await?.list_files(community, id, items, limit).await.map_err(err)
+    let engine = engine(&state).await?;
+    if in_place.unwrap_or(false) {
+        engine.list_files_in_place(community, id, items, limit).await.map_err(err)
+    } else {
+        engine.list_files(community, id, items, limit).await.map_err(err)
+    }
 }
 
 

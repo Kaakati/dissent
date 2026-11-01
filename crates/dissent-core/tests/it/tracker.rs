@@ -288,6 +288,90 @@ async fn a_drop_respects_who_may_add_and_who_may_make_categories() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_folder_is_scanned_and_seeded_in_place_with_no_copy() {
+    heavy(2, async {
+        let alice = peer("tracker-folder").await;
+        let bob = peer("tracker-folder-bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        let mut images = releases();
+        images.name = "Images".into();
+        images.types = vec!["Image".into()];
+        let cat = alice.engine.create_category(id, images).await.expect("category");
+        let mut docs = releases();
+        docs.name = "Docs".into();
+        docs.types = vec!["Document".into()];
+        alice.engine.create_category(id, docs).await.expect("category");
+
+        let dir = scratch("tracker-folder-src").join("Holiday Photos");
+        let bytes = sample(200_000, 7);
+        let png = write(&dir, "a.png", &bytes);
+        write(&dir, "b.png", &sample(1000, 8));
+        write(&dir.join("sub"), "c.png", &sample(1000, 9));
+        write(&dir, "notes.txt", b"notes");
+        write(&dir, ".hidden", b"x");
+        write(&dir, "desktop.ini", b"x");
+        write(&dir, ".env", b"SECRET=1");
+        write(&dir.join(".git"), "config", b"x");
+        write(&dir.join("1/2/3/4/5"), "deep.png", b"x");
+
+        // A folder nobody chose is refused.
+        assert!(alice.engine.scan_folder(id, dir.clone(), None).await.is_err());
+        alice.engine.allow_paths([dir.clone()]);
+        let scan = alice.engine.scan_folder(id, dir.clone(), None).await.expect("scan");
+        assert_eq!(scan.name, "Holiday Photos");
+        assert_eq!(scan.tag, "holiday-photos");
+        assert_eq!(scan.category.as_deref(), Some(cat.to_string().as_str()), "the most common type picks the category");
+        assert_eq!(scan.hidden_dirs, vec![".git"]);
+        assert_eq!(scan.too_deep, 1);
+        let flag_of = |name: &str| scan.files.iter().find(|f| f.name == name).map(|f| f.flag.clone());
+        assert_eq!(flag_of("a.png").as_deref(), Some(""));
+        assert_eq!(flag_of(".hidden").as_deref(), Some("hidden"));
+        assert_eq!(flag_of("desktop.ini").as_deref(), Some("system"));
+        assert_eq!(flag_of(".env").as_deref(), Some("credentials"));
+        assert_eq!(flag_of("deep.png"), None);
+
+        // A check, then listing in place.
+        let mut events = alice.engine.subscribe();
+        let job = alice.engine.start_file_check(id, vec![png.clone()]).expect("the scan allowed its files");
+        checked(&mut events, job).await;
+        let listed = alice.engine.list_files_in_place(id, cat, vec![item(&png, &["holiday-photos"])], SeedLimit::Forever).await.expect("listed");
+
+        // No copy went into the store: it has an outboard, and the seed names the file where it is.
+        let mut outboards = 0;
+        let mut stack = vec![alice.dir.clone()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "obao") {
+                    outboards += 1;
+                }
+            }
+        }
+        assert!(outboards >= 1, "the file is linked, not copied");
+        let l = alice.engine.files_view(id).unwrap().listings.remove(0);
+        assert_eq!((l.local.as_str(), l.local_path.as_deref()), ("seeding", Some(png.to_string_lossy().as_ref())));
+        assert_eq!(l.tags, vec!["holiday-photos"]);
+
+        // Another member gets it from there.
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings.len() == 1).map(|_| ())
+        })
+        .await;
+        bob.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download");
+        until_event(&bob.engine, Duration::from_secs(120), "bob has the file", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings[0].local == "seeding").map(|_| ())
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
     heavy(2, async {
         let alice = peer("tracker-alice").await;

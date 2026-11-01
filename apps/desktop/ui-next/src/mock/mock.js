@@ -589,7 +589,8 @@ if (!window.__TAURI__) {
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
   // What the mock's OS picker holds. See `pick_listing_files`.
-  const mockPicks = () => window.__mockPickFiles ?? [
+  const mockPicks = () => [...(window.__mockFolder?.files ?? []), ...(window.__mockPickFiles ?? MOCK_PICKS())];
+  const MOCK_PICKS = () => [
     { name: 'dissent-0.4.1-windows-x64.msi', ext: 'MSI', kind: 'Installer', size: 88_700_000 },
     { name: 'dissent-0.4.1-macos-arm64.dmg', ext: 'DMG', kind: 'Installer', size: 96_400_000 },
     { name: 'RELEASE-NOTES-draft.txt', ext: 'TXT', kind: 'Document', size: 6_000 },
@@ -971,6 +972,15 @@ if (!window.__TAURI__) {
       need(Boolean(cat?.folder), 'this category is not linked to a folder here');
       return handlers.pick_listing_files().filter((p) => !f.listings.some((l) => l.name === p.name));
     },
+    // `window.__mockFolder` is what a folder holds, as a `FolderScan`; `window.__mockPickFolder` what its picker gives.
+    pick_listing_folder: () => window.__mockPickFolder ?? null,
+    scan_listing_folder: ({ communityId, folder, filter }) => {
+      const scan = window.__mockFolder;
+      need(Boolean(scan), `${folder} is not a folder`);
+      const addable = handlers.files_view({ communityId }).categories.filter((x) => x.can_add && x.readable);
+      const chosen = addable.find((x) => x.id === filter) ?? addable[0];
+      return { root: folder, name: folder.split(/[\\/]/).pop(), tag: 'mock-folder', over_limit: 0, flagged_more: 0, too_deep: 0, hidden_dirs: [], stopped_early: false, max_files: 500, max_depth: 4, category: chosen?.id ?? null, ...scan };
+    },
     plan_file_drop: ({ communityId, paths, filter }) => {
       const c = servers[communityId];
       handlers.files_view({ communityId });
@@ -1044,8 +1054,9 @@ if (!window.__TAURI__) {
       if (record) record.cancelled = true;
       return null;
     },
-    list_files: ({ communityId, categoryId, items }) => {
+    list_files: ({ communityId, categoryId, items, inPlace }) => {
       if (window.__mockListFails) throw window.__mockListFails;
+      window.__mockLastList = { categoryId, items, inPlace: Boolean(inPlace) };
       const f = servers[communityId].files;
       const picks = mockPicks();
       return items.map((item) => {
