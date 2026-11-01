@@ -363,3 +363,59 @@ async fn a_1440p_screen_is_shared_at_1440p() {
     // Encoding a large picture takes the CPU of many engines, so it does not run beside them.
     heavy(7, share_reaches_its_own_size((2560, 1440))).await;
 }
+
+/// The sound of a share: off unless turned on, encrypted on the same path as the picture, in Bob's playout at his
+/// volume. The source is a test tone, so nothing captures the machine's sound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_share_can_carry_the_computers_sound_at_each_viewers_volume() {
+    let _serial = SERIAL.lock().await;
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        make_contacts_ready(&alice, &bob).await;
+        let mut bob_events = bob.engine.subscribe();
+        alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
+        accept_incoming(&bob.engine, &mut bob_events).await;
+        eventually("the call is up on both sides", || {
+            alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+        })
+        .await;
+        alice.engine.set_test_capture(TestCapture::Pattern);
+        alice.engine.set_screen_share(true, None).expect("screen share on");
+        let sound_on = |on: bool| bob.engine.call_state().is_some_and(|c| c.participants.iter().any(|p| p.screen_audio) == on);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(sound_on(false), "a share has no sound until the sharer adds it");
+
+        alice.engine.set_screen_audio(true).expect("sound on");
+        eventually("Bob's view says the share has sound", || sound_on(true).then_some(())).await;
+
+        let energy = |engine: &dissent_core::Engine| {
+            let mut most = 0f32;
+            for _ in 0..50 {
+                let mut out = vec![0f32; 960];
+                engine.pull_playout(&mut out);
+                most = most.max(out.iter().map(|s| s * s).sum::<f32>() / 960.0);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            most
+        };
+        let heard = energy(&bob.engine);
+        assert!(heard > 0.01, "Bob's playout has the tone: {heard}");
+        bob.engine.set_screen_volume(&alice.identity.root_id().to_string(), 0);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let muted = energy(&bob.engine);
+        assert!(muted < heard / 100.0, "Bob's volume mutes it: {muted} from {heard}");
+        assert!(alice.engine.call_state().is_some_and(|c| c.participants.iter().all(|p| !p.screen_audio)), "Alice does not get her own sound back");
+
+        alice.engine.set_screen_audio(false).expect("sound off");
+        eventually_within(Duration::from_secs(15), "the sound ends and the share goes on", || {
+            bob.engine.call_state().filter(|c| c.participants.iter().all(|p| p.screen && !p.screen_audio))
+        })
+        .await;
+        alice.engine.set_screen_share(false, None).expect("screen share off");
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+

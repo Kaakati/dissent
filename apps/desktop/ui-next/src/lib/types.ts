@@ -49,6 +49,7 @@ export interface VoiceParticipant {
   video_paused?: boolean; // their camera is on, but the forwarder pauses it for this device to fit its bandwidth
   screen_paused?: boolean; // the same for their shared screen
   screen?: boolean; // their screen is reaching this device, or is paused for it
+  screen_audio?: boolean; // their screen's sound is reaching this device
 }
 
 export interface ChannelView {

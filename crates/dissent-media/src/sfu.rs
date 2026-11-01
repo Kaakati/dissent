@@ -612,6 +612,25 @@ impl<T: PacketTransport> Sfu<T> {
                 return;
             }
         }
+        // A screen's sound goes to everyone. It has no layers, no keyframes, and costs little.
+        if raw.sound {
+            let mut targets: Vec<Link> = self
+                .links
+                .keys()
+                .copied()
+                .filter(|peer| Link::Down(*peer) != from && *peer != raw.sender)
+                .map(Link::Down)
+                .collect();
+            if let (Link::Down(_), Some(parent)) = (from, self.active_up) {
+                targets.push(Link::Up(parent));
+            }
+            for target in targets {
+                if self.send_video(target, &raw.nal).await.is_ok() {
+                    self.stats.frames_forwarded += 1;
+                }
+            }
+            return;
+        }
         // Every camera and screen that is on is forwarded, whether or not its sender speaks. A
         // viewer's budget can pause a stream for that viewer alone (see `plan_for`).
         let stream = stream_key(raw.sender, raw.screen);

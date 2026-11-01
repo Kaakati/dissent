@@ -19,7 +19,9 @@ pub struct OpusDecoder {
 
 pub const OPUS_OK: c_int = 0;
 pub const OPUS_APPLICATION_VOIP: c_int = 2048;
+pub const OPUS_APPLICATION_AUDIO: c_int = 2049;
 pub const OPUS_SIGNAL_VOICE: c_int = 3001;
+pub const OPUS_SIGNAL_MUSIC: c_int = 3002;
 
 pub const OPUS_SET_BITRATE_REQUEST: c_int = 4002;
 pub const OPUS_SET_VBR_REQUEST: c_int = 4006;

@@ -1452,6 +1452,34 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
     }).await;
 }
 
+/// A forwarder passes a screen's sound to everyone, though it holds no key. The source is a test tone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_forwarder_passes_a_screens_sound_to_every_viewer() {
+    heavy(7, async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let (sender, viewer) = (&everyone[others[0]], &everyone[others[1]]);
+    sender.engine.set_screen_audio(true).expect("sound on");
+    sender.engine.set_screen_share(true, None).expect("screen share on");
+    eventually_within(Duration::from_secs(60), "a viewer and the forwarder both get the sound", || {
+        let hears = |p: &Peer| p.engine.call_state().is_some_and(|c| c.participants.iter().any(|q| q.root_id == root(sender) && q.screen && q.screen_audio));
+        (hears(viewer) && hears(&everyone[forwarder])).then_some(())
+    })
+    .await;
+    let mut most = 0f32;
+    for _ in 0..50 {
+        let mut out = vec![0f32; 960];
+        viewer.engine.pull_playout(&mut out);
+        most = most.max(out.iter().map(|s| s * s).sum::<f32>() / 960.0);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(most > 0.01, "the viewer's playout has the tone: {most}");
+    sender.engine.set_screen_share(false, None).expect("screen share off");
+    finish(everyone).await;
+    }).await;
+}
+
 /// A forwarded 1440p screen: a wide tile gets the top layer, a narrow one the base, and a viewer whose
 /// budget cannot fit the top gets 720p, which it can still read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]

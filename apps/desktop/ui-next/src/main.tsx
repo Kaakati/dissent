@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import './shell.css';
 import App from './App';
+import { StreamWindow } from './components/call/stream-window';
 import { runGate } from './components/startup/gate';
 import { api } from './lib/api';
 import { applyAppearance } from './lib/appearance';
@@ -28,6 +29,19 @@ async function openMockView(params: URLSearchParams): Promise<void> {
 async function start(): Promise<void> {
   applyAppearance();
   await loadMockBackend();
+  // The pop-out of a shared screen is this page alone. It shows one stream and never opens the profile.
+  const params = new URLSearchParams(window.location.search);
+  const stream = params.get('stream');
+  if (stream) {
+    const host = document.getElementById('root');
+    if (!host) throw new Error('index.html has no #root element');
+    createRoot(host).render(
+      <StrictMode>
+        <StreamWindow rootId={stream} name={params.get('name') ?? ''} />
+      </StrictMode>,
+    );
+    return;
+  }
   // A portable profile waits here for its passphrase. Nothing below may call the engine before that.
   const vault = await api.vaultStatus();
   if (vault.chooser || vault.locked) await runGate(vault);

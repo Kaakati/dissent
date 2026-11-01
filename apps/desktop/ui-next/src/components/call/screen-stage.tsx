@@ -2,9 +2,10 @@
 // by themselves; with several, a viewer picks from the strip. It goes full screen with a button or a double-click, and Escape
 // comes back. Only this block is shown full screen, so the strip goes along and the call's controls do not.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown, ChevronUp, Maximize, Minimize, Monitor, Pin, PinOff } from 'lucide-react';
+import { ChevronDown, ChevronUp, ExternalLink, Maximize, Minimize, Monitor, Pin, PinOff, Volume2, VolumeX } from 'lucide-react';
+import { api, listenTo } from '@/lib/api';
 import { Tip } from '@/components/ui/tip';
-import { registerCanvas, useEncodedVideoOn } from '@/lib/webcodecs';
+import { registerCanvas, useEncodedVideoOn, webcodecsSupported } from '@/lib/webcodecs';
 import { useShell } from '@/lib/store';
 import { cn } from '@/lib/utils';
 import { useTileWidth, VideoImage } from './call-body';
@@ -16,6 +17,58 @@ export interface Sharer {
   rootId: string;
   name: string;
   self: boolean;
+  sound?: boolean; // their screen's sound is reaching this device
+}
+
+// How loud each sharer's sound is on this device, in percent, kept for the next time they share.
+const VOLUME_KEY = 'dissent.screenVolumes';
+
+function savedVolume(rootId: string): number {
+  try {
+    const saved = Number(JSON.parse(localStorage.getItem(VOLUME_KEY) ?? '{}')[rootId]);
+    return Number.isFinite(saved) && saved >= 0 ? Math.min(saved, 200) : 100;
+  } catch {
+    return 100;
+  }
+}
+
+function saveVolume(rootId: string, percent: number) {
+  try {
+    localStorage.setItem(VOLUME_KEY, JSON.stringify({ ...JSON.parse(localStorage.getItem(VOLUME_KEY) ?? '{}'), [rootId]: percent }));
+  } catch {
+    // A window without storage keeps the volume for the session.
+  }
+}
+
+// A viewer's volume for one sharer's sound: a mute button and a slider.
+function StreamVolume({ rootId }: { rootId: string }) {
+  const [percent, setPercent] = useState(() => savedVolume(rootId));
+  const [before, setBefore] = useState(100);
+  const apply = (next: number) => {
+    setPercent(next);
+    saveVolume(rootId, next);
+    void api.setScreenVolume(rootId, next).catch(() => {});
+  };
+  useEffect(() => {
+    void api.setScreenVolume(rootId, savedVolume(rootId)).catch(() => {});
+  }, [rootId]);
+  return (
+    <span className="inline-flex h-8 items-center gap-1 rounded-md bg-black/55 pr-2 text-text-strong">
+      <button
+        type="button"
+        aria-label={percent ? 'Mute the stream' : 'Unmute the stream'}
+        aria-pressed={percent === 0}
+        onClick={() => {
+          if (percent) setBefore(percent);
+          apply(percent ? 0 : before);
+        }}
+        className="grid size-8 place-items-center rounded-md hover:bg-black/40 focus-visible:outline-2 focus-visible:outline-ring"
+      >
+        {percent ? <Volume2 className="size-4" aria-hidden="true" /> : <VolumeX className="size-4" aria-hidden="true" />}
+      </button>
+      <input type="range" aria-label="Stream volume" min={0} max={200} step={5} value={percent} onChange={(e) => apply(Number(e.target.value))} className="w-20 accent-accent" />
+    </span>
+  );
 }
 
 // The app window's own state, which the page cannot set by itself. Nothing happens outside the app.
@@ -77,6 +130,42 @@ export function ScreenStage({ sharers, people }: { sharers: Sharer[]; people: Re
   const [stripOpen, setStripOpen] = useState(true);
   const [onTop, setOnTop] = useState(false);
   const [height, setHeight] = useState(0);
+  // A window of its own decodes its stream, so it needs WebCodecs here, whichever way the stage draws.
+  const [canPopOut, setCanPopOut] = useState(false);
+  useEffect(() => {
+    void webcodecsSupported().then(setCanPopOut);
+  }, []);
+  // The sharer whose screen is in its own window, while it is.
+  const [popped, setPopped] = useState<string | null>(null);
+  const poppedSharing = popped !== null && sharers.some((s) => s.rootId === popped);
+  useEffect(() => {
+    if (!popped) return;
+    let closed: (() => void) | undefined;
+    let live = true;
+    void listenTo('dissent://stream-window-closed', () => setPopped(null)).then((off) => {
+      if (live) closed = off;
+      else off();
+    });
+    return () => {
+      live = false;
+      closed?.();
+    };
+  }, [popped]);
+  // The share ended, or the stage went because the call did: the window goes with it.
+  useEffect(() => {
+    if (popped && !poppedSharing) {
+      void api
+        .closeStreamWindow()
+        .catch(() => {})
+        .then(() => setPopped(null));
+    }
+  }, [popped, poppedSharing]);
+  useEffect(
+    () => () => {
+      void api.closeStreamWindow().catch(() => {});
+    },
+    [],
+  );
   const block = useRef<HTMLDivElement>(null);
   const [blockHeight, setBlockHeight] = useState(Infinity);
   useLayoutEffect(() => {
@@ -144,7 +233,23 @@ export function ScreenStage({ sharers, people }: { sharers: Sharer[]; people: Re
         onDoubleClick={() => (full ? leave() : enter())}
         className="group relative min-h-0 flex-1 overflow-hidden rounded-lg bg-black"
       >
-        <ScreenPicture key={main.rootId} sharer={main} onSize={setHeight} />
+        {popped === main.rootId ? (
+          <div data-stream-popped className="absolute inset-0 grid place-content-center justify-items-center gap-s-2 text-sm text-text">
+            <span>{`${main.name}’s screen is in its own window.`}</span>
+            <button
+              type="button"
+              onClick={() => {
+                void api.closeStreamWindow().catch(() => {});
+                setPopped(null);
+              }}
+              className="h-8 rounded-md bg-elevated px-s-3 text-sm text-text-strong hover:bg-elevated-hover focus-visible:outline-2 focus-visible:outline-ring"
+            >
+              Bring it back
+            </button>
+          </div>
+        ) : (
+          <ScreenPicture key={main.rootId} sharer={main} onSize={setHeight} />
+        )}
         <span className="absolute bottom-2.5 left-2.5 inline-flex h-7 items-center gap-1.5 rounded-md bg-black/55 px-2.5 text-[12px] font-medium text-text-strong">
           <Monitor className="size-3.5" aria-hidden="true" />
           {main.self ? `${main.name} (you)` : main.name}
@@ -154,6 +259,20 @@ export function ScreenStage({ sharers, people }: { sharers: Sharer[]; people: Re
           <LiveBadge />
         </div>
         <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5">
+          {main.sound ? <StreamVolume key={main.rootId} rootId={main.rootId} /> : null}
+          {canPopOut && !main.self && popped !== main.rootId ? (
+            <StageButton
+              label="Open in its own window"
+              onClick={() => {
+                void api
+                  .openStreamWindow(main.rootId, main.name)
+                  .then(() => setPopped(main.rootId))
+                  .catch(() => {});
+              }}
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
+            </StageButton>
+          ) : null}
           <StageButton
             label={stripOpen ? 'Hide people' : 'Show people'}
             onClick={() => setStripOpen(!stripOpen)}

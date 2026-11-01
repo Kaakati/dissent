@@ -640,6 +640,8 @@ pub(crate) struct Room {
     screen: Mutex<Option<Sending>>,
     /// The decoders of the peers' cameras and screens.
     remote_video: Mutex<RemoteVideo>,
+    /// The sound of everyone's shared screens, for the playout.
+    screen_sound: Mutex<crate::call_screen_audio::ScreenAudioMix>,
     /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
     keyframe_wanted: AtomicBool,
     /// Who speaks: this device's last sent frame, and the speakers last shown. See `speaking`.
@@ -691,6 +693,10 @@ pub(crate) struct CallHub {
     test_capture: Mutex<crate::call_video::TestCapture>,
     /// The tallest picture and highest frame rate chosen for a screen share on this device. `None` is no limit.
     screen_quality: Mutex<(Option<u32>, Option<u32>)>,
+    /// Whether this device's share includes the computer's sound. Off until the sharer turns it on.
+    screen_sound_on: AtomicBool,
+    /// The volume this viewer chose for each sharer's sound, by root id, in percent.
+    screen_volumes: Mutex<std::collections::BTreeMap<String, u32>>,
     /// The bitrate chosen for a screen share on this device, in kbps.
     screen_kbps: std::sync::atomic::AtomicU32,
     /// This device's camera while the lobby previews it, before a call. A call takes the camera
@@ -723,6 +729,8 @@ impl CallHub {
             tiles: Mutex::new(HashMap::new()),
             test_capture: Mutex::new(crate::call_video::TestCapture::Device),
             screen_quality: Mutex::new((None, None)),
+            screen_sound_on: AtomicBool::new(false),
+            screen_volumes: Mutex::new(Default::default()),
             screen_kbps: std::sync::atomic::AtomicU32::new(dissent_video::adapt::SCREEN_DEFAULT_KBPS),
             encoded_sink: Mutex::new(None),
             lobby_camera: Mutex::new(None),
@@ -782,6 +790,8 @@ pub struct ParticipantView {
     pub screen_paused: bool,
     /// Their screen is reaching this device, or is paused for it.
     pub screen: bool,
+    /// Their screen's sound is reaching this device.
+    pub screen_audio: bool,
 }
 
 /// Whether a participant's link goes straight, or through a relay.
@@ -1033,6 +1043,7 @@ impl Room {
             camera: Mutex::new(None),
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
+            screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
             speaking: Mutex::new(speaking::Speaking::default()),
         }
@@ -1285,6 +1296,10 @@ fn take_encoded(room: &Room) -> Vec<(Encoded, bool)> {
                     out.push((encoded, screen));
                 }
             }
+            // Sound goes on while video is paused: it is the smaller stream, and the sharer's words may depend on it.
+            while let Some(encoded) = sending.sound.as_ref().and_then(|sound| sound.try_next()) {
+                out.push((encoded, screen));
+            }
         }
     }
     out
@@ -1349,6 +1364,18 @@ fn emit_preview(engine: &Engine, sender: u64, root_id: &str, screen: bool, previ
 /// wide as the window draws the tile, when the window has said so, and the default otherwise.
 fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
     use crate::call_video::{LARGE_PREVIEW_INTERVAL, PREVIEW_INTERVAL};
+    if frame.codec == dissent_media::VideoCodec::Opus {
+        let root = lock(&room.peers).get(&frame.sender).map(|peer| peer.root.to_string()).unwrap_or_default();
+        let before = lock(&room.screen_sound).sounding().len();
+        let mut mix = lock(&room.screen_sound);
+        mix.receive(frame.sender, &root, &frame.payload);
+        let now = mix.sounding().len();
+        drop(mix);
+        if now != before {
+            engine.emit(EngineEvent::CallUpdated);
+        }
+        return;
+    }
     room.with_layers(|l| l.received.insert((frame.sender, frame.screen), frame.layer));
     room.with_layers(|l| l.video_at = Some(Instant::now()));
     if frame.screen && room.with_layers(|l| l.screen_seen.insert(frame.sender, Instant::now()).is_none()) {
@@ -1872,6 +1899,8 @@ impl Engine {
         match lock(&self.inner.calls.current).clone() {
             Some(room) if !room.deafened.load(Ordering::Relaxed) => {
                 lock(&room.audio).playout(now_ms(), out);
+                let volumes = lock(&self.inner.calls.screen_volumes);
+                lock(&room.screen_sound).mix(out, &volumes);
             }
             _ => out.fill(0.0),
         }
@@ -3054,6 +3083,13 @@ impl Engine {
                 if matches!(room.scope, Scope::Channel { .. }) {
                     sending.budget.cap(self.room_ceilings(&room).screen);
                 }
+                if self.inner.calls.screen_sound_on.load(Ordering::Relaxed) {
+                    // A share without sound is better than none. `set_screen_audio` already told the sharer if this cannot work.
+                    match crate::call_screen_audio::ScreenAudio::start(self.test_capture()) {
+                        Ok(sound) => sending.set_sound(Some(sound)),
+                        Err(e) => tracing::warn!(error = %e, "the share goes without the computer's sound"),
+                    }
+                }
                 *screen = Some(sending);
             }
         }
@@ -3084,6 +3120,40 @@ impl Engine {
                 sending.set_screen_quality(max_height, max_fps);
             }
         }
+    }
+
+    /// Turns the computer's sound on or off for a running share and the next one. An error means it cannot
+    /// run, and leaves it off.
+    pub fn set_screen_audio(&self, on: bool) -> Result<()> {
+        let room = lock(&self.inner.calls.current).clone();
+        let screen = room.as_ref().map(|room| lock(&room.screen));
+        let result = match (on, screen) {
+            (false, Some(mut screen)) => {
+                if let Some(sending) = screen.as_mut() {
+                    sending.set_sound(None);
+                }
+                Ok(())
+            }
+            (true, Some(mut screen)) if screen.is_some() => {
+                let sound = crate::call_screen_audio::ScreenAudio::start(self.test_capture())?;
+                if let Some(sending) = screen.as_mut() {
+                    sending.set_sound(Some(sound));
+                }
+                Ok(())
+            }
+            // Nothing runs yet, so this checks now rather than failing silently at Go Live.
+            (true, _) if self.test_capture() == crate::call_video::TestCapture::Device && !crate::call_screen_audio::screen_audio_available() => {
+                Err(CoreError::Invalid("sharing the computer's sound is not available on this system".into()))
+            }
+            _ => Ok(()),
+        };
+        self.inner.calls.screen_sound_on.store(on && result.is_ok(), Ordering::Relaxed);
+        result
+    }
+
+    /// The volume of one sharer's sound on this device, in percent, up to 200.
+    pub fn set_screen_volume(&self, root_id: &str, percent: u32) {
+        lock(&self.inner.calls.screen_volumes).insert(root_id.to_string(), percent.min(200));
     }
 
     /// A small JPEG of a display or window, for the share picker.
@@ -3166,6 +3236,7 @@ impl Engine {
         let forwarder = room.forwarder_device();
         let paused = room.with_layers(|l| l.paused_here.clone());
         let screens: Vec<u64> = room.with_layers(|l| l.screen_seen.keys().copied().collect());
+        let sounding = lock(&room.screen_sound).sounding();
         let reported = self.self_reported_deafen();
         let quality = lock(&room.quality);
         let now = Instant::now();
@@ -3187,6 +3258,7 @@ impl Engine {
                 video_paused: paused.contains(&(*sid, false)),
                 screen_paused: paused.contains(&(*sid, true)),
                 screen: screens.contains(sid) || paused.contains(&(*sid, true)),
+                screen_audio: sounding.contains(&p.root.to_string()),
             })
             .collect();
         // Two devices in all make a direct link. Three or more make a mesh.

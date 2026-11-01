@@ -2064,6 +2064,21 @@ if (!window.__TAURI__) {
     set_screen_bitrate: ({ kbps }) => { window.__screenBitrate = kbps; return kbps; },
     set_screen_quality: ({ maxHeight, maxFps }) => { window.__screenQuality = [maxHeight, maxFps]; return null; },
     share_thumbnail: () => fakeJpeg(320, 180),
+    // What reached the engine or the window system is kept on window, for the driver.
+    screen_audio_available: () => window.__screenAudioAvailable !== false,
+    set_screen_audio: ({ on }) => {
+      if (on && window.__screenAudioAvailable === false) throw 'sharing the computer\'s sound is not available on this system';
+      window.__screenAudio = on;
+      return null;
+    },
+    set_screen_volume: ({ rootId, percent }) => { window.__screenVolumes = { ...(window.__screenVolumes ?? {}), [rootId]: percent }; return null; },
+    subscribe_encoded_video: () => null,
+    unsubscribe_encoded_video: () => null,
+    set_jpeg_tiles: () => null,
+    request_video_keyframes: () => null,
+    open_stream_window: ({ rootId }) => { window.__streamWindow = rootId; return null; },
+    subscribe_stream_window: () => null,
+    close_stream_window: () => { window.__streamWindow = null; return null; },
     list_share_sources: () => [
       { target: { kind: 'display', id: 1 }, name: 'Built-in display', primary: true },
       { target: { kind: 'window', id: 2 }, name: 'Notes · Draft', primary: false },
@@ -2307,9 +2322,11 @@ if (!window.__TAURI__) {
   // Sound previews. Each helper makes the event the engine would send, so the join, leave, missed and group sounds play.
   // Participants are replaced as a new array, the way the engine's serialised state arrives.
   // A person in the call starts or stops sharing a screen of this size, as the engine would report it.
-  window.__mockShare = (root, on, width = 2560, height = 1440) => {
+  // The viewer closes the pop-out with its own window controls.
+  window.__mockStreamClosed = () => { window.__streamWindow = null; emitTo('dissent://stream-window-closed', null); };
+  window.__mockShare = (root, on, width = 2560, height = 1440, sound = false) => {
     if (!calls.current) return;
-    calls.current.participants = calls.current.participants.map((p) => (p.root_id === root ? { ...p, screen: on } : p));
+    calls.current.participants = calls.current.participants.map((p) => (p.root_id === root ? { ...p, screen: on, screen_audio: on && sound } : p));
     emitTo('dissent://call-state', { ...calls.current });
     if (on) emit({ kind: 'video_frame', sender: 1, root_id: root, screen: true, width, height, jpeg: fakeJpeg(width, height) });
   };

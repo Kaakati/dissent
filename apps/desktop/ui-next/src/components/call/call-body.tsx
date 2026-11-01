@@ -258,7 +258,7 @@ export function CallStage({
   // You always have a tile, as in Discord: your camera while it is on, else your avatar.
   const selfTile = Boolean(me);
   // Whoever shares a screen, others first, so a viewer's stage shows what someone else is sharing before their own.
-  const sharers: Sharer[] = call.participants.filter((p) => p.screen).map((p) => ({ rootId: p.root_id, name: p.display_name, self: false }));
+  const sharers: Sharer[] = call.participants.filter((p) => p.screen).map((p) => ({ rootId: p.root_id, name: p.display_name, self: false, sound: p.screen_audio }));
   if (call.screen && me) sharers.push({ rootId: me.root_id, name: me.display_name, self: true });
   const tiles = (
     <>

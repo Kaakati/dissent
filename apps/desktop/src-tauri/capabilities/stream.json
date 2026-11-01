@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "stream",
+  "description": "The pop-out window of a shared screen: only what it does with its own window",
+  "windows": [
+    "stream"
+  ],
+  "permissions": [
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-always-on-top"
+  ]
+}

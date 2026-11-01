@@ -19,3 +19,7 @@ sonora = ["dep:sonora"]
 
 [build-dependencies]
 cc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+windows-core.workspace = true

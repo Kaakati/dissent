@@ -29,6 +29,10 @@ let streaming: ShareSource | null = null;
 function noteStreaming(source: ShareSource) {
   streaming = source;
 }
+let streamingSound = false;
+function noteSound(on: boolean) {
+  streamingSound = on;
+}
 
 function SourceThumb({ source }: { source: ShareSource }) {
   const [jpeg, setJpeg] = useState<string | null>(null);
@@ -77,6 +81,24 @@ function ShareBody({ channel, live, close }: { channel: string; live: boolean; c
   const [choosing, setChoosing] = useState(!live);
   const [settings, setSettings] = useState<ShareSettings>(savedShareSettings);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Off unless the sharer turns it on, each time they go live.
+  const [sound, setSound] = useState(live && streamingSound);
+  const [soundAvailable, setSoundAvailable] = useState<boolean | null>(null);
+  const [soundFailed, setSoundFailed] = useState<string | null>(null);
+  useEffect(() => {
+    api.screenAudioAvailable().then(setSoundAvailable, () => setSoundAvailable(false));
+  }, []);
+  const changeSound = (on: boolean) => {
+    setSound(on);
+    setSoundFailed(null);
+    noteSound(on);
+    // Checked now, so a device that cannot do it says so here instead of going silent after Go Live.
+    api.setScreenAudio(on).catch((e) => {
+      setSound(false);
+      noteSound(false);
+      setSoundFailed(String(e));
+    });
+  };
 
   useEffect(() => {
     api.listShareSources().then(setSources, (e) => setFailed(String(e)));
@@ -162,7 +184,23 @@ function ShareBody({ channel, live, close }: { channel: string; live: boolean; c
           <span className="min-w-0 flex-1 truncate" data-share-what>{source?.name ?? 'Your screen'}</span>
           <Button variant="outline" size="sm" onClick={() => setChoosing(true)}>Change</Button>
         </div>
-        <p className="text-meta text-muted-foreground">Sound isn’t shared with your screen yet. People hear your microphone only.</p>
+        <label className={cn('mt-s-1 flex items-start gap-s-2 text-sm text-text', soundAvailable === false && 'opacity-60')}>
+          <input
+            type="checkbox"
+            aria-label="Share your computer's sound"
+            data-share-sound
+            checked={sound}
+            disabled={soundAvailable === false}
+            onChange={(e) => changeSound(e.target.checked)}
+            className="mt-0.5 accent-accent"
+          />
+          <span>
+            Share your computer’s sound
+            <span className="block text-meta text-muted-foreground" data-share-sound-note>
+              {soundFailed ?? (soundAvailable === false ? 'Not available on this system. People hear your microphone only.' : 'What other apps play. The call’s own voices are left out.')}
+            </span>
+          </span>
+        </label>
       </div>
       <div className="grid gap-s-1">
         <span className={LABEL}>Streaming to</span>
@@ -245,6 +283,11 @@ function ShareBody({ channel, live, close }: { channel: string; live: boolean; c
 }
 
 export function openShareDialog(channel: string, live: boolean) {
+  // A new share starts without sound, whatever the last one did.
+  if (!live) {
+    noteSound(false);
+    void api.setScreenAudio(false).catch(() => {});
+  }
   openDialog({
     title: live ? 'Stream settings' : 'Screen Share',
     content: (close) => <ShareBody channel={channel} live={live} close={close} />,

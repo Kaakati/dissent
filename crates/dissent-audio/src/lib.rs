@@ -11,6 +11,7 @@ pub mod dsp;
 mod error;
 pub mod gate;
 pub mod jitter;
+pub mod loopback;
 mod opus_ffi;
 pub mod meter;
 pub mod pipeline;

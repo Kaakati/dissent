@@ -45,6 +45,9 @@ pub enum VideoCodec {
     Av1,
     /// H.264, decoded with OpenH264.
     H264,
+    /// The sound of a shared screen. Each frame stands alone, so no gate or layer applies. A released device
+    /// does not know this tag and drops the frame.
+    Opus,
 }
 
 impl VideoCodec {
@@ -52,6 +55,7 @@ impl VideoCodec {
         match self {
             Self::Av1 => 1,
             Self::H264 => 2,
+            Self::Opus => 3,
         }
     }
 
@@ -59,6 +63,7 @@ impl VideoCodec {
         match tag {
             1 => Some(Self::Av1),
             2 => Some(Self::H264),
+            3 => Some(Self::Opus),
             _ => None,
         }
     }
@@ -249,6 +254,8 @@ pub(crate) struct RawVideo {
     pub screen: bool,
     pub keyframe: bool,
     pub layer: u8,
+    /// Whether the frame is a screen's sound rather than a picture.
+    pub sound: bool,
 }
 
 /// What the gate decides for one arriving frame.
@@ -429,5 +436,17 @@ mod tests {
             !replay.accept(1, 10),
             "a counter older than the window is refused"
         );
+    }
+
+    #[test]
+    fn a_tag_this_build_does_not_know_is_refused_as_a_released_device_refuses_opus() {
+        let meta = VideoMeta { frame_id: 1, keyframe: true, codec: VideoCodec::Opus, screen: true, layer: 0 };
+        let mut body = unescape(&carry(meta, &[1, 2, 3])[1..]);
+        assert_eq!(body[5], 3, "the sound's tag, which v0.1.22 and earlier do not know");
+        assert_eq!(uncarry(&carry(meta, &[1, 2, 3])).unwrap().0.codec, VideoCodec::Opus);
+        body[5] = 200;
+        let mut nal = vec![NAL_HEADER];
+        nal.extend(escape(&body));
+        assert!(uncarry(&nal).is_err(), "dropped before any gate or key sees it");
     }
 }

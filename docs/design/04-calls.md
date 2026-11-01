@@ -357,6 +357,14 @@ Probing with `set_desired_bitrate` is not used. Measured before the timer fix be
 
 **Forwarded calls.** A direct call or a mesh gets the whole stream. In a forwarded call the layers are 180p, a middle layer, and the top rung, which is the source's size. The wire allows three layers and does not change, since the layer table is already (width, kbps). A screen taller than 720p uses 720p at 1000 kbps as its middle layer, because 360p text cannot be read and a viewer whose budget can't fit the top should still read the page. Lower layers run in OpenH264's camera mode and cost extra CPU on the sender's capture thread, which the governor sees.
 
+**Sound.** A sharer can add the computer's sound in the Screen Share dialog. It is off each time they go live. `dissent-audio::loopback` uses WASAPI process loopback (Windows 10 2004 and later) with this process and its children excluded, so the call's own voices and this app's sounds never go back into the call. Other platforms and older Windows report it as unavailable, and the dialog says so. ScreenCaptureKit and a PipeWire monitor stream would be the native paths there, and neither is built. Whole-device capture is not offered, since it would send the call back into itself.
+
+It travels on the video carrier as 96 kbps mono Opus frames with the codec tag 3, under the same SFrame key as the picture. Every frame stands alone, so it passes no gate or layer, and the forwarder sends it to everyone. It comes off the video budget (110 kbps). A viewer mixes it into the call's playout (`ScreenAudioMix`), so it follows the chosen speaker and deafen, and the mic's echo canceller knows it. Each viewer has a volume for each sharer, from 0 to 200%, kept on the device.
+
+Frames travel in order on the carrier, so a large keyframe holds the sound back with the picture. The mix drops what is more than 500 ms behind. **Released clients:** v0.1.22 and earlier refuse codec tag 3 in `uncarry`, before any gate or key sees it, and log it as malformed. A released viewer gets the picture without sound. A released forwarder does not pass the sound on, so nobody behind it hears it. That is from reading their code and a unit test of an unknown tag. A real older build was not run against this.
+
+**Pop-out.** A viewer who decodes in the window can open a share in a window of its own (`stream-window.tsx`, Tauri label `stream`), resizable, with full screen and stay on top. The frames of that stream go to its channel, and the main stage shows a note with "Bring it back". Closing the window, the sharer stopping, or leaving the call closes it and returns the stage. It loads the same page and CSP with a query, draws only to a canvas, loads no pictures, and its capability file allows only setting its own full screen and stay on top. It needs WebCodecs in the webview, and the button is absent without it. The stage itself can stay on JPEG previews: the window takes only its own stream's encoded frames.
+
 **Measured.** On this 24-thread Windows machine with other work running, in a release build, using the scrolling-page test picture only (`crates/dissent-video/tests/screen_cost.rs`, and `a_1080p_screen_is_shared_at_1080p`, `a_1440p_screen_is_shared_at_1440p` in `tests/it/video.rs`). No real screen was captured.
 
 Encoding only, frames not paced, mean ms per frame, in the screen configuration:
@@ -586,7 +594,7 @@ A voice channel call starts as a mesh and moves between tiers as its live roster
 
 Migration is per device, so two devices can reach the same tier a little apart. The generation id and the tier message keep them in step.
 
-## Webview decode with WebCodecs (built, on by default)
+## Webview decode with WebCodecs (built, off by default)
 
 **Why.** Today a remote frame is decoded in Rust, scaled by the box filter, encoded as a JPEG, base64-encoded into an event, and decoded again by the webview. Measured on one 720p30 H.264 tile, the Rust part (decode, scale and JPEG) costs 53 to 59% of a core at 1280 px, and the webview's base64 and image decode cost 5 to 7 ms per frame on its main thread. The JPEG step exists only to get pictures into the webview. `VideoDecoder` can decode the encoded frame in the webview, on the GPU or a hardware decoder, so the picture never needs a Rust decode, a scale or a JPEG.
 
@@ -641,9 +649,9 @@ The window numbers come from headless Edge with no GPU. The decoder runs off the
 
 **What this says.** The engine saves 16 to 20 ms of CPU per 720p30 frame on this machine. The window's main-thread cost does not fall: drawing a decoded frame to a software canvas takes about 4 ms, about what the JPEG path's decode and draw take. A GPU-accelerated window, such as WebView2 with a GPU, should draw much faster. That is not measured here, so the flag stays off until it is.
 
-**Still open.** The draw on a GPU window is measured below, and the path is the default now. A window that cannot decode H.264 keeps the JPEG path.
+**Still open.** The draw on a GPU window is measured below. The path stays opt-in. A window that cannot decode H.264 keeps the JPEG path.
 
-### Default on, measured in the app's WebView2 (28 October 2026)
+### Measured in the app's WebView2 (28 October 2026)
 
 The window's own bench ran inside the desktop app's WebView2 (Chromium with a GPU), 300 frames of 720p30 at 30 fps over 10 seconds, with CPU sampled for the app process and its WebView2 processes. Each figure is the CPU above an idle sample taken in the same pass, over three passes.
 
@@ -656,6 +664,6 @@ The window's own bench ran inside the desktop app's WebView2 (Chromium with a GP
 
 The two H.264 variants are within the noise of each other, so the simpler `drawImage` stays. Each frame is closed as soon as it is drawn, so no decoder waits on a frame the page still holds.
 
-**Decision.** The window decodes by default, and the setting in Settings › Voice is an opt-out. On a GPU-backed window this path costs about a third of the JPEG path's CPU, and the engine saves 16 to 20 ms a frame in Rust on top. Without WebCodecs or H.264 the window keeps the JPEG previews.
+**Current state.** The code has this off unless the viewer turns on the setting in Settings › Voice (`hardwareVideoWanted`), so most windows use JPEG previews. An earlier decision here made it the default, and the code does not do that. On a GPU-backed window this path costs about a third of the JPEG path's CPU, and the engine saves 16 to 20 ms a frame in Rust on top. Without WebCodecs or H.264 the window keeps the JPEG previews.
 
 **Not measured.** Two instances in a live DM call with fake capture, and the app's whole-process CPU in that call. The desktop app has no fake capture switch, and the second instance needs contacts set up. The figures above come from the bench inside the app's own WebView2, plus the engine costs measured in Rust.

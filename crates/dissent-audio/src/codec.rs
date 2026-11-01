@@ -94,6 +94,27 @@ impl OpusEncoder {
         Ok(enc)
     }
 
+    /// Creates an encoder for a computer's sound rather than a voice: music mode, with no redundancy and no
+    /// silence detection. Its bitrate is not held to the voice range.
+    pub fn for_music(bitrate_bps: u32) -> Result<Self> {
+        let mut err: c_int = 0;
+        // SAFETY: plain FFI constructor. The status and the returned pointer are checked below.
+        let raw = unsafe {
+            ffi::opus_encoder_create(SAMPLE_RATE as i32, 1, ffi::OPUS_APPLICATION_AUDIO, &mut err)
+        };
+        check_ret("opus_encoder_create", err)?;
+        let raw = NonNull::new(raw).ok_or(AudioError::Opus {
+            call: "opus_encoder_create",
+            code: -7,
+        })?;
+        let mut enc = OpusEncoder { raw };
+        enc.ctl(ffi::OPUS_SET_SIGNAL_REQUEST, ffi::OPUS_SIGNAL_MUSIC, "signal")?;
+        enc.ctl(ffi::OPUS_SET_VBR_REQUEST, 1, "vbr")?;
+        enc.ctl(ffi::OPUS_SET_COMPLEXITY_REQUEST, 8, "complexity")?;
+        enc.ctl(ffi::OPUS_SET_BITRATE_REQUEST, bitrate_bps as i32, "bitrate")?;
+        Ok(enc)
+    }
+
     /// True while DTX holds the encoder in discontinuous mode, which means the last frame was
     /// silence and sent as a tiny packet.
     pub fn in_dtx(&mut self) -> bool {

@@ -340,17 +340,99 @@ static JPEG_TILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// them with WebCodecs. Tiles in `JPEG_TILES` keep their JPEG previews.
 #[tauri::command]
 pub async fn subscribe_encoded_video(state: State<'_, AppState>, channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    *lock_main_channel() = Some(channel);
+    install_encoded_sink(&engine(&state).await?);
+    Ok(())
+}
+
+/// The sink both windows share. A stream in its own window goes there, with no decode here. Otherwise the main
+/// window takes frames it decodes itself. Anything left over returns false, and the engine makes a JPEG preview.
+fn install_encoded_sink(engine: &dissent_core::Engine) {
     let sink: EncodedSink = Arc::new(move |frame: EncodedVideo| {
+        let framed = || {
+            let mut bytes = video_header(&frame);
+            bytes.extend_from_slice(&frame.payload);
+            InvokeResponseBody::Raw(bytes)
+        };
+        if frame.screen {
+            if let Some((root, stream)) = lock_stream_window().as_ref() {
+                if *root == frame.root_id {
+                    let _ = stream.send(framed());
+                    return true;
+                }
+            }
+        }
         if lock_jpeg_tiles().contains(&frame.root_id) {
             return false;
         }
-        let mut bytes = video_header(&frame);
-        bytes.extend_from_slice(&frame.payload);
-        let _ = channel.send(InvokeResponseBody::Raw(bytes));
-        true
+        match lock_main_channel().as_ref() {
+            Some(channel) => {
+                let _ = channel.send(framed());
+                true
+            }
+            None => false,
+        }
     });
-    engine(&state).await?.set_encoded_video_sink(Some(sink));
+    engine.set_encoded_video_sink(Some(sink));
+}
+
+/// The main window's channel, while it decodes frames itself.
+static MAIN_CHANNEL: std::sync::Mutex<Option<Channel<InvokeResponseBody>>> = std::sync::Mutex::new(None);
+
+fn lock_main_channel() -> std::sync::MutexGuard<'static, Option<Channel<InvokeResponseBody>>> {
+    MAIN_CHANNEL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The channel of the pop-out window, with the root id of the sharer it shows.
+static STREAM_WINDOW: std::sync::Mutex<Option<(String, Channel<InvokeResponseBody>)>> = std::sync::Mutex::new(None);
+const STREAM_LABEL: &str = "stream";
+
+fn lock_stream_window() -> std::sync::MutexGuard<'static, Option<(String, Channel<InvokeResponseBody>)>> {
+    STREAM_WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Moves one shared screen into a window of its own. A second call moves the same window to the new stream.
+#[tauri::command]
+pub async fn open_stream_window(app: tauri::AppHandle, root_id: String, name: String) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(STREAM_LABEL) {
+        let _ = existing.close();
+    }
+    // Only ever this page, with the sharer's id and name as data for it to show.
+    let mut url = tauri::Url::parse("http://localhost/index.html").map_err(err)?;
+    url.query_pairs_mut().append_pair("stream", &root_id).append_pair("name", &name);
+    let query = url.query().unwrap_or_default().to_string();
+    let window = tauri::WebviewWindowBuilder::new(&app, STREAM_LABEL, tauri::WebviewUrl::App(format!("index.html?{query}").into()))
+        .title(format!("{name}'s screen"))
+        .inner_size(1280.0, 720.0)
+        .min_inner_size(320.0, 180.0)
+        .resizable(true)
+        .build()
+        .map_err(err)?;
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            *lock_stream_window() = None;
+            let _ = handle.emit_to("main", "dissent://stream-window-closed", ());
+        }
+    });
     Ok(())
+}
+
+/// The pop-out window takes its stream.
+#[tauri::command]
+pub async fn subscribe_stream_window(state: State<'_, AppState>, root_id: String, channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    *lock_stream_window() = Some((root_id, channel));
+    install_encoded_sink(&engine(&state).await?);
+    Ok(())
+}
+
+/// Closes the pop-out window, when the share or the call ends or the viewer brings it back.
+#[tauri::command]
+pub fn close_stream_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(STREAM_LABEL) {
+        let _ = window.close();
+    }
+    *lock_stream_window() = None;
 }
 
 /// Replaces the tiles that use JPEG previews instead of the encoded path. The window sends the whole list each time.
@@ -366,7 +448,11 @@ fn lock_jpeg_tiles() -> std::sync::MutexGuard<'static, Vec<String>> {
 /// Stops the encoded frames; the JPEG previews resume.
 #[tauri::command]
 pub async fn unsubscribe_encoded_video(state: State<'_, AppState>) -> Result<(), String> {
-    engine(&state).await?.set_encoded_video_sink(None);
+    *lock_main_channel() = None;
+    // A stream in its own window keeps coming. Everything else goes back to JPEG previews.
+    if lock_stream_window().is_none() {
+        engine(&state).await?.set_encoded_video_sink(None);
+    }
     Ok(())
 }
 
@@ -401,6 +487,25 @@ pub async fn set_screen_bitrate(state: State<'_, AppState>, kbps: u32) -> Result
 #[tauri::command]
 pub async fn set_screen_quality(state: State<'_, AppState>, max_height: Option<u32>, max_fps: Option<u32>) -> Result<(), String> {
     engine(&state).await?.set_screen_quality(max_height, max_fps);
+    Ok(())
+}
+
+/// Whether this device can share the computer's sound with its screen.
+#[tauri::command]
+pub fn screen_audio_available() -> bool {
+    dissent_core::screen_audio_available()
+}
+
+/// Turns the computer's sound on or off for a running share and the next one.
+#[tauri::command]
+pub async fn set_screen_audio(state: State<'_, AppState>, on: bool) -> Result<(), String> {
+    engine(&state).await?.set_screen_audio(on).map_err(err)
+}
+
+/// This viewer's volume for one sharer's sound, in percent.
+#[tauri::command]
+pub async fn set_screen_volume(state: State<'_, AppState>, root_id: String, percent: u32) -> Result<(), String> {
+    engine(&state).await?.set_screen_volume(&root_id, percent);
     Ok(())
 }
 

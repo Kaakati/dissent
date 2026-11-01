@@ -780,23 +780,29 @@ impl<T: PacketTransport> Call<T> {
             let Some(sender) = peek_sender(&ciphertext) else {
                 return;
             };
-            // Layers arrive interleaved, each with its own frame ids, so each is gated on its own.
-            let stream = layer_key(stream_key(sender, header.screen), header.layer);
-            let admit = self
-                .video_gate
-                .admit(stream, header.frame_id, header.keyframe);
-            if admit.need_keyframe {
-                self.request_keyframe_throttled();
+            // Sound has no keyframes to gate on.
+            let sound = header.codec == crate::video::VideoCodec::Opus;
+            if !sound {
+                // Layers arrive interleaved, each with its own frame ids, so each is gated on its own.
+                let stream = layer_key(stream_key(sender, header.screen), header.layer);
+                let admit = self
+                    .video_gate
+                    .admit(stream, header.frame_id, header.keyframe);
+                if admit.need_keyframe {
+                    self.request_keyframe_throttled();
+                }
+                if !admit.deliver {
+                    return;
+                }
             }
-            if admit.deliver {
-                self.video_raw_inbox.push_back(RawVideo {
-                    nal: nal.to_vec(),
-                    sender,
-                    screen: header.screen,
-                    keyframe: header.keyframe,
-                    layer: header.layer,
-                });
-            }
+            self.video_raw_inbox.push_back(RawVideo {
+                nal: nal.to_vec(),
+                sender,
+                screen: header.screen,
+                keyframe: header.keyframe,
+                layer: header.layer,
+                sound,
+            });
             return;
         }
         let opened = match self.keys.as_ref() {
@@ -815,16 +821,18 @@ impl<T: PacketTransport> Call<T> {
             self.stats.frames_replayed += 1;
             return;
         }
-        let admit = self.video_gate.admit(
-            stream_key(opened.sender, header.screen),
-            header.frame_id,
-            header.keyframe,
-        );
-        if admit.need_keyframe {
-            self.request_keyframe_throttled();
-        }
-        if !admit.deliver {
-            return;
+        if header.codec != crate::video::VideoCodec::Opus {
+            let admit = self.video_gate.admit(
+                stream_key(opened.sender, header.screen),
+                header.frame_id,
+                header.keyframe,
+            );
+            if admit.need_keyframe {
+                self.request_keyframe_throttled();
+            }
+            if !admit.deliver {
+                return;
+            }
         }
         match payload_of_stamp(&opened.plaintext) {
             Ok(payload) => self.video_inbox.push_back(VideoFrame {

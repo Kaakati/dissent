@@ -131,6 +131,8 @@ pub(crate) struct Sending {
     /// The simulcast layers the forwarder wants, as a bit mask (bit 0 is the 180p base). `None` is the mesh mode: one
     /// adaptive stream, tagged layer 0. A forwarded call only changes this when the forwarder asks for layers.
     wanted: Option<u8>,
+    /// The sound of a screen share, when the sharer added it.
+    pub(crate) sound: Option<crate::call_screen_audio::ScreenAudio>,
 }
 
 /// One simulcast layer a sender can send: its picture size and the rate it costs.
@@ -175,6 +177,7 @@ impl Sending {
             budget,
             paused: false,
             wanted: None,
+            sound: None,
         }
     }
 
@@ -229,7 +232,7 @@ impl Sending {
             return;
         };
         // The lower layers come out of the same uplink as the top rung.
-        let lower = self.lower_layers_kbps();
+        let lower = self.lower_layers_kbps() + if self.sound.is_some() { crate::call_screen_audio::SCREEN_AUDIO_KBPS } else { 0 };
         let estimate = available;
         let available = self.budget.trusted_kbps(estimate, audio_kbps, lower).saturating_sub(lower);
         match self.budget.update(available, audio_kbps) {
@@ -239,6 +242,11 @@ impl Sending {
             }
             None => self.paused = true,
         }
+    }
+
+    /// Adds or removes the share's sound, whose cost comes off what video may plan for.
+    pub(crate) fn set_sound(&mut self, sound: Option<crate::call_screen_audio::ScreenAudio>) {
+        self.sound = sound;
     }
 
     /// Whether every peer can decode AV1. The budget plans AV1 only when they all can.
@@ -1046,6 +1054,8 @@ impl RemoteVideo {
         let codec = match frame.codec {
             VideoCodec::H264 => dissent_video::Codec::H264,
             VideoCodec::Av1 => dissent_video::Codec::Av1,
+            // A screen's sound goes to the playout, not here.
+            VideoCodec::Opus => return None,
         };
         let av1 = frame.codec == VideoCodec::Av1;
         let decoder = match self.decoders.entry((frame.sender, frame.screen, av1)) {
