@@ -40,6 +40,7 @@ mod community;
 mod community_profile;
 mod animated_banner;
 pub mod boosts;
+mod decorations;
 mod profile_banners;
 mod profile_themes;
 mod profile_sync;

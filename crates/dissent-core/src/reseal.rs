@@ -2,7 +2,7 @@
 //! sealed again under the new one. The copy is checked before it is put in place, and the source is only
 //! read. See [`copy_profile`].
 //!
-//! Sealed files: `identity.bin`, `profiles/<id>/mls.bin`, `avatar.bin`, `peer_avatars.bin`, `banners.bin`, `themes.bin`, each
+//! Sealed files: `identity.bin`, `profiles/<id>/mls.bin`, `avatar.bin`, `peer_avatars.bin`, `banners.bin`, `themes.bin`, `decorations.bin`, each
 //! community's `content.sealed` log, `community.key`, `epoch-keys.bin`, `private-keys.bin` and `history-keys.bin`, and every
 //! other store file and log, sealed under the store subkey (`at_rest`). Only the events and commit logs and the blob store
 //! are not sealed: they hold what peers relay anyway.
@@ -25,6 +25,7 @@ const AVATAR_FILE: &str = "avatar.bin";
 const PEER_AVATARS_FILE: &str = "peer_avatars.bin";
 const BANNERS_FILE: &str = "banners.bin";
 const THEMES_FILE: &str = "themes.bin";
+const DECORATIONS_FILE: &str = "decorations.bin";
 const CONTENT_FILE: &str = "content.sealed";
 const COMMUNITY_KEY_FILE: &str = "community.key";
 /// The lock is per process, so a copy never carries it.
@@ -141,6 +142,7 @@ fn reseal_profile(profile: &Path, from: &Vault, to: &Vault) -> Result<()> {
     reseal_file(&profile.join(PEER_AVATARS_FILE), &peers_vault(from), &peers_vault(to))?;
     reseal_file(&profile.join(BANNERS_FILE), &peers_vault(from), &peers_vault(to))?;
     reseal_file(&profile.join(THEMES_FILE), &peers_vault(from), &peers_vault(to))?;
+    reseal_file(&profile.join(DECORATIONS_FILE), &peers_vault(from), &peers_vault(to))?;
     for (id, dir) in community_dirs(profile)? {
         reseal_records(&dir.join(CONTENT_FILE), &content_vault(from, &id), &content_vault(to, &id))?;
         reseal_community_key(&dir.join(COMMUNITY_KEY_FILE), from, to, &id)?;
@@ -226,6 +228,7 @@ fn verify(staging: &Path, to: &Vault, device: DeviceId) -> Result<()> {
         verify_file(&profile.join(PEER_AVATARS_FILE), &peers_vault(to), FILE_AAD)?;
         verify_file(&profile.join(BANNERS_FILE), &peers_vault(to), FILE_AAD)?;
         verify_file(&profile.join(THEMES_FILE), &peers_vault(to), FILE_AAD)?;
+        verify_file(&profile.join(DECORATIONS_FILE), &peers_vault(to), FILE_AAD)?;
         for (id, dir) in community_dirs(&profile)? {
             // A plain 32-byte key here would mean the copy was not sealed. Reading it would migrate it silently, so check the length first.
             let key_file = dir.join(COMMUNITY_KEY_FILE);
@@ -310,6 +313,7 @@ mod tests {
         write_sealed(&profile.join(PEER_AVATARS_FILE), &peers_vault(from), &Some(9u32)).unwrap();
         write_sealed(&profile.join(BANNERS_FILE), &peers_vault(from), &Some(11u32)).unwrap();
         write_sealed(&profile.join(THEMES_FILE), &peers_vault(from), &Some(13u32)).unwrap();
+        write_sealed(&profile.join(DECORATIONS_FILE), &peers_vault(from), &Some(12u32)).unwrap();
         let community_dir = profile.join("communities").join(community.to_string());
         let content = community_dir.join(CONTENT_FILE);
         append_sealed_records(&content, &content_vault(from, community), &[("hello".to_string(), 1u32), ("again".to_string(), 2u32)]).unwrap();
@@ -348,6 +352,7 @@ mod tests {
         assert_eq!(read_sealed::<Option<u32>>(&profile.join(PEER_AVATARS_FILE), &peers_vault(&to)).unwrap(), Some(Some(9)));
         assert_eq!(read_sealed::<Option<u32>>(&profile.join(BANNERS_FILE), &peers_vault(&to)).unwrap(), Some(Some(11)));
         assert_eq!(read_sealed::<Option<u32>>(&profile.join(THEMES_FILE), &peers_vault(&to)).unwrap(), Some(Some(13)));
+        assert_eq!(read_sealed::<Option<u32>>(&profile.join(DECORATIONS_FILE), &peers_vault(&to)).unwrap(), Some(Some(12)));
         let content = profile.join("communities").join(community.to_string()).join(CONTENT_FILE);
         let records: Vec<(String, u32)> = read_sealed_records(&content, &content_vault(&to, &community)).unwrap();
         assert_eq!(records, vec![("hello".to_string(), 1), ("again".to_string(), 2)]);

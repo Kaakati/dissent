@@ -89,6 +89,7 @@ impl World {
         let mut out = Vec::new();
         out.extend(self.own_avatar.map(|p| p.hash));
         out.extend(self.banners.own.iter().flat_map(|b| b.pictures()).map(|p| p.hash));
+        out.extend(self.decorations.own_pictures().map(|p| p.hash));
         for (root, (_, picture)) in &self.peer_avatars {
             if self.still_known(root) {
                 out.extend(picture.map(|p| p.hash));
@@ -99,10 +100,16 @@ impl World {
                 out.extend(banner.iter().flat_map(|b| b.pictures()).map(|p| p.hash));
             }
         }
+        for (root, (_, decoration)) in &self.decorations.peers {
+            if self.still_known(root) {
+                out.extend(decoration.as_ref().and_then(|d| d.picture()).map(|p| p.hash));
+            }
+        }
         for c in self.communities.values() {
             let s = c.state();
             out.extend(s.avatars.values().filter_map(|(_, p)| p.map(|p| p.hash)));
             out.extend(s.profile_banners.values().flat_map(|(_, b)| b.iter().flat_map(|b| b.pictures())).map(|p| p.hash));
+            out.extend(s.avatar_decorations.values().filter_map(|(_, d)| d.as_ref()?.picture()).map(|p| p.hash));
             out.extend(s.icon.and_then(|(_, p)| p).map(|p| p.hash));
             out.extend(s.animated_icon.and_then(|(_, i)| i).into_iter().flat_map(|i| [i.image.hash, i.poster.hash]));
             out.extend(s.banner.and_then(|(_, b)| b).iter().flat_map(|b| b.pictures()).map(|p| p.hash));
@@ -145,6 +152,7 @@ impl World {
         let s = c.state();
         out.extend(s.avatars.values().filter_map(|(_, p)| p.map(|p| p.hash)));
         out.extend(s.profile_banners.values().flat_map(|(_, b)| b.iter().flat_map(|b| b.pictures())).map(|p| p.hash));
+        out.extend(s.avatar_decorations.values().filter_map(|(_, d)| d.as_ref()?.picture()).map(|p| p.hash));
         out.extend(s.icon.and_then(|(_, p)| p).map(|p| p.hash));
         out.extend(s.banner.and_then(|(_, b)| b).iter().flat_map(|b| b.pictures()).map(|p| p.hash));
         out
@@ -159,7 +167,8 @@ impl World {
     pub(crate) fn pictures_of(&self, root: &RootId) -> Vec<[u8; 32]> {
         let avatar = self.peer_avatars.get(root).and_then(|(_, p)| p.map(|p| p.hash));
         let banner = self.banners.peers.get(root).into_iter().flat_map(|(_, b)| b.iter().flat_map(|b| b.pictures()));
-        avatar.into_iter().chain(banner.map(|p| p.hash)).collect()
+        let decoration = self.decorations.peers.get(root).and_then(|(_, d)| d.as_ref()?.picture());
+        avatar.into_iter().chain(banner.chain(decoration).map(|p| p.hash)).collect()
     }
 }
 

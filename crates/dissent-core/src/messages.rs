@@ -297,6 +297,7 @@ impl Engine {
                     | Payload::HistorySupport { .. }
                     | Payload::ChannelLayout { .. }
                     | Payload::ProfileThemeSet { .. }
+                    | Payload::AvatarDecorationSet { .. }
             ) || dissent_events::is_roles_payload(&body.payload)
                 || dissent_events::is_files_payload(&body.payload);
             body.payload = match &member {

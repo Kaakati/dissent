@@ -428,6 +428,7 @@ impl Engine {
             suffix: self.inner.me.suffix(),
             display_name: w.my_name(),
             avatar: w.avatar_of(&self.inner.me),
+            decoration: w.decoration_view(&self.inner.me),
             banner,
             banner_poster,
             banner_preset,

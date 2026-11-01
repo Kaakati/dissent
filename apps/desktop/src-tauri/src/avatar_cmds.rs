@@ -59,6 +59,35 @@ pub async fn clear_profile_theme(state: State<'_, AppState>) -> Result<(), Strin
     engine(&state).await?.clear_profile_theme().await.map_err(err)
 }
 
+/// The avatar decoration: one of the app's built-ins, by id.
+#[tauri::command]
+pub async fn set_avatar_decoration_builtin(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    engine(&state).await?.set_avatar_decoration_builtin(id).await.map_err(err)
+}
+
+/// The avatar decoration: uploaded art as base64. The engine decodes it and refuses what is over its caps.
+#[tauri::command]
+pub async fn set_avatar_decoration(state: State<'_, AppState>, bytes: String) -> Result<(), String> {
+    let bytes = decode(&bytes)?;
+    engine(&state).await?.set_avatar_decoration(bytes).await.map_err(err)
+}
+
+/// This device's past uploads, newest first, to offer again.
+#[tauri::command]
+pub async fn avatar_decoration_recents(state: State<'_, AppState>) -> Result<Value, String> {
+    for_ui(&engine(&state).await?.recent_decorations())
+}
+
+#[tauri::command]
+pub async fn set_avatar_decoration_recent(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    engine(&state).await?.set_avatar_decoration_recent(id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn clear_avatar_decoration(state: State<'_, AppState>) -> Result<(), String> {
+    engine(&state).await?.clear_avatar_decoration().await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn set_community_icon(state: State<'_, AppState>, community_id: String, bytes: String) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
@@ -111,7 +140,7 @@ fn asset_urls(value: &mut Value) {
         Value::Object(map) => {
             for (key, field) in map.iter_mut() {
                 let url = match (key.as_str(), &*field) {
-                    ("avatar" | "icon" | "icon_poster" | "banner" | "banner_poster", Value::String(path)) if Path::new(path).is_absolute() => {
+                    ("avatar" | "icon" | "icon_poster" | "banner" | "banner_poster" | "decoration_image" | "decoration_poster", Value::String(path)) if Path::new(path).is_absolute() => {
                         Some(crate::pictures::picture_url(path))
                     }
                     _ => None,

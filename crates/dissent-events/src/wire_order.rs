@@ -73,6 +73,7 @@ const V0111_PAYLOAD: &[&str] = &[
     "ReputationRulesSet",
     "ReputationReset",
     "ProfileThemeSet",
+    "AvatarDecorationSet",
 ];
 
 const LAYOUT_ENTRY: &[&str] = &["Channel", "Category"];

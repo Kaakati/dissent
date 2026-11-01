@@ -8,6 +8,7 @@ import { BannerPicker } from '@/components/banner-picker';
 import { ProfileCardBody } from '@/components/profile/profile-card';
 import { useUserProfile } from '@/components/profile/use-user-profile';
 import { chooseImage } from '@/components/settings/avatar-editor';
+import { DecorationSection } from '@/components/settings/decoration-picker';
 import { Block, Hint, ROW } from '@/components/settings/settings-ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -381,6 +382,7 @@ export function AccountPage() {
   return (
     <div className="flex flex-col">
       {has('avatars') ? <AvatarSection /> : null}
+      {has('avatars') ? <DecorationSection /> : null}
       {has('avatars') ? <BannerSection /> : null}
       {has('avatars') ? <ThemeSection /> : null}
       <DisplayName />

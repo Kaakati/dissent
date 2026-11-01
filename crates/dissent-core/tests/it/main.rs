@@ -39,6 +39,7 @@ mod legacy_state;
 mod part6;
 mod peer_exchange;
 mod presence;
+mod decorations;
 mod profile_banners;
 mod profile_themes;
 mod previews;

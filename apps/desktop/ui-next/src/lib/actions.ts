@@ -365,3 +365,7 @@ export const setProfileBannerAnimated = (gif: string, poster: string) =>
 export const clearProfileBanner = () => guarded(async () => (await api.clearProfileBanner(), afterProfileBanner()));
 export const setProfileTheme = (primary: number[], accent: number[]) => guarded(async () => (await api.setProfileTheme(primary, accent), afterProfileBanner()));
 export const clearProfileTheme = () => guarded(async () => (await api.clearProfileTheme(), afterProfileBanner()));
+export const setAvatarDecorationBuiltin = (id: string) => guarded(async () => (await api.setAvatarDecorationBuiltin(id), afterProfileBanner()));
+export const setAvatarDecoration = (bytes: string) => guarded(async () => (await api.setAvatarDecoration(bytes), afterProfileBanner()));
+export const setAvatarDecorationRecent = (id: string) => guarded(async () => (await api.setAvatarDecorationRecent(id), afterProfileBanner()));
+export const clearAvatarDecoration = () => guarded(async () => (await api.clearAvatarDecoration(), afterProfileBanner()));

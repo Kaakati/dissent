@@ -39,6 +39,7 @@ pub struct FriendView {
     pub suffix: String,
     /// Path of the decrypted picture on this device, once fetched. `None` when there is none yet.
     pub avatar: Option<String>,
+    pub decoration: Option<crate::decorations::DecorationView>,
 }
 
 /// The people on both lists, without `me` and without `peer` themselves, in id order.
@@ -189,6 +190,7 @@ impl Engine {
                 display_name: w.display_name(&r),
                 suffix: r.suffix(),
                 avatar: w.avatar_of(&r),
+                decoration: w.decoration_view(&r),
             })
             .collect()
     }

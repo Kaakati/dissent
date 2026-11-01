@@ -209,6 +209,10 @@ pub(crate) enum Request {
     /// The sender's signed profile colours, sent to a contact. Answered with `Response::ProfileTheme`, the
     /// responder's own. A device from before this answers with an error. Appended, see `profile_themes`.
     ProfileTheme(Box<crate::profile_themes::SignedTheme>),
+    /// The sender's signed avatar decoration, if it has ever set one, and a request for ours, sent to a contact's
+    /// device. A device from before decorations cannot decode it and answers with an error. Appended, see
+    /// `decorations`.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -301,6 +305,8 @@ pub(crate) enum Response {
     CategoryKeys(Vec<(u64, [u8; 32])>),
     /// The answer to `Request::ProfileTheme`: the responder's signed profile colours. Appended.
     ProfileTheme(Box<crate::profile_themes::SignedTheme>),
+    /// The answer to `Request::AvatarDecoration`: the responder's own, if it has ever set one. Appended.
+    AvatarDecoration(Option<Box<crate::decorations::SignedDecoration>>),
 }
 
 impl Request {
@@ -466,10 +472,10 @@ mod wire_order_tests {
 
     /// The Request variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
     const APPENDED_REQUEST: &[&str] =
-        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys", "ProfileTheme"];
+        &["InvitePreviewMore", "RelayCheck", "RotationSupport", "StorageGrantAsk", "GuardianOf", "RecoveryAnswer", "InboxProbe", "Features", "FilesKeys", "PushFilesKeys", "Holdings", "CategoryKeys", "PushCategoryKeys", "ProfileTheme", "AvatarDecoration"];
 
     /// The Response variants appended after v0.1.11, in tag order. Pinned too, so a later variant goes after them.
-    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys", "ProfileTheme"];
+    const APPENDED_RESPONSE: &[&str] = &["InvitePreviewMore", "RelayCheck", "RotationSupport", "InboxProbe", "Features", "FilesKeys", "Holdings", "CategoryKeys", "ProfileTheme", "AvatarDecoration"];
 
     /// The CallMsg variants as of v0.1.11, in tag order.
     const V0111_CALLMSG: &[&str] = &[

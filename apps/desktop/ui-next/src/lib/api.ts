@@ -1,4 +1,5 @@
 import { noteImages } from './images';
+import type { RecentDecoration } from './decorations';
 import { pictureUrls } from './pictures';
 import type { FileInspection,
   AudioDevices,
@@ -103,6 +104,11 @@ export const api = {
   // Profile colours, as RGB bytes.
   setProfileTheme: (primary: number[], accent: number[]) => call<void>('set_profile_theme', { primary, accent }),
   clearProfileTheme: () => call<void>('clear_profile_theme'),
+  setAvatarDecorationBuiltin: (id: string) => call<void>('set_avatar_decoration_builtin', { id }),
+  setAvatarDecoration: (bytes: string) => call<void>('set_avatar_decoration', { bytes }),
+  avatarDecorationRecents: () => call<RecentDecoration[]>('avatar_decoration_recents'),
+  setAvatarDecorationRecent: (id: string) => call<void>('set_avatar_decoration_recent', { id }),
+  clearAvatarDecoration: () => call<void>('clear_avatar_decoration'),
   setCommunityIcon: (communityId: Id, bytes: string) => call<void>('set_community_icon', { communityId, bytes }),
   // An animated server icon: the engine crops it to a square and loops it, and the poster is its still frame.
   prepareAnimatedIcon: (bytes: string, crop: { x: number; y: number; w: number; h: number; rot: number }) =>

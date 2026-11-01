@@ -31,6 +31,12 @@ pub fn vault_for(dir: &Path) -> Arc<Vault> {
 
 /// Engine intervals short enough for tests. Everything stays well apart: a beacon still arrives
 /// several times inside its presence window, so one late beacon does not flicker a peer offline.
+/// Publishes `bytes` as an uploaded decoration without the check an honest sender runs, as a modified client could.
+pub async fn publish_unchecked_decoration(engine: &crate::Engine, bytes: Vec<u8>) -> crate::Result<()> {
+    let picture = engine.add_picture_blob(&bytes).await?;
+    engine.publish_decoration(Some(dissent_events::Decoration::Upload(picture))).await
+}
+
 pub fn fast_timings() -> crate::Timings {
     use std::time::Duration;
     crate::Timings {
