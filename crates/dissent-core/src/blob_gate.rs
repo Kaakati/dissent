@@ -407,8 +407,9 @@ const THROTTLE: ThrottleMode = ThrottleMode::Intercept;
 
 impl Engine {
     /// Bytes of `hash` this device just sent to `device`. The tracker's seeding counters read it.
-    pub(crate) fn on_served(&self, _device: DeviceId, hash: [u8; 32], bytes: u64) {
+    pub(crate) fn on_served(&self, device: DeviceId, hash: [u8; 32], bytes: u64) {
         self.tracker_served(hash, bytes);
+        self.meter_sent(device, hash, bytes);
     }
 
     /// How long to wait before sending `bytes` more of `hash` to `device`. The tracker's upload caps answer it;
@@ -517,6 +518,12 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
                 let blob = sending.lock().unwrap_or_else(PoisonError::into_inner).get(&(m.connection_id, m.request_id)).copied();
                 let wait = blob.map_or(Duration::ZERO, |(device, hash)| engine.throttle(device, hash, m.size));
                 if let ProviderMessage::Throttle(m) = msg {
+                    // No cap, no timer. This is asked per 16 KiB, and a zero sleep still waits for the next timer tick
+                    // (about 10 ms on Windows), which held every upload to about 1.6 MB/s per request.
+                    if wait.is_zero() {
+                        m.tx.send(Ok(())).await.ok();
+                        continue;
+                    }
                     // The wait runs on its own, so one slow transfer does not hold the gate.
                     tokio::spawn(async move {
                         tokio::time::sleep(wait).await;

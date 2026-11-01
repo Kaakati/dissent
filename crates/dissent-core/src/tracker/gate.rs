@@ -112,6 +112,7 @@ impl Engine {
 
     /// Saves the books whose upload counters moved. Called from the maintenance pass.
     pub(crate) fn save_dirty_tracker_books(&self) {
+        self.prune_meters();
         let dirty: Vec<CommunityId> = {
             let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
             state

@@ -15,6 +15,7 @@ pub mod catalog;
 pub(crate) mod gate;
 pub(crate) mod restricted;
 pub(crate) mod scan;
+pub mod live;
 pub mod seeding;
 pub mod swarm;
 
@@ -108,6 +109,9 @@ pub(crate) struct Local {
     /// Paths a picker or a folder scan offered this run. Only these may be listed, so a page that was tricked into
     /// calling `list_files` cannot publish a file the person never chose. In memory only.
     pub(crate) offered: BTreeSet<PathBuf>,
+    /// Fingerprints made this run, by path, with the file's size and modification time then. Adding a file reads it once
+    /// less. The encrypt pass still checks the bytes against the fingerprint.
+    pub(crate) fingerprints: BTreeMap<PathBuf, (u64, Option<u64>, [u8; 32])>,
     /// This device's last holdings answer and when it was made, so a member asking in a loop costs one build per
     /// `HOLDINGS_CACHE`. In memory only.
     pub(crate) answer: Option<(Instant, Vec<swarm::Holding>)>,
@@ -131,6 +135,8 @@ pub(crate) struct TrackerState {
     pub(crate) upload: gate::UploadBucket,
     /// The seeding settings as last read or saved.
     pub(crate) settings: Option<seeding::SeedingSettings>,
+    /// What moves through each blob now. See `live`.
+    pub(crate) meters: std::collections::HashMap<[u8; 32], live::BlobMeters>,
 }
 
 /// One line of `files_keys.bin`: a generation, its key, and the restricted category it belongs to, if any.

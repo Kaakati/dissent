@@ -323,10 +323,10 @@ impl Engine {
             std::sync::Arc::new(inner.files.protocol_handler_with(crate::blob_gate::gate_events(&inner)).with_served({
                 // Linked files are served outside iroh-blobs' events: count and cap them here. See `tracker::gate`.
                 let weak = std::sync::Arc::downgrade(&inner);
-                std::sync::Arc::new(move |hash: [u8; 32], bytes: u64| match weak.upgrade() {
+                std::sync::Arc::new(move |device: [u8; 32], hash: [u8; 32], bytes: u64| match weak.upgrade() {
                     Some(inner) => {
                         let engine = Engine { inner };
-                        engine.tracker_served(hash, bytes);
+                        engine.on_served(DeviceId(device), hash, bytes);
                         engine.upload_wait(bytes)
                     }
                     None => std::time::Duration::ZERO,

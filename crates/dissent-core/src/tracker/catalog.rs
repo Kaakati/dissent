@@ -629,10 +629,36 @@ impl Engine {
             let view = self.candidate(&path, &types, &opened).await;
             if view.state == "ready" || view.state == "already_listed" {
                 self.with_tracker(community, |l| l.offered.insert(path.clone()));
+                if let Ok(fp) = data_encoding::HEXLOWER.decode(view.fingerprint.as_bytes()).map_err(drop).and_then(|b| <[u8; 32]>::try_from(b).map_err(drop)) {
+                    self.remember_fingerprint(community, &path, fp);
+                }
             }
             out.push(view);
         }
         Ok(out)
+    }
+
+    /// Keeps `fingerprint` of the file at `path` as it is now, so listing it need not read it again.
+    pub(crate) fn remember_fingerprint(&self, community: CommunityId, path: &Path, fingerprint: [u8; 32]) {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            let stamp = (meta.len(), super::modified_ms(path), fingerprint);
+            self.with_tracker(community, |l| l.fingerprints.insert(path.to_path_buf(), stamp));
+        }
+    }
+
+    /// The fingerprint and size of the file at `path`, kept if the file is unchanged, or read now.
+    async fn fingerprint_of(&self, community: CommunityId, path: &Path) -> Result<([u8; 32], u64)> {
+        let kept = self.with_tracker(community, |l| l.fingerprints.get(path).copied());
+        if let (Some((size, modified, fp)), Ok(meta)) = (kept, std::fs::symlink_metadata(path)) {
+            if meta.len() == size && modified.is_some() && super::modified_ms(path) == modified {
+                return Ok((fp, size));
+            }
+        }
+        let owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true))
+            .await
+            .map_err(|e| CoreError::Invalid(e.to_string()))?
+            .map_err(files_err)
     }
 
     async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened]) -> CandidateView {
@@ -719,11 +745,7 @@ impl Engine {
             }
             let tags = clean_tags(&item.tags)?;
             let description = clean_description(&item.description)?;
-            let owned = path.clone();
-            let (fp, size) = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true))
-                .await
-                .map_err(|e| CoreError::Invalid(e.to_string()))?
-                .map_err(files_err)?;
+            let (fp, size) = self.fingerprint_of(community, &path).await?;
             // Dedupe within the same keys: an open category's file against open listings, a restricted one's against its
             // own category. A listing whose blob is not what these bytes make under its key was made of other bytes:
             // this file is listed anew rather than refused, so nobody can squat a fingerprint.

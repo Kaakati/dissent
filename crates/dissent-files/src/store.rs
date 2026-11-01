@@ -883,6 +883,10 @@ impl Write for ChannelWriter {
     }
 }
 
+/// How much one read of a stored blob asks for when decrypting it. Each read is one request to the store, so a small
+/// one made a large file take minutes after its last byte came in.
+const DECRYPT_READ_BYTES: usize = 4 * 1024 * 1024;
+
 /// Reads a stored blob from a blocking thread. Each read is one request to the store, so the
 /// blob never has to be exported to a file first.
 struct StoreReader {
@@ -938,7 +942,7 @@ impl DecryptJob {
 
     fn decrypt_to_partial(&mut self) -> Result<()> {
         let mut output = BufWriter::new(File::create(&self.partial)?);
-        let mut input = BufReader::new(&mut self.reader);
+        let mut input = BufReader::with_capacity(DECRYPT_READ_BYTES, &mut self.reader);
         let plain_len = crypt::decrypt_stream(&mut input, &mut output, &self.key)?;
         output.flush()?;
         drop(output);
