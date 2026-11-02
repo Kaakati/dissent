@@ -2,7 +2,7 @@
 // file page, My seeding and Uploads. Opened from the server sidebar. See docs/design/14-file-tracker.md.
 import { useMemo, useState } from 'react';
 import { create } from 'zustand';
-import { ArrowLeft, Download, FolderOpen, Link2, Lock, Plus, Search, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, FolderOpen, FolderPlus, Link2, Lock, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tip } from '@/components/ui/tip';
@@ -16,6 +16,8 @@ import { cn } from '@/lib/utils';
 import { DangerNote } from '@/components/chat/attachments';
 import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
+import { openAddFolder } from './add-folder-dialog';
+import { FilesDropOverlay, openEditListing } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
 import { SwarmPanel } from './swarm-panel';
 
@@ -54,7 +56,9 @@ const dateOf = (ms: number) => new Date(ms).toLocaleDateString(undefined, { mont
 function useCommunityFiles(): { community: CommunityView | null; view: FilesView | null } {
   const community = useShell((s) => (s.route.kind === 'server' ? s.community : null));
   const transfers = useShell((s) => s.transfers);
-  const view = useFilesOf(community?.id ?? null, community, transfers);
+  // Only a change of state reloads the whole view: a running download's figures come from its own row.
+  const transferStates = transfers.map((t) => `${t.id}:${t.state}`).join();
+  const view = useFilesOf(community?.id ?? null, community, transferStates);
   return { community, view };
 }
 
@@ -101,13 +105,20 @@ export function FilesBody() {
   if (!community) return null;
   if (!view) return <p className="p-s-6 text-body text-muted-foreground">Loading files…</p>;
   const open = ui.open ? view.listings.find((l) => l.id === ui.open) : undefined;
-  if (open) return <FilePage community={community} view={view} listing={open} />;
-  if (ui.tab === 'seeding') return <SeedingPanel communityId={community.id} trigger={view} />;
   return (
-    <div data-files className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)_260px]">
-      <Filters view={view} />
-      <Listings community={community} view={view} />
-      <Standing view={view} />
+    <div className="relative grid min-h-0">
+      {open ? (
+        <FilePage community={community} view={view} listing={open} />
+      ) : ui.tab === 'seeding' ? (
+        <SeedingPanel communityId={community.id} trigger={view} />
+      ) : (
+        <div data-files className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)_260px]">
+          <Filters view={view} />
+          <Listings community={community} view={view} />
+          <Standing view={view} />
+        </div>
+      )}
+      <FilesDropOverlay />
     </div>
   );
 }
@@ -271,6 +282,11 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
             <Plus className="size-4" /> Add files
           </Button>
         </Tip>
+        <Tip label={view.categories.some((c) => c.can_add && c.readable) ? 'Add a whole folder, seeded where it is' : 'No category you can add to'}>
+          <Button variant="secondary" disabled={!view.categories.some((c) => c.can_add && c.readable)} onClick={() => void openAddFolder(community, view)}>
+            <FolderPlus className="size-4" /> Add folder
+          </Button>
+        </Tip>
         {canAdd && target?.folder ? (
           <Tip label={`Look for new files in ${target.folder}`}>
             <Button variant="ghost" onClick={() => void openAddFiles(community, view, target, true)}>
@@ -320,7 +336,7 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
             <span role="cell" className="truncate text-right">{l.lister_name}</span>
           </div>
         ))}
-        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet.'}</p> : null}
+        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet. Drop files here to add them.'}</p> : null}
         {view.locked ? <p className="text-sm text-muted-foreground">{view.locked} more are locked until a member shares this server’s files key.</p> : null}
       </div>
     </section>
@@ -373,6 +389,7 @@ function Standing({ view }: { view: FilesView }) {
 function FilePage({ community, view, listing: l }: { community: CommunityView; view: FilesView; listing: ListingView }) {
   const category = view.categories.find((c) => c.id === l.category);
   const [busy, setBusy] = useState(false);
+  const own = useShell((s) => s.transfers.find((t) => t.message_id === `files:${community.id}:${l.id}`));
   const download = async () => {
     setBusy(true);
     try {
@@ -428,13 +445,18 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
           {l.local === 'downloaded' || l.local === 'seeding' || l.local === 'paused' ? (
             <span className="text-sm font-semibold text-success-text">{l.local === 'downloaded' ? 'Downloaded' : l.local === 'paused' ? 'Seeding paused' : 'You seed this file'}</span>
           ) : l.local === 'downloading' ? (
-            <span className="text-sm font-semibold text-text">Downloading · {Math.round(l.progress * 100)}%</span>
+            <span data-download-progress className="text-sm font-semibold text-text tabular-nums">Downloading · {Math.round((own?.progress ?? l.progress) * 100)}%{own?.rate_bps ? ` · ${formatBytes(own.rate_bps)}/s` : ''}</span>
           ) : (
             <Button disabled={busy} onClick={() => void download()}>
               <Download className="size-4" /> Download · {formatBytes(l.size)}
             </Button>
           )}
           <span className="text-meta text-muted-foreground">From {l.seeders} {l.seeders === 1 ? 'seeder' : 'seeders'}</span>
+          {l.can_edit ? (
+            <Button variant="ghost" onClick={() => openEditListing(community.id, l)}>
+              <Pencil className="size-4" /> Edit tags and description
+            </Button>
+          ) : null}
           {l.can_edit ? (
             <Button variant="ghost" onClick={() => void remove()}>
               <Trash2 className="size-4" /> Remove listing

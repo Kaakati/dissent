@@ -409,6 +409,8 @@ pub(crate) struct LiveSources {
     pub providers: Vec<PeerAddr>,
     pub counts: Vec<SourceCount>,
     pub cipher: u64,
+    /// When the meters last heard of these counts.
+    pub metered: Option<std::time::Instant>,
 }
 
 /// The preview of an image. `state` is `available` until the thumbnail is fetched, then
@@ -423,6 +425,8 @@ pub struct ThumbView {
 
 /// Thumbnails at or under this size are fetched when their message arrives.
 pub(crate) const THUMB_AUTO_BYTES: u64 = 64 * 1024;
+/// The shortest time between two progress events of a download, and two updates of its speed.
+const METER_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A download or upload, as `list_transfers` lists it. `state` is `active`, `paused`, `waiting`,
 /// `done` or `failed`. `direction` is `download` or `upload`.
@@ -439,6 +443,8 @@ pub struct TransferView {
     pub started_ms: u64,
     pub local_path: Option<String>,
     pub error: Option<String>,
+    /// Bytes per second coming in now, for a running download of a tracker listing.
+    pub rate_bps: u64,
     /// The providers that have been tried or can be used, with what each delivered.
     pub sources: Vec<SourceView>,
     /// Verified pieces, while the download has counts.
@@ -1233,6 +1239,7 @@ impl Engine {
                 error: None,
                 sources: Vec::new(),
                 pieces: None,
+                rate_bps: 0,
             });
         }
         let t = w
@@ -1245,8 +1252,16 @@ impl Engine {
 
     /// Every transfer this run, downloads and uploads.
     pub fn transfers(&self) -> Vec<TransferView> {
-        let w = self.read();
-        w.attach.transfers.values().map(|t| view_of(t, &w)).collect()
+        let (mut views, hashes): (Vec<TransferView>, Vec<[u8; 32]>) = {
+            let w = self.read();
+            w.attach.transfers.values().map(|t| (view_of(t, &w), t.file.hash)).unzip()
+        };
+        for (view, hash) in views.iter_mut().zip(hashes) {
+            if view.state == "active" {
+                view.rate_bps = self.received_rate(&hash);
+            }
+        }
+        views
     }
 
     /// Stops a download and keeps what it has. It can resume later.
@@ -1300,8 +1315,23 @@ impl Engine {
 
     /// Stores the latest per-provider counts of a download, for the views.
     fn record_sources(&self, id: &str, counts: &[SourceCount]) {
-        if let Some(live) = self.write().source_counts.get_mut(id) {
+        let totals = {
+            let mut w = self.write();
+            let hash = w.attach.transfers.get(id).map(|t| t.file.hash);
+            let Some(live) = w.source_counts.get_mut(id) else { return };
             live.counts = counts.to_vec();
+            let due = live.metered.is_none_or(|at| at.elapsed() >= METER_EVERY);
+            if due {
+                live.metered = Some(std::time::Instant::now());
+            }
+            let totals: Vec<(dissent_identity::DeviceId, u64)> = counts
+                .iter()
+                .filter_map(|c| live.providers.get(c.index).map(|p| (p.id, c.bytes)))
+                .collect();
+            hash.filter(|_| due).map(|hash| (hash, totals))
+        };
+        if let Some((hash, totals)) = totals {
+            self.meter_received(hash, &totals);
         }
     }
 
@@ -1358,6 +1388,7 @@ impl Engine {
                 providers: peers,
                 counts: Vec::new(),
                 cipher: file.cipher_size,
+                metered: None,
             },
         );
         let node = self.node();
@@ -1375,9 +1406,15 @@ impl Engine {
             inner: self.inner.clone(),
         };
         let sink_id = id.to_string();
+        let mut told = None::<std::time::Instant>;
         let on_progress = move |held: u64, total: u64| {
             let progress = if total == 0 { 0.0 } else { held as f64 / total as f64 };
-            engine.set_progress(&att, progress, &msg);
+            // The state always moves; the event is at most about ten a second, or a fast download floods the app.
+            let tell = held >= total || told.is_none_or(|at: std::time::Instant| at.elapsed() >= METER_EVERY);
+            if tell {
+                told = Some(std::time::Instant::now());
+            }
+            engine.set_progress(&att, progress, &msg, tell);
         };
         let on_sources = move |counts: &[SourceCount]| sink.record_sources(&sink_id, counts);
         // A tracker listing comes from its whole swarm at once; an attachment from its providers in turn.
@@ -1452,7 +1489,7 @@ impl Engine {
         self.emit(EngineEvent::TransfersChanged);
     }
 
-    fn set_progress(&self, id: &str, progress: f64, message_id: &str) {
+    fn set_progress(&self, id: &str, progress: f64, message_id: &str, tell: bool) {
         let changed = {
             let mut guard = self.write();
             match guard.attach.transfers.get_mut(id) {
@@ -1463,7 +1500,7 @@ impl Engine {
                 None => false,
             }
         };
-        if changed {
+        if changed && tell {
             self.emit(EngineEvent::AttachmentProgress {
                 message_id: message_id.to_string(),
                 attachment_id: id.to_string(),
@@ -1617,6 +1654,7 @@ fn view_of(t: &Transfer, w: &World) -> TransferView {
             .collect(),
     };
     TransferView {
+        rate_bps: 0,
         pieces: live.map(piece_counts),
         sources,
         id: t.id.clone(),
@@ -2511,6 +2549,7 @@ mod source_view_tests {
 
     fn live(providers: Vec<PeerAddr>, counts: Vec<(u64, u64)>, cipher: u64) -> LiveSources {
         LiveSources {
+            metered: None,
             providers,
             counts: counts
                 .into_iter()

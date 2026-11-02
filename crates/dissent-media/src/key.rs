@@ -13,6 +13,13 @@ use sframe::mls::MlsExporter;
 pub struct MediaKey([u8; 32]);
 
 impl MediaKey {
+    /// The first bytes of the secret's hash, to compare two keys in a test.
+    pub fn fingerprint(&self) -> [u8; 4] {
+        let hash = blake3::hash(&self.0);
+        let bytes = hash.as_bytes();
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
+    }
+
     /// Length of the secret in bytes.
     pub const LEN: usize = 32;
 

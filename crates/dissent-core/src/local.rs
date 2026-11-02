@@ -40,7 +40,6 @@ pub const CAPABILITIES: &[&str] = &[
     "mentions",
     "server_prefs",
     "private_channels",
-    "forward_calls",
     "channel_order",
     "channel_categories",
     "dm_mentions",

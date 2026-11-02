@@ -127,10 +127,27 @@ export interface CommunityView extends CommunitySummary {
 
 // Whether member-only control is on, and whether the owner may turn it on now: every other member device must say it
 // supports it, and `waiting` counts the ones that did not (offline, or on an older version).
+// A member device that did not say yes to a compatibility check (`GateDevice` in dissent-core).
+export interface GateDevice {
+  device: string;
+  root_id: string;
+  name: string;
+}
+
+// Who could not follow a switch: `offline` gave no answer, `outdated` answered and is too old.
+export interface GateStatus {
+  ready: number;
+  offline: GateDevice[];
+  outdated: GateDevice[];
+}
+
 export interface MemberOnlyStatus {
   on: boolean;
+  // No device that answered is too old.
   can_enable: boolean;
   waiting: number;
+  offline: GateDevice[];
+  outdated: GateDevice[];
 }
 
 // A category in a server's channel layout. `id` is 32 hex digits from the engine; the sidebar gives a category the
@@ -253,6 +270,7 @@ export interface CallState {
   route?: CallRoute;
   quality?: CallQuality;
   forwarded_by?: string | null; // a member who forwards the call without being in it, never listed as a participant
+  cannot_decrypt?: boolean; // frames arrive and none decrypts, so this device hears nothing
   self_speaking?: boolean; // this device's person is speaking now: it sent audio within the hold
   channel_name?: string;
   community_name?: string;
@@ -337,6 +355,8 @@ export interface TransferItem {
   status_text?: string;
   error?: string;
   local_path?: string | null;
+  message_id?: string;
+  rate_bps?: number; // bytes per second coming in now
 }
 
 export interface TransferRates {
@@ -378,6 +398,8 @@ export type TypingTarget =
 // the store's switch and is ignored.
 export type EngineEvent =
   | { kind: 'communities_changed' }
+  | { kind: 'file_check'; job: number; path: string; done: number; total: number; result: import('./files').CandidateView | null }
+  | { kind: 'file_check_done'; job: number }
   | { kind: 'community_updated'; community_id: Id }
   | { kind: 'storage_grant_asked'; community_id: Id; community_name: string; root_id: Id; display_name: string }
   | { kind: 'inbox_host_changed'; root_id: Id; display_name: string; device_id: Id; on: boolean }

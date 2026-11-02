@@ -105,11 +105,11 @@ rules are requests each app keeps for its own member); no streaming playback; no
   is refused.
 - `BotRegister { root, name, on }`: control; `MANAGE_BOTS`; name as for a role; the root must not be the owner.
 - **Effects on existing kinds**: replay honors a custom role's bits on released kinds (`ChannelCreate`, `Ban`,
-  `Delete`, ...) only while `CustomRolePerms { on: true }` is in force. That switch is owner only, carried, and the
-  owner may turn it on only when every member device answers `Request::Features` with `FEATURE_CUSTOM_ROLES`, as
-  for member-only control.
-  Without it, a released client would reject an event a new client accepts, and the two would replay different
-  servers. New kinds (roles, bots, files) always honor custom bits, since released clients see them locked anyway.
+  `Delete`, ...) only while `CustomRolePerms { on: true }` is in force. That switch is owner only, carried, and goes on
+  under "Switches older apps cannot follow" below.
+  A released client rejects an event a new client accepts while the switch is on, and the two replay different servers
+  until that client updates. New kinds (roles, bots, files) always honor custom bits, since released clients see them
+  locked anyway.
 - **Revocation of a role's bits** is immediate in replay order: an event is checked against the roles in force at
   its position.
 
@@ -119,6 +119,35 @@ All six payloads (`RoleCreate`, `RoleUpdate`, `RoleDelete`, `RoleAssign`, `BotRe
 appended after `StorageGrant` and carried (`carry_sealed`). `Request::Features` / `Response::Features(u64)` is an
 appended, generic feature probe; bit 0 is custom roles. A released client shows the events as locked and keeps its
 built-in view of ranks.
+
+### Switches older apps cannot follow
+
+`CustomRolePerms`, `MemberOnlyControl` and `HistoryVisibility` change what a device on an older app can follow. One member
+who never updates or never logs in again must not be able to hold a server hostage, and nobody should be surprised. So
+`Engine::gate_status` asks every member device at once (`GateStatus`) and sorts them:
+
+| Answer | Means | Effect |
+| --- | --- | --- |
+| The probe's yes | Current | Nothing. |
+| An answer without the bit, or `Response::Error("bad request: ...")`, which every release has sent for a request it cannot decode | Online and too old | Blocks by default. The owner may override. |
+| No answer, a failed dial, or another error | Offline or out of reach; nobody can tell its version | Named in a warning, and does not hold the switch back. |
+
+Going ahead always takes an explicit act. `set_custom_role_perms_confirmed`, `set_member_only_confirmed` and
+`set_history_visibility_confirmed` take the device ids the owner confirmed, and refuse if a device is listed that is not
+among them, so a device that turned up after the owner read the warning is not skipped silently. The plain forms confirm
+nothing. The UI's confirmation names the people and says what they will see until they update.
+
+What a returning device sees:
+
+- **On a current app**, nothing unusual: it syncs and reads everything.
+- **`CustomRolePerms`, on an app from before it.** The switch shows as locked, so it keeps the old rules: it refuses
+  channels, deletions and bans made through a custom role, and what was said in those channels. It sees a different
+  server. Updating recovers it, since refused events stay in the log and replay runs again from them with the switch
+  readable (`a_returning_old_app_diverges_on_custom_bits_and_updating_recovers_it`).
+- **Member-only, on an app from before it.** Control events sealed under the epoch show as locked (members, names, roles,
+  channels, settings changed since). Updating recovers them once its device has the epoch keys, through `MlsCommits` and
+  `EpochHistory` from any online member.
+- **Files, on an app from before the tracker.** See "No gate on files" under "Events": nothing to confirm.
 
 ### Core and app
 
@@ -222,12 +251,20 @@ Appended after the roles payloads, pinned in `wire_order.rs`, carried (`carry_se
 | `ReputationRulesSet { rules: ReputationRules { levels, distinct, decay_days, admins_reset } }` | all | — | `MANAGE_FILES` |
 | `ReputationReset { root }` | root | — | `MANAGE_FILES`, while `admins_reset` |
 
+- **No gate on files.** Every kind above is carried, so an app from before the tracker sees them as locked, agrees on
+  everything else and cannot diverge (`an_old_app_sees_tracker_events_as_locked_and_agrees_on_the_rest`). A server starts
+  sharing files whoever is offline or out of date (`an_old_app_or_an_offline_member_does_not_stop_a_server_sharing_files`).
+  `FEATURE_TRACKER` is still answered, and nothing depends on it. If every other holder of the files key is offline, a
+  file manager makes a new generation, and a member reads what the online holders can give it. A new member needs one
+  holder online to read the catalog.
 - `AddSpec { min_rank: u8, roles: Vec<RoleId>, members: Vec<RootId>, min_level: u8 }`: an actor may add when
   their rank is at least `min_rank` (0 member … 3 owner, 4 `NO_RANK` = no rank path), or they hold a listed role, or
   are listed, or their level is at least `min_level` (0 = no level path). `MANAGE_FILES` always may. "Admins, CI
   bot" is `min_rank = 2` plus the bot's role; "Members (Lv 5+)" is `min_rank = NO_RANK, min_level = 5`.
 - Replay keeps who wrote each category's spec in force (`CategoryState.author`), since its sealed body names them.
-- A listing update's body is sealed by the lister's app only; a file manager may remove a listing but not rewrite it.
+- A listing update's body is sealed with the lister in its associated data, whoever writes it, so every reader opens it the
+  same way. The lister and holders of `MANAGE_FILES` may write one, as replay checks; the listing's page has the control.
+  The listing still shows its lister, and does not say who edited it last.
 - Bounds: sealed fields at most 16 KiB, at most 256 roles or members in a spec, 64 credits per receipt, a receipt at
   most 11 GiB in total, at most 10 levels.
 - **Replay checks the outer layer only.** The view checks the inner layer and hides a listing whose type is not
@@ -282,6 +319,51 @@ Attachments lose identifying details by default (`scrub`). A listing never does:
 disk, and a linked file is served in place, so a scrubbed copy would not match and could not be seeded from the folder.
 The Add files dialog says so; a member who wants a photo cleaned sends it as an attachment or cleans it first.
 
+## Adding files
+
+Adding must not make anyone wait on a file being read (`tracker::adding`). The picker's command returns what can be told
+without reading: name, size, type. The dialog opens from that at once, and `start_file_check` fingerprints each file in
+the background (four at a time), reporting with `EngineEvent::FileCheck`. Each row shows "Checking…" with its progress, and
+Add stays off until every ticked row is known. A type the chosen category refuses is known from the start and is not
+waited for. Closing the dialog cancels the job at the next read of each file.
+
+**Whose paths.** A page cannot name a file by itself. Only the OS picker and the app's native drop handler call
+`Engine::allow_paths`, and `start_file_check` refuses anything else. A file reaches `offered`, which `list_files` requires, only
+when its check says it can be added, so a tricked page cannot publish a file nobody chose, as before.
+
+**Dropping on the Files page** lists with no dialog (`tracker::drops`). Tauri's native drag-drop event gives the paths
+(`WindowEvent::DragDrop`, which reports paths on Windows, macOS and Linux; the webview's HTML5 drop has no paths, and Tauri
+does not fire it for files while its own handler is on). A drop anywhere else still attaches to the open chat.
+
+- **Category.** `FileType::of_name`, then among the categories this person may add to (`may_add_files`): the page's filter
+  if it accepts the file; the narrowest category that names the type; then one allowing any type. Ties go to the first in
+  server order.
+- **No category.** Someone with `MANAGE_FILES` gets one per type dropped (Images, Documents, ...), open to members. Anyone
+  else is told someone has to make one.
+- **Left out, with the reason in the toast**: fits no category, over `MAX_FILE_SIZE`, a link, unreadable, and any name that
+  looks like a key or password file (`looks_like_credentials`), since a drop asks nothing first and goes to the whole server.
+  Add files can still list such a file on purpose.
+- **Already listed.** By someone else: this device seeds that listing, as the dialog does. By this device: left alone, so
+  its counters stay.
+- **Progress** is a tray above the toasts, per file, that blocks nothing. Files are listed one at a time, so a batch can be
+  cancelled between files. The bytes of one file being encrypted show no progress yet.
+- **Undo** on the toast removes the batch's new listings and stops seeding what it only joined, since an accidental drop
+  publishes to the whole server. A single-file drop also offers Add tags.
+- Listings stay unscrubbed ("Photo details"). The drop overlay says so once.
+
+**A whole folder**, from Add folder or a drop, always opens a dialog first (`tracker::folders`). It walks as a linked folder
+is walked (4 levels, 500 files), and is seeded in place, with no copy, as a linked folder is.
+
+- Category: the page's filter or the one the folder's most common type fits. Tag: the folder's name, editable. Tags
+  from the category's defaults apply too.
+- Ticked: what can be added. Unticked, and tickable: hidden and system files (dotfiles, desktop.ini, Thumbs.db, and on
+  Windows anything with the hidden or system attribute) and names that look like keys or passwords, which also get a warning.
+  Not tickable, with the reason: type not allowed, over the size limit, already listed, link not followed.
+- Every limit it hits is stated: files past 500 are counted, folders past 4 levels are counted, hidden folders such as `.git`
+  are named and not entered, and a walk that gave up (100,000 entries) says more may be in there. Nothing is dropped silently.
+- Add stays off until ticked rows are checked. Progress, Cancel and Undo are the drop's. What the dialog checked is not read again
+  by the batch, though `list_files` itself still reads the file.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).
@@ -298,7 +380,7 @@ Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inp
   changed on disk fails at the first changed group, and nothing of it is sent. A file whose modification time
   changed is refused before reading. After a restart the app relinks its linked seeds (`reconcile_linked`).
 - **Scanning**: Files › Scan folder lists the files under the linked folder (4 levels, at most 500) that this device
-  does not seed yet, with the same states as a pick. Auto-import lists them on its own every 10 minutes, with the
+  does not seed yet, with the same states as a pick, checked as "Adding files" says. Auto-import lists them on its own every 10 minutes, with the
   category's default tags. Live file-system watching is not built.
 - **Limits per listing**: Forever, until ratio r, for n hours, until a date. States, worked out from the record, the
   settings and the time: Stopped (by hand, or limit reached), Paused, Scheduled (a metered network, battery, or an

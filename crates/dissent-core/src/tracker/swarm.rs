@@ -24,6 +24,9 @@ const HOLDINGS_KEPT_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const LEECHING_MS: u64 = 3 * 60 * 1000;
 /// How long this device reuses its own holdings answer.
 const HOLDINGS_CACHE: Duration = Duration::from_secs(10);
+/// How often an open file page asks for holdings, at most, while its file moves. A device's answer is at most
+/// `HOLDINGS_CACHE` old, so asking faster would learn nothing.
+const HOLDINGS_EVERY_MOVING: Duration = Duration::from_secs(10);
 /// How long one device has to answer.
 const ASK_WAIT: Duration = Duration::from_secs(5);
 
@@ -64,6 +67,8 @@ const PIECE_ASKS: usize = 16;
 #[derive(Clone, Debug, Serialize)]
 pub struct SwarmPeerView {
     pub root_id: String,
+    /// This person, on this device or another.
+    pub you: bool,
     pub name: String,
     pub role: String,
     /// A seeder: a storage member, holding the encrypted copy only.
@@ -326,7 +331,10 @@ impl Engine {
             .find(|o| o.id == listing)
             .ok_or_else(|| crate::error::CoreError::NotFound(format!("listing {listing}")))?;
         let (blob, size) = (o.body.blob, o.body.cipher_size);
-        self.refresh_holdings(community, false).await;
+        let ask_now = self.blob_moving(&blob)
+            && self.with_tracker(community, |l| l.holdings_asked.is_none_or(|at| at.elapsed() >= HOLDINGS_EVERY_MOVING));
+        self.refresh_holdings(community, ask_now).await;
+        let me = self.inner.me;
         let now = now_ms();
         let heard: Vec<(DeviceId, HeardHoldings)> =
             self.with_tracker(community, |l| l.heard.iter().map(|(d, h)| (*d, h.clone())).collect());
@@ -346,6 +354,7 @@ impl Engine {
                 }
                 let has = (holding.bytes as f64 / size.max(1) as f64).min(1.0);
                 let entry = peers.entry(root).or_insert_with(|| SwarmPeerView {
+                    you: root == me,
                     root_id: root.to_string(),
                     name: w.display_name(&root),
                     role: c.role_of(&root).to_string(),
@@ -356,6 +365,22 @@ impl Engine {
                 });
                 entry.has = entry.has.max(has);
                 entry.online |= w.presence_of(&root, now) != crate::presence::Presence::Offline;
+            }
+            // A lister nobody has heard from yet holds it, as far as anyone knows; this device says for itself below.
+            let heard_roots: std::collections::BTreeSet<RootId> = heard.iter().filter_map(|(_, h)| h.root).collect();
+            for lister in opened.iter().filter(|x| x.body.blob == blob).map(|x| x.lister) {
+                if lister != me && !heard_roots.contains(&lister) {
+                    peers.entry(lister).or_insert_with(|| SwarmPeerView {
+                        you: false,
+                        root_id: lister.to_string(),
+                        name: w.display_name(&lister),
+                        role: c.role_of(&lister).to_string(),
+                        storage: c.state().members.get(&lister).is_some_and(|m| m.storage),
+                        online: w.presence_of(&lister, now) != crate::presence::Presence::Offline,
+                        has: 1.0,
+                        level: c.state().files.level_of(&lister, now),
+                    });
+                }
             }
         }
         let pieces_total = dissent_files::pieces_of(size) as usize;
@@ -377,10 +402,32 @@ impl Engine {
                 *count = count.saturating_add(1);
             }
         }
+        // This device's own row: whole while it seeds, its progress while it downloads.
+        let own_download = {
+            let w = self.read();
+            let wanted = format!("{TRANSFER_PREFIX}{community}:{listing}");
+            w.attach.transfers.values().find(|t| t.message_id == wanted && t.state == "active").map(|t| t.progress)
+        };
+        if let Some(has) = if mine { Some(1.0) } else { own_download } {
+            let w = self.read();
+            let c = w.communities.get(&community).ok_or_else(|| crate::engine::not_found(&community))?;
+            let entry = peers.entry(me).or_insert_with(|| SwarmPeerView {
+                you: true,
+                root_id: me.to_string(),
+                name: w.display_name(&me),
+                role: c.role_of(&me).to_string(),
+                storage: false,
+                online: true,
+                has: 0.0,
+                level: c.state().files.level_of(&me, now),
+            });
+            entry.has = entry.has.max(has);
+            entry.online = true;
+        }
         let mut peers: Vec<SwarmPeerView> = peers.into_values().collect();
         peers.sort_by(|a, b| b.online.cmp(&a.online).then(b.has.total_cmp(&a.has)).then_with(|| a.name.cmp(&b.name)));
         Ok(SwarmView {
-            seeders: peers.iter().filter(|p| p.has >= 1.0).count() as u32 + u32::from(mine),
+            seeders: peers.iter().filter(|p| p.has >= 1.0).count() as u32,
             downloading: peers.iter().filter(|p| p.has < 1.0).count() as u32,
             peers,
             pieces,

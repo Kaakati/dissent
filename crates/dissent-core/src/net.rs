@@ -416,7 +416,8 @@ impl Engine {
             Request::SecretHistory { community } => self.serve_secret_history(conn_from, community),
             Request::EpochHistory { community } => self.serve_epoch_history(conn_from, community),
             Request::WriteKeys { community } => self.serve_write_keys(conn_from, community),
-            Request::MemberSealedSupport { .. } => Response::MemberSealedSupport(true),
+            // `features` is never 0 outside the tests, where 0 models a device from before these probes.
+            Request::MemberSealedSupport { .. } => Response::MemberSealedSupport(self.inner.features.load(std::sync::atomic::Ordering::Relaxed) != 0),
             Request::InvitePreview {
                 community,
                 token,

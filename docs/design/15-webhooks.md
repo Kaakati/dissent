@@ -578,8 +578,9 @@ A "Webhooks" section, shown to holders of `MANAGE_WEBHOOKS`.
 - a bot reads only its own posts;
 - it sees channel and member names unless member-only control is on, which it offers to turn on.
 
-**Old devices (decision 6).** Before the community's first hook, the app counts member devices that do not answer
-`FEATURE_WEBHOOKS`, using `devices_without`. A device that is offline or too old to answer counts.
+**Old devices (decision 6).** Before the community's first hook, the app asks member devices for `FEATURE_WEBHOOKS`
+with `gate_status` (`14-file-tracker.md`, "Switches older apps cannot follow"), which tells a device that is offline
+from one that answers and is too old. Both are listed; neither holds the owner back once confirmed.
 - If any remain, the dialog shows:
   - the count;
   - the people they belong to, where the directory knows the device's root: display name, plus "N devices"

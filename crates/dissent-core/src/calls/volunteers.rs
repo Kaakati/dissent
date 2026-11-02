@@ -1,34 +1,31 @@
-//! Volunteer forwarders: members who are not in a voice channel call and forward it for the people
-//! who are. See `docs/design/13-forwarded-calls.md`, "Who forwards" and phase 3.
+//! Forwarders outside the call: a server's seeders, once its owner allows it. See `docs/design/13-forwarded-calls.md`,
+//! "Who forwards".
 //!
-//! - A member turns on "Help forward calls in this server" for one server
-//!   (`Engine::set_forward_calls`). It is off by default, and kept on this device only.
-//! - While that device is in no call itself, it offers to forward one call it hears of in that
-//!   server (`CallMsg::ForwardOffer`), to every device in the call. The offer is signed, renewed
-//!   every `forward_offer_every`, and lapses after three of those. Leaving withdraws it.
-//! - Each device in the call checks an offer before it keeps it: a current, unbanned member of the
-//!   server, in its MLS group, and not a participant. It checks again before it links to one.
-//! - The election ranks the participants and the live offers together. A volunteer gets a small,
-//!   capped bonus, since it spends no upload on media of its own. Hosting a relay only breaks a tie
-//!   between volunteers. Volunteers count only while every device in the call sent
-//!   `FEATURE_VOLUNTEERS`, so a released client never sees one.
+//! - Members never forward a call they are not in. A member holds the server's key, so it could listen to a call
+//!   it carries. A member's offer is answered as for a call this device is not in, and no device elects one.
+//! - A seeder, which holds no media key, offers to forward a voice channel call it hears of in a server whose owner
+//!   allows it ("Seeder may forward calls", `Payload::SeederForwardsCalls`), to every device in the call
+//!   (`CallMsg::ForwardOffer`). The offer is signed, renewed every `forward_offer_every`, and lapses after three of
+//!   those.
+//! - The election ranks the participants and the live seeder offers together. A seeder gets a small, capped bonus,
+//!   since it spends no upload on media of its own. Seeders count only while every device in the call sent
+//!   `FEATURE_SEEDERS_ONLY` and `FEATURE_SEEDER_FORWARDERS`. Clients from before this send `FEATURE_VOLUNTEERS`
+//!   instead and elect a member who volunteers only while every device in the call sent that, so a call with one
+//!   current client in it elects nobody outside the call, on either side.
 //! - A leaf links to an elected volunteer as to a participant forwarder, but never lists it as a
 //!   participant. The volunteer builds its relay when a device of the call names it in a signed
 //!   tier message. The relay has no leaf and holds no media key: SFrame stays end to end.
 //! - When the volunteer's offer is withdrawn or lapses, or it is banned, each device moves the call
 //!   to a participant forwarder at once, through the same migration as any tier change.
-//! - A seeder forwards too, as a volunteer, once the server's owner allows it ("Seeder may forward
-//!   calls", `Payload::SeederForwardsCalls`). It is outside the MLS group, so it has no leaf index:
-//!   it takes the sender id `device_sid` gives its device, which the call's devices keep beside the
-//!   group's ids while its offer holds, and each leaf tells it the leaf's own id (`RelayLeaf`).
-//!   Seeders count only while every device in the call sent `FEATURE_SEEDER_FORWARDERS`.
+//! - A seeder is outside the MLS group, so it has no leaf index: it takes the sender id `device_sid` gives its
+//!   device, which the call's devices keep beside the group's ids while its offer holds, and each leaf tells it the
+//!   leaf's own id (`RelayLeaf`).
 //! - A volunteer that stays linked but stops forwarding is caught by its leaves: a leaf that hears no
 //!   audio through it for `STALL_WINDOW` tells every device in the call (`ForwarderStalled`). Once
 //!   two leaves report it, and at least one of them was speaking all along, every device excludes
 //!   that volunteer for the rest of the call and fails over, as for a lapse.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -41,13 +38,12 @@ use tracing::debug;
 
 use super::{
     candidate, device_sid, elect_forwarder, gen_id, lock, pump_forwarded, CallMsg, CallReply, Forwarding, Inner, Role, Room,
-    RoomId, Scope, Tier, TierMsg, CAPACITY_FRESH, DEFAULT_KBPS, FEATURES, FEATURE_SEEDER_FORWARDERS, FEATURE_VOLUNTEERS, FRAME_MS,
+    RoomId, Scope, Tier, TierMsg, CAPACITY_FRESH, DEFAULT_KBPS, FEATURES, FEATURE_SEEDER_FORWARDERS, FEATURE_SEEDERS_ONLY, FEATURE_VOLUNTEERS, FRAME_MS,
     MEMBERSHIP_EVERY,
 };
 use crate::engine::Engine;
 use crate::error::{CoreError, Result};
 use crate::timings::millis;
-use crate::world::World;
 
 /// Domain tag of a signed forward offer.
 const OFFER_DOMAIN: &[u8] = b"dissent/call-forward-offer/v1";
@@ -281,10 +277,6 @@ pub(crate) struct Volunteering {
     excluded: Mutex<BTreeMap<RoomId, BTreeSet<u64>>>,
 }
 
-fn prefs_path(w: &World) -> PathBuf {
-    w.paths.local_state().with_file_name("forward_calls.bin")
-}
-
 /// Runs for the engine's life: every quarter of `forward_offer_every`, offers to forward a call in
 /// the servers this device volunteers for, and renews or withdraws its offers.
 pub(crate) async fn volunteer_loop(weak: Weak<Inner>) {
@@ -298,18 +290,6 @@ pub(crate) async fn volunteer_loop(weak: Weak<Inner>) {
 }
 
 impl Engine {
-    /// The servers this device volunteers to forward calls for. Kept on this device only.
-    fn forward_calls_set(&self) -> BTreeSet<CommunityId> {
-        let paths = self.paths();
-        paths.read_bin(&prefs_path(&self.read())).ok().flatten().unwrap_or_default()
-    }
-
-    /// Whether this device volunteers in `community` now: a person who turned on "Help Forward
-    /// Calls", or a seeder in a server whose owner allows seeders to forward calls.
-    fn volunteers_in(&self, community: CommunityId, set: &BTreeSet<CommunityId>) -> bool {
-        set.contains(&community) || self.seeder_may_forward(community)
-    }
-
     /// Whether this device is a seeder (a storage member) of `community`, and its owner allows
     /// seeders to forward calls.
     fn seeder_may_forward(&self, community: CommunityId) -> bool {
@@ -338,35 +318,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Whether this device helps forward calls in `community` ("Help forward calls in this
-    /// server"). Off unless turned on.
-    pub fn forwards_calls(&self, community: CommunityId) -> bool {
-        self.forward_calls_set().contains(&community)
-    }
 
-    /// Turns "Help forward calls in this server" on or off for a server this device belongs to.
-    /// Off withdraws this device's offers in that server and stops its relays there.
-    pub fn set_forward_calls(&self, community: CommunityId, on: bool) -> Result<()> {
-        if !self.read().communities.contains_key(&community) {
-            return Err(CoreError::NotFound(format!("community {community}")));
-        }
-        let (paths, path) = (self.paths(), prefs_path(&self.read()));
-        {
-            let _serial = self.write();
-            let mut set: BTreeSet<CommunityId> = paths.read_bin(&path).ok().flatten().unwrap_or_default();
-            if on {
-                set.insert(community);
-            } else {
-                set.remove(&community);
-            }
-            paths.write_bin(&path, &set)?;
-        }
-        if !on {
-            let engine = self.clone();
-            self.spawn_task(async move { engine.withdraw_forward_offers(Some(community)).await });
-        }
-        Ok(())
-    }
 
     /// This device's sender id in `community`'s calls: its MLS leaf index.
     /// A seeder is outside the group: its id is the one `device_sid` gives its device.
@@ -407,7 +359,6 @@ impl Engine {
             self.withdraw_forward_offers(None).await;
             return;
         }
-        let volunteered = self.forward_calls_set();
         // Relays in a server this device no longer volunteers for stop.
         let keep: BTreeSet<CommunityId> = lock(&self.inner.calls.volunteering.relays)
             .iter()
@@ -415,13 +366,13 @@ impl Engine {
                 Scope::Channel { community, .. } => Some(community),
                 _ => None,
             })
-            .filter(|community| self.volunteers_in(*community, &volunteered))
+            .filter(|community| self.seeder_may_forward(*community))
             .collect();
         lock(&self.inner.calls.volunteering.relays).retain(|room| match room.scope {
             Scope::Channel { community, .. } => keep.contains(&community),
             _ => false,
         });
-        let calls = self.forwardable_calls(&volunteered);
+        let calls = self.forwardable_calls();
         let serving = lock(&self.inner.calls.volunteering.relays).last().map(|room| room.id);
         let chosen = serving
             .filter(|id| calls.contains_key(id))
@@ -473,10 +424,10 @@ impl Engine {
         }
     }
 
-    /// The voice channel calls this device hears of in the servers it volunteers for, by room: the
+    /// The voice channel calls this device hears of in the servers whose owner lets it, a seeder, forward them, by room: the
     /// scope, the devices in the call, and how many people are in it. Only calls of `MIN_PEOPLE` or
     /// more, in servers where this device is a member with a sender id.
-    fn forwardable_calls(&self, volunteered: &BTreeSet<CommunityId>) -> BTreeMap<RoomId, (Scope, BTreeSet<DeviceId>, usize)> {
+    fn forwardable_calls(&self) -> BTreeMap<RoomId, (Scope, BTreeSet<DeviceId>, usize)> {
         let now = crate::engine::now_ms();
         let ttl = millis(self.inner.timings.call_presence_ttl);
         let me = self.inner.me;
@@ -490,7 +441,7 @@ impl Engine {
             let Scope::Channel { community, .. } = h.scope else {
                 continue;
             };
-            if !self.volunteers_in(community, volunteered) || h.members.iter().any(|m| m.root == me) {
+            if !self.seeder_may_forward(community) || h.members.iter().any(|m| m.root == me) {
                 continue;
             }
             let entry = calls.entry(h.room).or_insert_with(|| (h.scope, BTreeSet::new(), BTreeSet::new()));
@@ -582,7 +533,8 @@ impl Engine {
         if offer.verify(&from).is_err() {
             return CallReply::Refused("bad forward offer signature".into());
         }
-        if offer.features & FEATURE_VOLUNTEERS == 0 {
+        // A seeder from before `FEATURE_SEEDERS_ONLY` sends `FEATURE_VOLUNTEERS`; either relays the same way.
+        if offer.features & (FEATURE_VOLUNTEERS | FEATURE_SEEDERS_ONLY) == 0 {
             return CallReply::Refused("the volunteer cannot forward".into());
         }
         if room.live_sid(&from).is_some() {
@@ -630,7 +582,8 @@ impl Engine {
 
     /// Whether `device` may forward `room`'s call as a volunteer: a device of a current, unbanned
     /// member of the call's server. Returns that member.
-    fn check_volunteer(&self, room: &Room, device: &DeviceId) -> std::result::Result<RootId, String> {
+    /// Whether `device` belongs to a current, unbanned member of `room`'s server, as a leaf of a relay must.
+    fn check_member(&self, room: &Room, device: &DeviceId) -> std::result::Result<RootId, String> {
         let Scope::Channel { community, .. } = room.scope else {
             return Err("only voice channel calls take volunteers".into());
         };
@@ -643,8 +596,22 @@ impl Engine {
         if !c.is_member(&root) {
             return Err("not a member".into());
         }
-        let storage = c.state().members.get(&root).is_some_and(|m| m.storage);
-        if storage && !c.state().seeder_forwards_calls {
+        Ok(root)
+    }
+
+    /// Whether `device` may forward `room`'s call from outside it: only a seeder of the server, while its owner allows
+    /// it. A member holds the server's key, so it could listen to a call it carries.
+    fn check_volunteer(&self, room: &Room, device: &DeviceId) -> std::result::Result<RootId, String> {
+        let root = self.check_member(room, device)?;
+        let Scope::Channel { community, .. } = room.scope else {
+            return Err("only voice channel calls take volunteers".into());
+        };
+        let w = self.read();
+        let state = w.communities.get(&community).ok_or_else(|| "unknown community".to_string())?.state();
+        if !state.members.get(&root).is_some_and(|m| m.storage) {
+            return Err("only a seeder forwards a call it is not in".into());
+        }
+        if !state.seeder_forwards_calls {
             return Err("the owner does not let seeders forward calls".into());
         }
         Ok(root)
@@ -671,9 +638,11 @@ impl Engine {
             .collect()
     }
 
-    /// Whether every live device of `room` said it supports volunteers, recently.
+    /// Whether every live device of `room` said, recently, that it elects only seeders outside the call. A call with
+    /// a client from before that elects nobody outside the call: such a client elects a member only when every
+    /// device sent `FEATURE_VOLUNTEERS`, which current ones do not.
     fn all_support_volunteers(&self, room: &Room) -> bool {
-        self.all_support(room, FEATURE_VOLUNTEERS)
+        self.all_support(room, FEATURE_SEEDERS_ONLY)
     }
 
     /// Whether every live device of `room` sent the feature `bit`, recently.
@@ -917,7 +886,7 @@ impl Engine {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        if let Err(why) = self.check_volunteer(&room, &from) {
+        if let Err(why) = self.check_member(&room, &from) {
             debug!(device = %from, why, "relay request refused");
             return CallReply::Refused("not in this call".into());
         }
@@ -956,7 +925,7 @@ impl Engine {
     /// Whether this device's relay for `room` may take a link from `device`: a current, unbanned
     /// member of the server, in its MLS group.
     pub(super) fn may_relay_for(&self, room: &Room, device: &DeviceId) -> std::result::Result<(), String> {
-        self.check_volunteer(room, device)?;
+        self.check_member(room, device)?;
         room.sid_of(device).map(|_| ()).ok_or_else(|| "not in the server's group".into())
     }
 
@@ -977,7 +946,7 @@ impl Engine {
         let Scope::Channel { community, .. } = scope else {
             return refuse("not in this call");
         };
-        if msg.tier != Tier::Forwarded || !self.volunteers_in(community, &self.forward_calls_set()) {
+        if msg.tier != Tier::Forwarded || !self.seeder_may_forward(community) {
             return refuse("not in this call");
         }
         let Some(my_sid) = self.my_sid_in(community) else {
@@ -995,7 +964,7 @@ impl Engine {
             Err(e) => return CallReply::Refused(e.to_string()),
         };
         // The sender must be a member. A seeder learns its sender id only when it links (`RelayLeaf`).
-        if let Err(why) = self.check_volunteer(&room, &from) {
+        if let Err(why) = self.check_member(&room, &from) {
             debug!(device = %from, why, "relay request refused");
             return CallReply::Refused("not in this call".into());
         }

@@ -64,3 +64,6 @@ pub const SYNTHETIC_CALLER: SocketAddr =
 /// [`SYNTHETIC_CALLER`].
 pub const SYNTHETIC_CALLEE: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 1);
+
+#[cfg(test)]
+mod nonce_tests;

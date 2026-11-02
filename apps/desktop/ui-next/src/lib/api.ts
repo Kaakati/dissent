@@ -194,8 +194,6 @@ export const api = {
   getServerPrefs: (communityId: Id) => call<ServerPrefs>('get_server_prefs', { communityId }),
   setServerPrefs: (communityId: Id, prefs: ServerPrefs) => call<void>('set_server_prefs', { communityId, prefs }),
   serverAlerts: (communityId: Id, mentioned: boolean, byName: boolean) => call<boolean>('server_alerts', { communityId, mentioned, byName }),
-  getForwardCalls: (communityId: Id) => call<boolean>('get_forward_calls', { communityId }),
-  setForwardCalls: (communityId: Id, on: boolean) => call<void>('set_forward_calls', { communityId, on }),
   react: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
     call<void>('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
@@ -235,8 +233,8 @@ export const api = {
   // ---- moderation and server settings ----
   moderate: (communityId: Id, action: string, user: Id) => call<void>('moderate', { communityId, action, user }),
   memberOnlyStatus: (communityId: Id) => call<MemberOnlyStatus>('member_only_status', { communityId }),
-  setMemberOnly: (communityId: Id, on: boolean) => call<void>('set_member_only', { communityId, on }),
-  setHistoryVisibility: (communityId: Id, setting: string) => call<void>('set_history_visibility', { communityId, setting }),
+  setMemberOnly: (communityId: Id, on: boolean, confirmed: string[] = []) => call<void>('set_member_only', { communityId, on, confirmed }),
+  setHistoryVisibility: (communityId: Id, setting: string, confirmed: string[] = []) => call<void>('set_history_visibility', { communityId, setting, confirmed }),
   channelAccess: (communityId: Id, channelId: Id) => call<ChannelAccess>('channel_access', { communityId, channelId }),
   createPrivateChannel: (communityId: Id, name: string, access: Pick<ChannelAccess, 'roles' | 'members'>) =>
     call<ChannelView>('create_private_channel', { communityId, name, roles: access.roles, members: access.members }),

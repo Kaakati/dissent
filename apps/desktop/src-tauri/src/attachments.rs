@@ -17,6 +17,8 @@ use tracing::warn;
 use crate::commands::{engine, AppState};
 
 pub const EVENT_DROPPED: &str = "dissent://files-dropped";
+/// Every path of a drop, folders too, for the Files page.
+const EVENT_PATHS_DROPPED: &str = "dissent://paths-dropped";
 pub const EVENT_DRAG_OVER: &str = "dissent://drag-over";
 pub const EVENT_DRAG_LEAVE: &str = "dissent://drag-leave";
 const WINDOW: &str = "main";
@@ -184,6 +186,14 @@ pub fn install(app: &AppHandle) {
                 if !files.is_empty() {
                     let _ = handle.emit(EVENT_DROPPED, files);
                 }
+                // The person chose these, by dropping them: the Files page may read them. Told before the page hears.
+                let (handle, paths) = (handle.clone(), paths.clone());
+                tauri::async_runtime::spawn(async move {
+                    if let Some(engine) = handle.state::<AppState>().engine.read().await.clone() {
+                        engine.allow_paths(paths.iter().cloned());
+                        let _ = handle.emit(EVENT_PATHS_DROPPED, paths);
+                    }
+                });
             }
             _ => {}
         }

@@ -34,6 +34,8 @@ MLS commits are not DAG events. Each applied commit is announced on the communit
 - Rank sets only how long a device waits before acting: owner, then admins, then moderators, then members by join time. A device waits 3 s for each higher-ranked member that is online, up to 15 s, and then acts unless the change is already done.
 - Collision: a commit for an epoch already applied is ignored, so the first one applied wins. Two members that commit at once can fork the group. The delay makes this rare, but full resolution needs deferred merge and is future work.
 
+- A device that is one commit behind holds an older key under the same call, until the commit arrives. A call survives that: see `04-calls.md`, "Rekey".
+
 ## Joining
 
 1. The joiner gets the community's events, authors its `Join`, and pushes the `Join` to the invite peers (as before).
@@ -172,7 +174,7 @@ Control events (membership, roles, bans, names, channels, relays, invites, setti
 - **History keys.** After joining, a joiner asks the first three member devices for their epoch keys with `EpochHistory`, and keeps what they send. This is the RPC path, not the welcome. The openmls welcome cannot carry extra data, and an RPC reply travels over the same authenticated, post-quantum TLS as `SecretHistory`, which already sends older community secrets this way. A member answers only an active person, never a storage member.
 - **History visibility.** `Payload::HistoryVisibility { setting }`, owner or admin only, defaults to `All`. Under `SinceJoin`, a member answers with the epochs from the one its device entered at, which it learns from the commit that added the device. A member that did not see that commit answers with none. `since_invite` is not implemented. It would need the epoch of each invite, which the DAG does not record.
 - **Write keys for storage.** A storage member asks any member device for `WriteKeys`, which answers only storage members, and keeps the write keys. A tag that fails is dropped, and an event whose write key it lacks waits until the key arrives. The tag keeps junk out of seeders that lack the write key, which means outsiders and DHT nodes. A storage member holds the write key, so it can make a tag that checks for any ciphertext it likes. It can push junk that other seeders keep. Members still refuse that junk, since it does not open under `enc`.
-- **The switch.** `Payload::MemberOnlyControl { on }`, owner only, latest HLC wins. The owner may turn it on only when every other member device answers `MemberSealedSupport` with `true`. An offline device counts as not supporting it. The owner's status reports how many devices are waiting. The UI shows "Some members need to update" until every device answers.
+- **The switch.** `Payload::MemberOnlyControl { on }`, owner only, latest HLC wins. A device that answers `MemberSealedSupport` with anything but `true` is online and too old: it blocks the switch until the owner overrides it. A device that does not answer is offline, is named in a warning, and does not hold it back. Either way the owner confirms by device, and is told what those people see until they update. See `14-file-tracker.md`, "Switches older apps cannot follow".
 - **Before the switch.** Events made before the switch keep their community-secret form, and storage members can read them. A new community starts with the switch off. So the owner's own first `Join`, and the first channels, stay readable to storage members until the owner turns the switch on. Turning it on for new communities by default is a product decision that is not made here.
 - **Enforcement.** Replay does not check the form of a control event against the switch, so a member that breaks the rule can still send a community-secret event, which storage members read. Honest devices never do. The rule is in the author path, and tests cover it.
 - **Locked history.** A device without an epoch key sees its events as `Rejection::Locked`. The view sets `history_locked`, and the UI shows "Waiting for a member to unlock history".
@@ -196,8 +198,8 @@ not know fails the batch, stalls that peer's sync, and makes the community skip 
 - **Tolerant reading everywhere.** Sync asks with `FetchRaw`, which answers each event as its own bytes, and skips one
   that does not decode, keeping the rest of the page. A peer that predates `FetchRaw` gets `Fetch`. The events log is
   read with `read_records_skipping`, which keeps an undecodable record on disk for a later version.
-- **Settings the owner can change are gated.** `set_history_visibility` is refused while a member device cannot
-  answer the support probe, as the member-only switch is.
+- **Settings the owner can change are gated.** `set_history_visibility` is confirmed device by device, as the
+  member-only switch is.
 
 Residual: a client that predates this rule still stalls on a payload kind added without the carrier, which is why
 new kinds must use it.

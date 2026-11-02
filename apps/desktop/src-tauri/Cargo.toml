@@ -15,6 +15,9 @@ custom-protocol = ["tauri/custom-protocol"]
 svt-av1 = ["dissent-core/svt-av1"]
 # Test picture for the camera and screen, from DISSENT_FAKE_CAPTURE=1, in release builds too. Never enabled in CI or the installers.
 fake-capture = []
+# Folder pickers answer from the file DISSENT_TEST_PICK_FOLDER_FILE names, with no OS dialog, so a timing or real-app run
+# cannot be handed one of the person's own folders. Never enabled in CI or the installers.
+test-folder-hook = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

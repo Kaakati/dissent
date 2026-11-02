@@ -566,6 +566,10 @@ if (!window.__TAURI__) {
   window.__mockEngineEvent = (ev) => emit(ev);
   // Who speaks in the call: `who` is 'me', or a participant's display name. Sends the call state, as the engine's
   // `call_speaking` does.
+  window.__mockCannotDecrypt = (on) => {
+    calls.current.cannot_decrypt = on;
+    emitTo('dissent://call-state', { ...calls.current });
+  };
   window.__mockSpeaking = (who, on) => {
     if (!calls.current) return false;
     if (who === 'me') calls.current.self_speaking = on;
@@ -599,6 +603,22 @@ if (!window.__TAURI__) {
   };
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
+  // What the mock's OS picker holds. See `pick_listing_files`.
+  const mockPicks = () => [...(window.__mockFolder?.files ?? []), ...(window.__mockPickFiles ?? MOCK_PICKS())];
+  const MOCK_PICKS = () => [
+    { name: 'dissent-0.4.1-windows-x64.msi', ext: 'MSI', kind: 'Installer', size: 88_700_000 },
+    { name: 'dissent-0.4.1-macos-arm64.dmg', ext: 'DMG', kind: 'Installer', size: 96_400_000 },
+    { name: 'RELEASE-NOTES-draft.txt', ext: 'TXT', kind: 'Document', size: 6_000 },
+  ].map((p) => ({ ...p, path: `D:\\Dissent\\releases\\${p.name}` }));
+  let mockCheckJob = 0;
+  const mockCheckTimers = new Map();
+  // Member devices that would not follow a switch, as `GateStatus` in dissent-core: see `window.__mockGate`.
+  const gateStatus = () => ({ ready: 1, offline: window.__mockGate?.offline ?? [], outdated: window.__mockGate?.outdated ?? [] });
+  const needConfirmed = (confirmed) => {
+    const gate = gateStatus();
+    const left = [...gate.offline, ...gate.outdated].filter((d) => !(confirmed ?? []).includes(d.device));
+    if (left.length > 0) throw `${left.length} member device(s) must be confirmed first, since they may not follow this: ${left.map((d) => d.name).join(', ')}`;
+  };
   const need = (cond, reason) => {
     if (!cond) throw reason;
   };
@@ -683,6 +703,7 @@ if (!window.__TAURI__) {
   };
   // My seeding: the settings and a record per seeded listing.
   const seeding = { settings: null, records: {} };
+  const liveReads = {};
   const handlers = {
     disclaimer_accepted: () => disclaimerSaved(),
     accept_disclaimer: ({ updated }) => {
@@ -958,32 +979,104 @@ if (!window.__TAURI__) {
       cat.auto_import = Boolean(cat.folder) && on;
       return null;
     },
-    pick_files_for_category: ({ communityId, categoryId }) => {
+    // The picks the mock's OS picker gives. `window.__mockPickFiles` replaces them; `window.__mockCheckMs` is how long each
+    // file's fingerprint takes. `window.__mockChecks` records what each check job did, for the driver.
+    pick_listing_files: () => mockPicks().map(({ path, name, ext, kind, size }) => ({ path, name, ext, kind, size, is_dir: false })),
+    scan_category_folder: ({ communityId, categoryId }) => {
       const f = servers[communityId].files;
       const cat = f.categories.find((x) => x.id === categoryId);
-      const kinds = { msi: 'Installer', dmg: 'Installer', txt: 'Document' };
-      const names = ['dissent-0.4.1-windows-x64.msi', 'dissent-0.4.1-macos-arm64.dmg', 'RELEASE-NOTES-draft.txt'];
-      return names.map((name, i) => {
-        const ext = name.split('.').pop();
-        const kind = kinds[ext];
-        const listed = f.listings.find((l) => l.name === name);
-        const state = cat.types.length && !cat.types.includes(kind) ? 'type_not_allowed' : listed ? 'already_listed' : 'ready';
-        return {
-          path: `D:\\Dissent\\releases\\${name}`, name, ext: ext.toUpperCase(), kind, size: [88_700_000, 96_400_000, 6_000][i], state,
-          fingerprint: `9f2c41${String(i).repeat(52)}e07e1a`, listed_by: listed?.lister_name ?? null, listing: listed?.id ?? null,
-        };
-      });
-    },
-    scan_category_folder: ({ communityId, categoryId }) => {
-      const cat = servers[communityId].files.categories.find((x) => x.id === categoryId);
       need(Boolean(cat?.folder), 'this category is not linked to a folder here');
-      return handlers.pick_files_for_category({ communityId, categoryId }).filter((f) => f.state !== 'already_listed');
+      return handlers.pick_listing_files().filter((p) => !f.listings.some((l) => l.name === p.name));
     },
-    list_files: ({ communityId, categoryId, items }) => {
+    // `window.__mockFolder` is what a folder holds, as a `FolderScan`; `window.__mockPickFolder` what its picker gives.
+    pick_listing_folder: () => window.__mockPickFolder ?? null,
+    scan_listing_folder: ({ communityId, folder, filter }) => {
+      const scan = window.__mockFolder;
+      need(Boolean(scan), `${folder} is not a folder`);
+      const addable = handlers.files_view({ communityId }).categories.filter((x) => x.can_add && x.readable);
+      const chosen = addable.find((x) => x.id === filter) ?? addable[0];
+      return { root: folder, name: folder.split(/[\\/]/).pop(), tag: 'mock-folder', over_limit: 0, flagged_more: 0, too_deep: 0, hidden_dirs: [], stopped_early: false, max_files: 500, max_depth: 4, category: chosen?.id ?? null, ...scan };
+    },
+    plan_file_drop: ({ communityId, paths, filter }) => {
+      const c = servers[communityId];
+      handlers.files_view({ communityId });
+      const f = c.files;
+      const manage = ['owner', 'admin'].includes(myRole(c));
+      const none = f.categories.length === 0;
+      const picks = paths.map((path) => mockPicks().find((p) => p.path === path)).filter(Boolean);
+      const secret = (name) => /^\.env|^id_rsa$|\.(pem|key)$/i.test(name);
+      const created = [];
+      if (none && manage) {
+        const NAMES = { Installer: 'Installers', Archive: 'Archives', Document: 'Documents', Image: 'Images', Audio: 'Audio', Video: 'Videos', Other: 'Other files' };
+        for (const kind of [...new Set(picks.filter((p) => !p.is_dir && !secret(p.name) && p.size <= 10 * 1024 ** 3).map((p) => p.kind))]) {
+          handlers.create_category({ communityId, category: { name: NAMES[kind], icon: 'folder', types: [kind], default_tags: [], rules: {}, add: { min_rank: 'member', roles: [], members: [], min_level: 0 }, visible: null } });
+          created.push(NAMES[kind]);
+        }
+      }
+      const addable = handlers.files_view({ communityId }).categories.filter((x) => x.can_add && x.readable);
+      const choose = (kind) => {
+        const accepts = (x) => !x.types.length || x.types.includes(kind);
+        const chosen = addable.find((x) => x.id === filter && accepts(x));
+        if (chosen) return chosen;
+        const named = addable.filter((x) => x.types.includes(kind)).sort((a, b) => a.types.length - b.types.length)[0];
+        return named ?? addable.find((x) => !x.types.length) ?? null;
+      };
+      return {
+        items: picks.filter((p) => !p.is_dir).map((p) => {
+          const cat = choose(p.kind);
+          const skip = p.link ? 'link' : p.size > 10 * 1024 ** 3 ? 'too_large' : secret(p.name) ? 'credentials' : cat ? null : 'no_category';
+          return { path: p.path, name: p.name, ext: p.ext, kind: p.kind, size: p.size, category: skip ? null : cat.id, category_name: skip ? null : cat.name, skip };
+        }),
+        folders: picks.filter((p) => p.is_dir).map((p) => p.path),
+        created,
+        no_categories: none && !manage,
+      };
+    },
+    start_file_check: ({ communityId, paths }) => {
       const f = servers[communityId].files;
-      const picks = handlers.pick_files_for_category({ communityId, categoryId });
+      const job = ++mockCheckJob;
+      const record = { job, paths, reported: 0, cancelled: false };
+      (window.__mockChecks ??= []).push(record);
+      mockCheckTimers.set(job, record);
+      const ms = window.__mockCheckMs ?? 60;
+      let left = paths.length;
+      paths.forEach((path, i) => {
+        const pick = mockPicks().find((p) => p.path === path);
+        const size = pick?.size ?? 0;
+        setTimeout(() => {
+          if (!record.cancelled) emit({ kind: 'file_check', job, path, done: Math.floor(size / 2), total: size, result: null });
+        }, ms / 2);
+        setTimeout(() => {
+          left -= 1;
+          if (!record.cancelled) {
+            const listed = f.listings.find((l) => l.name === pick?.name);
+            record.reported += 1;
+            emit({
+              kind: 'file_check', job, path, done: size, total: size,
+              result: {
+                path, name: pick?.name ?? '', ext: pick?.ext ?? '', kind: pick?.kind ?? 'Other', size,
+                state: pick?.state ?? (listed ? 'already_listed' : 'ready'),
+                fingerprint: `9f2c41${String(i).repeat(52)}e07e1a`, listed_by: listed?.lister_name ?? null, listing: listed?.id ?? null,
+              },
+            });
+          }
+          if (left === 0) emit({ kind: 'file_check_done', job });
+        }, ms);
+      });
+      return job;
+    },
+    cancel_file_check: ({ job }) => {
+      const record = mockCheckTimers.get(job);
+      if (record) record.cancelled = true;
+      return null;
+    },
+    list_files: ({ communityId, categoryId, items, inPlace }) => {
+      if (window.__mockListFails) throw window.__mockListFails;
+      window.__mockLastList = { categoryId, items, inPlace: Boolean(inPlace) };
+      const f = servers[communityId].files;
+      const picks = mockPicks();
       return items.map((item) => {
-        const name = item.path.split('\\').pop();
+        const name = item.path.split(/[\\/]/).pop();
         const old = f.listings.find((l) => l.name === name);
         if (old) {
           old.local = 'seeding';
@@ -992,7 +1085,7 @@ if (!window.__TAURI__) {
         const pick = picks.find((x) => x.name === name);
         const listing = {
           id: id(`listing${f.listings.length}x${Date.now()}`), category: categoryId, name, ext: pick.ext, kind: pick.kind, mime: 'application/octet-stream',
-          size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: pick.fingerprint,
+          size: pick.size, cipher_size: pick.size + 16 * Math.ceil(pick.size / 65536), pieces: Math.ceil(pick.size / 65536), fingerprint: `9f2c41${String(f.listings.length).repeat(52)}e07e1a`,
           tags: item.tags.map((t) => t.replace(/^#/, '').toLowerCase()), description: item.description, lister: ME, lister_name: people[ME], added_ms: Date.now(),
           also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine: true, local: 'seeding', local_path: item.path, progress: 1, can_edit: true,
           danger: pick.kind === 'Installer' ? 'installer' : null,
@@ -1003,7 +1096,8 @@ if (!window.__TAURI__) {
     },
     update_listing: ({ communityId, listingId, tags, description }) => {
       const l = servers[communityId].files.listings.find((x) => x.id === listingId);
-      Object.assign(l, { tags, description });
+      if (window.__mockListFails) throw window.__mockListFails;
+      Object.assign(l, { tags: tags.map((t) => t.replace(/^#/, '').toLowerCase()), description });
       return null;
     },
     remove_listing: ({ communityId, listingId }) => {
@@ -1024,7 +1118,15 @@ if (!window.__TAURI__) {
       const pieces = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
       return {
         seeders: l.seeders, downloading: l.leechers, asked: 8, pieces,
-        peers: [{ root_id: LINUS, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
+        peers: [{ root_id: LINUS, you: false, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
+      };
+    },
+    // A download moves on each read, so a check can see the figures change.
+    listing_live: ({ listingId }) => {
+      const reads = (liveReads[listingId] = (liveReads[listingId] ?? 0) + 1);
+      return {
+        active: true, down_bps: 1000000 + reads * 300000, up_bps: 0, eta_s: 60, progress: Math.min(1, reads / 100),
+        own_pieces: [[0, reads * 8]], peers: [{ root_id: LINUS, name: people[LINUS], from_bps: 1000000 + reads * 300000, to_bps: 0, has: 1 }],
       };
     },
     // My seeding, as `dissent_core::tracker::seeding` reports it. The mock keeps a record per seeded listing.
@@ -1033,11 +1135,13 @@ if (!window.__TAURI__) {
       const s = (seeding.settings ??= { upload_bps: null, download_bps: null, alt: null, alt_on: false, max_active: 5, unmetered_only: true, pause_on_battery: false });
       const rows = f.listings.filter((l) => l.local === 'seeding' || l.local === 'paused').map((l) => {
         const r = (seeding.records[l.id] ??= { limit: 'forever', paused: false, stopped: false });
-        const state = r.stopped ? 'stopped' : r.paused ? 'paused' : 'seeding';
-        const note = { seeding: 'Serving now', paused: 'Paused by you', stopped: 'Stopped by you' }[state];
+        // A check sets this to show a seed under a limit it has reached.
+        const reached = !!window.__seedLimitReached && r.limit !== 'forever';
+        const state = r.stopped || reached ? 'stopped' : r.paused ? 'paused' : 'seeding';
+        const note = reached ? 'Seed limit reached' : { seeding: 'Serving now', paused: 'Paused by you', stopped: 'Stopped by you' }[state];
         return {
           blob: l.id, listing: l.id, name: l.name, ext: l.ext, kind: l.kind, category: l.category, folder: null, path: l.local_path,
-          state, note, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
+          state, note, limit_reached: reached, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
         };
       });
       return { rows, seeding: rows.filter((r) => r.state === 'seeding').length, uploaded: 0, settings: s, conditions: { metered: false, on_battery: false, metered_known: true }, caps_now: [s.upload_bps, s.download_bps], held_back: false };
@@ -1123,9 +1227,11 @@ if (!window.__TAURI__) {
       delete c.bots?.[userId];
       return null;
     },
-    set_custom_role_perms: ({ communityId, on }) => {
+    custom_role_perms_status: () => gateStatus(),
+    set_custom_role_perms: ({ communityId, on, confirmed }) => {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'NoPermission');
+      if (on) needConfirmed(confirmed);
       c.rolesHonored = on;
       return null;
     },
@@ -1396,23 +1502,25 @@ if (!window.__TAURI__) {
       m.deleted = true;
       return null;
     },
-    // `window.__mockMemberOnlyWaiting = n` makes n member devices not answer, so the switch cannot turn on.
+    // `window.__mockGate = { offline: [...], outdated: [...] }` lists member devices that would not follow a switch.
     member_only_status: ({ communityId }) => {
       const c = servers[communityId];
-      const waiting = window.__mockMemberOnlyWaiting ?? 0;
-      return { on: Boolean(c.memberOnly), can_enable: waiting === 0, waiting };
+      const gate = gateStatus();
+      const waiting = gate.offline.length + gate.outdated.length;
+      return { on: Boolean(c.memberOnly), can_enable: gate.outdated.length === 0, waiting, offline: gate.offline, outdated: gate.outdated };
     },
-    set_member_only: ({ communityId, on }) => {
+    set_member_only: ({ communityId, on, confirmed }) => {
       const c = servers[communityId];
       need(myRole(c) === 'owner', 'Only the owner can hide server details');
-      const waiting = window.__mockMemberOnlyWaiting ?? 0;
-      need(!on || waiting === 0, `${waiting} member device(s) need to update`);
+      if (on) needConfirmed(confirmed);
       c.memberOnly = Boolean(on);
       return null;
     },
-    set_history_visibility: ({ communityId }) => {
+    set_history_visibility: ({ communityId, setting, confirmed }) => {
       const c = servers[communityId];
       need(canMod(c), 'Only owner or admin can change history');
+      needConfirmed(confirmed);
+      c.history = setting;
       return null;
     },
     moderate: ({ communityId, action, user }) => {
@@ -1663,7 +1771,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'forward_calls', 'channel_order', 'channel_categories', 'dm_mentions'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'channel_order', 'channel_categories', 'dm_mentions'];
   const ignoredSet = new Set();
   // The DHT and relay latencies the title bar shows. The engine sends them with each probe, so the mock does too.
   const mockNetLatency = { dht_ms: 2529, relay_ms: 42 };
@@ -2025,15 +2133,6 @@ if (!window.__TAURI__) {
     join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
     join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
     get_server_prefs: ({ communityId }) => prefsNow(communityId),
-    // Help Forward Calls, per server. `window.__mockForwardCalls` lists the servers it is on for, so the driver can read it.
-    get_forward_calls: ({ communityId }) => (window.__mockForwardCalls ?? []).includes(communityId),
-    set_forward_calls: ({ communityId, on }) => {
-      const set = new Set(window.__mockForwardCalls ?? []);
-      if (on) set.add(communityId);
-      else set.delete(communityId);
-      window.__mockForwardCalls = [...set];
-      return null;
-    },
     // `window.__mockMuteMs` shortens a timed mute, so the driver can watch one run out.
     set_server_prefs: ({ communityId, prefs }) => {
       const timed = prefs.muted_until !== null && prefs.muted_until < 2 ** 63;
@@ -2308,6 +2407,26 @@ if (!window.__TAURI__) {
   window.__mockDeepLink = (link) => emitTo('dissent://deep-link', [link]);
   // The driver drops files from the desktop onto the window, as the app's drag and drop reports them.
   window.__mockDropFiles = (files) => emitTo('dissent://files-dropped', files);
+  // A native drop: the paths, for the Files page, as the desktop backend sends them. See `mockPicks` for what they are.
+  window.__mockDropPaths = (paths) => {
+    emitTo('dissent://drag-leave', null);
+    emitTo('dissent://files-dropped', paths.map((path) => ({ path, name: path.split(/[\\/]/).pop(), size: 1, mime: 'application/octet-stream' })));
+    emitTo('dissent://paths-dropped', paths);
+  };
+  // Makes a listing someone else's, which this device does not hold.
+  window.__mockListedByOther = (communityId, name) => {
+    const l = servers[communityId].files.listings.find((x) => x.name === name);
+    Object.assign(l, { lister: LINUS, lister_name: people[LINUS], mine: false, local: 'none', local_path: null, progress: 0 });
+  };
+  // Someone else edits a listing: this page hears of it as a change to the server.
+  window.__mockRemoteEdit = (communityId, name, tags, description) => {
+    Object.assign(servers[communityId].files.listings.find((x) => x.name === name), { tags, description });
+    emit({ kind: 'community_updated', community_id: communityId });
+  };
+  // Takes away the edit right, as replay would for someone who is neither lister nor file manager.
+  window.__mockCannotEdit = (communityId, name) => { servers[communityId].files.listings.find((x) => x.name === name).can_edit = false; };
+  window.__mockDragOver = () => emitTo('dissent://drag-over', null);
+  window.__mockDragLeave = () => emitTo('dissent://drag-leave', null);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.
   window.__mockNetLatency = (dht_ms, relay_ms) => {
     Object.assign(mockNetLatency, { dht_ms, relay_ms });

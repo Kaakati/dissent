@@ -123,6 +123,9 @@ pub fn forward_events(app: AppHandle, mut rx: broadcast::Receiver<EngineEvent>) 
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     warn!(skipped, "engine event receiver lagged");
                     let _ = app.emit(EVENT, EngineEvent::CommunitiesChanged);
+                    // What was lost may be a call or speaking change, and nothing else would redraw the call.
+                    crate::part6::emit_call_state(&app).await;
+                    crate::voice::sync(&app).await;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }

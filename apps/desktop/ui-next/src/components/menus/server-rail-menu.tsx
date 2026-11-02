@@ -3,7 +3,7 @@
 // Each item is one Dissent can back. Mark As Read clears every text channel's unread dot and mention count. Invite to
 // Server, Claim Handle and Copy Server Address are for everyone. Server Settings (with each section of the page),
 // Create Channel and Server Icon are for owners and admins. Leave Server asks first and is for everyone but the owner,
-// who must hand the server over or delete it instead. Help Forward Calls lets this device relay the server's voice
+// who must hand the server over or delete it instead.
 // calls while it is in none (off by default). Ported from the server context menu of the Discord reference, adapted
 // to what the engine has: no emoji, stickers or events.
 import type { MouseEvent } from 'react';
@@ -126,7 +126,6 @@ export async function openServerMenu(communityId: Id, x: number, y: number): Pro
   }
   const withPrefs = has('server_prefs');
   if (withPrefs) await loadServerPrefs(communityId);
-  const forwarding = has('forward_calls') ? await api.getForwardCalls(communityId).catch(() => null) : null;
   const prefs = prefsOf(communityId);
   const manage = view.my_role === 'owner' || view.my_role === 'admin';
   const asks = manage ? asksLabel((await loadStorageAsks(view.id)).length) : '';
@@ -150,15 +149,6 @@ export async function openServerMenu(communityId: Id, x: number, y: number): Pro
           checkbox: true,
           checked: prefs.hide_muted_channels,
           onPick: () => void updateServerPrefs(view.id, { hide_muted_channels: !prefs.hide_muted_channels }),
-        }
-      : null,
-    forwarding !== null
-      ? {
-          label: 'Help Forward Calls',
-          sub: 'Relay this server’s calls while you’re not in one. The call shows your name.',
-          checkbox: true,
-          checked: forwarding,
-          onPick: () => void api.setForwardCalls(view.id, !forwarding).catch(toast),
         }
       : null,
     manage

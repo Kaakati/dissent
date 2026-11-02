@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dissent_core::{
-    ChannelAccessView, ChannelId, ChannelInfo, CommunityId, CommunitySummary, InvitePreviewView, Role,
+    ChannelAccessView, ChannelId, ChannelInfo, CommunityId, CommunitySummary, DeviceId, InvitePreviewView, Role,
     Engine, EventId, Identity, MessageItem, MeView, Mentions, ModAction, NetStatusView, RootId, UserView, DmItem,
 };
 use dissent_identity::{keystore, mnemonic, DeviceKey, Vault};
@@ -321,6 +321,11 @@ pub async fn moderate(
     engine(&state).await?.moderate(community, action, user).await.map_err(err)
 }
 
+/// The devices the owner confirmed for a switch older apps may not follow. See `dissent_core::custom_roles::GateStatus`.
+pub(crate) fn confirmed_devices(confirmed: Option<Vec<String>>) -> Result<Vec<DeviceId>, String> {
+    confirmed.unwrap_or_default().iter().map(|d| parse("device id", d)).collect()
+}
+
 /// Whether member-only control is on, and whether the owner may turn it on yet. See `MemberOnlyStatus`.
 #[tauri::command]
 pub async fn member_only_status(
@@ -337,9 +342,11 @@ pub async fn set_member_only(
     state: State<'_, AppState>,
     community_id: String,
     on: bool,
+    confirmed: Option<Vec<String>>,
 ) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
-    engine(&state).await?.set_member_only(community, on).await.map_err(err)
+    let confirmed = confirmed_devices(confirmed)?;
+    engine(&state).await?.set_member_only_confirmed(community, on, &confirmed).await.map_err(err)
 }
 
 /// Sets who may read a channel. `private` false makes it public again. Roles are `admin` or `moderator`;
@@ -417,14 +424,16 @@ pub async fn set_history_visibility(
     state: State<'_, AppState>,
     community_id: String,
     setting: String,
+    confirmed: Option<Vec<String>>,
 ) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
+    let confirmed = confirmed_devices(confirmed)?;
     let setting = match setting.as_str() {
         "all" => dissent_core::HistorySetting::All,
         "since_join" => dissent_core::HistorySetting::SinceJoin,
         other => return Err(format!("unknown history setting: {other}")),
     };
-    engine(&state).await?.set_history_visibility(community, setting).await.map_err(err)
+    engine(&state).await?.set_history_visibility_confirmed(community, setting, &confirmed).await.map_err(err)
 }
 
 #[tauri::command]

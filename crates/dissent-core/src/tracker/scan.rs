@@ -43,6 +43,13 @@ fn files_under(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 impl Engine {
     /// The files in `category`'s linked folder that this device does not seed yet, with what adding each would do.
     pub async fn scan_category_folder(&self, community: CommunityId, category: CategoryId) -> Result<Vec<CandidateView>> {
+        let found = self.new_files_in_folder(community, category).await?;
+        self.prepare_listing(community, category, found).await
+    }
+
+    /// The files in `category`'s linked folder that this device does not seed yet, without reading them. They may be
+    /// checked with `start_file_check`.
+    pub async fn new_files_in_folder(&self, community: CommunityId, category: CategoryId) -> Result<Vec<PathBuf>> {
         let (folder, seeded) = self.with_tracker(community, |l| {
             let seeded: Vec<PathBuf> = l.book.seeds.values().filter_map(|s| s.path.clone()).collect();
             (l.book.folders.get(&category).cloned(), seeded)
@@ -57,7 +64,8 @@ impl Engine {
         })
         .await
         .map_err(|e| CoreError::Invalid(e.to_string()))?;
-        self.prepare_listing(community, category, found).await
+        self.allow_paths(found.iter().cloned());
+        Ok(found)
     }
 
     /// Lists what each auto-import category's folder holds that is new here, with the category's default tags.

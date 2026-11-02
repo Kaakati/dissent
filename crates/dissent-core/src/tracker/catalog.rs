@@ -151,7 +151,7 @@ pub struct ReaderSpecView {
 }
 
 /// A file found for adding, and what adding it would do.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CandidateView {
     pub path: String,
     pub name: String,
@@ -213,7 +213,7 @@ fn spec_of(view: &AddSpecView) -> Result<AddSpec> {
     })
 }
 
-fn ext_of(name: &str) -> String {
+pub(super) fn ext_of(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_uppercase()).filter(|e| e.len() <= 5).unwrap_or_default()
 }
 
@@ -496,14 +496,6 @@ impl Engine {
     /// Makes a category. Restricted categories, with their own keys, are not built yet.
     pub async fn create_category(&self, community: CommunityId, input: CategoryInput) -> Result<CategoryId> {
         let body = category_body(&input)?;
-        // The first category turns the Files area on for everyone, so it waits until every member's app has it.
-        let first = self.read().communities.get(&community).is_some_and(|c| c.state().files.categories.is_empty());
-        if first {
-            let waiting = self.devices_without(community, crate::custom_roles::FEATURE_TRACKER).await;
-            if waiting > 0 {
-                return Err(CoreError::Invalid(format!("{waiting} member device(s) need to update before this server can share files")));
-            }
-        }
         let add = spec_of(&input.add)?;
         let visible = input.visible.as_ref().map(reader_spec_of).transpose()?;
         // A restricted category is sealed under a key of its own from the start; an open one under the files key.
@@ -626,16 +618,49 @@ impl Engine {
         let opened = self.opened_listings(community);
         let mut out = Vec::new();
         for path in paths {
-            let view = self.candidate(&path, &types, &opened).await;
+            let view = self.candidate(&path, &types, &opened, |_| true).await;
             if view.state == "ready" || view.state == "already_listed" {
                 self.with_tracker(community, |l| l.offered.insert(path.clone()));
+                self.remember_candidate(community, &path, &view);
             }
             out.push(view);
         }
         Ok(out)
     }
 
-    async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened]) -> CandidateView {
+    /// Keeps the fingerprint a candidate check made, so listing the file need not read it again.
+    pub(super) fn remember_candidate(&self, community: CommunityId, path: &Path, view: &CandidateView) {
+        if let Ok(fp) = data_encoding::HEXLOWER.decode(view.fingerprint.as_bytes()).map_err(drop).and_then(|b| <[u8; 32]>::try_from(b).map_err(drop)) {
+            self.remember_fingerprint(community, path, fp);
+        }
+    }
+
+    /// Keeps `fingerprint` of the file at `path` as it is now, so listing it need not read it again.
+    pub(crate) fn remember_fingerprint(&self, community: CommunityId, path: &Path, fingerprint: [u8; 32]) {
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            let stamp = (meta.len(), super::modified_ms(path), fingerprint);
+            self.with_tracker(community, |l| l.fingerprints.insert(path.to_path_buf(), stamp));
+        }
+    }
+
+    /// The fingerprint and size of the file at `path`, kept if the file is unchanged, or read now.
+    async fn fingerprint_of(&self, community: CommunityId, path: &Path) -> Result<([u8; 32], u64)> {
+        let kept = self.with_tracker(community, |l| l.fingerprints.get(path).copied());
+        if let (Some((size, modified, fp)), Ok(meta)) = (kept, std::fs::symlink_metadata(path)) {
+            if meta.len() == size && modified.is_some() && super::modified_ms(path) == modified {
+                return Ok((fp, size));
+            }
+        }
+        let owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true))
+            .await
+            .map_err(|e| CoreError::Invalid(e.to_string()))?
+            .map_err(files_err)
+    }
+
+    /// What adding the file at `path` would do. `progress` gets the bytes fingerprinted so far, and stops the pass when it
+    /// returns false.
+    pub(super) async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened], progress: impl FnMut(u64) -> bool + Send + 'static) -> CandidateView {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let kind = FileType::of_name(&name);
         let mut view = CandidateView {
@@ -665,7 +690,7 @@ impl Engine {
             return view;
         }
         let owned = path.to_path_buf();
-        let fingerprint = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true)).await;
+        let fingerprint = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, progress)).await;
         let Ok(Ok((fp, _))) = fingerprint else {
             view.state = "unreadable".into();
             return view;
@@ -719,11 +744,7 @@ impl Engine {
             }
             let tags = clean_tags(&item.tags)?;
             let description = clean_description(&item.description)?;
-            let owned = path.clone();
-            let (fp, size) = tokio::task::spawn_blocking(move || dissent_files::tracker::fingerprint_file(&owned, |_| true))
-                .await
-                .map_err(|e| CoreError::Invalid(e.to_string()))?
-                .map_err(files_err)?;
+            let (fp, size) = self.fingerprint_of(community, &path).await?;
             // Dedupe within the same keys: an open category's file against open listings, a restricted one's against its
             // own category. A listing whose blob is not what these bytes make under its key was made of other bytes:
             // this file is listed anew rather than refused, so nobody can squat a fingerprint.
@@ -742,7 +763,9 @@ impl Engine {
             let mut existing = self.opened_listings(community).into_iter().find(|o| o.body.fingerprint == fp && scope_of(o));
             let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
             // A file in the category's linked folder is seeded from there; any other is copied into the store.
-            let linked = self.with_tracker(community, |l| l.book.folders.get(&category).cloned()).is_some_and(|dir| path.starts_with(dir));
+            let linked = self.with_tracker(community, |l| {
+                l.in_place.contains(&path) || l.book.folders.get(&category).is_some_and(|dir| path.starts_with(dir))
+            });
             let (generation, files_key, fref) = loop {
                 let generation = match &existing {
                     Some(o) => o.body.content_generation,
@@ -831,28 +854,29 @@ impl Engine {
     /// Replaces a listing's tags and description.
     pub async fn update_listing(&self, community: CommunityId, listing: EventId, tags: Vec<String>, description: String) -> Result<()> {
         let body = ListingUpdateBody { tags: clean_tags(&tags)?, description: clean_description(&description)? };
-        // The update opens with the lister's author in its associated data, so only the lister's own app writes it.
-        let lister = self
+        // Every reader opens an update with the lister in its associated data, whoever wrote it, so a file manager's edit
+        // is sealed that way too. Replay decides who may publish one: the lister or a holder of `MANAGE_FILES`.
+        let (lister, category) = self
             .read()
             .communities
             .get(&community)
-            .and_then(|c| c.state().files.listings.get(&listing).map(|l| l.lister))
+            .and_then(|c| {
+                let st = c.state();
+                let l = st.files.listings.get(&listing)?;
+                let restricted = st.files.categories.get(&l.category).filter(|s| s.visible.is_some()).map(|_| l.category);
+                Some((l.lister, restricted))
+            })
             .ok_or_else(|| CoreError::NotFound(format!("listing {listing}")))?;
-        if lister != self.inner.me {
-            return Err(CoreError::Invalid("only the lister edits a listing; file managers may remove it".into()));
+        let me = self.inner.me;
+        let allowed = lister == me || self.read().communities.get(&community).is_some_and(|c| c.state().perms_of(&me).contains(Perms::MANAGE_FILES));
+        if !allowed {
+            return Err(CoreError::Rejected("NoPermission".into()));
         }
-        let category = self.read().communities.get(&community).and_then(|c| {
-            let st = c.state();
-            let cat = st.files.listings.get(&listing)?.category;
-            st.files.categories.get(&cat).filter(|s| s.visible.is_some()).map(|_| cat)
-        });
-        let inner = match category {
-            Some(cat) => {
-                let (generation, key) = self.newest_category_key(community, cat).await?;
-                seal(&key, generation, &community, &self.inner.me, BodyKind::ListingUpdate, &body)?
-            }
-            None => self.seal_files_body(community, BodyKind::ListingUpdate, &body, false).await?,
+        let (generation, key) = match category {
+            Some(cat) => self.newest_category_key(community, cat).await?,
+            None => self.newest_files_key(community, false).await?,
         };
+        let inner = seal(&key, generation, &community, &lister, BodyKind::ListingUpdate, &body)?;
         self.author_publish(community, ChannelId::CONTROL, Payload::FileListingUpdate { listing, inner }).await?;
         Ok(())
     }

@@ -224,6 +224,18 @@ function withCall(state: ShellState, next: CallState | null): Partial<ShellState
   };
 }
 
+// While a download runs its figures are read each second. Its events say only that it moved, and a view of every
+// transfer per event would cost more than this.
+const TRANSFERS_EVERY_MS = 1000;
+let transfersTimer: ReturnType<typeof setInterval> | null = null;
+function followTransfers(active: boolean, read: () => void) {
+  if (active && transfersTimer === null) transfersTimer = setInterval(read, TRANSFERS_EVERY_MS);
+  if (!active && transfersTimer !== null) {
+    clearInterval(transfersTimer);
+    transfersTimer = null;
+  }
+}
+
 export const useShell = create<ShellState>()((set, get) => ({
   me: null,
   status: { status: 'online', until_ms: null },
@@ -385,6 +397,7 @@ export const useShell = create<ShellState>()((set, get) => ({
     try {
       const result = await api.listTransfers();
       const list = Array.isArray(result) ? result : (result.transfers ?? []);
+      followTransfers(list.some((t) => t.state === 'active'), () => void get().loadTransfers());
       set({
         transfers: list,
         transferRates: Array.isArray(result) ? null : ((result.rates as ShellState['transferRates']) ?? null),
@@ -601,6 +614,9 @@ export const useShell = create<ShellState>()((set, get) => ({
         case 'communities_changed':
           await get().loadCommunities();
           await get().refreshUnread();
+          return;
+        case 'transfers_changed':
+          await get().loadTransfers();
           return;
         case 'community_updated': {
           const { route } = get();

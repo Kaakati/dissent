@@ -96,7 +96,15 @@ pub async fn unregister_bot(state: State<'_, AppState>, community_id: String, us
 }
 
 #[tauri::command]
-pub async fn set_custom_role_perms(state: State<'_, AppState>, community_id: String, on: bool) -> Result<(), String> {
+pub async fn set_custom_role_perms(state: State<'_, AppState>, community_id: String, on: bool, confirmed: Option<Vec<String>>) -> Result<(), String> {
     let community: CommunityId = parse("community id", &community_id)?;
-    engine(&state).await?.set_custom_role_perms(community, on).await.map_err(err)
+    let confirmed = crate::commands::confirmed_devices(confirmed)?;
+    engine(&state).await?.set_custom_role_perms_confirmed(community, on, &confirmed).await.map_err(err)
+}
+
+/// Which member devices could not follow custom roles' permissions, for the owner to decide.
+#[tauri::command]
+pub async fn custom_role_perms_status(state: State<'_, AppState>, community_id: String) -> Result<dissent_core::custom_roles::GateStatus, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    Ok(engine(&state).await?.custom_role_perms_status(community).await)
 }

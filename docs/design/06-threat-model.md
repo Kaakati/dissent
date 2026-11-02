@@ -579,7 +579,14 @@ device keys it moves between.
 
 ## A forwarder who is not in the call: what a volunteer sees
 
-A member can turn on "Help Forward Calls" for one server (off by default). While their device is in
+**Since v0.1.24 only a seeder the owner allows forwards a call it is not in.** A member holds the server's key, so a
+member who carried a call it was not in could have joined the key it already holds to the media it relayed and
+listened. Current clients refuse a member's offer and elect no member outside the call, and a call with one current
+client in it elects nobody outside the call on older clients either. Calls of older clients only, with a member who
+turned volunteering on, still can. What follows describes what any outside forwarder sees, which still applies to a
+seeder.
+
+Before v0.1.24, a member could turn on "Help Forward Calls" for one server (off by default). While their device is in
 no call of its own, it may be elected to forward a voice channel call in that server that it is not
 in (`docs/design/13-forwarded-calls.md`, phase 3). Every participant's media then goes through it.
 Its relay holds no media key and forwards SFrame frames unchanged, so it cannot read what is said
@@ -792,6 +799,51 @@ about that domain at that time. A domain owner who shares few servers with the v
 their profile. Results are kept for this run only, so the first profile opened after a restart looks the handle up
 again. The resolver itself is whatever the system uses, often the ISP's, and the lookup is plain DNS unless the
 system is set up for encrypted DNS.
+
+## Listing edits: who can change what a listing says
+
+A holder of `MANAGE_FILES` may rewrite another member's listing tags and description. Replay always allowed that event; the
+app now writes it. The page keeps naming the original lister and does not say who edited last, so a file manager can put words
+under someone's listing. The signed event in the log names the editor. The name, type, size, fingerprint and blob cannot
+change this way, so an edit cannot swap the file.
+
+## Switches older apps cannot follow: what one member can hold back
+
+`CustomRolePerms`, member-only control and the history setting change what an older app can follow
+(`14-file-tracker.md`). They used to wait for every member device, so one person who never updates or never logs in
+again could stop an owner from ever turning on member-only control, which is a privacy feature. Now an offline device does
+not hold them back, and an online device that answers too old does until the owner overrides it.
+
+What that costs, and who decides it: the owner chooses, by device, after being told who is affected.
+
+- **Member-only control turned on over an old device.** That device stops reading control events and shows them as locked.
+  It does not leak anything new: it still holds what it could read before, and the switch does not hide past events. A
+  device that pretends to be old only blinds itself.
+- **`CustomRolePerms` turned on over an old device.** That device keeps the old rules and refuses what a custom role did, so
+  a person banned through a custom role is still a member on that app, and a message deleted through one still shows.
+  Enforcement elsewhere is unaffected. It lasts until the app updates.
+- **The probe's answer is the device's word.** A modified client may answer yes or no as it likes, as before. Lying yes
+  makes it the same as a client that diverges by choice. Lying silent or old makes the owner confirm one more name.
+- **Names in the warning** are what the owner can already read in the member list. The probe tells the owner which member
+  devices are online right now, as any request to them does.
+
+## Audio and video nonces: what a repeated counter exposed
+
+Call frames are AES-GCM under SFrame. The key comes from the MLS epoch's media key and the key id, and the nonce from the key and the frame counter. Before v0.1.23, a device that started sending again in one MLS epoch used the same key id and started the counter at 0 again, so its frames repeated keys and nonces. This happened on every tier move, on every leave and rejoin, and on a restart and rejoin, when the group had not changed since. Video repeated in the same cases, under the video key. Two devices of one person never shared a key id, and stopping and starting a camera did not repeat, since the sender kept counting. DM calls have a fresh key per call.
+
+Who could use it, in calls before v0.1.23:
+
+- **Relays and the network: nothing.** Frames travel inside DTLS-SRTP inside QUIC, so they never see SFrame bytes.
+- **A participant, a forwarder in the call, or a member volunteer: nothing new.** They hold the media key or can derive it.
+- **A seeder forwarding calls, the one case that gains.** It has no key and it sees SFrame frames. If it forwarded both sessions, it could XOR their frames to get the XOR of two audio streams, and could recover the GCM authentication key for that key id. A frame forged with it still fails its sender's signed digest, which is what mutes a sender, but it may play for the moments before a digest is due. This needs an owner to have let the seeder forward calls, and a session that repeated in one epoch through it. Nothing suggests it was used, and no stored data is at risk: a seeder would have had to keep the frames at the time.
+
+Since v0.1.23 every sender has a random 32-bit context in its key id, and the key is derived from the whole key id, so each start of sending has its own key. It needs no storage, so a restart is covered. Two starts by one device in one epoch collide with a chance of 2^-32. A frame is 4 bytes longer. Released clients open these frames, since they derive the key from the id on the wire, but a released client's own frames still repeat until it updates.
+
+Each start of sending also has its own replay window, since each counts from 0: before this, someone who left and came back in one epoch was refused as a replay by whoever stayed. A new context takes over only when a digest its sender signed covers one of its frames, and its frames wait for that, about half a second, so a member who holds the key cannot take over or silence someone else's session by naming a new context, or play forged audio that way. The last 32 replaced contexts of a sender stay refused. Contexts are random and carry no order, so an older one cannot be told from a new one. What remains: something on the media path, which among non-members means a seeder forwarding calls, could replay a session it recorded, once that sender has had more than 32 later sessions in the same MLS epoch. It would be old genuine audio in that person's voice, and a rekey ends it. Video has no such proof at the point it is checked, so it keeps the last 8 contexts of a sender and forgets older ones rather than refusing them, because refusing could silence the real sender; there, a replay takes more than 8 later sessions.
+
+Someone who comes back is normally unheard for about 0.5 s, the first digest, or about 1 s if that digest is lost. A member holding the key who floods new contexts in their name can replace the one waiting candidate and keep them unheard for as long as that lasts. It cannot touch a session already proven.
+
+A member holding the key can name any sender or key id, so state from those is capped: 64 senders with no certificate per link, 1024 senders for video, and 4 key ids taken under the current key until the next rekey. A frame costs at most two decrypt attempts.
 
 ## Findings
 

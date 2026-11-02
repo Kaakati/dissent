@@ -143,6 +143,17 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
 }
 
 /// Makes `engine` answer `Request::Features` with `bits`. Zero models a device from before the probe.
+/// Makes `engine` send the call features of a client from before `FEATURE_SEEDERS_ONLY`: it says it elects a member
+/// outside the call. Only what it says changes; it still elects as this build does.
+pub fn send_old_call_features(engine: &crate::Engine) {
+    let old = crate::calls::FEATURE_BOOST_TIERS
+        | crate::calls::FEATURE_VIDEO_LAYERS
+        | crate::calls::FEATURE_VOLUNTEERS
+        | crate::calls::FEATURE_SEEDER_FORWARDERS
+        | crate::calls::FEATURE_PAUSED_VIDEO;
+    engine.inner.call_features_override.store(old, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn set_features(engine: &crate::Engine, bits: u64) {
     engine.inner.features.store(bits, std::sync::atomic::Ordering::Relaxed);
 }
@@ -182,6 +193,11 @@ pub fn wanted_layers(engine: &crate::Engine, screen: bool) -> Option<u8> {
 
 /// The simulcast layer of the last frame `engine` received of `sender_root`'s camera (or screen)
 /// in its current call.
+/// `engine`'s leaf links' counters in a forwarded call, for a test that timed out.
+pub async fn leaf_stats(engine: &crate::Engine) -> String {
+    engine.leaf_stats_now().await
+}
+
 pub fn received_layer(engine: &crate::Engine, sender_root: &str, screen: bool) -> Option<u8> {
     engine.received_layer_now(sender_root, screen)
 }
@@ -318,4 +334,9 @@ pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::Devi
         .filter(|stored| stored.addr.id == device)
         .map(|stored| stored.addr.direct.len())
         .sum()
+}
+
+/// A hash of the media key and the sender id of `engine`'s current channel call, and the epoch that key belongs to.
+pub fn call_key_state(engine: &crate::Engine) -> Option<([u8; 4], u64, u64)> {
+    engine.call_key_state()
 }

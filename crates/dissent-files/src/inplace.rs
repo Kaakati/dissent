@@ -268,9 +268,9 @@ impl Files {
     }
 }
 
-/// Told the bytes of each piece of a linked file as it is sent, with the blob's hash; answers how long to wait
+/// Told the bytes of each piece of a linked file as it is sent, with the receiver and the blob's hash; answers how long to wait
 /// before the next, for an upload cap. Linked files are served outside iroh-blobs, so its transfer events miss them.
-pub type ServedHook = Arc<dyn Fn([u8; 32], u64) -> std::time::Duration + Send + Sync>;
+pub type ServedHook = Arc<dyn Fn([u8; 32], [u8; 32], u64) -> std::time::Duration + Send + Sync>;
 
 /// Serves the iroh-blobs protocol for a store, with linked files answered from disk.
 #[derive(Clone)]
@@ -299,10 +299,11 @@ impl ProtocolHandler for FilesProtocol {
             conn.close(cause.code(), cause.reason());
             return Ok(());
         }
+        let remote = *conn.remote_id().as_bytes();
         while let Ok(pair) = StreamPair::accept(&conn, self.events.clone()).await {
             let this = self.clone();
             tokio::spawn(async move {
-                if let Err(e) = this.dispatch(pair).await {
+                if let Err(e) = this.dispatch(pair, remote).await {
                     tracing::debug!(error = %e, "blob stream failed");
                 }
             });
@@ -325,12 +326,12 @@ impl FilesProtocol {
         self
     }
 
-    async fn dispatch(&self, mut pair: StreamPair) -> std::result::Result<(), String> {
+    async fn dispatch(&self, mut pair: StreamPair, remote: [u8; 32]) -> std::result::Result<(), String> {
         let request = pair.read_request().await.map_err(|e| e.to_string())?;
         let store = self.store.clone();
         match request {
             Request::Get(request) => match self.linked.get(&request.hash) {
-                Some(linked) => self.serve_linked(pair, request, linked).await,
+                Some(linked) => self.serve_linked(pair, request, linked, remote).await,
                 None => iroh_blobs::provider::handle_get(pair, store, request).await.map_err(|e| e.to_string()),
             },
             Request::Observe(request) => match self.linked.get(&request.hash) {
@@ -345,7 +346,7 @@ impl FilesProtocol {
 
     /// Answers a GET for a linked blob: its size, then the bao encoding of the ranges asked for, each chunk group
     /// checked against the outboard before it is written.
-    async fn serve_linked(&self, pair: StreamPair, request: iroh_blobs::protocol::GetRequest, linked: Linked) -> std::result::Result<(), String> {
+    async fn serve_linked(&self, pair: StreamPair, request: iroh_blobs::protocol::GetRequest, linked: Linked, remote: [u8; 32]) -> std::result::Result<(), String> {
         let tracker = pair.get_request(|| request.clone()).await.map_err(|e| e.to_string())?;
         let mut writer = pair.into_writer(tracker).await.map_err(|e| e.to_string())?;
         let Some((0, ranges)) = request.ranges.as_single().map(|(o, r)| (o, r.clone())) else {
@@ -366,7 +367,7 @@ impl FilesProtocol {
         while let Some(bytes) = rx.recv().await {
             writer.inner.write_all(&bytes).await.map_err(|e| e.to_string())?;
             if let Some(hook) = &self.served {
-                let wait = hook(*hash.as_bytes(), bytes.len() as u64);
+                let wait = hook(remote, *hash.as_bytes(), bytes.len() as u64);
                 if !wait.is_zero() {
                     tokio::time::sleep(wait).await;
                 }

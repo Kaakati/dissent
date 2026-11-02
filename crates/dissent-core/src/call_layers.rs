@@ -312,6 +312,22 @@ impl Engine {
 
     /// For tests: the layer of the last frame received of `root_id`'s camera or screen in the
     /// current call.
+    /// For tests: this device's leaf links' counters, to say why media stopped.
+    pub(crate) async fn leaf_stats_now(&self) -> String {
+        let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
+            return "no call".into();
+        };
+        let Some(forwarding) = room.forwarding() else {
+            return "not forwarded".into();
+        };
+        let leaf = forwarding.leaf().lock().await;
+        let stats = match leaf.as_ref() {
+            Some(participant) => format!("{:?}", participant.link_stats()),
+            None => "no leaf".into(),
+        };
+        stats
+    }
+
     pub(crate) fn received_layer_now(&self, root_id: &str, screen: bool) -> Option<u8> {
         let room = crate::calls::lock(&self.inner.calls.current).clone()?;
         let sid = room.sid_of_root(root_id)?;

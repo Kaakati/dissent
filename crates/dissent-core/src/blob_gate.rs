@@ -42,6 +42,8 @@ use crate::world::World;
 const REBUILD_GAP: Duration = Duration::from_secs(2);
 /// The shortest time between two certificate asks to one device.
 const INTRODUCE_GAP: Duration = Duration::from_secs(10);
+/// What the blob server sends at most per progress report, for the first report of a request, whose start it does not say.
+const CHUNK_GROUP_BYTES: u64 = 16 * 1024;
 /// Messages the blob server may queue for the gate before it waits.
 const GATE_QUEUE: usize = 64;
 
@@ -407,8 +409,9 @@ const THROTTLE: ThrottleMode = ThrottleMode::Intercept;
 
 impl Engine {
     /// Bytes of `hash` this device just sent to `device`. The tracker's seeding counters read it.
-    pub(crate) fn on_served(&self, _device: DeviceId, hash: [u8; 32], bytes: u64) {
+    pub(crate) fn on_served(&self, device: DeviceId, hash: [u8; 32], bytes: u64) {
         self.tracker_served(hash, bytes);
+        self.meter_sent(device, hash, bytes);
     }
 
     /// How long to wait before sending `bytes` more of `hash` to `device`. The tracker's upload caps answer it;
@@ -460,18 +463,22 @@ async fn count_served(
     sending: Sending,
     mut updates: RequestUpdates,
 ) {
-    let mut current: Option<([u8; 32], u64)> = None;
+    // The blob, and where its last progress ended. Each request's offsets are in the whole blob, not from its own start.
+    let mut current: Option<([u8; 32], Option<u64>)> = None;
     while let Ok(Some(update)) = updates.recv().await {
         match update {
             RequestUpdate::Started(started) => {
                 let hash = *started.hash.as_bytes();
-                current = Some((hash, 0));
+                current = Some((hash, None));
                 sending.lock().unwrap_or_else(PoisonError::into_inner).insert(key, (device, hash));
             }
             RequestUpdate::Progress(progress) => {
-                if let Some((hash, sent)) = current.as_mut() {
-                    let delta = progress.end_offset.saturating_sub(*sent);
-                    *sent = progress.end_offset.max(*sent);
+                if let Some((hash, last)) = current.as_mut() {
+                    let delta = match *last {
+                        Some(last) => progress.end_offset.saturating_sub(last),
+                        None => progress.end_offset.min(CHUNK_GROUP_BYTES),
+                    };
+                    *last = Some(progress.end_offset.max(last.unwrap_or(0)));
                     if delta > 0 {
                         engine.on_served(device, *hash, delta);
                     }
@@ -517,6 +524,12 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
                 let blob = sending.lock().unwrap_or_else(PoisonError::into_inner).get(&(m.connection_id, m.request_id)).copied();
                 let wait = blob.map_or(Duration::ZERO, |(device, hash)| engine.throttle(device, hash, m.size));
                 if let ProviderMessage::Throttle(m) = msg {
+                    // No cap, no timer. This is asked per 16 KiB, and a zero sleep still waits for the next timer tick
+                    // (about 10 ms on Windows), which held every upload to about 1.6 MB/s per request.
+                    if wait.is_zero() {
+                        m.tx.send(Ok(())).await.ok();
+                        continue;
+                    }
                     // The wait runs on its own, so one slow transfer does not hold the gate.
                     tokio::spawn(async move {
                         tokio::time::sleep(wait).await;

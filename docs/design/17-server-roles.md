@@ -127,8 +127,9 @@ except the moderation actions.
 Enforcing `SEND_MESSAGES` and the like on released kinds means a new client rejects an event an old client accepts, and the
 two would replay different servers. So enforcement on released kinds is behind a switch, like `CustomRolePerms`:
 
-- **`RolesV2 { on }`**, owner only, carried. The owner may turn it on only when every member device answers
-  `Request::Features` with the new `FEATURE_ROLES_V2` bit.
+- **`RolesV2 { on }`**, owner only, carried. It goes on as `14-file-tracker.md`, "Switches older apps cannot follow",
+  says, with the new `FEATURE_ROLES_V2` bit: an offline device is named and does not hold it back, an online device that
+  answers without the bit blocks until the owner overrides it, and either way the owner confirms what those people see.
 - While off, new roles, display traits, self-assign and audit log all work, since they harm nobody. Baseline and override
   denials on released kinds show as "Waiting for N members to update", and the settings name who.
 - New joiners with an old client after the switch is on are the same residual as member-only control. The invite page and
@@ -224,7 +225,7 @@ and a cosmetic role with permissions.
 - Networked (`scripts/fwtest.sh`): a removed role holder cannot read new messages in a private channel and still reads old
   ones. A moderator who is not a reader triggers rotation through a remaining reader. A modified sender's denied message is
   rejected by everyone. A timed-out member can't post.
-- Gate: `RolesV2` is refused while one device lacks the feature.
+- Gate: `RolesV2` is refused until each device lacking the feature, offline or too old, is confirmed by the owner.
 - UI driver: drag limits, disabled bits with reasons, inspect explanations, presets, templates.
 - `06-threat-model.md` gets an entry for the enforcement levels.
 

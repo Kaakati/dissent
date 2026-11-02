@@ -1,5 +1,5 @@
-//! Volunteer forwarders: a member who is not in a voice channel call forwards it. See
-//! `docs/design/13-forwarded-calls.md`, phase 3. Every engine runs on loopback with relays off.
+//! Forwarders outside the call: a seeder the owner allows forwards a voice channel call it is not in, and a member
+//! never does. See `docs/design/13-forwarded-calls.md`, "Who forwards". Every engine runs on loopback with relays off.
 
 use crate::calls::{all_see, boosted_call, forwarder_root, layer_of, only_senders_speak, root};
 use crate::common::*;
@@ -7,16 +7,26 @@ use dissent_core::test_support::{act_as_released_calls, forward_offers, offer_to
 use dissent_core::{ChannelId, CommunityId, ModAction, Topology};
 use std::time::{Duration, Instant};
 
-/// Seven members in a voice channel call at level 0, and an eighth, `members[7]`, who is not in it
-/// and volunteers to forward calls in the server. The devices at `released` act as released builds.
-/// Returns once the call is forwarded and every participant hears it.
+/// Seven members in a voice channel call at level 0, and a seeder of the server, which the owner lets forward calls.
+/// The devices at `released` act as released builds. Returns once the call is forwarded and every participant hears it.
 async fn volunteer_call(released: &[usize]) -> (Vec<Peer>, Peer, CommunityId, ChannelId) {
-    let (mut everyone, community, channel) = boosted_call(8, 0, 5_000).await;
-    let volunteer = everyone.pop().expect("eight members");
-    // A volunteer offers the election's default upload, which with its bonus beats the participants'.
+    let (everyone, community, channel) = boosted_call(7, 0, 5_000).await;
+    let invite = everyone[0].engine.create_invite(community).await.expect("invite");
+    let volunteer = peer("seeder").await;
+    volunteer.engine.join_as_storage(&invite).await.expect("the seeder joins as storage");
+    let seeder_root = root(&volunteer);
+    for p in &everyone {
+        eventually("every member sees the seeder", || {
+            p.engine.community_view(community).ok().filter(|v| v.members.iter().any(|m| m.root_id == seeder_root))
+        })
+        .await;
+    }
+    everyone[0].engine.set_seeder_forwards_calls(community, true).await.expect("the owner allows it");
+    for p in everyone.iter().chain(std::iter::once(&volunteer)) {
+        eventually("the setting reaches every device", || p.engine.seeder_forwards_calls(community).then_some(())).await;
+    }
+    // A seeder offers the election's default upload, which with its bonus beats the participants'.
     volunteer.engine.set_capacity_override(None);
-    volunteer.engine.set_forward_calls(community, true).expect("volunteer");
-    assert!(volunteer.engine.forwards_calls(community));
     for i in released {
         act_as_released_calls(&everyone[*i].engine);
     }
@@ -53,7 +63,7 @@ async fn all_still_hear(everyone: &[Peer], what: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
+async fn a_seeder_outside_the_call_is_elected_and_carries_its_media() {
     heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
@@ -81,11 +91,19 @@ async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
     sender.engine.set_camera(true).expect("camera on");
     viewer.engine.set_video_tile(&root(sender), false, 1920);
     everyone[3].engine.set_video_tile(&root(sender), false, 200);
-    eventually_within(Duration::from_secs(60), "video reaches both viewers at their layers", || {
+    let deadline = Instant::now() + crate::common::scaled(Duration::from_secs(60));
+    loop {
         let (wide, narrow) = (layer_of(viewer, sender), layer_of(&everyone[3], sender));
-        (wide.is_some_and(|l| l > 0) && narrow == Some(0)).then_some(())
-    })
-    .await;
+        if wide.is_some_and(|l| l > 0) && narrow == Some(0) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let wide_stats = dissent_core::test_support::leaf_stats(&viewer.engine).await;
+            let narrow_stats = dissent_core::test_support::leaf_stats(&everyone[3].engine).await;
+            panic!("timed out waiting for video at both viewers' layers: wide {wide:?} {wide_stats}, narrow {narrow:?} {narrow_stats}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     sender.engine.set_camera(false).expect("camera off");
 
     let mut all = everyone;
@@ -96,7 +114,7 @@ async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-async fn a_volunteer_who_leaves_hands_the_call_to_a_participant() {
+async fn a_seeder_that_leaves_hands_the_call_to_a_participant() {
     heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
@@ -123,12 +141,13 @@ async fn a_volunteer_who_leaves_hands_the_call_to_a_participant() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-async fn a_banned_or_outside_volunteer_is_refused() {
-    heavy(8, async {
-    let (mut everyone, community, channel) = boosted_call(8, 0, 5_000).await;
-    let banned = everyone.pop().expect("eight members");
+async fn a_member_outside_the_call_is_refused_and_never_elected() {
+    heavy(9, async {
+    let (mut everyone, community, channel) = boosted_call(9, 0, 5_000).await;
+    let banned = everyone.pop().expect("nine members");
+    let member = everyone.pop().expect("nine members");
     banned.engine.set_capacity_override(None);
-    banned.engine.set_forward_calls(community, true).expect("volunteer");
+    member.engine.set_capacity_override(None);
     everyone[0]
         .engine
         .moderate(community, ModAction::Ban, banned.identity.root_id())
@@ -154,6 +173,10 @@ async fn a_banned_or_outside_volunteer_is_refused() {
     all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
 
     let target = everyone[1].identity.device_id();
+    // A member holds the server's key, so it could listen to a call it carries. It hears what anyone hears for a call
+    // the device is not in.
+    let reply = offer_to_forward(&member.engine, community, channel, target).await;
+    assert_eq!(reply, "not in this call", "a member's offer is refused");
     let reply = offer_to_forward(&banned.engine, community, channel, target).await;
     // Both hear what anyone hears for a call the device is not in, so neither learns it is in one.
     assert_eq!(reply, "not in this call", "a banned member's offer is refused");
@@ -169,6 +192,7 @@ async fn a_banned_or_outside_volunteer_is_refused() {
     }
     assert!(everyone.iter().find_map(|p| forwarder_root(&p.engine)).is_some(), "a participant forwards");
 
+    everyone.push(member);
     everyone.push(banned);
     everyone.push(outsider);
     finish(everyone).await;
@@ -177,7 +201,7 @@ async fn a_banned_or_outside_volunteer_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-async fn an_old_client_in_the_call_keeps_volunteers_out() {
+async fn an_old_client_in_the_call_keeps_seeders_out() {
     heavy(9, async {
     // Device 6 runs a released build, which cannot decode an offer or link to a volunteer.
     let (everyone, volunteer, _, _) = volunteer_call(&[6]).await;
@@ -206,7 +230,7 @@ async fn an_old_client_in_the_call_keeps_volunteers_out() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
-async fn a_volunteer_that_drops_everything_is_excluded_and_the_call_fails_over() {
+async fn a_seeder_that_drops_everything_is_excluded_and_the_call_fails_over() {
     heavy(9, async {
     let (everyone, volunteer, _, _) = volunteer_call(&[]).await;
     all_forwarded_by(&everyone, &volunteer).await;
@@ -335,5 +359,44 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     let mut all = everyone;
     all.push(seeder);
     finish(all).await;
+    }).await;
+}
+
+/// Devices that say they are from before this, and so would elect a member outside the call, in a call with current
+/// ones: a member's offer is refused, nobody outside the call forwards it, and the call stays one call with audio. The
+/// older devices are modelled by their features only: a real one elects a member only when every device in the call
+/// says it would, which a current one never does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_call_with_older_clients_elects_no_member_outside_it() {
+    heavy(8, async {
+    let (mut everyone, community, channel) = boosted_call(8, 0, 5_000).await;
+    let member = everyone.pop().expect("eight members");
+    member.engine.set_capacity_override(None);
+    for p in &everyone[4..] {
+        dissent_core::test_support::send_old_call_features(&p.engine);
+    }
+    for p in &everyone {
+        p.engine.set_test_capture(dissent_core::TestCapture::Pattern);
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
+    for p in &everyone {
+        let reply = offer_to_forward(&member.engine, community, channel, p.identity.device_id()).await;
+        assert_eq!(reply, "not in this call", "a member's offer is refused");
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let forwarders: std::collections::BTreeSet<String> = everyone.iter().filter_map(|p| forwarder_root(&p.engine)).collect();
+    assert_eq!(forwarders.len(), 1, "one call, with one forwarder: {forwarders:?}");
+    assert!(everyone.iter().any(|p| forwarders.contains(&root(p))), "a participant forwards");
+    for p in &everyone {
+        let view = p.engine.call_state().expect("in call");
+        assert_eq!(view.forwarded_by, None, "nobody outside the call forwards it");
+        assert_eq!(view.participants.len(), 6);
+    }
+    assert_eq!(relay_downlinks(&member.engine).await, 0, "the member relays nothing");
+    all_still_hear(&everyone, "audio with older clients in the call").await;
+    everyone.push(member);
+    finish(everyone).await;
     }).await;
 }

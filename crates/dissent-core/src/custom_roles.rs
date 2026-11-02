@@ -2,12 +2,13 @@
 //! `docs/design/14-file-tracker.md`, "Phase 0".
 //!
 //! * A custom role's bits always count on the new kinds (roles, bots, files). On the kinds released clients know they
-//!   count only once the owner turns on `CustomRolePerms`, which this device allows only when every member device
-//!   answers `Request::Features` with [`FEATURE_CUSTOM_ROLES`].
+//!   count only once the owner turns on `CustomRolePerms`. A member device that answers `Request::Features` without
+//!   [`FEATURE_CUSTOM_ROLES`] holds that back, and so does one that does not answer, until the owner confirms it by
+//!   name: see [`GateStatus`].
 //! * A bot is a fresh identity this device makes: its root is registered with `BotRegister`, and the bot joins
 //!   through an invite. [`BotToken`] carries both to the headless app that runs it.
 
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use dissent_events::{ChannelId, Payload, Perms, RoleId, RoleSpec};
@@ -29,6 +30,83 @@ pub const FEATURES: u64 = FEATURE_CUSTOM_ROLES | FEATURE_TRACKER;
 const FEATURES_FRESH: Duration = Duration::from_secs(10 * 60);
 /// How long one device has to answer `Request::Features`.
 const ASK_WAIT: Duration = Duration::from_secs(5);
+/// How many devices a compatibility check asks at once.
+const ASK_AT_ONCE: usize = 32;
+
+/// A member device that did not say yes to a compatibility check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GateDevice {
+    pub device: String,
+    pub root_id: String,
+    /// The member's display name.
+    pub name: String,
+}
+
+/// What a switch older apps cannot follow is waiting for. The owner decides: nothing here turns a switch on by itself,
+/// and every device listed must be confirmed by id (`GateStatus::unconfirmed`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GateStatus {
+    /// Devices that answered yes.
+    pub ready: usize,
+    /// Devices that gave no answer: offline, or out of reach. Nobody can tell what version they run.
+    pub offline: Vec<GateDevice>,
+    /// Devices that answered, and are too old for the switch.
+    pub outdated: Vec<GateDevice>,
+}
+
+impl GateStatus {
+    /// The listed devices that are not in `confirmed`. A switch goes on only when this is empty.
+    pub fn unconfirmed(&self, confirmed: &[DeviceId]) -> Vec<&GateDevice> {
+        self.offline
+            .iter()
+            .chain(&self.outdated)
+            .filter(|d| !confirmed.iter().any(|c| c.to_string() == d.device))
+            .collect()
+    }
+
+    /// Refuses unless every listed device is in `confirmed`, naming those that are not.
+    pub(crate) fn check(&self, confirmed: &[DeviceId]) -> Result<()> {
+        let left = self.unconfirmed(confirmed);
+        if left.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = left.iter().map(|d| d.name.as_str()).collect();
+        Err(CoreError::Invalid(format!(
+            "{} member device(s) must be confirmed first, since they may not follow this: {}",
+            left.len(),
+            names.join(", ")
+        )))
+    }
+}
+
+/// What one device said to a compatibility check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateAnswer {
+    Ready,
+    Outdated,
+    Silent,
+}
+
+/// Reads a device's reply to a compatibility check. A device that predates the question answers
+/// `Response::Error("bad request: ...")`, as every release has, so it is online and too old. Any other refusal, a
+/// timeout or a failed dial says nothing about its version.
+fn gate_answer(reply: Option<Result<Response>>, yes: impl Fn(&Response) -> bool) -> GateAnswer {
+    match reply {
+        Some(Ok(Response::Error(e))) if e.starts_with("bad request") => GateAnswer::Outdated,
+        Some(Ok(Response::Error(_))) | Some(Err(_)) | None => GateAnswer::Silent,
+        Some(Ok(answer)) if yes(&answer) => GateAnswer::Ready,
+        Some(Ok(_)) => GateAnswer::Outdated,
+    }
+}
+
+/// The question a compatibility check asks.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GateProbe {
+    /// `Request::Features`, with these bits.
+    Feature(u64),
+    /// `Request::MemberSealedSupport`, which reaches devices from before `Request::Features`.
+    MemberSealed(CommunityId),
+}
 
 /// The prefix of a bot token.
 pub const BOT_TOKEN_PREFIX: &str = "dissent-bot:";
@@ -249,58 +327,86 @@ impl Engine {
     }
 
     /// Turns on or off whether custom roles' bits count on the kinds released clients know. Owner only. Turning it on
-    /// is refused while some member device has not said its replay knows custom roles, since that device would
-    /// replay a different server.
+    /// is refused while `custom_role_perms_status` lists a device: see `set_custom_role_perms_confirmed`.
     pub async fn set_custom_role_perms(&self, community: CommunityId, on: bool) -> Result<()> {
+        self.set_custom_role_perms_confirmed(community, on, &[]).await
+    }
+
+    /// As `set_custom_role_perms`, going ahead for the listed devices in `confirmed`: the owner was told what those
+    /// people see until they update. A device that newly turned up is still refused.
+    pub async fn set_custom_role_perms_confirmed(&self, community: CommunityId, on: bool, confirmed: &[DeviceId]) -> Result<()> {
         if on {
-            let waiting = self.devices_without(community, FEATURE_CUSTOM_ROLES).await;
-            if waiting > 0 {
-                return Err(CoreError::Invalid(format!(
-                    "{waiting} member device(s) need to update before custom roles can grant these permissions"
-                )));
-            }
+            self.custom_role_perms_status(community).await.check(confirmed)?;
         }
         self.author_publish(community, ChannelId::CONTROL, Payload::CustomRolePerms { on }).await?;
         Ok(())
     }
 
-    /// How many devices of current members of `community` do not answer `Request::Features` with every bit of
-    /// `feature`. A device that is offline, or too old to understand the question, counts.
-    pub async fn devices_without(&self, community: CommunityId, feature: u64) -> usize {
-        let mut missing = 0;
-        for device in self.member_devices(community) {
-            if self.features_of(device).await & feature != feature {
-                missing += 1;
+    /// Which member devices could not follow `CustomRolePerms`.
+    pub async fn custom_role_perms_status(&self, community: CommunityId) -> GateStatus {
+        self.gate_status(community, GateProbe::Feature(FEATURE_CUSTOM_ROLES)).await
+    }
+
+    /// Asks every device of a current member, at once, and sorts them by what they said.
+    pub(crate) async fn gate_status(&self, community: CommunityId, probe: GateProbe) -> GateStatus {
+        let limit = Arc::new(tokio::sync::Semaphore::new(ASK_AT_ONCE));
+        let mut asks = tokio::task::JoinSet::new();
+        for (device, root, name) in self.member_devices(community) {
+            let engine = self.clone();
+            let limit = limit.clone();
+            asks.spawn(async move {
+                let _turn = limit.acquire_owned().await;
+                (GateDevice { device: device.to_string(), root_id: root.to_string(), name }, engine.ask_gate(device, probe).await)
+            });
+        }
+        let mut status = GateStatus::default();
+        while let Some(done) = asks.join_next().await {
+            let Ok((device, answer)) = done else { continue };
+            match answer {
+                GateAnswer::Ready => status.ready += 1,
+                GateAnswer::Outdated => status.outdated.push(device),
+                GateAnswer::Silent => status.offline.push(device),
             }
         }
-        missing
+        status.offline.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.device.cmp(&b.device)));
+        status.outdated.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.device.cmp(&b.device)));
+        status
     }
 
-    /// The feature bits `device` answered with lately, asking it when the answer is missing or stale. No answer is 0.
-    pub(crate) async fn features_of(&self, device: DeviceId) -> u64 {
-        let fresh = |answers: &std::collections::BTreeMap<DeviceId, (u64, Instant)>| {
-            answers.get(&device).filter(|(_, at)| at.elapsed() < FEATURES_FRESH).map(|(bits, _)| *bits)
-        };
-        if let Some(bits) = fresh(&self.inner.feature_answers.lock().unwrap_or_else(PoisonError::into_inner)) {
-            return bits;
+    async fn ask_gate(&self, device: DeviceId, probe: GateProbe) -> GateAnswer {
+        match probe {
+            GateProbe::Feature(feature) => {
+                let has = |bits: u64| bits & feature == feature;
+                // Only a yes is kept: a device that was offline or old is asked again next time.
+                let known = {
+                    let answers = self.inner.feature_answers.lock().unwrap_or_else(PoisonError::into_inner);
+                    answers.get(&device).is_some_and(|(bits, at)| at.elapsed() < FEATURES_FRESH && has(*bits))
+                };
+                if known {
+                    return GateAnswer::Ready;
+                }
+                let reply = tokio::time::timeout(ASK_WAIT, self.call(device, &Request::Features)).await.ok();
+                if let Some(Ok(Response::Features(bits))) = &reply {
+                    if has(*bits) {
+                        self.inner
+                            .feature_answers
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(device, (*bits, Instant::now()));
+                    }
+                }
+                gate_answer(reply, |r| matches!(r, Response::Features(bits) if has(*bits)))
+            }
+            GateProbe::MemberSealed(community) => {
+                let reply = tokio::time::timeout(ASK_WAIT, self.call(device, &Request::MemberSealedSupport { community })).await.ok();
+                gate_answer(reply, |r| matches!(r, Response::MemberSealedSupport(true)))
+            }
         }
-        let bits = match tokio::time::timeout(ASK_WAIT, self.call(device, &Request::Features)).await {
-            Ok(Ok(Response::Features(bits))) => bits,
-            _ => 0,
-        };
-        // Only a yes is kept: a device that was offline is asked again next time.
-        if bits != 0 {
-            self.inner
-                .feature_answers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(device, (bits, Instant::now()));
-        }
-        bits
     }
 
-    /// Every device of a current member, this device's siblings and storage members included, but not this device.
-    fn member_devices(&self, community: CommunityId) -> Vec<DeviceId> {
+    /// Every device of a current member with its root and name, this device's siblings and storage members included,
+    /// but not this device.
+    fn member_devices(&self, community: CommunityId) -> Vec<(DeviceId, RootId, String)> {
         let w = self.read();
         let Some(c) = w.communities.get(&community) else {
             return Vec::new();
@@ -309,8 +415,11 @@ impl Engine {
         st.members
             .iter()
             .filter(|(root, m)| !m.left && !st.banned.contains(root))
-            .flat_map(|(root, _)| w.directory.devices_of(root))
-            .filter(|d| *d != w.device && !st.revoked_devices.contains_key(d))
+            .flat_map(|(root, _)| {
+                let name = w.display_name(root);
+                w.directory.devices_of(root).into_iter().map(move |d| (d, *root, name.clone()))
+            })
+            .filter(|(d, ..)| *d != w.device && !st.revoked_devices.contains_key(d))
             .collect()
     }
 }
@@ -318,6 +427,34 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gate_device(name: &str, device: DeviceId) -> GateDevice {
+        GateDevice { device: device.to_string(), root_id: String::new(), name: name.into() }
+    }
+
+    #[test]
+    fn a_gate_tells_an_old_device_from_a_silent_one() {
+        let yes = |r: &Response| matches!(r, Response::Features(b) if b & FEATURE_CUSTOM_ROLES != 0);
+        let old = Some(Ok(Response::Error("bad request: Hit the end of buffer".into())));
+        assert_eq!(gate_answer(old, yes), GateAnswer::Outdated, "a release from before the question");
+        assert_eq!(gate_answer(Some(Ok(Response::Features(FEATURE_TRACKER))), yes), GateAnswer::Outdated, "lacks the bit");
+        assert_eq!(gate_answer(Some(Ok(Response::Features(FEATURES))), yes), GateAnswer::Ready);
+        assert_eq!(gate_answer(Some(Ok(Response::Error("rate limited".into()))), yes), GateAnswer::Silent);
+        assert_eq!(gate_answer(Some(Err(CoreError::Invalid("dial".into()))), yes), GateAnswer::Silent);
+        assert_eq!(gate_answer(None, yes), GateAnswer::Silent, "no answer in time");
+    }
+
+    #[test]
+    fn a_switch_waits_until_every_listed_device_is_confirmed() {
+        let (carol, bob) = (dissent_identity::DeviceKey::generate().id(), dissent_identity::DeviceKey::generate().id());
+        let status = GateStatus { ready: 1, offline: vec![gate_device("Carol", carol)], outdated: vec![gate_device("Bob", bob)] };
+        let refused = status.check(&[]).unwrap_err().to_string();
+        assert!(refused.contains("2 member device(s)") && refused.contains("Carol") && refused.contains("Bob"), "{refused}");
+        let refused = status.check(&[carol]).unwrap_err().to_string();
+        assert!(refused.contains("Bob") && !refused.contains("Carol"), "{refused}");
+        status.check(&[carol, bob]).expect("every listed device is confirmed");
+        GateStatus::default().check(&[]).expect("nobody to wait for");
+    }
 
     #[test]
     fn colours_parse_and_print() {

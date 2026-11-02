@@ -235,17 +235,24 @@ async fn member_only_waits_until_every_member_device_answers() {
         assert!(!status.on);
 
         // Bob goes offline, so his device cannot say it supports member-only control.
-        let (_, bob_dir) = stop(bob).await;
+        let (bob_identity, bob_dir) = stop(bob).await;
         let status = alice.engine.member_only_status(id).await.expect("status");
-        assert!(!status.can_enable, "an offline member blocks the switch");
-        assert_eq!(status.waiting, 1);
-        assert!(
-            alice.engine.set_member_only(id, true).await.is_err(),
-            "the switch stays off while a member device is unaccounted for"
-        );
-        let _ = std::fs::remove_dir_all(bob_dir);
+        assert!(status.can_enable, "an offline member does not block the switch");
+        assert_eq!((status.waiting, status.offline.len(), status.outdated.len()), (1, 1, 0));
+        assert_eq!(status.offline[0].name, "bob", "the warning names who");
+        let refused = alice.engine.set_member_only(id, true).await.expect_err("never silently");
+        assert!(refused.to_string().contains("must be confirmed"), "{refused}");
 
-        finish(vec![alice]).await;
+        // The owner confirms Bob's device by name, and makes a channel while he is away.
+        let bob_device = bob_identity.device_id();
+        alice.engine.set_member_only_confirmed(id, true, &[bob_device]).await.expect("confirmed");
+        alice.engine.create_channel(id, "while-away".into()).await.expect("sealed channel");
+
+        // Bob comes back on a current app: he catches up on what was sealed while he was gone.
+        let bob = start(bob_identity, bob_dir).await;
+        until_event(&bob.engine, Duration::from_secs(90), "bob reads the sealed channel", || channel_id(&bob.engine, id, "while-away")).await;
+        assert!(bob.engine.community_view(id).unwrap().member_only);
+        finish(vec![alice, bob]).await;
     })
     .await;
 }

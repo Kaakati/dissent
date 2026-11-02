@@ -23,6 +23,7 @@ import { clearCommunityIcon, moderate, saveServerProfile, setCommunityIcon, setC
 import { bannerOf, bannersStill, draftUrlOf, sameBanner, subscribeBannerMotion, type BannerDraft } from '@/lib/banners';
 import { boostLabel, videoLabel } from '@/lib/boosts';
 import { confirm, useDialogs } from '@/lib/dialog';
+import { confirmGate, gateSummary } from '@/lib/gate';
 import { iconSrc } from '@/lib/images';
 import { useShell } from '@/lib/store';
 import { loadStorageAsks, useStorageAsks } from '@/lib/storage-asks';
@@ -397,7 +398,14 @@ function ProfileForm({ community, draft, edit }: { community: CommunityView; dra
 function HistoryBlock({ community }: { community: CommunityView }) {
   const change = async (setting: string) => {
     try {
-      await api.setHistoryVisibility(community.id, setting);
+      const status = await api.memberOnlyStatus(community.id);
+      const confirmed = await confirmGate(status, {
+        title: 'Change who can read past messages?',
+        okLabel: 'Change it',
+        seen: 'Until they update, their app cannot read this setting and keeps following the old one.',
+      });
+      if (!confirmed) return;
+      await api.setHistoryVisibility(community.id, setting, confirmed);
       await useShell.getState().loadCommunity(community.id);
     } catch (err) {
       toast(err);
@@ -515,9 +523,10 @@ function BoostsSection({ community }: { community: CommunityView }) {
 
 // Member-only control: the owner seals the server's details (who is in it, names, roles, channels, settings) under the
 // encryption group, so only current members read them. Invite holders who have not joined and seeders (storage
-// members) stop seeing them. It turns on only when every member device says it can read sealed details, since a device
-// that cannot would lose them; the status names how many have not said so. It turns off at any time. The default stays
-// off (docs/design/05-encrypted-servers.md, "Member-only control").
+// members) stop seeing them. A device that answers it is too old holds the switch back until the owner overrides it, and
+// an offline device is named when turning it on: either way the owner confirms what those people see, so one person
+// cannot hold the server hostage. It turns off at any time. The default stays off
+// (docs/design/05-encrypted-servers.md, "Member-only control").
 function PrivacySection({ community }: { community: CommunityView }) {
   const [status, setStatus] = useState<MemberOnlyStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -540,8 +549,20 @@ function PrivacySection({ community }: { community: CommunityView }) {
   const change = async (next: boolean) => {
     setBusy(true);
     try {
-      await api.setMemberOnly(community.id, next);
-      await loadCommunity(community.id);
+      // Asked afresh, since who is online changes while the page stays open.
+      const fresh = next ? await api.memberOnlyStatus(community.id) : null;
+      if (fresh) setStatus(fresh);
+      const confirmed = fresh
+        ? await confirmGate(fresh, {
+            title: 'Hide server details from non-members?',
+            okLabel: 'Turn on',
+            seen: 'Until they update, server details changed from now on (members, names, roles, channels and settings) show as locked on their app.',
+          })
+        : [];
+      if (confirmed) {
+        await api.setMemberOnly(community.id, next, confirmed);
+        await loadCommunity(community.id);
+      }
     } catch (err) {
       toast(`Could not change member-only details: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -550,6 +571,7 @@ function PrivacySection({ community }: { community: CommunityView }) {
   };
   if (!status) return <Hint>Checking the members' devices…</Hint>;
   const blocked = !status.on && !status.can_enable;
+  const listed = !status.on && status.waiting > 0;
   return (
     <Block title="Member-only details">
       <CheckRow>
@@ -572,18 +594,20 @@ function PrivacySection({ community }: { community: CommunityView }) {
       <p id="member-only-status" data-member-only-status className="text-sm text-muted-foreground" role="status">
         {status.on
           ? 'On. New server details are only readable by members.'
-          : blocked
-            ? `${status.waiting} member ${status.waiting === 1 ? 'device has' : 'devices have'} not confirmed they support this. They may be offline or need to update the app. You can turn it on once every member device answers.`
+          : listed
+            ? gateSummary(status)
             : 'Every member device supports this.'}
       </p>
-      {blocked ? (
-        <div>
+      {listed ? (
+        <div className="flex gap-s-2">
           <Button variant="secondary" size="sm" disabled={busy} onClick={() => void load()}>Check again</Button>
+          {blocked ? <Button variant="secondary" size="sm" disabled={busy} onClick={() => void change(true)}>Turn on anyway…</Button> : null}
         </div>
       ) : null}
       <Hint>
-        Members on an app version from before this setting cannot read sealed details, which is why it waits for every
-        device. A device that joins later on an older version sees them as locked.
+        Members on an app version from before this setting cannot read sealed details, so you are told who that is before
+        it turns on. An offline member does not hold it back. A device that joins later on an older version sees them as
+        locked. Updating the app unlocks them.
       </Hint>
       {owner ? null : <Hint>Only the owner can change this.</Hint>}
     </Block>
@@ -591,7 +615,7 @@ function PrivacySection({ community }: { community: CommunityView }) {
 }
 
 // Seeder may forward calls: the owner lets the server's seeders forward its voice calls when nobody in a call
-// forwards better, as members who turn on Help Forward Calls do. Off by default. Admins see it, but only the owner
+// forwards better. A seeder holds no key, so it carries the call sealed; members never forward a call they are not in. Off by default. Admins see it, but only the owner
 // changes it, which the engine enforces too.
 function SeederForwardsBlock({ community }: { community: CommunityView }) {
   const [on, setOn] = useState<boolean | null>(null);

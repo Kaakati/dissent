@@ -605,13 +605,19 @@ async fn a_host_tells_the_person_when_it_starts_and_stops_holding_their_mail() {
         bob.inbox_notices().first().is_some_and(|n| n.on && n.device == carol_dev && n.root == carol_root.to_string())
     })
     .await;
-    let mut seen = None;
-    while let Ok(ev) = events.try_recv() {
-        if let EngineEvent::InboxHostChanged { device_id, on, .. } = ev {
-            seen = Some((device_id, on));
+    // The notice can be readable a moment before its event is sent, so this waits for the event.
+    let seen = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await {
+                Ok(EngineEvent::InboxHostChanged { device_id, on, .. }) => return (device_id, on),
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("the engine stopped"),
+            }
         }
-    }
-    assert_eq!(seen, Some((carol_dev.clone(), true)), "the app is told, for an in-app notice");
+    })
+    .await
+    .expect("the app is told, for an in-app notice");
+    assert_eq!(seen, (carol_dev.clone(), true), "the app is told, for an in-app notice");
     assert!(!bob.inbox_notices()[0].chosen, "bob has not picked it yet");
 
     // Setting what is already set sends nothing.

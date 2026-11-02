@@ -16,8 +16,8 @@ What runs today, in `dissent-media` and `dissent-core/src/calls.rs`:
   step. From `cascade_at` devices (`CASCADE_AT`, 50) a forwarded call becomes a cascade: a root and
   child forwarders with standbys (`cascade.rs`). It runs over the network, tested on loopback with
   `cascade_at` lowered to 9.
-- **Who forwards.** A participant, or since phase 3 a volunteer member who is not in the call
-  (`calls/volunteers.rs`). `elect_forwarder` ranks the call's own devices by announced upload
+- **Who forwards.** A participant, or a seeder the owner allows (`calls/volunteers.rs`). Members who are not in
+  the call no longer forward it, as of v0.1.24: see "Member volunteers, removed" below. `elect_forwarder` ranks the call's own devices by announced upload
   capacity, then the spec's rules (not on battery, wired, CPU ok, central, lowest id).
 - **End to end.** The forwarder holds no media key. It routes SFrame frames by the key id and passes
   them on unchanged. It sees levels, sizes, timing and sender ids, never content (`04-calls.md`,
@@ -39,7 +39,9 @@ in this order of preference for a given call:
 
 1. **A participant.** This is today's rule, and it stays the default. The forwarder hears and is
    heard. Its own speech enters through an in-process link, so it pays no extra hop.
-2. **A volunteer member.** Built in phase 3. A member who turned on "Help Forward Calls" for that
+2. **A volunteer member. Removed in v0.1.24** (decided by the user): a member holds the server's key, so a member
+   who carries a call it is not in could listen to it. Each device refuses a member's offer as for a call it is not in,
+   and elects only participants and seeders. What it was: built in phase 3. A member who turned on "Help Forward Calls" for that
    server (decided: per server, off by default; it is in the server's menu beside the other
    per-server choices, since members have no Server Settings page), whose device is online and in
    no call of its own. They forward the call only: no audio and no video, never listed as in the
@@ -55,6 +57,22 @@ in this order of preference for a given call:
    `Payload::SeederForwardsCalls { on }`, appended and carried. No call role in replay is needed,
    since forwarding publishes no event: the seeder's engine reads the setting and volunteers on its
    own, and every device in the call checks it before it keeps the seeder's offer.
+
+### Member volunteers, removed
+
+- **Who still forwards from outside a call.** Only a seeder whose owner allows it, which holds no key.
+- **Compatibility.** A current client no longer sends `FEATURE_VOLUNTEERS` (bit 4) and sends `FEATURE_SEEDERS_ONLY`
+  (bit 32) instead. A client from before elects anyone outside the call only when every device in it sent bit 4, so
+  a call with one current client in it elects nobody outside the call, on either side, and does not split. A current
+  client elects a seeder only when every device sent bit 32, so seeders forward only calls of current clients until
+  everyone updates. A seeder from before still offers with bit 4, and a current client takes it.
+- **The stored opt-in.** "Help Forward Calls" is gone from the server menu, and the setting it stored
+  (`forward_calls.bin`) is ignored.
+- **The cost.** A big call on weak links loses the help of a member with good upload outside it. It is forwarded by
+  its best participant, or by a seeder where the owner allows one, and a boost level still sets how big a mesh gets.
+- **Tests.** `volunteers::a_member_outside_the_call_is_refused_and_never_elected`, and
+  `volunteers::a_call_with_older_clients_elects_no_member_outside_it`, whose older devices are modelled by their
+  features. The other outside-forwarder tests now use a seeder.
 
 A **relay host** (`12-boosts.md`) is not a forwarder kind of its own. The relay binary carries
 packets, not calls, and making it a media forwarder would put a str0m stack in `apps/relay`. Instead,
@@ -276,7 +294,8 @@ as a mesh before it is forwarded:
   in the call, so it cannot read the call's `Features` before it offers: it sends the offer to every
   device it hears of, and a released one answers with a decode error, as it does for `Features`.
   An election that includes a non-participant is used only when every live device sent
-  `FEATURE_VOLUNTEERS` (bit 4) in the last 30 s. Otherwise the forwarder is a participant, as
+  `FEATURE_VOLUNTEERS` (bit 4) in the last 30 s, for clients before v0.1.24, or `FEATURE_SEEDERS_ONLY` (bit 32), for
+  later ones, which elect only seeders. Otherwise the forwarder is a participant, as
   today, and a volunteer already forwarding is replaced by one.
 - **Layers.** A released receiver reads the layer bits as layer 0, and a forwarder sends it layer
   0 only, since it never reported tile widths: two layers would reach its decoder as one broken

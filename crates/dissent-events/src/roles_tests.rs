@@ -250,6 +250,89 @@ fn a_carried_role_event_opens_and_applies() {
     assert!(st.rejected.iter().any(|(r, why)| *r == id && *why == Rejection::Locked));
 }
 
+/// An app from before custom roles has the same events, and no key for the carried kinds. What it replays, and what
+/// the same events replay to once the app is updated.
+#[test]
+fn a_returning_old_app_diverges_on_custom_bits_and_updating_recovers_it() {
+    use crate::control::{carry_sealed, seal};
+    let mut f = Fixture::new();
+    let secret = [7u8; 32];
+    let carried = |f: &mut Fixture, who: usize, payload: Payload| {
+        f.t += 1;
+        let body = crate::EventBody {
+            community: dissent_identity::CommunityId([0; 32]),
+            channel: ChannelId::CONTROL,
+            author: f.id(who),
+            device: f.users[who].device.id(),
+            parents: f.last.into_iter().collect(),
+            hlc: Hlc { wall_ms: f.t, counter: 0 },
+            payload,
+        };
+        let mut sealed = body.clone();
+        sealed.payload = carry_sealed(&seal(&secret, 0, &body).unwrap()).unwrap();
+        let ev = crate::Event::sign(sealed, &f.users[who].device);
+        let id = ev.id;
+        f.dag.insert(ev).unwrap();
+        f.last = Some(id);
+        id
+    };
+    let role = RoleId(carried(&mut f, ADMIN, Payload::RoleCreate { spec: spec("Builders", Perms::MANAGE_CHANNELS, 1) }).0);
+    let bob = f.id(BOB);
+    carried(&mut f, ADMIN, Payload::RoleAssign { user: bob, role, on: true });
+    let switch = carried(&mut f, OWNER, Payload::CustomRolePerms { on: true });
+    let channel = f.push(BOB, Payload::ChannelCreate { name: "builds".into() });
+    let chat = f.push_in(BOB, ChannelId(channel.0), Payload::Message { text: "hello".into() });
+
+    let old = replay_with(f.id(OWNER), &f.dag, &[]);
+    assert!(old.rejected.iter().any(|(r, why)| *r == switch && *why == Rejection::Locked), "the switch is locked there");
+    assert!(old.rejected.iter().any(|(r, why)| *r == channel && *why == Rejection::NoPermission), "so bob's channel is refused");
+    assert!(!old.channels.contains_key(&ChannelId(channel.0)));
+    assert!(old.rejected.iter().any(|(r, _)| *r == chat), "and so is what was said in it");
+
+    // The events stay in the log. An updated app replays them with the carrier's kinds and sees the server as it is.
+    let updated = replay_with(f.id(OWNER), &f.dag, &[(0, secret)]);
+    assert!(updated.rejected.iter().all(|(r, _)| *r != switch && *r != channel && *r != chat), "{:?}", updated.rejected);
+    assert!(updated.channels.contains_key(&ChannelId(channel.0)));
+}
+
+/// Tracker kinds are carried, so an app from before the tracker sees them locked and agrees on everything else.
+#[test]
+fn an_old_app_sees_tracker_events_as_locked_and_agrees_on_the_rest() {
+    use crate::control::{carry_sealed, seal};
+    let mut f = Fixture::new();
+    let secret = [7u8; 32];
+    f.t += 1;
+    let body = crate::EventBody {
+        community: dissent_identity::CommunityId([0; 32]),
+        channel: ChannelId::CONTROL,
+        author: f.id(OWNER),
+        device: f.users[OWNER].device.id(),
+        parents: f.last.into_iter().collect(),
+        hlc: Hlc { wall_ms: f.t, counter: 0 },
+        payload: Payload::FileCategorySet {
+            category: None,
+            add: Default::default(),
+            visible: None,
+            inner: crate::FilesSealed { generation: 1, ciphertext: vec![1, 2, 3] },
+        },
+    };
+    let mut sealed = body.clone();
+    sealed.payload = carry_sealed(&seal(&secret, 0, &body).unwrap()).unwrap();
+    let ev = crate::Event::sign(sealed, &f.users[OWNER].device);
+    let id = ev.id;
+    f.dag.insert(ev).unwrap();
+    f.last = Some(id);
+    let later = f.push(ADMIN, Payload::ChannelCreate { name: "general".into() });
+
+    let old = replay_with(f.id(OWNER), &f.dag, &[]);
+    assert!(old.rejected.iter().any(|(r, why)| *r == id && *why == Rejection::Locked));
+    assert!(old.files.categories.is_empty());
+    assert!(old.channels.contains_key(&ChannelId(later.0)), "it still agrees on released kinds");
+    let new = replay_with(f.id(OWNER), &f.dag, &[(0, secret)]);
+    assert_eq!(new.files.categories.len(), 1, "updating opens the category");
+    assert!(new.channels.contains_key(&ChannelId(later.0)));
+}
+
 #[test]
 fn a_manage_channels_role_arranges_channels_once_custom_bits_count() {
     let mut f = Fixture::new();

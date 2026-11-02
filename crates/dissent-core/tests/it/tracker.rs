@@ -100,6 +100,328 @@ async fn an_owner_makes_a_category_lists_files_and_a_second_copy_dedupes() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_old_app_or_an_offline_member_does_not_stop_a_server_sharing_files() {
+    heavy(3, async {
+        let alice = peer("tracker-free-alice").await;
+        let bob = peer("tracker-free-bob").await;
+        let carol = peer("tracker-free-carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+
+        // Bob's app is too old for the tracker and Carol is offline.
+        dissent_core::test_support::set_features(&bob.engine, 0);
+        let (carol_identity, carol_dir) = stop(carol).await;
+        let cat = alice.engine.create_category(id, releases()).await.expect("the first category needs nobody's app");
+
+        let dir = scratch("tracker-free-src");
+        let bytes = sample(150_000, 9);
+        let msi = write(&dir, "app.msi", &bytes);
+        alice.engine.prepare_listing(id, cat, vec![msi.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.expect("the first listing");
+
+        // A member who comes back on a current app reads the catalog and downloads.
+        let carol = start(carol_identity, carol_dir).await;
+        until_event(&carol.engine, Duration::from_secs(60), "carol reads the listing", || {
+            carol.engine.files_view(id).ok().filter(|v| v.listings.len() == 1).map(|_| ())
+        })
+        .await;
+        carol.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download");
+        until_event(&carol.engine, Duration::from_secs(120), "carol has the file", || {
+            carol.engine.files_view(id).ok().filter(|v| v.listings[0].local == "seeding").map(|_| ())
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+/// Waits for a check job to finish, and returns what it reported.
+async fn checked(events: &mut tokio::sync::broadcast::Receiver<dissent_core::EngineEvent>, job: u64) -> Vec<dissent_core::tracker::catalog::CandidateView> {
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), events.recv()).await.expect("the check finishes") {
+            Ok(dissent_core::EngineEvent::FileCheck { job: j, result: Some(view), .. }) if j == job => out.push(view),
+            Ok(dissent_core::EngineEvent::FileCheckDone { job: j }) if j == job => return out,
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_check_reports_each_file_and_only_for_chosen_paths() {
+    heavy(1, async {
+        let alice = peer("tracker-check").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let dir = scratch("tracker-check-src");
+        let bytes = sample(150_000, 3);
+        let msi = write(&dir, "a.msi", &bytes);
+        let other = write(&dir, "b.msi", &sample(150_000, 4));
+
+        // A path nobody chose goes nowhere: it is not checked, and it does not become listable.
+        let refused = alice.engine.start_file_check(id, vec![msi.clone()]);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.is_err());
+
+        let mut events = alice.engine.subscribe();
+        alice.engine.allow_paths([msi.clone(), other.clone()]);
+        let job = alice.engine.start_file_check(id, vec![msi.clone(), other.clone()]).expect("chosen paths");
+        let mut views = checked(&mut events, job).await;
+        views.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].state, "ready");
+        assert_eq!(views[0].fingerprint, data_encoding::HEXLOWER.encode(blake3::hash(&bytes).as_bytes()));
+        let listed = alice.engine.list_files(id, cat, vec![item(&msi, &[])], SeedLimit::Forever).await.expect("checked, so listable");
+
+        // The same bytes under another name read as already listed.
+        let copy = write(&dir, "copy.msi", &bytes);
+        alice.engine.allow_paths([copy.clone()]);
+        let job = alice.engine.start_file_check(id, vec![copy]).unwrap();
+        let views = checked(&mut events, job).await;
+        assert_eq!((views[0].state.as_str(), views[0].listing.as_deref()), ("already_listed", Some(listed[0].as_str())));
+
+        // A cancelled check stops, reports nothing more, and makes nothing listable.
+        let big = write(&dir, "big.msi", &sample(40_000_000, 5));
+        alice.engine.allow_paths([big.clone()]);
+        let job = alice.engine.start_file_check(id, vec![big.clone()]).unwrap();
+        alice.engine.cancel_file_check(job);
+        let views = checked(&mut events, job).await;
+        assert!(views.is_empty(), "{views:?}");
+        assert!(alice.engine.list_files(id, cat, vec![item(&big, &[])], SeedLimit::Forever).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drop_sends_each_file_to_the_category_its_type_fits() {
+    heavy(1, async {
+        let alice = peer("tracker-drop").await;
+        let server = alice.engine.create_community("Drops".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let dir = scratch("tracker-drop-src");
+        let png = write(&dir, "cat.png", b"png");
+        let pdf = write(&dir, "book.pdf", b"pdf");
+        let key = write(&dir, "server.pem", b"secret");
+        let all = vec![png.clone(), pdf.clone(), key.clone()];
+
+        // A page cannot name a path nobody chose.
+        assert!(alice.engine.plan_file_drop(id, all.clone(), None).await.is_err());
+        alice.engine.allow_paths(all.iter().cloned());
+
+        // A server with no category gets one per type, and never one for a key file, which is not listed.
+        let plan = alice.engine.plan_file_drop(id, all.clone(), None).await.expect("plan");
+        assert_eq!(plan.created, vec!["Images", "Documents"]);
+        let by_name = |plan: &dissent_core::tracker::drops::DropPlan, name: &str| plan.items.iter().find(|i| i.name == name).cloned().unwrap();
+        assert_eq!(by_name(&plan, "cat.png").category_name.as_deref(), Some("Images"));
+        assert_eq!(by_name(&plan, "book.pdf").category_name.as_deref(), Some("Documents"));
+        let secret = by_name(&plan, "server.pem");
+        assert_eq!((secret.skip.as_deref(), secret.category), (Some("credentials"), None));
+
+        // With categories, nothing more is made. The narrowest wins, and a filter that accepts the file wins over it.
+        let view = alice.engine.files_view(id).unwrap();
+        let images: dissent_events::CategoryId = view.categories.iter().find(|c| c.name == "Images").unwrap().id.parse().unwrap();
+        let mut any = releases();
+        any.name = "Everything".into();
+        any.types = vec![];
+        let everything = alice.engine.create_category(id, any).await.unwrap();
+        let plan = alice.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(plan.created.is_empty());
+        assert_eq!(plan.items[0].category.as_deref(), Some(images.to_string().as_str()));
+        let plan = alice.engine.plan_file_drop(id, vec![png.clone()], Some(everything)).await.unwrap();
+        assert_eq!(plan.items[0].category.as_deref(), Some(everything.to_string().as_str()));
+        let zip = write(&dir, "a.zip", b"zip");
+        alice.engine.allow_paths([zip.clone()]);
+        let plan = alice.engine.plan_file_drop(id, vec![zip.clone()], Some(images)).await.unwrap();
+        assert_eq!(plan.items[0].category.as_deref(), Some(everything.to_string().as_str()), "the filter refuses a zip");
+
+        // A folder is reported, not listed.
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        alice.engine.allow_paths([sub.clone()]);
+        let plan = alice.engine.plan_file_drop(id, vec![sub.clone()], None).await.unwrap();
+        assert_eq!((plan.items.len(), plan.folders.len()), (0, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_drop_respects_who_may_add_and_who_may_make_categories() {
+    heavy(2, async {
+        let alice = peer("tracker-drop-owner").await;
+        let bob = peer("tracker-drop-member").await;
+        let id = rustaceans(&alice, &bob).await;
+        let dir = scratch("tracker-drop-member-src");
+        let png = write(&dir, "cat.png", b"png");
+        bob.engine.allow_paths([png.clone()]);
+
+        // A member may not make the first category: nothing is listed, and the plan says why.
+        let plan = bob.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(plan.no_categories && plan.created.is_empty());
+        assert_eq!(plan.items[0].skip.as_deref(), Some("no_category"));
+
+        // A category only admins may add to is not offered to a member.
+        let mut staff = releases();
+        staff.name = "Staff only".into();
+        staff.types = vec![];
+        staff.add.min_rank = "admin".into();
+        alice.engine.create_category(id, staff).await.unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob sees the category", || {
+            bob.engine.files_view(id).ok().filter(|v| v.categories.iter().any(|c| c.readable)).map(|_| ())
+        })
+        .await;
+        let plan = bob.engine.plan_file_drop(id, vec![png.clone()], None).await.unwrap();
+        assert!(!plan.no_categories);
+        assert_eq!(plan.items[0].skip.as_deref(), Some("no_category"), "{:?}", plan.items[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_folder_is_scanned_and_seeded_in_place_with_no_copy() {
+    heavy(2, async {
+        let alice = peer("tracker-folder").await;
+        let bob = peer("tracker-folder-bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        let mut images = releases();
+        images.name = "Images".into();
+        images.types = vec!["Image".into()];
+        let cat = alice.engine.create_category(id, images).await.expect("category");
+        let mut docs = releases();
+        docs.name = "Docs".into();
+        docs.types = vec!["Document".into()];
+        alice.engine.create_category(id, docs).await.expect("category");
+
+        let dir = scratch("tracker-folder-src").join("Holiday Photos");
+        let bytes = sample(200_000, 7);
+        let png = write(&dir, "a.png", &bytes);
+        write(&dir, "b.png", &sample(1000, 8));
+        write(&dir.join("sub"), "c.png", &sample(1000, 9));
+        write(&dir, "notes.txt", b"notes");
+        write(&dir, ".hidden", b"x");
+        write(&dir, "desktop.ini", b"x");
+        write(&dir, ".env", b"SECRET=1");
+        write(&dir.join(".git"), "config", b"x");
+        write(&dir.join("1/2/3/4/5"), "deep.png", b"x");
+
+        // A folder nobody chose is refused.
+        assert!(alice.engine.scan_folder(id, dir.clone(), None).await.is_err());
+        alice.engine.allow_paths([dir.clone()]);
+        let scan = alice.engine.scan_folder(id, dir.clone(), None).await.expect("scan");
+        assert_eq!(scan.name, "Holiday Photos");
+        assert_eq!(scan.tag, "holiday-photos");
+        assert_eq!(scan.category.as_deref(), Some(cat.to_string().as_str()), "the most common type picks the category");
+        assert_eq!(scan.hidden_dirs, vec![".git"]);
+        assert_eq!(scan.too_deep, 1);
+        let flag_of = |name: &str| scan.files.iter().find(|f| f.name == name).map(|f| f.flag.clone());
+        assert_eq!(flag_of("a.png").as_deref(), Some(""));
+        assert_eq!(flag_of(".hidden").as_deref(), Some("hidden"));
+        assert_eq!(flag_of("desktop.ini").as_deref(), Some("system"));
+        assert_eq!(flag_of(".env").as_deref(), Some("credentials"));
+        assert_eq!(flag_of("deep.png"), None);
+
+        // A check, then listing in place.
+        let mut events = alice.engine.subscribe();
+        let job = alice.engine.start_file_check(id, vec![png.clone()]).expect("the scan allowed its files");
+        checked(&mut events, job).await;
+        let listed = alice.engine.list_files_in_place(id, cat, vec![item(&png, &["holiday-photos"])], SeedLimit::Forever).await.expect("listed");
+
+        // No copy went into the store: it has an outboard, and the seed names the file where it is.
+        let mut outboards = 0;
+        let mut stack = vec![alice.dir.clone()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "obao") {
+                    outboards += 1;
+                }
+            }
+        }
+        assert!(outboards >= 1, "the file is linked, not copied");
+        let l = alice.engine.files_view(id).unwrap().listings.remove(0);
+        assert_eq!((l.local.as_str(), l.local_path.as_deref()), ("seeding", Some(png.to_string_lossy().as_ref())));
+        assert_eq!(l.tags, vec!["holiday-photos"]);
+
+        // Another member gets it from there.
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings.len() == 1).map(|_| ())
+        })
+        .await;
+        bob.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download");
+        until_event(&bob.engine, Duration::from_secs(120), "bob has the file", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings[0].local == "seeding").map(|_| ())
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
+    heavy(3, async {
+        let alice = peer("tracker-edit-owner").await;
+        let bob = peer("tracker-edit-lister").await;
+        let carol = peer("tracker-edit-other").await;
+        let id = rustaceans(&alice, &bob).await;
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the category", || {
+            bob.engine.files_view(id).ok().filter(|v| v.categories.iter().any(|c| c.readable)).map(|_| ())
+        })
+        .await;
+        let dir = scratch("tracker-edit-src");
+        let msi = write(&dir, "app.msi", &sample(20_000, 11));
+        bob.engine.prepare_listing(id, cat, vec![msi.clone()]).await.unwrap();
+        let listed = bob.engine.list_files(id, cat, vec![item(&msi, &["first"])], SeedLimit::Forever).await.expect("listed");
+        let listing = listed[0].parse().unwrap();
+        let seen = |engine: &dissent_core::Engine, tag: &str| engine.files_view(id).ok().filter(|v| v.listings.first().is_some_and(|l| l.tags == vec![tag.to_string()])).map(|_| ());
+        for p in [&alice, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the listing arrives", || seen(&p.engine, "first")).await;
+        }
+
+        // The lister edits, and the others see it with no reload.
+        bob.engine.update_listing(id, listing, vec!["#Second".into()], "Newer".into()).await.expect("the lister edits");
+        for p in [&alice, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the edit arrives", || seen(&p.engine, "second")).await;
+        }
+        assert_eq!(carol.engine.files_view(id).unwrap().listings[0].description, "Newer");
+
+        // A file manager edits someone else's listing, and every member opens it.
+        assert!(alice.engine.files_view(id).unwrap().listings[0].can_edit);
+        alice.engine.update_listing(id, listing, vec!["third".into()], "By a manager".into()).await.expect("a manager edits");
+        for p in [&bob, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the manager's edit arrives", || seen(&p.engine, "third")).await;
+        }
+
+        // Anyone else may not, and nothing changes.
+        assert!(!carol.engine.files_view(id).unwrap().listings[0].can_edit);
+        assert!(carol.engine.update_listing(id, listing, vec!["nope".into()], String::new()).await.is_err());
+        assert!(alice.engine.update_listing(id, listing, vec!["two words".into()], String::new()).await.is_err(), "a bad tag fails");
+        assert_eq!(bob.engine.files_view(id).unwrap().listings[0].tags, vec!["third"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
     heavy(2, async {
         let alice = peer("tracker-alice").await;
@@ -511,6 +833,127 @@ async fn a_book_that_does_not_read_is_kept_and_its_seeds_keep_their_pins() {
         assert_eq!(alice.engine.store_stats().await.unwrap().files, 1, "the seed keeps its pin");
         let _ = std::fs::remove_dir_all(&src);
         finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_download_shows_live_figures_on_both_sides_and_moves_faster_than_a_timer_tick_per_chunk() {
+    heavy(2, async {
+        let alice = peer("tracker-live-alice").await;
+        let bob = peer("tracker-live-bob").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let invite = alice.engine.create_invite(id).await.unwrap();
+        join_ready(&alice, &bob, &invite).await;
+        let dir = scratch("tracker-live-src");
+        // Large enough to outlast a timer tick per 16 KiB by far, small enough for CI.
+        let bytes = sample(64 * 1024 * 1024, 5);
+        let zip = write(&dir, "large.zip", &bytes);
+        alice.engine.prepare_listing(id, cat, vec![zip.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&zip, &[])], SeedLimit::Forever).await.unwrap();
+        let listing = listed[0].parse().unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listed[0]))
+        })
+        .await;
+
+        // The seeder sees itself in the swarm before anyone downloads, and counts once.
+        let own = alice.engine.listing_swarm(id, listing).await.unwrap();
+        assert_eq!(own.seeders, 1);
+        assert!(own.peers.iter().any(|p| p.you && p.has >= 1.0), "{:?}", own.peers);
+        // The downloader sees the lister before it has answered for itself.
+        let seen = bob.engine.listing_swarm(id, listing).await.unwrap();
+        let alice_root = alice.engine.me().root_id;
+        assert!(seen.peers.iter().any(|p| p.root_id == alice_root && !p.you && p.has >= 1.0), "{:?}", seen.peers);
+
+        // A cap keeps the download long enough to read its figures. It says nothing of the uncapped speed below.
+        let settings = bob.engine.seeding_settings();
+        bob.engine.set_seeding_settings(dissent_core::tracker::seeding::SeedingSettings { download_bps: Some(8_000_000), ..settings.clone() }).unwrap();
+        bob.engine.download_listing(id, listing).await.expect("download starts");
+        let moving = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let down = bob.engine.listing_live(id, listing).await.unwrap();
+                let up = alice.engine.listing_live(id, listing).await.unwrap();
+                let sent = up.peers.iter().find(|p| p.has > 0.0 && p.to_bps > 0).cloned();
+                if let (true, true, Some(sent)) = (down.down_bps > 0 && down.eta_s.is_some(), !down.own_pieces.is_empty(), sent) {
+                    return (down, up, sent);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("both sides report the transfer while it runs");
+        assert!(moving.0.active && moving.1.active);
+        assert!(moving.1.up_bps > 0);
+        assert!(moving.2.has < 1.0, "bob is not done: {:?}", moving.2);
+        let row = bob.engine.transfers().into_iter().find(|t| t.message_id.contains(&listed[0])).expect("a row");
+        assert!(row.rate_bps > 0, "the transfer's row has a speed");
+        // The downloader's own row shows its progress.
+        let mine = bob.engine.listing_swarm(id, listing).await.unwrap();
+        assert!(mine.peers.iter().any(|p| p.you && p.has < 1.0), "{:?}", mine.peers);
+        bob.engine.pause_transfer(&row.id).unwrap();
+
+        // Uncapped, this must beat one 16 KiB chunk per timer tick, which was about 1.6 MB/s.
+        bob.engine.set_seeding_settings(settings).unwrap();
+        let held = bob.engine.transfers().into_iter().find(|t| t.id == row.id).unwrap().progress;
+        let from = std::time::Instant::now();
+        bob.engine.resume_transfer(&row.id).unwrap();
+        let path = until_event(&bob.engine, Duration::from_secs(120), "the download finishes and seeds", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.local == "seeding")).and_then(|l| l.local_path)
+        })
+        .await;
+        let mb_per_s = (1.0 - held) * 64.0 / from.elapsed().as_secs_f64();
+        assert!(mb_per_s > 4.0, "{mb_per_s:.1} MB/s");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+        // Each slice's offsets are in the whole file: the seeder counts what it sent once, not each slice from zero.
+        let size = bytes.len() as u64;
+        until_event(&alice.engine, Duration::from_secs(10), "alice counts what she sent", || {
+            alice.engine.files_view(id).ok().filter(|v| v.standing.uploaded >= size * 9 / 10)
+        })
+        .await;
+        let uploaded = alice.engine.files_view(id).unwrap().standing.uploaded;
+        assert!(uploaded <= size * 12 / 10, "uploaded {uploaded} of {size}");
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn an_upload_cap_still_holds_now_that_no_cap_means_no_wait() {
+    heavy(2, async {
+        let alice = peer("tracker-cap-alice").await;
+        let bob = peer("tracker-cap-bob").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        let invite = alice.engine.create_invite(id).await.unwrap();
+        join_ready(&alice, &bob, &invite).await;
+        let dir = scratch("tracker-cap-src");
+        let zip = write(&dir, "capped.zip", &sample(16 * 1024 * 1024, 6));
+        alice.engine.prepare_listing(id, cat, vec![zip.clone()]).await.unwrap();
+        let listed = alice.engine.list_files(id, cat, vec![item(&zip, &[])], SeedLimit::Forever).await.unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob reads the listing", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listed[0]))
+        })
+        .await;
+        let settings = alice.engine.seeding_settings();
+        alice.engine.set_seeding_settings(dissent_core::tracker::seeding::SeedingSettings { upload_bps: Some(2_000_000), ..settings }).unwrap();
+        let from = std::time::Instant::now();
+        bob.engine.download_listing(id, listed[0].parse().unwrap()).await.expect("download starts");
+        until_event(&bob.engine, Duration::from_secs(60), "the capped download finishes", || {
+            bob.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.local == "seeding"))
+        })
+        .await;
+        // 16 MiB at 2 MB/s, less the one second the bucket starts with.
+        let took = from.elapsed().as_secs_f64();
+        assert!(took > 6.0, "the cap did not hold: {took:.1} s");
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice, bob]).await;
     })
     .await;
 }

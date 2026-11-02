@@ -1,6 +1,7 @@
 // The server file tracker (Files area, Server Settings > Files). See `dissent_core::tracker`.
 import { useEffect } from 'react';
 import { create } from 'zustand';
+import { onEngineEvent } from './api';
 import type { FileDanger, Id, TransferItem } from './types';
 
 export interface DownloadRules {
@@ -100,12 +101,32 @@ export interface FilesView {
 
 export interface SwarmPeerView {
   root_id: Id;
+  you: boolean;
   name: string;
   role: string;
   storage: boolean;
   online: boolean;
   has: number; // 0 to 1
   level: number;
+}
+
+// What is moving for a listing now, as this device sees it. Read each second while its page is open.
+export interface LivePeer {
+  root_id: Id;
+  name: string;
+  from_bps: number; // what this device receives from them
+  to_bps: number; // what this device sends them
+  has: number; // 0 to 1, their last answer plus what they were sent since
+}
+
+export interface LiveSwarm {
+  active: boolean;
+  down_bps: number;
+  up_bps: number;
+  eta_s: number | null;
+  progress: number | null; // this device's own download, 0 to 1
+  own_pieces: [number, number][]; // the pieces this device's download holds, as start and end
+  peers: LivePeer[];
 }
 
 export interface SwarmView {
@@ -146,6 +167,61 @@ export interface CandidateView {
   listing: Id | null;
 }
 
+// A chosen path, as far as it can be told without reading the file.
+export interface PickedView {
+  path: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  is_dir: boolean;
+}
+
+// A dropped file, and where it goes or why it does not (`DropItem` in dissent-core).
+export interface DropItem {
+  path: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  category: Id | null;
+  category_name: string | null;
+  skip: string | null;
+}
+
+export interface DropPlan {
+  items: DropItem[];
+  folders: string[];
+  created: string[];
+  no_categories: boolean;
+}
+
+// One file found in a folder. `flag` says why it starts unticked, or cannot be ticked (`FolderFile` in dissent-core).
+export interface FolderFile {
+  path: string;
+  relative: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  flag: '' | 'hidden' | 'system' | 'credentials' | 'link' | 'too_large';
+}
+
+export interface FolderScan {
+  root: string;
+  name: string;
+  tag: string;
+  files: FolderFile[];
+  over_limit: number;
+  flagged_more: number;
+  too_deep: number;
+  hidden_dirs: string[];
+  stopped_early: boolean;
+  max_files: number;
+  max_depth: number;
+  category: Id | null;
+}
+
 export interface AddItem {
   path: string;
   tags: string[];
@@ -166,17 +242,70 @@ export const filesApi = {
   pickFolder: (communityId: Id, categoryId: Id) => invoke<string | null>('pick_category_folder', { communityId, categoryId }),
   unlinkFolder: (communityId: Id, categoryId: Id) => invoke<void>('unlink_category_folder', { communityId, categoryId }),
   setAutoImport: (communityId: Id, categoryId: Id, on: boolean) => invoke<void>('set_category_auto_import', { communityId, categoryId, on }),
-  pickFiles: (communityId: Id, categoryId: Id) => invoke<CandidateView[]>('pick_files_for_category', { communityId, categoryId }),
-  scanFolder: (communityId: Id, categoryId: Id) => invoke<CandidateView[]>('scan_category_folder', { communityId, categoryId }),
-  list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit }),
+  pickFiles: () => invoke<PickedView[]>('pick_listing_files', {}),
+  scanFolder: (communityId: Id, categoryId: Id) => invoke<PickedView[]>('scan_category_folder', { communityId, categoryId }),
+  startCheck: (communityId: Id, paths: string[]) => invoke<number>('start_file_check', { communityId, paths }),
+  cancelCheck: (job: number) => invoke<void>('cancel_file_check', { job }),
+  pickListingFolder: () => invoke<string | null>('pick_listing_folder', {}),
+  scanListingFolder: (communityId: Id, folder: string, filter: Id | null) => invoke<FolderScan>('scan_listing_folder', { communityId, folder, filter }),
+  planDrop: (communityId: Id, paths: string[], filter: Id | null) => invoke<DropPlan>('plan_file_drop', { communityId, paths, filter }),
+  list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string, inPlace = false) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit, inPlace }),
   updateListing: (communityId: Id, listingId: Id, tags: string[], description: string) =>
     invoke<void>('update_listing', { communityId, listingId, tags, description }),
   removeListing: (communityId: Id, listingId: Id) => invoke<void>('remove_listing', { communityId, listingId }),
   download: (communityId: Id, listingId: Id) => invoke<TransferItem>('download_listing', { communityId, listingId }),
   swarm: (communityId: Id, listingId: Id) => invoke<SwarmView>('listing_swarm', { communityId, listingId }),
+  live: (communityId: Id, listingId: Id) => invoke<LiveSwarm>('listing_live', { communityId, listingId }),
   setRules: (communityId: Id, rules: ReputationRules) => invoke<void>('set_reputation_rules', { communityId, rules }),
   resetReputation: (communityId: Id, userId: Id) => invoke<void>('reset_reputation', { communityId, userId }),
 };
+
+interface FileCheckEvents {
+  progress?: (path: string, done: number, total: number) => void;
+  result: (candidate: CandidateView) => void;
+  done?: () => void;
+  failed?: (err: unknown) => void;
+}
+
+// Fingerprints `paths` in the background (`start_file_check`) and reports each. Returns what stops it, which also stops
+// the work in the engine.
+export function checkFiles(communityId: Id, paths: string[], on: FileCheckEvents): () => void {
+  let job: number | null = null;
+  let stopped = false;
+  // Events can arrive before the job's number does.
+  const early: Parameters<Parameters<typeof onEngineEvent>[0]>[0][] = [];
+  const handle = (ev: Parameters<Parameters<typeof onEngineEvent>[0]>[0]) => {
+    if (stopped) return;
+    if (ev.kind !== 'file_check' && ev.kind !== 'file_check_done') return;
+    if (job === null) {
+      early.push(ev);
+      return;
+    }
+    if (ev.job !== job) return;
+    if (ev.kind === 'file_check_done') {
+      on.done?.();
+      return;
+    }
+    if (ev.result) on.result(ev.result);
+    else on.progress?.(ev.path, ev.done, ev.total);
+  };
+  const listening = onEngineEvent(handle);
+  void listening
+    .then(() => filesApi.startCheck(communityId, paths))
+    .then((id) => {
+      job = id;
+      if (stopped) void filesApi.cancelCheck(id).catch(() => {});
+      else early.splice(0).forEach(handle);
+    })
+    .catch((err) => {
+      if (!stopped) on.failed?.(err);
+    });
+  return () => {
+    stopped = true;
+    if (job !== null) void filesApi.cancelCheck(job).catch(() => {});
+    void listening.then((unlisten) => unlisten());
+  };
+}
 
 // The open server's files view. Reloaded on every change of that server and of the transfers.
 export const useFiles = create<{ communityId: Id | null; view: FilesView | null; error: string | null }>(() => ({
@@ -241,6 +370,7 @@ export interface SeedRowView {
   folder: string | null;
   path: string | null;
   state: SeedState;
+  limit_reached: boolean; // Resume alone cannot start it: its limit has to change
   note: string;
   size: number;
   uploaded: number;

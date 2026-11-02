@@ -2,7 +2,11 @@
 
 use std::path::PathBuf;
 
-use dissent_core::tracker::catalog::{AddItem, CandidateView, CategoryInput, FilesView};
+use dissent_core::tracker::adding::PickedView;
+use dissent_core::tracker::catalog::{AddItem, CategoryInput, FilesView};
+use dissent_core::tracker::drops::DropPlan;
+use dissent_core::tracker::folders::FolderScan;
+use dissent_core::tracker::live::LiveSwarm;
 use dissent_core::tracker::swarm::SwarmView;
 use dissent_core::tracker::seeding::{parse_blob, parse_limit, SeedingSettings, SeedingView};
 use dissent_core::{CommunityId, RootId, TransferView};
@@ -43,6 +47,20 @@ pub async fn delete_category(state: State<'_, AppState>, community_id: String, c
     engine(&state).await?.delete_category(community, id).await.map_err(err)
 }
 
+/// Asks for a folder through the OS picker. `None` when it is cancelled. See the `test-folder-hook` feature.
+async fn ask_folder(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    #[cfg(feature = "test-folder-hook")]
+    if let Some(file) = std::env::var_os("DISSENT_TEST_PICK_FOLDER_FILE") {
+        let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+        return Ok(Some(PathBuf::from(text.trim())));
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    picked.map(|f| f.into_path().map_err(err)).transpose()
+}
+
 /// Opens a folder picker and links the chosen folder to the category on this computer. Returns the path, or `None`
 /// when the picker was cancelled.
 #[tauri::command]
@@ -52,16 +70,11 @@ pub async fn pick_category_folder(
     community_id: String,
     category_id: String,
 ) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
-    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(picked) = picked else {
+    let Some(folder) = ask_folder(app).await? else {
         return Ok(None);
     };
-    let folder: PathBuf = picked.into_path().map_err(err)?;
     engine(&state).await?.set_category_folder(community, id, Some(folder.clone())).map_err(err)?;
     Ok(Some(folder.to_string_lossy().into_owned()))
 }
@@ -85,30 +98,67 @@ pub async fn set_category_auto_import(
     engine(&state).await?.set_category_auto_import(community, id, on).map_err(err)
 }
 
-/// Opens a file picker and reports what adding the picked files would do.
+/// Opens a file picker and reports what was picked, without reading the files. See `start_file_check`.
 #[tauri::command]
-pub async fn pick_files_for_category(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    community_id: String,
-    category_id: String,
-) -> Result<Vec<CandidateView>, String> {
+pub async fn pick_listing_files(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Vec<PickedView>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let community: CommunityId = parse("community id", &community_id)?;
-    let id: CategoryId = parse("category id", &category_id)?;
     let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_files())
         .await
         .map_err(|e| e.to_string())?;
     let paths: Vec<PathBuf> = picked.unwrap_or_default().into_iter().filter_map(|f| f.into_path().ok()).collect();
-    engine(&state).await?.prepare_listing(community, id, paths).await.map_err(err)
+    let engine = engine(&state).await?;
+    engine.allow_paths(paths.iter().cloned());
+    Ok(engine.describe_paths(&paths))
 }
 
-/// The files in the category's linked folder this computer does not seed yet, and what adding each would do.
+/// The files in the category's linked folder this computer does not seed yet, without reading them.
 #[tauri::command]
-pub async fn scan_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<Vec<CandidateView>, String> {
+pub async fn scan_category_folder(state: State<'_, AppState>, community_id: String, category_id: String) -> Result<Vec<PickedView>, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
-    engine(&state).await?.scan_category_folder(community, id).await.map_err(err)
+    let engine = engine(&state).await?;
+    let found = engine.new_files_in_folder(community, id).await.map_err(err)?;
+    Ok(engine.describe_paths(&found))
+}
+
+/// Fingerprints chosen files in the background, each reported as a `file_check` event. Returns the job.
+#[tauri::command]
+pub async fn start_file_check(state: State<'_, AppState>, community_id: String, paths: Vec<PathBuf>) -> Result<u64, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.start_file_check(community, paths).map_err(err)
+}
+
+#[tauri::command]
+pub async fn cancel_file_check(state: State<'_, AppState>, job: u64) -> Result<(), String> {
+    engine(&state).await?.cancel_file_check(job);
+    Ok(())
+}
+
+/// Opens a folder picker for adding a whole folder. `None` when it is cancelled.
+#[tauri::command]
+pub async fn pick_listing_folder(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<PathBuf>, String> {
+    let folder = ask_folder(app).await?;
+    if let Some(folder) = &folder {
+        engine(&state).await?.allow_paths([folder.clone()]);
+    }
+    Ok(folder)
+}
+
+/// What a chosen or dropped folder holds, and what was left out and why.
+#[tauri::command]
+pub async fn scan_listing_folder(state: State<'_, AppState>, community_id: String, folder: PathBuf, filter: Option<String>) -> Result<FolderScan, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let filter: Option<CategoryId> = filter.map(|f| parse("category id", &f)).transpose()?;
+    engine(&state).await?.scan_folder(community, folder, filter).await.map_err(err)
+}
+
+/// What a drop on the Files page will do with `paths`. A server with no category gets them here, when this person may make
+/// them.
+#[tauri::command]
+pub async fn plan_file_drop(state: State<'_, AppState>, community_id: String, paths: Vec<PathBuf>, filter: Option<String>) -> Result<DropPlan, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let filter: Option<CategoryId> = filter.map(|f| parse("category id", &f)).transpose()?;
+    engine(&state).await?.plan_file_drop(community, paths, filter).await.map_err(err)
 }
 
 /// `limit` is `forever`, `ratio:<thousandths>`, `hours:<n>` or `until:<ms>`.
@@ -119,11 +169,17 @@ pub async fn list_files(
     category_id: String,
     items: Vec<AddItem>,
     limit: String,
+    in_place: Option<bool>,
 ) -> Result<Vec<String>, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: CategoryId = parse("category id", &category_id)?;
     let limit = parse_limit(&limit).map_err(err)?;
-    engine(&state).await?.list_files(community, id, items, limit).await.map_err(err)
+    let engine = engine(&state).await?;
+    if in_place.unwrap_or(false) {
+        engine.list_files_in_place(community, id, items, limit).await.map_err(err)
+    } else {
+        engine.list_files(community, id, items, limit).await.map_err(err)
+    }
 }
 
 
@@ -159,6 +215,13 @@ pub async fn listing_swarm(state: State<'_, AppState>, community_id: String, lis
     let community: CommunityId = parse("community id", &community_id)?;
     let id: EventId = parse("listing id", &listing_id)?;
     engine(&state).await?.listing_swarm(community, id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn listing_live(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<LiveSwarm, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.listing_live(community, id).await.map_err(err)
 }
 
 #[tauri::command]

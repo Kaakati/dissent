@@ -1716,3 +1716,66 @@ async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_vi
     finish(everyone).await;
     }).await;
 }
+
+/// A device that sends again within one MLS epoch has the same key and the same sender id: after leaving and rejoining,
+/// and after a restart as well. So a key id and counter must not repeat. See `dissent_media::e2ee` and the threat model,
+/// "Audio and video nonces".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoin_and_a_restart_in_one_epoch_have_the_same_key_and_sender() {
+    bounded(async {
+        let alice = peer("rejoin-key").await;
+        let server = alice.engine.create_community("Rejoin".into()).await.expect("create");
+        let community: CommunityId = server.id.parse().unwrap();
+        let info = alice.engine.create_voice_channel(community, "Lounge".into()).await.expect("voice channel");
+        let channel: ChannelId = info.id.parse().expect("channel id");
+        alice.engine.join_call(community, channel).await.expect("join");
+        let first = dissent_core::test_support::call_key_state(&alice.engine).expect("in a call");
+        alice.engine.leave_call().await.expect("leave");
+        alice.engine.join_call(community, channel).await.expect("rejoin");
+        assert_eq!(dissent_core::test_support::call_key_state(&alice.engine), Some(first), "a rejoin");
+        alice.engine.leave_call().await.expect("leave again");
+        let (identity, dir) = stop(alice).await;
+        let alice = start(identity, dir).await;
+        alice.engine.join_call(community, channel).await.expect("rejoin after a restart");
+        assert_eq!(dissent_core::test_support::call_key_state(&alice.engine), Some(first), "a restart");
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+/// Someone who leaves a channel call and comes back in one MLS epoch counts from 0 again. Whoever stayed must hear them
+/// at once, not only when their count passes where it had got to, here half a minute of talking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let (community, channel) = voice_community(&alice, &[&bob]).await;
+        alice.engine.join_call(community, channel).await.expect("alice joins");
+        bob.engine.join_call(community, channel).await.expect("bob joins");
+        eventually("alice hears bob", || alice.engine.call_state().filter(|v| v.frames_received > 0)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let epoch = alice.engine.call_state().expect("in call").key_epoch;
+
+        bob.engine.leave_call().await.expect("bob leaves");
+        eventually("alice sees bob leave", || alice.engine.call_state().filter(|v| v.participants.is_empty())).await;
+        let before = alice.engine.call_state().expect("in call").frames_received;
+        bob.engine.join_call(community, channel).await.expect("bob rejoins");
+        eventually("alice sees bob back", || alice.engine.call_state().filter(|v| !v.participants.is_empty())).await;
+
+        // Well inside the half minute bob talked before, and unscaled for that reason.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let view = alice.engine.call_state().expect("in call");
+            assert_eq!(view.key_epoch, epoch, "the test needs one epoch throughout");
+            if view.frames_received > before + 20 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "alice does not hear bob after he came back: {} frames then {}", before, view.frames_received);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}

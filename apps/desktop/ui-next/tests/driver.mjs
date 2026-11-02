@@ -641,6 +641,26 @@ check('RL4 adding a bot shows its token once and lists the bot', (await ev(`docu
 await ev(`${ssButton('Done')}.click()`);
 await sleep(200);
 check('RL5 Done hides the token', (await ev(`!document.querySelector('${SS} [data-bot-token]')`)) === true);
+// An old app holds the permissions switch back and an offline member does not; the owner overrides by name.
+await ev(`window.__mockGate = { outdated: [{ device: 'dev-lena', root_id: 'r3', name: 'Lena' }], offline: [{ device: 'dev-maya', root_id: 'r1', name: 'Maya' }] }`);
+await ev(`${ssButton('Files')}.click()`);
+await sleep(200);
+await ev(`${ssButton('Roles')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('${SS} [data-roles-gate]')`)) === true, 3000);
+const rolesGate = () => ev(`document.querySelector('${SS} [data-roles-gate]')?.textContent ?? ''`);
+const honoredBox = `[...document.querySelectorAll('${SS} label')].find((l) => l.textContent.startsWith('Let custom roles manage')).querySelector('input')`;
+check('RL6 the warning names who is old and who is offline', (await rolesGate()).includes('needs to update the app: Lena') && (await rolesGate()).includes('did not answer') && (await rolesGate()).includes('Maya'), await rolesGate());
+check('RL6 an old app disables the switch', (await ev(`${honoredBox}.disabled`)) === true);
+await ev(`${ssButton('Turn on anyway…')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('[role="alertdialog"]')`)) === true, 3000);
+check('RL7 the override says what those people will see', (await ev(`document.querySelector('[role="alertdialog"]').textContent`)).includes('they see a different server'));
+await ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === 'Turn on').click()`);
+await until(async () => (await ev(`${honoredBox}.checked`)) === true, 3000);
+check('RL7 confirming turns it on', (await ev(`${honoredBox}.checked`)) === true);
+await ev(`window.__mockGate = null`);
+await ev(`${honoredBox}.click()`);
+await until(async () => (await ev(`${honoredBox}.checked`)) === false, 3000);
+check('RL8 turning it off asks nothing', (await ev(`!document.querySelector('[role="alertdialog"]')`)) === true);
 // Files (the tracker): the owner makes a category in Server Settings, then lists files from the Files area. A picked file
 // whose type the category refuses is shown so and left out; picking listed files again seeds them instead.
 await ev(`${ssButton('Files')}.click()`);
@@ -663,14 +683,28 @@ await ev(`${sideButton('Files')}.click()`);
 await sleep(500);
 check('FL3 the Files area shows Browse, My seeding and Uploads, and the category', (await ev(`JSON.stringify([...document.querySelectorAll('[role="tablist"][aria-label="Files"] [role="tab"]')].map((t) => t.firstChild.textContent))`)) === JSON.stringify(['Browse', 'My seeding', 'Uploads']) && (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Releases')`)) === true);
 await ev(`[...document.querySelectorAll('[data-files] button')].find((b) => b.textContent.trim() === 'Scan folder').click()`);
-await sleep(500);
+await sleep(600);
 check('FL10 scanning the linked folder lists what it found since the last scan', (await ev(`document.querySelector('[role="dialog"]')?.textContent.includes('since the last scan') && document.querySelectorAll('[data-add-files] [data-state]').length === 3`)) === true);
 await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim() === 'Cancel').click()`);
 await sleep(300);
 const filesButton = (text) => `[...document.querySelectorAll('[data-files] button, [role="dialog"] button')].find((b) => b.textContent.trim() === ${JSON.stringify(text)})`;
+// The dialog opens from what the picker knows, before any file is read, and fills in as fingerprints arrive.
+await ev(`window.__mockCheckMs = 900`);
 await ev(`${filesButton('Add files')}.click()`);
-await sleep(500);
+await until(async () => (await ev(`!!document.querySelector('[data-add-files]')`)) === true, 3000);
+const earlyStates = await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`);
+check('FL3b the dialog opens at once, each row checking, and a type the category refuses is known already', earlyStates === JSON.stringify(['checking', 'checking', 'type_not_allowed']), earlyStates);
+check('FL3b Add stays off while a ticked row is unknown', (await ev(`[...document.querySelectorAll('[role="dialog"] button')].find((b) => b.textContent.trim().startsWith('Checking 2 files')).disabled`)) === true);
+await ev(`${filesButton('Cancel')}.click()`);
+await sleep(200);
+check('FL3c closing the dialog stops the check', (await ev(`window.__mockChecks.at(-1).cancelled`)) === true);
+await sleep(1000);
+check('FL3c nothing more is reported after it stops', (await ev(`window.__mockChecks.at(-1).reported`)) === 0);
+await ev(`window.__mockCheckMs = 60`);
+await ev(`${filesButton('Add files')}.click()`);
+await until(async () => (await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`)) === JSON.stringify(['ready', 'ready', 'type_not_allowed']), 3000);
 const states = await ev(`JSON.stringify([...document.querySelectorAll('[data-add-files] [data-state]')].map((s) => s.dataset.state))`);
+check('FL4b the seeding choice says what off does', (await ev(`document.querySelector('[data-add-files]').textContent`)).includes('Keep seeding after one full copy has gone out') && (await ev(`document.querySelector('[data-add-files]').textContent`)).includes('Off: stops once members have received one full copy from you.'));
 check('FL4 the picked files show ready, ready and type not allowed', states === JSON.stringify(['ready', 'ready', 'type_not_allowed']), states);
 await ev(`${filesButton('Add 2 files')}.click()`);
 await sleep(600);
@@ -686,6 +720,11 @@ check('FL7b an installer\'s page warns that it can run code', (await ev(`documen
 check('FL7 a file page shows its fingerprint and the server key', (await ev(`document.querySelector('[data-file-facts]')?.textContent`))?.includes('b3:9f2c41') && (await ev(`document.querySelector('[data-file-facts]').textContent.includes('AES-256-GCM, server key')`)) === true);
 await sleep(300);
 check('FL9 the file page shows piece availability and the swarm', (await ev(`document.querySelectorAll('[data-pieces] [role="img"] span').length > 0 && document.querySelector('[data-swarm]')?.textContent.includes('Jonas')`)) === true);
+const speedOnce = await ev(`document.querySelector('[data-swarm-speed]')?.textContent`);
+await sleep(1200);
+const speedLater = await ev(`document.querySelector('[data-swarm-speed]')?.textContent`);
+check('FL9b the swarm speed updates about each second without leaving the page', !!speedOnce && speedOnce.includes('/s') && speedOnce !== speedLater, `${speedOnce} -> ${speedLater}`);
+check('FL9c a member who is moving bytes shows a speed in their row', (await ev(`[...document.querySelectorAll('[data-swarm] [role="row"]')].some((r) => r.textContent.includes('Jonas') && r.textContent.includes('/s'))`)) === true);
 await ev(`[...document.querySelectorAll('[data-file-page] button')].find((b) => b.textContent.trim() === 'Files').click()`);
 await sleep(300);
 await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] label')].find((l) => l.textContent.trim() === 'Installer').querySelector('input').click()`);
@@ -703,6 +742,17 @@ await ev(`[...document.querySelectorAll('[data-limit-editor] label')].find((l) =
 await ev(`[...document.querySelectorAll('[data-limit-editor] button')].find((b) => b.textContent === 'Apply').click()`);
 await sleep(400);
 check('SD2 a seed limit applies to its row', (await ev(`document.querySelector('[data-seed-row] button[aria-expanded]')?.textContent`)) === 'Until ratio 5.0');
+await ev(`window.__seedLimitReached = true; document.querySelector('[data-seed-row] button[aria-label="Pause seeding"]').click()`);
+await sleep(400);
+await ev(`document.querySelector('[data-seed-row] button[aria-label="Resume seeding"]').click()`);
+await sleep(300);
+check('SD2b Resume on a seed past its limit says so and offers to change the limit', (await ev(`document.querySelector('[data-limit-editor] [data-limit-reached]')?.textContent`))?.includes('reached its limit'));
+await ev(`[...document.querySelectorAll('[data-limit-editor] label')].find((l) => l.textContent.startsWith('Forever')).querySelector('input[type="radio"]').click()`);
+await ev(`[...document.querySelectorAll('[data-limit-editor] button')].find((b) => b.textContent === 'Apply').click()`);
+await sleep(400);
+check('SD2c a higher limit lets it serve again', (await ev(`document.querySelector('[data-seed-row] [data-seed-state]')?.dataset.seedState`)) === 'paused');
+await ev(`window.__seedLimitReached = false; document.querySelector('[data-seed-row] button[aria-label="Resume seeding"]').click()`);
+await sleep(300);
 await ev(`document.querySelector('[data-seed-row] button[aria-label="Pause seeding"]').click()`);
 await sleep(400);
 check('SD3 pausing a file shows it paused', (await ev(`document.querySelector('[data-seed-row] [data-seed-state]')?.dataset.seedState`)) === 'paused');
@@ -1977,6 +2027,12 @@ check('C7 the voice channel call chat says anyone who can read the channel reads
 check('C7 the voice roster lists you first in the channel you joined', (await b.ev(`[...document.querySelectorAll('[role="list"][aria-label="In workshop"] [role="listitem"]')][0]?.textContent.includes('Sami') === true`)) === true);
 check('C7 the call details show the route sections the call has (no route block)', (await b.ev(`!document.querySelector('aside[aria-label="Details"]')?.textContent.includes('ROUTE') && !document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Route')`)) === true);
 check('C7 the call details show Forwarded by and Backup for a forwarded call', (await b.ev(`document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Forwarded by') && document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Backup')`)) === true);
+await b.ev(`window.__mockCannotDecrypt(true)`);
+await sleep(200);
+check('C7b a call that decrypts nothing says so, in place of the route', String(await b.ev(`document.querySelector('[data-call-cannot-decrypt]')?.textContent`)).includes('can’t decrypt'));
+await b.ev(`window.__mockCannotDecrypt(false)`);
+await sleep(200);
+check('C7b the note goes once it decrypts again', (await b.ev(`document.querySelector('[data-call-cannot-decrypt]') === null`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-voice-channel.png`);
 
 // The voice rows' tooltips follow the connection.
@@ -3966,7 +4022,7 @@ check('W24 no console errors', errors.length === 0, errors.slice(0, 3).join(' | 
 await b.close();
 }
 
-// ---- Volunteer forwarders: the rail menu's Help Forward Calls, and a call forwarded by a member who is not in it ----
+// ---- Forwarders outside the call: no Help Forward Calls for members, and a call a seeder forwards ----
 async function section_volunteers() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9813, profile: `${SCRATCH}/volunteers-next-profile` });
 const { ev } = b;
@@ -3975,24 +4031,9 @@ const openRailMenu = (name) => ev(`(() => { const b = document.querySelector('bu
 const forwardItem = () => ev(`(() => { const n = [...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')); return n ? { checked: n.getAttribute('aria-checked'), text: n.textContent.trim() } : null; })()`);
 const closeMenus = async () => { await ev(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(250); };
 
-// The toggle is off by default, says what it does, and turns on and back off for that server only.
-await openRailMenu('Riverside Makers');
-await sleep(400);
-const off = await forwardItem();
-check('V1 a member sees Help Forward Calls in the server menu, off by default', off?.checked === 'false', JSON.stringify(off));
-check('V1 the item says the call shows your name', off?.text.includes('The call shows your name') === true, JSON.stringify(off));
-await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
-await sleep(400);
-check('V2 picking it turns forwarding on for that server', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === JSON.stringify(['c1']), String(await ev(`JSON.stringify(window.__mockForwardCalls)`)));
-await openRailMenu('Riverside Makers');
-await sleep(400);
-check('V2 the item shows it is on', (await forwardItem())?.checked === 'true');
-await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
-await sleep(400);
-check('V3 picking it again turns it off', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === '[]');
-await closeMenus();
+check('V1 the server menu has no Help Forward Calls: members do not forward calls they are not in', await (async () => { await openRailMenu('Riverside Makers'); await sleep(400); const none = (await forwardItem()) === null; await closeMenus(); return none; })());
 
-// A call forwarded by a member who is not in it names them, and lists only the people in the call.
+// A call a seeder forwards names it, and lists only the people in the call.
 await ev(`window.__mockForwardedBy = 'Yusuf'`);
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
 await sleep(700);
@@ -5312,6 +5353,224 @@ await b.close();
 // ---- Q. Server Settings › Privacy: the owner's member-only switch. Off by default, it explains what it hides and from
 // whom; it turns on and off; it waits while a member device has not confirmed support, with Check again; an admin sees
 // it but cannot change it. ----
+// Dropping files on the Files page: no dialog, each file in the category its type fits, with Undo.
+async function section_filedrop() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9833, profile: `${SCRATCH}/filedrop-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const openFilesOf = async (server) => {
+  await ev(`document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(server)}) + ']').click()`);
+  await sleep(600);
+  await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => b.textContent.trim() === 'Files').click()`);
+  await until(async () => (await ev(`!!document.querySelector('[data-files]')`)) === true, 5000);
+};
+const picks = (names) => names.map(([name, kind, size, extra]) => ({ name, kind, size: size ?? 1000, ext: name.split('.').pop().toUpperCase(), path: `C:\\drop\\${name}`, ...(extra ?? {}) }));
+const setPicks = (list) => ev(`window.__mockPickFiles = ${JSON.stringify(list)}`);
+const drop = (list) => ev(`window.__mockDropPaths(${JSON.stringify(list.map((p) => p.path))})`);
+const toastText = () => ev(`[...document.querySelectorAll('[aria-live="polite"] [role="status"]')].map((t) => t.textContent).join(' || ')`);
+const toastHas = (text, ms = 5000) => until(async () => (await toastText()).includes(text), ms);
+const clickToast = (label) => ev(`[...document.querySelectorAll('[aria-live="polite"] button')].reverse().find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+const listed = () => ev(`JSON.stringify([...document.querySelectorAll('[data-files] [data-listing]')].map((r) => r.querySelector('[role="cell"]').textContent.trim() + '@' + r.querySelectorAll('[role="cell"]')[1].textContent.trim()).sort())`);
+const member = { min_rank: 'member', roles: [], members: [], min_level: 0 };
+const makeCategory = (id, name, types) => ev(`window.__TAURI__.core.invoke('create_category', { communityId: ${JSON.stringify(id)}, category: ${JSON.stringify({ name, icon: 'folder', types, default_tags: [], rules: {}, add: member, visible: null })} })`);
+
+await openFilesOf('Open Source Arabic');
+// The overlay names the rule and the photo details.
+await ev(`window.__mockDragOver()`);
+await sleep(100);
+const overlay = await ev(`document.querySelector('[data-files-drop]')?.textContent ?? ''`);
+check('FD1 dragging over the Files page shows the rule', overlay.includes('category that fits its type') && overlay.includes('photo details included'), overlay);
+check('FD1 the chat overlay stays away', (await ev(`!document.querySelector('.drop-overlay:not([data-files-drop])')`)) === true);
+await ev(`window.__mockDragLeave()`);
+await sleep(100);
+check('FD1 it leaves with the drag', (await ev(`!document.querySelector('[data-files-drop]')`)) === true);
+
+// No categories: a file manager gets one from the type.
+const first = picks([['cat.png', 'Image'], ['notes.pdf', 'Document'], ['key.pem', 'Other'], ['big.zip', 'Archive', 11 * 1024 ** 3]]);
+await setPicks(first);
+await drop(first);
+await toastHas('Made categories for your files');
+check('FD2 a file manager gets categories made from the types, not for what is left out', (await toastText()).includes('Images') && (await toastText()).includes('Documents') && !(await toastText()).includes('Archives'), await toastText());
+await toastHas('added to');
+await until(async () => JSON.parse(await listed()).length === 2, 3000);
+check('FD3 each file is listed in its type\'s category with no dialog', (await listed()) === JSON.stringify(['PDFnotes.pdf@Documents', 'PNGcat.png@Images']) && (await ev(`!document.querySelector('[role="dialog"]')`)) === true, await listed());
+const summary = await toastText();
+check('FD3 the toast says what went where', summary.includes('1 file added to Images, 1 to Documents'), summary);
+check('FD4 the rest are not listed, and the toast says why', summary.includes('1 looks like a key or password file') && summary.includes('1 over 10 GB') && summary.includes('Undo') && summary.includes('Add files'), summary);
+
+// Undo takes the batch back.
+await clickToast('Undo');
+await until(async () => JSON.parse(await listed()).length === 0, 3000);
+check('FD5 Undo removes those listings', (await listed()) === '[]');
+
+// Progress starts at once, per file, and does not block the page.
+await makeCategory('c2', 'Anything', []);
+const three = picks([['a.png', 'Image'], ['b.png', 'Image'], ['c.png', 'Image'], ['d.pdf', 'Document']]);
+await setPicks(three);
+await ev(`window.__mockCheckMs = 700`);
+await drop(three);
+await until(async () => (await ev(`!!document.querySelector('[data-file-adds]')`)) === true, 2000);
+check('FD6 the tray shows each file at once', (await ev(`document.querySelectorAll('[data-file-adds] [data-add-row]').length`)) === 4);
+check('FD6 nothing covers the page', (await ev(`!document.querySelector('[role="dialog"]') && !document.querySelector('[data-files-drop]')`)) === true);
+await ev(`document.querySelector('input[aria-label="Search files"]').focus()`);
+check('FD6 the page stays usable', (await ev(`document.activeElement?.getAttribute('aria-label')`)) === 'Search files');
+await ev(`window.__mockCheckMs = 60`);
+await toastHas('3 files added to Images, 1 to Documents', 6000);
+check('FD7 the toast counts by category', true);
+await until(async () => (await ev(`!document.querySelector('[data-file-adds]')`)) === true, 2000);
+check('FD7 the tray leaves when it is done', true);
+
+// A filter that accepts the file wins. Dropping again what this device seeds leaves it alone.
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] button')].find((n) => n.textContent.includes('Anything')).click()`);
+await sleep(200);
+const one = picks([['e.png', 'Image']]);
+await setPicks(one);
+await drop(one);
+await toastHas('1 file added to Anything');
+check('FD8 the page\'s filter wins when it accepts the file', true);
+check('FD9 a single-file drop offers Add tags', (await toastText()).includes('Add tags'));
+await clickToast('Add tags');
+await until(async () => (await ev(`!!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+await ev(`(() => { const n = document.querySelector('[data-edit-listing] input'); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(n, '#kitten #cute'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await until(async () => (await ev(`!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+check('FD9 the tags are saved', (await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('e.png')).textContent.includes('#kitten')`)) === true);
+await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] button')].find((n) => n.textContent.includes('All files')).click()`);
+await sleep(200);
+await drop(one);
+await toastHas('1 already seeded by you');
+check('FD10 a file this device seeds is left alone', JSON.parse(await listed()).filter((x) => x.includes('e.png')).length === 1, await listed());
+
+// Listed by someone else: seeded, not listed again.
+await ev(`window.__mockListedByOther('c2', 'e.png')`);
+await sleep(100);
+await drop(one);
+await toastHas('Seeding 1 file already listed');
+check('FD11 a file someone else listed is seeded', JSON.parse(await listed()).filter((x) => x.includes('e.png')).length === 1, await listed());
+
+// A failure is reported per file.
+const bad = picks([['f.png', 'Image']]);
+await setPicks(bad);
+await ev(`window.__mockListFails = 'the disk is full'`);
+await drop(bad);
+await toastHas('1 file could not be added');
+await ev(`window.__mockListFails = null`);
+check('FD12 a file that fails to list says so', true);
+
+// Cancel stops what is waiting.
+const slow = picks([['g.png', 'Image'], ['h.png', 'Image']]);
+await setPicks(slow);
+await ev(`window.__mockCheckMs = 900`);
+await drop(slow);
+await until(async () => (await ev(`!!document.querySelector('[data-file-adds]')`)) === true, 2000);
+await ev(`document.querySelector('button[aria-label="Cancel adding files"]').click()`);
+await sleep(1200);
+check('FD13 Cancel stops the check and lists nothing', (await ev(`window.__mockChecks.at(-1).cancelled`)) === true && !(await listed()).includes('g.png'), await listed());
+await ev(`window.__mockCheckMs = 60`);
+
+// Someone who cannot make categories is told so.
+await ev(`window.__mockSetMyRole('c1', 'member')`);
+await openFilesOf('Riverside Makers');
+const none = picks([['z.png', 'Image']]);
+await setPicks(none);
+await drop(none);
+await toastHas('no file categories yet');
+check('FD14 a member on a server with no category gets a clear message', (await ev(`document.querySelectorAll('[data-files] [data-listing]').length`)) === 0);
+
+// A whole folder: a confirm dialog opens at once, with the picker's category, count, limits and per-file ticks.
+await openFilesOf('Open Source Arabic');
+const fileOf = (relative, kind, flag = '', size = 2000) => ({ path: `C:\\pics\\${relative.replaceAll('/', '\\')}`, relative, name: relative.split('/').pop(), ext: relative.split('.').pop().toUpperCase(), kind, size, flag });
+const folderFiles = [fileOf('p1.png', 'Image'), fileOf('p2.png', 'Image'), fileOf('sub/p3.png', 'Image'), fileOf('notes.txt', 'Document'), fileOf('.hidden', 'Other', 'hidden'), fileOf('desktop.ini', 'Other', 'system'), fileOf('.env', 'Other', 'credentials'), fileOf('id_rsa', 'Other', 'credentials'), fileOf('shortcut.png', 'Image', 'link', 0), fileOf('huge.mkv', 'Video', 'too_large', 11 * 1024 ** 3)];
+await ev(`window.__mockFolder = ${JSON.stringify({ files: folderFiles, tag: 'holiday-photos', over_limit: 12, too_deep: 2, hidden_dirs: ['.git'] })}`);
+await ev(`window.__mockPickFolder = 'C:\\\\pics'`);
+await ev(`window.__mockPickFiles = []`);
+await ev(`window.__mockCheckMs = 800`);
+const folderButton = (text) => `[...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim().startsWith(${JSON.stringify(text)}))`;
+await ev(`[...document.querySelectorAll('[data-files] button')].find((n) => n.textContent.trim() === 'Add folder').click()`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+const rowOf = (name) => `[...document.querySelectorAll('[data-add-folder] [data-folder-row]')].find((n) => n.textContent.includes(${JSON.stringify(name)}))`;
+check('FF1 a folder opens a dialog at once and Add waits for the check', (await ev(`${folderButton('Checking')}?.disabled`)) === true);
+const body = await ev(`document.querySelector('[data-add-folder]').textContent`);
+check('FF2 it says hidden and system files are left out, and which folders', body.includes('Hidden and system files start unticked') && body.includes('.git'), body.slice(0, 200));
+check('FF3 it warns on likely credentials', body.includes('look like passwords or keys'));
+check('FF4 it states the limits it exceeded', (await ev(`[...document.querySelectorAll('[data-folder-limit]')].map((n) => n.textContent).join('|')`)).includes('at most 500 files at once, so 12 more files') && body.includes('2 folders are more than 4 levels down'), body.slice(0, 300));
+const chooseFolderCategory = (name) => ev(`(() => { const box = document.querySelector('[data-add-folder] select[aria-label="Category"]'); const opt = [...box.options].find((o) => o.textContent === ${JSON.stringify(name)}); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(box, opt.value); box.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await chooseFolderCategory('Anything');
+await sleep(100);
+check('FF5 hidden, system and credentials rows start unticked but can be ticked', (await ev(`['.hidden', 'desktop.ini', '.env', 'id_rsa'].every((name) => { const box = ${rowOf('X').replace('"X"', 'name')}.querySelector('input'); return !box.checked && !box.disabled; })`)) === true);
+check('FF6 a link and an oversized file cannot be ticked, and say why', (await ev(`(() => { const a = ${rowOf('shortcut.png')}; const b = ${rowOf('huge.mkv')}; return a.querySelector('input').disabled && a.textContent.includes('not followed') && b.querySelector('input').disabled && b.textContent.includes('Over 10 GB'); })()`)) === true);
+check('FF7 the folder name is the default tag', (await ev(`document.querySelector('[data-add-folder] input[aria-label="Tag"]').value`)) === 'holiday-photos');
+await until(async () => (await ev(`!!${folderButton('Add 4')}`)) === true, 4000);
+check('FF8 the count and size follow the ticks', (await ev(`document.querySelector('[data-folder-count]').textContent`)).startsWith('4 files'), await ev(`document.querySelector('[data-folder-count]').textContent`));
+await ev(`${rowOf('notes.txt')}.querySelector('input').click()`);
+await sleep(100);
+check('FF8 unticking changes the count', (await ev(`document.querySelector('[data-folder-count]').textContent`)).startsWith('3 files'));
+// A category that refuses a type says so per file.
+await chooseFolderCategory('Documents');
+await sleep(100);
+check('FF9 a category that refuses a type leaves those files out', (await ev(`${rowOf('p1.png')}.dataset.folderRow`)) === 'type_not_allowed');
+await chooseFolderCategory('Images');
+await sleep(100);
+// Cancelling stops the check; adding seeds in place with the tag, with Undo.
+await ev(`${folderButton('Add 3')}.click()`);
+await toastHas('3 files added to Images', 4000);
+check('FF10 the batch is listed with the tag and seeded in place', (await ev(`window.__mockLastList.inPlace && window.__mockLastList.items[0].tags.includes('holiday-photos')`)) === true);
+await clickToast('Undo');
+await until(async () => !(await listed()).includes('p1.png'), 3000);
+check('FF11 Undo removes the batch', true);
+// A dropped folder opens the same dialog, whatever else came with it.
+await ev(`window.__mockCheckMs = 60`);
+await ev(`window.__mockPickFiles = ${JSON.stringify([{ path: 'C:\\pics', name: 'pics', ext: '', kind: 'Other', size: 0, is_dir: true }])}`);
+await ev(`window.__mockDropPaths(['C:\\\\pics'])`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+check('FF12 dropping a folder opens the dialog', true);
+await ev(`${folderButton('Cancel')}.click()`);
+await sleep(200);
+await ev(`window.__mockFolder = null`);
+
+// Editing a listing from its page.
+await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('e.png')).click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-file-page]')`)) === true, 2000);
+const pageBtn = (t) => `[...document.querySelectorAll('[data-file-page] button')].find((n) => n.textContent.trim() === ${JSON.stringify(t)})`;
+const setInput = (selector, proto, value) => ev(`(() => { const n = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(${proto}.prototype, 'value').set.call(n, ${JSON.stringify(value)}); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`${pageBtn('Edit tags and description')}.click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-edit-listing]')`)) === true, 2000);
+await setInput('[data-edit-listing] input', 'HTMLInputElement', '#fresh #Tags');
+await setInput('[data-edit-listing] textarea', 'HTMLTextAreaElement', 'A new description');
+// A failure keeps the dialog and what was typed.
+await ev(`window.__mockListFails = 'no connection'`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await toastHas('no connection');
+check('FE1 a failed save says why and keeps the edits', (await ev(`document.querySelector('[data-edit-listing] input')?.value`)) === '#fresh #Tags' && (await ev(`document.querySelector('[data-edit-listing] textarea').value`)) === 'A new description');
+await ev(`window.__mockListFails = null`);
+await ev(`[...document.querySelectorAll('[data-edit-listing] button')].find((n) => n.textContent.trim() === 'Save').click()`);
+await until(async () => (await ev(`!document.querySelector('[data-edit-listing]')`)) === true, 3000);
+const pageText = () => ev(`document.querySelector('[data-file-page]').textContent`);
+check('FE2 saving shows the new tags and description', (await pageText()).includes('#fresh') && (await pageText()).includes('#tags') && (await pageText()).includes('A new description'), (await pageText()).slice(0, 200));
+await ev(`window.__mockRemoteEdit('c2', 'e.png', ['remote'], 'Edited elsewhere')`);
+await until(async () => (await pageText()).includes('#remote'), 3000);
+check('FE3 someone else\'s edit shows without reloading', (await pageText()).includes('Edited elsewhere'));
+await ev(`window.__mockCannotEdit('c2', 'e.png')`);
+await ev(`window.__mockRemoteEdit('c2', 'e.png', ['remote'], 'Edited elsewhere')`);
+await until(async () => (await ev(`!${pageBtn('Edit tags and description')}`)) === true, 3000);
+check('FE4 someone who may not edit gets no control', true);
+await ev(`${pageBtn('Files')}.click()`);
+await sleep(200);
+
+// Off the Files page a drop still attaches to the chat.
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((b) => /general/i.test(b.textContent))?.click()`);
+await sleep(500);
+await ev(`window.__mockDragOver()`);
+await sleep(100);
+check('FD15 the Files overlay is not shown in chat', (await ev(`!document.querySelector('[data-files-drop]')`)) === true);
+await ev(`window.__mockDropPaths(['C:\\\\drop\\\\z.png'])`);
+await sleep(500);
+check('FD15 a drop on a chat stays an attachment', (await ev(`document.querySelector('.staged')?.textContent.includes('z.png') ?? false`)) === true);
+check('FD16 no console errors', (await b.errors?.() ?? []).length === 0);
+b.close?.();
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -5347,21 +5606,56 @@ await ev(`document.querySelector('${BOX}').click()`);
 await sleep(600);
 check('Q3 unchecking turns it off again', (await engineOn()) === false && (await ev(`document.querySelector('${BOX}').checked`)) === false);
 
-// Two member devices have not answered: the switch waits, and says why.
-await ev(`window.__mockMemberOnlyWaiting = 2`);
-await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again')?.click()`);
-await sleep(200);
-// Check again shows only while waiting, so the page is reopened to read the new status.
-await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
-await sleep(400);
-await openPrivacy('Open Source Arabic');
-await until(async () => (await statusText()).startsWith('2 member devices'), 5000);
-check('Q4 while member devices have not answered the switch is disabled', (await ev(`document.querySelector('${BOX}').disabled`)) === true);
-check('Q4 and the status counts them and says why', (await statusText()).startsWith('2 member devices have not confirmed they support this.'), await statusText());
-await ev(`window.__mockMemberOnlyWaiting = 0`);
-await ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === 'Check again').click()`);
+// Two members are offline: the switch stays usable, names them, and asks before it goes ahead.
+const GATE_OFFLINE = `[{ device: 'dev-maya', root_id: 'r1', name: 'Maya' }, { device: 'dev-omar', root_id: 'r2', name: 'Omar' }]`;
+const GATE_OLD = `[{ device: 'dev-lena', root_id: 'r3', name: 'Lena' }]`;
+const reopenPrivacy = async () => {
+  await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await sleep(400);
+  await openPrivacy('Open Source Arabic');
+};
+const answerAlert = (label) => ev(`[...document.querySelectorAll('[role="alertdialog"] button')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+const alertText = () => ev(`document.querySelector('[role="alertdialog"]')?.textContent ?? ''`);
+await ev(`window.__mockGate = { offline: ${GATE_OFFLINE} }`);
+await reopenPrivacy();
+await until(async () => (await statusText()).includes('did not answer'), 5000);
+check('Q4 an offline member does not disable the switch', (await ev(`document.querySelector('${BOX}').disabled`)) === false, await statusText());
+check('Q4 the warning counts and names them', (await statusText()).includes('2 member devices did not answer') && (await statusText()).includes('Maya and Omar'), await statusText());
+await ev(`document.querySelector('${BOX}').click()`);
+await until(async () => (await alertText()) !== '', 3000);
+check('Q4 turning it on asks first and says what those people will see', (await alertText()).includes('Maya and Omar') && (await alertText()).includes('show as locked') && (await alertText()).includes('Updating the app catches them up'), await alertText());
+check('Q4 nothing changed before the answer', (await engineOn()) === false);
+await answerAlert('Cancel');
+await sleep(300);
+check('Q4 Cancel leaves it off', (await engineOn()) === false);
+check('Q4 the engine refuses without the names', (await ev(`window.__TAURI__.core.invoke('set_member_only', { communityId: 'c2', on: true }).then(() => 'on', (e) => String(e))`)).includes('must be confirmed'));
+await ev(`document.querySelector('${BOX}').click()`);
+await until(async () => (await alertText()) !== '', 3000);
+await answerAlert('Turn on');
+await until(engineOn, 3000);
+check('Q4 confirming turns it on', (await engineOn()) === true);
+await ev(`document.querySelector('${BOX}').click()`);
 await sleep(500);
-check('Q5 Check again enables it once every device answers', (await ev(`document.querySelector('${BOX}').disabled`)) === false && (await statusText()) === 'Every member device supports this.', await statusText());
+check('Q4 turning it off asks nothing', (await engineOn()) === false && (await alertText()) === '');
+
+// An online device on an old app holds it back until the owner overrides it.
+await ev(`window.__mockGate = { outdated: ${GATE_OLD} }`);
+await reopenPrivacy();
+await until(async () => (await statusText()).includes('need'), 5000);
+check('Q5 an old device disables the switch and names who', (await ev(`document.querySelector('${BOX}').disabled`)) === true && (await statusText()).includes('1 member device needs to update the app: Lena'), await statusText());
+const clickSS = (label) => ev(`[...document.querySelectorAll('${SS} button')].find((n) => n.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+await clickSS('Turn on anyway…');
+await until(async () => (await alertText()) !== '', 3000);
+check('Q5 the override states what they will see', (await alertText()).includes('Lena') && (await alertText()).includes('show as locked'), await alertText());
+await answerAlert('Turn on');
+await until(engineOn, 3000);
+check('Q5 the override turns it on', (await engineOn()) === true);
+await ev(`document.querySelector('${BOX}').click()`);
+await sleep(500);
+await ev(`window.__mockGate = null`);
+await clickSS('Check again');
+await sleep(500);
+check('Q6 Check again clears it once they answer', (await ev(`document.querySelector('${BOX}').disabled`)) === false && (await statusText()) === 'Every member device supports this.', await statusText());
 await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 await sleep(400);
 
@@ -5826,6 +6120,7 @@ const SECTIONS = [
   ['activebadge', section_activebadge],
   ['channelorder', section_channelorder],
   ['memberonly', section_memberonly],
+  ['filedrop', section_filedrop],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],
