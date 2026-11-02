@@ -182,6 +182,11 @@ pub fn wanted_layers(engine: &crate::Engine, screen: bool) -> Option<u8> {
 
 /// The simulcast layer of the last frame `engine` received of `sender_root`'s camera (or screen)
 /// in its current call.
+/// `engine`'s leaf links' counters in a forwarded call, for a test that timed out.
+pub async fn leaf_stats(engine: &crate::Engine) -> String {
+    engine.leaf_stats_now().await
+}
+
 pub fn received_layer(engine: &crate::Engine, sender_root: &str, screen: bool) -> Option<u8> {
     engine.received_layer_now(sender_root, screen)
 }

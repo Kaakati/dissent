@@ -32,7 +32,7 @@ use crate::signal::Signal;
 use crate::transport::{PacketTransport, UdpTransport};
 use crate::video::{
     carry, layer_key, nal_of, stream_key, uncarry, RawFrame, RawVideo, VideoFrame, VideoGate,
-    VideoMeta, VideoReplay,
+    VideoMeta, VideoReplay, VideoVerdict,
 };
 use dissent_identity::DeviceCert;
 
@@ -77,6 +77,16 @@ pub struct CallStats {
     /// starts at a default, and moves with the measured RTT and loss, see
     /// [`Call::target_bitrate_kbps`].
     pub target_kbps: u32,
+    /// Video frames refused by the replay window, of a known start of sending.
+    pub video_replayed: u64,
+    /// Video frames refused because their sender's state was full. See `VideoReplay`.
+    pub video_capped: u64,
+    /// Audio frames of a start of sending already replaced. See `RxState::on_frame_in`.
+    pub frames_retired_session: u64,
+    /// Audio frames dropped because the link keeps no more senders without a certificate.
+    pub frames_sender_capped: u64,
+    /// Frames dropped because the link takes no more key ids under the current key until the next rekey.
+    pub frames_id_capped: u64,
     /// What this side sent on the link, in kbps, every byte of every datagram, smoothed over the
     /// stats intervals. `None` until two stats reports have arrived. It is a floor for what the link
     /// carries, not an estimate of what it could: str0m's TWCC estimate stays at its starting value
@@ -777,11 +787,21 @@ impl<T: PacketTransport> Call<T> {
         };
         if opened.under_current && !self.state.lock().expect("receiver state").adopt_epoch(opened.lsb) {
             self.stats.frames_undecryptable += 1;
+            self.stats.frames_id_capped += 1;
             return;
         }
-        if !self.video_replay.accept(opened.sender, opened.context, opened.counter) {
-            self.stats.frames_replayed += 1;
-            return;
+        match self.video_replay.accept(opened.sender, opened.context, opened.counter) {
+            VideoVerdict::Fresh => {}
+            VideoVerdict::Replayed => {
+                self.stats.frames_replayed += 1;
+                self.stats.video_replayed += 1;
+                return;
+            }
+            VideoVerdict::Full => {
+                self.stats.frames_replayed += 1;
+                self.stats.video_capped += 1;
+                return;
+            }
         }
         let admit = self.video_gate.admit(
             stream_key(opened.sender, header.screen),
@@ -1062,6 +1082,7 @@ impl<T: PacketTransport> Call<T> {
                     if opened.under_current && !state.adopt_epoch(opened.lsb) {
                         drop(state);
                         self.stats.frames_undecryptable += 1;
+                        self.stats.frames_id_capped += 1;
                         return;
                     }
                     if let Some(recovered) = opened.recovered {
@@ -1097,6 +1118,8 @@ impl<T: PacketTransport> Call<T> {
     /// Records what a receiver step did, and queues the frames it plays.
     fn absorb(&mut self, step: Step) {
         self.stats.frames_replayed += step.replayed;
+        self.stats.frames_retired_session += step.retired;
+        self.stats.frames_sender_capped += step.capped;
         self.stats.frames_unauthenticated += step.unauthenticated;
         self.stats.impersonation_detected += step.impersonations;
         self.stats.frames_received += step.deliver.len() as u64;

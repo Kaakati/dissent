@@ -81,11 +81,19 @@ async fn a_volunteer_outside_the_call_is_elected_and_carries_its_media() {
     sender.engine.set_camera(true).expect("camera on");
     viewer.engine.set_video_tile(&root(sender), false, 1920);
     everyone[3].engine.set_video_tile(&root(sender), false, 200);
-    eventually_within(Duration::from_secs(60), "video reaches both viewers at their layers", || {
+    let deadline = Instant::now() + crate::common::scaled(Duration::from_secs(60));
+    loop {
         let (wide, narrow) = (layer_of(viewer, sender), layer_of(&everyone[3], sender));
-        (wide.is_some_and(|l| l > 0) && narrow == Some(0)).then_some(())
-    })
-    .await;
+        if wide.is_some_and(|l| l > 0) && narrow == Some(0) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let wide_stats = dissent_core::test_support::leaf_stats(&viewer.engine).await;
+            let narrow_stats = dissent_core::test_support::leaf_stats(&everyone[3].engine).await;
+            panic!("timed out waiting for video at both viewers' layers: wide {wide:?} {wide_stats}, narrow {narrow:?} {narrow_stats}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     sender.engine.set_camera(false).expect("camera off");
 
     let mut all = everyone;

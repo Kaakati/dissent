@@ -346,6 +346,8 @@ impl Step {
         self.replayed += other.replayed;
         self.unauthenticated += other.unauthenticated;
         self.impersonations += other.impersonations;
+        self.retired += other.retired;
+        self.capped += other.capped;
     }
 }
 
@@ -445,6 +447,10 @@ pub(crate) struct Step {
     pub(crate) unauthenticated: u64,
     /// Senders newly flagged as impersonated by a mismatched frame.
     pub(crate) impersonations: u64,
+    /// Frames of a start of sending already replaced, counted in `replayed` too.
+    pub(crate) retired: u64,
+    /// Frames of a new sender this link has no room for.
+    pub(crate) capped: u64,
 }
 
 /// Receiver-side authentication and replay state, shared by a participant's links.
@@ -528,7 +534,7 @@ impl RxState {
         let deadline = self.deadline;
         let fresh = !self.senders.contains_key(&(sender, lsb));
         if fresh && !self.has_room_for(sender) {
-            return Step::default();
+            return Step { capped: 1, ..Step::default() };
         }
         let state = self.senders.entry((sender, lsb)).or_default();
         if fresh {
@@ -544,6 +550,7 @@ impl RxState {
         }
         if state.retired.contains(&context) {
             step.replayed = 1;
+            step.retired = 1;
             return step;
         }
         if !authenticated {

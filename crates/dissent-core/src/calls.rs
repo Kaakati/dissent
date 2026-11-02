@@ -354,6 +354,10 @@ impl Forwarding {
         &self.sfu
     }
 
+    pub(crate) fn leaf(&self) -> &AsyncMutex<Option<Participant<CallLink>>> {
+        &self.leaf
+    }
+
     /// Whether this is a volunteer's relay for a call it is not in. It has no leaf side.
     pub(crate) fn is_volunteer_relay(&self) -> bool {
         self.serving

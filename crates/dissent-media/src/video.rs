@@ -212,6 +212,15 @@ const MAX_VIDEO_SESSIONS: usize = 8;
 /// Senders kept for video, so a member naming random sender ids cannot grow this without bound.
 const MAX_VIDEO_SENDERS: usize = 1024;
 
+/// What [`VideoReplay::accept`] made of a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoVerdict {
+    Fresh,
+    Replayed,
+    /// A new sender, with the record of senders full.
+    Full,
+}
+
 /// Remembers the recent counters of each start of sending of each sender, so a replayed ciphertext is dropped.
 #[derive(Debug, Default)]
 pub(crate) struct VideoReplay {
@@ -221,9 +230,9 @@ pub(crate) struct VideoReplay {
 impl VideoReplay {
     /// Records `counter` for `sender`'s start of sending `context`. Returns false when it was already seen or is older
     /// than the window.
-    pub(crate) fn accept(&mut self, sender: u64, context: u64, counter: u64) -> bool {
+    pub(crate) fn accept(&mut self, sender: u64, context: u64, counter: u64) -> VideoVerdict {
         if !self.seen.contains_key(&sender) && self.seen.len() >= MAX_VIDEO_SENDERS {
-            return false;
+            return VideoVerdict::Full;
         }
         let sessions = self.seen.entry(sender).or_default();
         // The most recent session is at the back.
@@ -238,25 +247,25 @@ impl VideoReplay {
             }
         };
         let Some(session) = sessions.remove(at) else {
-            return false;
+            return VideoVerdict::Replayed;
         };
         sessions.push_back(session);
         let Some((_, recent)) = sessions.back_mut() else {
-            return false;
+            return VideoVerdict::Replayed;
         };
         if recent.contains(&counter) {
-            return false;
+            return VideoVerdict::Replayed;
         }
         if let Some(&oldest) = recent.front() {
             if recent.len() >= REPLAY_WINDOW && counter < oldest {
-                return false;
+                return VideoVerdict::Replayed;
             }
         }
         recent.push_back(counter);
         if recent.len() > REPLAY_WINDOW {
             recent.pop_front();
         }
-        true
+        VideoVerdict::Fresh
     }
 }
 
@@ -446,26 +455,23 @@ mod tests {
     #[test]
     fn replay_window_drops_repeats_and_old_counters() {
         let mut replay = VideoReplay::default();
-        assert!(replay.accept(1, 0, 10));
-        assert!(!replay.accept(1, 0, 10), "a repeat is a replay");
-        assert!(replay.accept(2, 0, 10), "counters are per sender");
+        assert_eq!(replay.accept(1, 0, 10), VideoVerdict::Fresh);
+        assert_ne!(replay.accept(1, 0, 10), VideoVerdict::Fresh, "a repeat is a replay");
+        assert_eq!(replay.accept(2, 0, 10), VideoVerdict::Fresh, "counters are per sender");
         for c in 11..11 + REPLAY_WINDOW as u64 {
-            assert!(replay.accept(1, 0, c));
+            assert_eq!(replay.accept(1, 0, c), VideoVerdict::Fresh);
         }
-        assert!(
-            !replay.accept(1, 0, 10),
-            "a counter older than the window is refused"
-        );
+        assert_ne!(replay.accept(1, 0, 10), VideoVerdict::Fresh, "a counter older than the window is refused");
     }
 
     #[test]
     fn a_new_start_of_sending_counts_again_and_the_record_is_bounded() {
         let mut replay = VideoReplay::default();
-        assert!(replay.accept(1, 5, 0));
-        assert!(replay.accept(1, 6, 0), "its own counters, from 0");
-        assert!(!replay.accept(1, 5, 0), "the old one's frame is still a replay");
+        assert_eq!(replay.accept(1, 5, 0), VideoVerdict::Fresh);
+        assert_eq!(replay.accept(1, 6, 0), VideoVerdict::Fresh, "its own counters, from 0");
+        assert_ne!(replay.accept(1, 5, 0), VideoVerdict::Fresh, "the old one's frame is still a replay");
         for context in 100..10_000 {
-            assert!(replay.accept(1, context, 0));
+            assert_eq!(replay.accept(1, context, 0), VideoVerdict::Fresh);
         }
         assert!(replay.seen[&1].len() <= MAX_VIDEO_SESSIONS);
         for sender in 2..100_000 {
