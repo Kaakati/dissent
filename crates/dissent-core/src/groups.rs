@@ -956,6 +956,7 @@ impl Engine {
 
     /// The newest `limit` messages of a conversation, oldest first.
     pub fn conversation_messages(&self, conv: ConvId, limit: usize) -> Vec<DmItem> {
+        self.retry_missed_pictures();
         let mut items = self.conv_items(conv);
         let start = items.len().saturating_sub(limit);
         items.split_off(start)

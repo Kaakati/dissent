@@ -148,3 +148,28 @@ async fn a_video_gets_its_first_frame_as_a_thumbnail_and_vp9_goes_without_one() 
 
     finish(vec![alice, bob]).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thumbnail_whose_first_fetch_fails_still_arrives() {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    rustaceans(&alice, &bob).await;
+    let alice_root = alice.identity.root_id();
+    let bob_root = bob.identity.root_id();
+    let dir = scratch("thumbs-retry");
+    let path = dir.join("late.png");
+    a_picture(&path);
+
+    // Alice's device does not serve yet when bob first asks, as a sender still starting up.
+    dissent_core::test_support::refuse_blobs_for(&alice.engine, std::time::Duration::from_secs(3));
+    let sent = alice.engine.send_dm_files(bob_root, vec![path], "later".into()).await.expect("alice sends the picture");
+    let asked = std::time::Instant::now();
+    let thumb_path = thumbnail_of(&bob, alice_root, &sent.id).await;
+    // The fetch is tried again after 1, 2 and 4 s, so it comes soon after the refusals end, well before the later tries
+    // of a picture given up on, which wait 15 s.
+    assert!(asked.elapsed() < std::time::Duration::from_secs(12), "arrived after {:?}", asked.elapsed());
+    assert!(dissent_core::test_support::refused_blobs(&alice.engine) > 0, "the first fetch was refused");
+    let decoded = image::load_from_memory(&bob.engine.open_picture(&thumb_path).expect("the thumbnail opens").0).expect("the thumbnail decodes");
+    assert_eq!((decoded.width(), decoded.height()), (320, 160));
+    finish(vec![alice, bob]).await;
+}

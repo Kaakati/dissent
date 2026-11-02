@@ -66,6 +66,8 @@ pub(crate) struct World {
     pub attach: crate::attachments::AttachBook,
     /// Attachments whose thumbnail is being fetched now. Not stored: a restart fetches again.
     pub thumb_fetching: std::collections::BTreeSet<String>,
+    /// Thumbnails and preview pictures whose fetches all failed, kept to try again later. Not stored.
+    pub thumb_missed: BTreeMap<String, crate::attachments::MissedPicture>,
     /// Per-provider counts of the downloads in this run. Not stored: a restart starts them again.
     pub source_counts: BTreeMap<String, crate::attachments::LiveSources>,
     /// Which scopes each blob held here belongs to, for the members-only blob server. Built at start.
@@ -150,6 +152,7 @@ impl World {
         let inbox = crate::inbox::InboxBook::load(&paths)?;
         let attach = crate::attachments::AttachBook::load(&paths)?;
         let thumb_fetching = std::collections::BTreeSet::new();
+        let thumb_missed = BTreeMap::new();
         let source_counts = BTreeMap::new();
         let access = crate::access::load(&paths, communities.keys().copied())?;
         for (id, c) in communities.iter_mut() {
@@ -204,6 +207,7 @@ impl World {
             inbox,
             attach,
             thumb_fetching,
+            thumb_missed,
             source_counts,
             blob_scopes: Default::default(),
             own,

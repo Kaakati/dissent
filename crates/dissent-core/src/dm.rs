@@ -217,6 +217,7 @@ impl Engine {
 
     /// The newest `limit` messages with `peer`, sealed and plaintext, oldest first.
     pub fn dm_messages(&self, peer: RootId, limit: usize) -> Vec<DmItem> {
+        self.retry_missed_pictures();
         let conv = dm_conv_id(&self.inner.me, &peer);
         let mut items = self.conversation_messages(conv, usize::MAX);
         {

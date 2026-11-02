@@ -492,6 +492,8 @@ impl Engine {
             }
         }
         if before != after {
+            // Someone came online: the pictures their messages name may be fetchable now.
+            self.retry_missed_pictures();
             self.emit(EngineEvent::PresenceChanged {
                 user: root.to_string(),
             });

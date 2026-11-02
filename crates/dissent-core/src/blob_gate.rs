@@ -73,6 +73,10 @@ pub(crate) struct BlobScopes {
     /// Devices a test told the gate to treat as unknown until it asks them for their certificate. See
     /// `test_support::gate_forget_device`.
     pub(crate) forgotten: std::collections::BTreeSet<DeviceId>,
+    /// Until when a test told the gate to refuse everything, and how many requests it refused so. See
+    /// `test_support::refuse_blobs_for`.
+    pub(crate) refuse_until: Option<Instant>,
+    pub(crate) refused_by_test: u64,
 }
 
 impl BlobScopes {
@@ -549,8 +553,15 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
             _ => continue,
         };
         let device = devices.get(&conn).copied();
+        let refused_by_test = {
+            let mut w = engine.write();
+            let on = w.blob_scopes.refuse_until.is_some_and(|until| Instant::now() < until);
+            w.blob_scopes.refused_by_test += u64::from(on);
+            on
+        };
         let verdict = match device {
             None => Verdict::Deny,
+            Some(_) if refused_by_test => Verdict::Deny,
             Some(device) => {
                 let verdicts: Vec<Verdict> = hashes.iter().map(|h| engine.gate_fetch(&device, h)).collect();
                 if verdicts.contains(&Verdict::Unknown) {

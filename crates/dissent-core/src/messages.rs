@@ -233,12 +233,14 @@ impl Engine {
     }
 
     /// The newest `limit` messages in a channel, oldest first.
+    /// The latest messages of a channel. Pictures that could not be fetched are tried again, since they are about to show.
     pub fn channel_messages(
         &self,
         community: CommunityId,
         channel: ChannelId,
         limit: usize,
     ) -> Vec<MessageItem> {
+        self.retry_missed_pictures();
         self.read().message_items(&community, &channel, limit)
     }
 

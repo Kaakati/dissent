@@ -1820,7 +1820,104 @@ impl Engine {
     }
 }
 
+/// The pauses between a picture's fetches. After the last it is tried again only when its message is shown, its
+/// sender comes online, or the maintenance pass comes round.
+const PICTURE_RETRIES: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(4),
+    std::time::Duration::from_secs(8),
+];
+/// The shortest time between two later tries of one missed picture.
+const MISSED_AGAIN_MS: u64 = 15_000;
+
+/// Which kind of picture a fetch is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PictureKind {
+    Thumbnail,
+    Preview,
+}
+
+/// A picture whose fetches all failed: where it is named, and when it was last tried.
+#[derive(Clone, Debug)]
+pub(crate) struct MissedPicture {
+    community: Option<dissent_identity::CommunityId>,
+    message: String,
+    kind: PictureKind,
+    at_ms: u64,
+}
+
 impl Engine {
+    /// Claims the fetch of picture `id`, unless it is on this device or being fetched. Two fetches of one picture never
+    /// run at once.
+    fn claim_picture(&self, id: &str) -> bool {
+        let mut guard = self.write();
+        let w = &mut *guard;
+        !thumb_path(&w.paths, id).is_file() && w.thumb_fetching.insert(id.to_string())
+    }
+
+    /// Fetches a picture, trying again after each of `PICTURE_RETRIES`. The claim is held across the pauses.
+    fn spawn_picture_fetch(&self, community: Option<dissent_identity::CommunityId>, message: String, id: String, kind: PictureKind) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut pauses = PICTURE_RETRIES.iter();
+            let outcome = loop {
+                let result = match kind {
+                    PictureKind::Thumbnail => engine.download_thumbnail(community, &message, &id).await,
+                    PictureKind::Preview => engine.download_embed_image(community, &message, &id).await,
+                };
+                match (result, pauses.next()) {
+                    (Ok(()), _) => break Ok(()),
+                    (Err(e), Some(pause)) => {
+                        debug!(error = %e, ?kind, "could not fetch a picture yet");
+                        tokio::time::sleep(*pause).await;
+                    }
+                    (Err(e), None) => break Err(e),
+                }
+            };
+            {
+                let mut w = engine.write();
+                w.thumb_fetching.remove(&id);
+                match &outcome {
+                    Ok(()) => {
+                        w.thumb_missed.remove(&id);
+                    }
+                    Err(_) => {
+                        w.thumb_missed.insert(id.clone(), MissedPicture { community, message: message.clone(), kind, at_ms: now_ms() });
+                    }
+                }
+            }
+            match outcome {
+                Ok(()) => engine.emit(EngineEvent::AttachmentChanged { message_id: message, attachment_id: id }),
+                Err(e) => debug!(error = %e, ?kind, "gave up on a picture for now"),
+            }
+        });
+    }
+
+    /// Tries again the pictures whose fetches all failed, at most once per `MISSED_AGAIN_MS` each. Called when messages
+    /// are shown, when someone comes online, and from the maintenance pass.
+    pub(crate) fn retry_missed_pictures(&self) {
+        let now = now_ms();
+        let due: Vec<(String, MissedPicture)> = {
+            let w = self.read();
+            if w.thumb_missed.is_empty() {
+                return;
+            }
+            w.thumb_missed.iter().filter(|(_, m)| now.saturating_sub(m.at_ms) >= MISSED_AGAIN_MS).map(|(id, m)| (id.clone(), m.clone())).collect()
+        };
+        for (id, missed) in due {
+            if self.claim_picture(&id) {
+                if let Some(m) = self.write().thumb_missed.get_mut(&id) {
+                    m.at_ms = now;
+                }
+                self.spawn_picture_fetch(missed.community, missed.message, id, missed.kind);
+            } else {
+                // On this device by now, or being fetched.
+                self.write().thumb_missed.remove(&id);
+            }
+        }
+    }
+
     /// Fetches the thumbnails of a message's images, for those small enough to fetch on arrival.
     fn auto_fetch_thumbnails(
         &self,
@@ -1834,41 +1931,11 @@ impl Engine {
                 continue;
             };
             let id = attachment_id(&a.file);
-            let fetch = {
-                let mut guard = self.write();
-                let w = &mut *guard;
-                !thumb_path(&w.paths, &id).is_file() && w.thumb_fetching.insert(id.clone())
-            };
-            if !fetch {
-                continue;
+            // A fetch tells the seeders nothing: a hint from each fetching member would tell them who fetched what, and
+            // when. Only the sender hints (see `media_blobs`).
+            if self.claim_picture(&id) {
+                self.spawn_picture_fetch(community, message.clone(), id, PictureKind::Thumbnail);
             }
-            let engine = Engine {
-                inner: self.inner.clone(),
-            };
-            let message = message.clone();
-            tokio::spawn(async move {
-                engine.fetch_thumbnail(community, message, id).await;
-            });
-        }
-    }
-
-    /// Fetches one thumbnail and tells the UI when it is on this device.
-    async fn fetch_thumbnail(
-        &self,
-        community: Option<dissent_identity::CommunityId>,
-        message: String,
-        attachment: String,
-    ) {
-        // A fetch tells the seeders nothing: a hint from each fetching member would tell them who fetched what, and
-        // when. Only the sender hints (see `media_blobs`).
-        let result = self.download_thumbnail(community, &message, &attachment).await;
-        self.write().thumb_fetching.remove(&attachment);
-        match result {
-            Ok(()) => self.emit(EngineEvent::AttachmentChanged {
-                message_id: message,
-                attachment_id: attachment,
-            }),
-            Err(e) => debug!(error = %e, "could not fetch a thumbnail"),
         }
     }
 
@@ -1881,39 +1948,9 @@ impl Engine {
     ) {
         for picture in embed_extras_of(plain).into_iter().filter_map(|e| e.image) {
             let id = attachment_id(&picture.file);
-            let fetch = {
-                let mut guard = self.write();
-                let w = &mut *guard;
-                !thumb_path(&w.paths, &id).is_file() && w.thumb_fetching.insert(id.clone())
-            };
-            if !fetch {
-                continue;
+            if self.claim_picture(&id) {
+                self.spawn_picture_fetch(community, message.clone(), id, PictureKind::Preview);
             }
-            let engine = Engine {
-                inner: self.inner.clone(),
-            };
-            let message = message.clone();
-            tokio::spawn(async move {
-                engine.fetch_embed_image(community, message, id).await;
-            });
-        }
-    }
-
-    /// Fetches one link preview's picture and tells the UI when it is on this device.
-    async fn fetch_embed_image(
-        &self,
-        community: Option<dissent_identity::CommunityId>,
-        message: String,
-        picture: String,
-    ) {
-        let result = self.download_embed_image(community, &message, &picture).await;
-        self.write().thumb_fetching.remove(&picture);
-        match result {
-            Ok(()) => self.emit(EngineEvent::AttachmentChanged {
-                message_id: message,
-                attachment_id: picture,
-            }),
-            Err(e) => debug!(error = %e, "could not fetch a link preview picture"),
         }
     }
 

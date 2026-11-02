@@ -836,6 +836,7 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
             break;
         };
         let engine = Engine { inner };
+        engine.retry_missed_pictures();
         engine.retry_outbox().await;
         engine.retry_contact_outbox().await;
         engine.flush_conv_queues().await;

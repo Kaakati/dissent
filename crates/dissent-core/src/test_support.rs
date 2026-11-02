@@ -350,3 +350,13 @@ pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::Devi
 pub fn call_key_state(engine: &crate::Engine) -> Option<([u8; 4], u64, u64)> {
     engine.call_key_state()
 }
+
+/// Makes `engine`'s blob server refuse every request for `time`, as a sender that is not serving yet.
+pub fn refuse_blobs_for(engine: &crate::Engine, time: std::time::Duration) {
+    engine.write().blob_scopes.refuse_until = Some(std::time::Instant::now() + time);
+}
+
+/// How many requests `engine`'s blob server refused under `refuse_blobs_for`.
+pub fn refused_blobs(engine: &crate::Engine) -> u64 {
+    engine.read().blob_scopes.refused_by_test
+}
