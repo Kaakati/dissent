@@ -843,6 +843,8 @@ Each start of sending also has its own replay window, since each counts from 0: 
 
 Someone who comes back is normally unheard for about 0.5 s, the first digest, or about 1 s if that digest is lost. A member holding the key who floods new contexts in their name can replace the one waiting candidate and keep them unheard for as long as that lasts. It cannot touch a session already proven.
 
+A screen's sound is encrypted by the sender's video key, so it gets video's replay rule, not audio's. A new context is accepted on its first frame, with up to 8 contexts kept per sender, and no signed digest has to cover it first. That is weaker: someone holding the media key can start a new context in a sharer's name at once, as with video. The sound and the picture share one window of 128 counters, which tolerates loss and the small reordering the carrier allows.
+
 A member holding the key can name any sender or key id, so state from those is capped: 64 senders with no certificate per link, 1024 senders for video, and 4 key ids taken under the current key until the next rekey. A frame costs at most two decrypt attempts.
 
 ## Findings

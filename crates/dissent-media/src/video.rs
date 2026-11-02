@@ -498,4 +498,27 @@ mod tests {
         nal.extend(escape(&body));
         assert!(uncarry(&nal).is_err(), "dropped before any gate or key sees it");
     }
+
+    /// A screen's sound and its picture share one sender, so their counters interleave in one replay window. Losing or
+    /// swapping frames of either kind must not make the window refuse the other.
+    #[test]
+    fn sound_and_picture_on_one_sender_do_not_stall_each_other() {
+        let mut replay = VideoReplay::default();
+        // About 50 sound frames and 30 pictures a second, from one counter, as the sender interleaves them.
+        let kinds: Vec<bool> = (0..4_000u64).map(|i| i % 8 < 5).collect();
+        let mut order: Vec<u64> = (0..kinds.len() as u64).collect();
+        // Every seventh frame is lost, and neighbours arrive swapped.
+        order.retain(|c| c % 7 != 3);
+        for pair in order.chunks_mut(2) {
+            pair.reverse();
+        }
+        for &counter in &order {
+            assert_eq!(replay.accept(1, 9, counter), VideoVerdict::Fresh, "counter {counter}, sound {}", kinds[counter as usize]);
+        }
+        // A picture or a sound frame sent again is still refused.
+        for counter in [order[order.len() - 1], order[order.len() - 2]] {
+            assert_eq!(replay.accept(1, 9, counter), VideoVerdict::Replayed);
+        }
+    }
 }
+
