@@ -405,8 +405,12 @@ way. Nothing syncs: the listing is a snapshot, and a later change is a new listi
   fetched from its holders into a staging folder beside where the folder lands (`.dissent-partial-...`), checked against its
   fingerprint, and marked as from the internet. Nothing opens. A file already staged whole is not fetched again, so a retry resumes.
   Every path is checked again, and nothing is written through a link in staging. The staging folder is then moved into place under the
-  folder's name, `Name (2)` beside one already there. The files are then seeded like a downloaded file. No receipt is sent for a
-  folder yet.
+  folder's name, `Name (2)` beside one already there. The files are then seeded like a downloaded file. The staging folder stays
+  only while the download can resume, after a pause or a failure: cancelling or removing the download clears it, and any left
+  in the download folder for more than 7 days is cleared at startup.
+- **A listing that fails partway** undoes the links it made for no earlier seed, and a manifest it stored but could not publish, so
+  nothing is served without a seed record.
+- **Not built: receipts.** A folder download sends no `FileReceipt`, so it earns its providers no reputation yet.
 
 ## Seeding
 

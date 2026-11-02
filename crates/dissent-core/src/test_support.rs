@@ -142,6 +142,16 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
         .store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.
+pub fn fail_folder_after(engine: &crate::Engine, files: u64) {
+    engine.inner.fail_folder_after.store(files, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many files `engine` serves in place.
+pub fn linked_count(engine: &crate::Engine) -> usize {
+    engine.inner.files.linked_count()
+}
+
 /// Lists `manifest` as a folder with no files behind it, as a lying lister would.
 pub async fn list_raw_folder(
     engine: &crate::Engine,

@@ -129,6 +129,9 @@ pub(crate) struct Inner {
     /// which clear bits to model an older device.
     pub features: std::sync::atomic::AtomicU64,
     /// Devices' answers to `Request::Features`, with when. In memory only. See `custom_roles`.
+    /// Set only in tests: `list_folder` fails after linking this many files. See `test_support`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fail_folder_after: std::sync::atomic::AtomicU64,
     pub(crate) feature_answers: Mutex<BTreeMap<DeviceId, (u64, std::time::Instant)>>,
     /// The file tracker's keys and local book, per community. See `tracker`.
     pub(crate) tracker: Mutex<crate::tracker::TrackerState>,
@@ -291,6 +294,8 @@ impl Engine {
             history_support: AtomicBool::new(true),
             history_probes: AtomicBool::new(true),
             rotation_support: AtomicBool::new(true),
+            #[cfg(feature = "test-hooks")]
+            fail_folder_after: std::sync::atomic::AtomicU64::new(0),
             features: std::sync::atomic::AtomicU64::new(crate::custom_roles::FEATURES),
             feature_answers: Default::default(),
             tracker: Default::default(),
@@ -347,6 +352,7 @@ impl Engine {
         engine.adopt_all_relays().await;
         engine.refetch_pictures();
         engine.reconcile_all_linked();
+        engine.sweep_folder_staging();
         engine.load_blob_scopes();
         engine.release_unreferenced_at_start();
         // Local stamps must sort after every stored event, so the clock starts past the newest.

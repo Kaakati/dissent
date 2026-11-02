@@ -1304,7 +1304,11 @@ impl Engine {
     /// Stops a download and drops its row. The partial bytes stay until they expire.
     pub fn cancel_transfer(&self, id: &str) -> Result<()> {
         self.abort_task(id);
-        self.write().attach.transfers.remove(id);
+        let removed = self.write().attach.transfers.remove(id);
+        // A folder's staged files are kept only while the download can still resume.
+        if removed.is_some_and(|t| t.message_id.starts_with(crate::tracker::folder::FOLDER_PREFIX)) {
+            self.remove_folder_staging(id);
+        }
         self.persist_attach();
         self.emit(EngineEvent::TransfersChanged);
         Ok(())

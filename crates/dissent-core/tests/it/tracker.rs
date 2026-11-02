@@ -533,6 +533,49 @@ async fn a_folder_is_one_listing_with_its_contents_and_a_changed_file_shows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_folder_that_fails_to_list_or_a_cancelled_download_leaves_nothing_behind() {
+    heavy(1, async {
+        let alice = peer("tracker-folder-undo").await;
+        let server = alice.engine.create_community("Undo".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.unwrap();
+        let (dir, _) = album(&scratch("tracker-folder-undo-src"));
+        let rel = check_folder(&alice.engine, id, &dir).await;
+        let before = dissent_core::test_support::linked_count(&alice.engine);
+
+        // Listing fails after two files were linked: they are not left served without a seed record.
+        dissent_core::test_support::fail_folder_after(&alice.engine, 2);
+        assert!(alice.engine.list_folder(id, cat, dir.clone(), rel.clone(), vec![], String::new(), SeedLimit::Forever).await.is_err());
+        assert_eq!(dissent_core::test_support::linked_count(&alice.engine), before, "the links it made are undone");
+        assert!(alice.engine.files_view(id).unwrap().listings.is_empty());
+        assert!(alice.engine.seeding_view(id).unwrap().rows.is_empty());
+        dissent_core::test_support::fail_folder_after(&alice.engine, 0);
+        let listing: dissent_events::EventId = alice.engine.list_folder(id, cat, dir.clone(), rel, vec![], String::new(), SeedLimit::Forever).await.unwrap().parse().unwrap();
+        assert_eq!(dissent_core::test_support::linked_count(&alice.engine), before + 3);
+
+        // A download that fails keeps its staging to resume; cancelling it clears that.
+        let downloads = scratch("tracker-folder-undo-downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        alice.engine.set_download_dir(Some(downloads.clone())).unwrap();
+        let t = alice.engine.download_folder(id, listing).await.expect("started");
+        let staging = || std::fs::read_dir(&downloads).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".dissent-partial-")).count();
+        until_event(&alice.engine, Duration::from_secs(60), "the download stops with nobody to fetch from", || {
+            alice.engine.transfers().into_iter().find(|x| x.id == t.id).filter(|x| x.state == "failed").map(|_| ())
+        })
+        .await;
+        assert_eq!(staging(), 1, "a failed download keeps its staging to resume");
+        alice.engine.cancel_transfer(&t.id).unwrap();
+        assert_eq!(staging(), 0, "cancelling clears it");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&downloads);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_member_downloads_a_nested_folder_byte_for_byte_and_holds_it() {
     heavy(2, async {

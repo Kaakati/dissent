@@ -33,6 +33,10 @@ const MAX_PARTS: usize = super::folders::MAX_DEPTH + 2;
 const MAX_PATH_CHARS: usize = 200;
 /// Longest name of one file or folder in it.
 const MAX_PART_CHARS: usize = 120;
+/// How long a folder download's staged files wait for a resume before they are cleared at startup.
+const STAGING_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+/// The start of a staging folder's name, in the download folder.
+const STAGING_PREFIX: &str = ".dissent-partial-";
 /// Room left on the disk beyond what a download needs.
 const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -373,11 +377,44 @@ impl Engine {
         } else {
             self.newest_files_key(community, false).await?
         };
+        // Links made for this listing and for no seed before it. If listing fails, they are undone, so nothing stays served
+        // without a seed record.
+        let seeded_before: BTreeSet<[u8; 32]> = self.with_tracker(community, |l| l.book.seeds.keys().copied().collect());
+        let mut made: Vec<[u8; 32]> = Vec::new();
+        let result = self
+            .list_folder_linked(community, category, &root, &files, &types, restricted, (generation, files_key), name, tags, description, limit, &seeded_before, &mut made)
+            .await;
+        if result.is_err() {
+            for blob in made {
+                self.inner.files.forget_linked(blob);
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)] // `list_folder`'s own state, so a failure can undo what it made
+    async fn list_folder_linked(
+        &self,
+        community: CommunityId,
+        category: CategoryId,
+        root: &Path,
+        files: &[String],
+        types: &[FileType],
+        restricted: bool,
+        (generation, files_key): (u64, [u8; 32]),
+        name: String,
+        tags: Vec<String>,
+        description: String,
+        limit: SeedLimit,
+        seeded_before: &BTreeSet<[u8; 32]>,
+        made: &mut Vec<[u8; 32]>,
+    ) -> Result<String> {
+        let me = self.inner.me;
         let mut entries = Vec::new();
         let mut seeds = Vec::new();
-        for rel in &files {
+        for rel in files {
             let parts = check_relative(rel)?;
-            let path = parts.iter().fold(root.clone(), |p, part| p.join(part));
+            let path = parts.iter().fold(root.to_path_buf(), |p, part| p.join(part));
             let offered = self.with_tracker(community, |l| l.offered.contains(&path));
             if !offered || !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
                 return Err(CoreError::Invalid(format!("{} was not checked for adding", path.display())));
@@ -390,7 +427,14 @@ impl Engine {
             let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
             let key = dissent_files::tracker::content_key(&files_key, &fingerprint);
             let fref = self.inner.files.link_file(&path, &mime, key, fingerprint).await.map_err(|e| CoreError::Invalid(e.to_string()))?;
+            if !seeded_before.contains(&fref.hash) {
+                made.push(fref.hash);
+            }
             entries.push(ManifestEntry { path: rel.clone(), size, kind, fingerprint, blob: fref.hash, cipher_size: fref.cipher_size });
+            #[cfg(feature = "test-hooks")]
+            if self.inner.fail_folder_after.load(std::sync::atomic::Ordering::Relaxed) == entries.len() as u64 {
+                return Err(CoreError::Invalid("failed on purpose, for a test".into()));
+            }
             seeds.push((fref.hash, path));
         }
         let manifest = Manifest { entries };
@@ -416,8 +460,11 @@ impl Engine {
         let inner = seal(&files_key, generation, &community, &me, BodyKind::Folder, &body)?;
         // A restricted category's blobs stay sealed, as for a file.
         let blob = (!restricted).then_some((mref.hash, mref.cipher_size));
-        let se = self.author_publish(community, ChannelId::CONTROL, Payload::FileListing { category, blob, inner }).await?;
-        let listing = EventId(se.event.id.0);
+        let published = self.author_publish(community, ChannelId::CONTROL, Payload::FileListing { category, blob, inner }).await;
+        if published.is_err() {
+            let _ = self.inner.files.unpin(mref.hash).await;
+        }
+        let listing = EventId(published?.event.id.0);
         self.remember_manifest(community, mref.hash, manifest);
         let record = |path: Option<PathBuf>, linked: bool| SeedRecord {
             listing,
@@ -775,7 +822,7 @@ impl Engine {
             .files_key(community, f.body.content_generation)
             .ok_or_else(|| CoreError::Invalid("this device lacks the key that folder was listed under".into()))?;
         let dest = self.download_dir();
-        let staging = dest.join(format!(".dissent-partial-{}", &id[..id.len().min(16)]));
+        let staging = self.folder_staging(id);
         std::fs::create_dir_all(&staging)?;
         if std::fs::symlink_metadata(&staging)?.file_type().is_symlink() {
             return Err(CoreError::Invalid("the staging folder is a link".into()));
@@ -885,6 +932,36 @@ impl Engine {
         self.emit(EngineEvent::TransfersChanged);
         self.emit(EngineEvent::CommunityUpdated { community_id: community.to_string() });
         Ok(())
+    }
+
+    /// Where a folder download stages its files: beside where it lands, so moving it into place is a rename.
+    fn folder_staging(&self, id: &str) -> PathBuf {
+        self.download_dir().join(format!("{STAGING_PREFIX}{}", &id[..id.len().min(16)]))
+    }
+
+    /// Clears a folder download's staged files, once it cannot resume.
+    pub(crate) fn remove_folder_staging(&self, id: &str) {
+        let staging = self.folder_staging(id);
+        if std::fs::symlink_metadata(&staging).is_ok_and(|m| m.is_dir()) {
+            if let Err(e) = std::fs::remove_dir_all(&staging) {
+                tracing::warn!(error = %e, "could not clear a cancelled folder download");
+            }
+        }
+    }
+
+    /// Clears staging folders left in the download folder for more than `STAGING_KEPT`. Called at startup.
+    pub(crate) fn sweep_folder_staging(&self) {
+        let Ok(entries) = std::fs::read_dir(self.download_dir()) else { return };
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+            let old = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STAGING_KEPT);
+            if meta.is_dir() && old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
     }
 
     /// The folder a linked folder listing of this device was listed from, so it can be listed again. It may be read: the
