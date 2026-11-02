@@ -34,7 +34,8 @@ use crate::signal::Signal;
 use crate::transport::PacketTransport;
 use crate::video::{layer_key, stream_key, RawFrame, RawVideo, MAX_LAYERS};
 
-/// How long a viewer waiting for a keyframe of a stream waits before its source is asked again.
+/// How long a viewer waiting for a keyframe of a stream waits before its source is asked again. Also the least time
+/// between two requests to one source, whatever the number of viewers waiting on it: at most two a second.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 
 /// How recently a participant must have sent a frame to count as an active speaker.
@@ -116,6 +117,8 @@ pub struct Sfu<T: PacketTransport> {
     video_started: HashSet<(Link, u64)>,
     /// Each (downlink, stream or layer) waiting for a keyframe, with when its source was last asked for one.
     video_wanted: BTreeMap<(Link, u64), Instant>,
+    /// When each source link was last asked for a keyframe, so the waits of many viewers ask it once.
+    asked_source: BTreeMap<Link, Instant>,
     /// The link each sender's video arrives on, for keyframe requests.
     video_source: BTreeMap<u64, Link>,
     /// Each stream's layers, as its sender announced them. A stream with none has one layer.
@@ -148,6 +151,7 @@ impl<T: PacketTransport> Sfu<T> {
             use_estimates: true,
             video_started: HashSet::new(),
             video_wanted: BTreeMap::new(),
+            asked_source: BTreeMap::new(),
             video_source: BTreeMap::new(),
             layers: BTreeMap::new(),
             tiles: BTreeMap::new(),
@@ -768,7 +772,14 @@ impl<T: PacketTransport> Sfu<T> {
         )
     }
 
+    /// Asks `source` for a keyframe, unless it was asked within `KEYFRAME_RETRY`. One keyframe serves every viewer
+    /// waiting on a source, so the waits and requests of many viewers ask it at most twice a second.
     fn request_keyframe_from(&mut self, source: Link) {
+        let now = Instant::now();
+        if self.asked_source.get(&source).is_some_and(|asked| now.duration_since(*asked) < KEYFRAME_RETRY) {
+            return;
+        }
+        self.asked_source.insert(source, now);
         self.stats.keyframes_requested += 1;
         let call = match source {
             Link::Down(peer) => self.links.get_mut(&peer),
