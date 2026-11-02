@@ -294,6 +294,10 @@ Not events, and not gossip: each device asks (built in phase 3, `tracker::swarm`
 - Why polling rather than a gossip beacon: no new topic or signed beacon format to freeze, the digest makes a repeat
   answer a few bytes, and the swarm needs only online members. A gossip beacon can come later without changing the
   RPC.
+- What is moving now, for an open file page: `Engine::listing_live` (`tracker::live`, read about once a second) answers from
+  this device's own byte counts per blob and device, kept in memory and read without touching the network: the rates up and
+  down, the time left and pieces of this device's download, and each peer it exchanges with. Who else holds what stays with
+  `Holdings`, at its slower pace.
 - Piece availability for the file page: iroh-blobs remote `observe` from up to 16 online holders
   (`Files::piece_map`), counted per 64 KiB ciphertext piece, plus this device's own copy.
 
@@ -318,6 +322,12 @@ Not events, and not gossip: each device asks (built in phase 3, `tracker::swarm`
 Attachments lose identifying details by default (`scrub`). A listing never does: its fingerprint names the file on
 disk, and a linked file is served in place, so a scrubbed copy would not match and could not be seeded from the folder.
 The Add files dialog says so; a member who wants a photo cleaned sends it as an attachment or cleans it first.
+
+## Browsing
+
+The whole catalog is on the device, so the Files page pages it locally, with no wire change: the page shows 15, 25, 50 or 75
+files (25 at first, remembered per device), of what the filters and search match. Changing a filter, the search, the sort or the
+size returns to page 1. A listing arriving leaves the page number alone. A page left empty moves to the last valid page.
 
 ## Adding files
 
@@ -472,7 +482,10 @@ one that does not open or decode moves to `<name>.bad` untouched, any other read
 a `tracker.bin.bad` is there the unpin sweep keeps everything. `tracker.bin`: `LocalBook { receipt_secret, folders,
 auto_import, seeds: BTreeMap<blob, SeedRecord { listing, path, limit, paused, stopped, linked, modified_ms, uploaded,
 since_ms, downloaded }>, completed }`. `seeding.bin`: `SeedingSettings`. `outboards/*.obao`: bao post-order
-outboards. Neither crosses the wire. After the merge they get an `upgrade_compat`
+outboards. `tracker_counters.bin` is a marker that a community's upload counters are known good: v0.1.22 counted each slice from the
+start of the file, so its saved counters ran too high and a seed under a ratio limit looked finished. A book with no marker has its
+counters set to zero, once, and is marked only after that book is saved. It is a separate file so the book keeps the format
+v0.1.22 wrote. Neither crosses the wire. After the merge they get an `upgrade_compat`
 fixture, and any later change gets a new fixture.
 
 ## Build plan

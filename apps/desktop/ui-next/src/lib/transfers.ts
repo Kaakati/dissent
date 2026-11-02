@@ -10,11 +10,13 @@ import type { Id, TransferSettings } from './types';
 // The download folder and the auto-accept limit. Null until the backend answers, or when it does not report them.
 interface TransferSettingsState {
   settings: TransferSettings | null;
+  dirError: string | null; // why the last change of folder was refused
   load: () => Promise<void>;
 }
 
 export const useTransferSettings = create<TransferSettingsState>()((set) => ({
   settings: null,
+  dirError: null,
   load: async () => {
     try {
       set({ settings: await api.transferSettings() });
@@ -55,23 +57,22 @@ export async function revealTransfer(path: string): Promise<void> {
   }
 }
 
-// Asks for a new download folder and saves it. Cancelling the picker keeps the current folder.
-export async function changeDownloadDir(): Promise<void> {
+// Saves a change of download folder. A refused one keeps the folder there was, and says why beside the control.
+async function changeFolder(change: () => Promise<TransferSettings>): Promise<void> {
   try {
-    useTransferSettings.setState({ settings: await api.pickDownloadDir() });
+    useTransferSettings.setState({ settings: await change(), dirError: null });
   } catch (err) {
-    toast(err);
+    const text = (err instanceof Error ? err.message : String(err)).replace(/^invalid: /, '');
+    useTransferSettings.setState({ dirError: text });
+    toast(text);
   }
 }
 
+// Asks for a new download folder and saves it. Cancelling the picker keeps the current folder.
+export const changeDownloadDir = () => changeFolder(() => api.pickDownloadDir());
+
 // Goes back to the default download folder, which follows the OS Downloads folder.
-export async function resetDownloadDir(): Promise<void> {
-  try {
-    useTransferSettings.setState({ settings: await api.resetDownloadDir() });
-  } catch (err) {
-    toast(err);
-  }
-}
+export const resetDownloadDir = () => changeFolder(() => api.resetDownloadDir());
 
 // Files up to this size download without asking. Null means always ask.
 export async function setAutoAccept(bytes: number | null): Promise<void> {

@@ -496,6 +496,9 @@ pub(crate) struct AttachBook {
     /// stored, so a moved OS folder is picked up on the next start.
     #[serde(skip)]
     pub default_download_dir: Option<PathBuf>,
+    /// A folder a download could not save to this run, as a write test then showed. Not stored.
+    #[serde(skip)]
+    pub unwritable_dir: Option<PathBuf>,
     /// Finished downloads: attachment id to local path.
     pub downloads: BTreeMap<String, PathBuf>,
     /// What each file on disk turned out to be, by attachment id, so a file is read once a run.
@@ -1394,6 +1397,7 @@ impl Engine {
         let node = self.node();
         let dest = self.download_dir();
         if let Err(e) = std::fs::create_dir_all(&dest) {
+            self.write().attach.unwritable_dir = Some(dest);
             self.fail(id, "failed", format!("Could not create the download folder: {e}"));
             return;
         }
@@ -1445,6 +1449,9 @@ impl Engine {
                 {
                     let mut guard = self.write();
                     guard.attach.downloads.insert(id.to_string(), path.clone());
+                    if guard.attach.unwritable_dir.as_deref() == Some(dest.as_path()) {
+                        guard.attach.unwritable_dir = None;
+                    }
                     guard.attach.content_checks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
                     if let Some(t) = guard.attach.transfers.get_mut(id) {
                         t.state = "done".into();
@@ -1471,6 +1478,10 @@ impl Engine {
             Err(FilesError::DiskFull { .. }) => self.fail(id, "disk_full", "Not enough disk space.".into()),
             Err(e) => {
                 debug!(error = %e, "download failed");
+                // A failed save is the one time after picking that the folder gets a write test.
+                if matches!(e, FilesError::Io(_)) && check_writable_dir(&dest).is_err() {
+                    self.write().attach.unwritable_dir = Some(dest.clone());
+                }
                 self.fail(id, "failed", failure_reason(&e));
             }
         }
@@ -2013,6 +2024,25 @@ mod tests {
         let os = Path::new("/home/ada/Downloads");
         let picked = Path::new("/mnt/shared");
         assert_eq!(resolve_download_dir(Some(picked), Some(os), profile), picked, "a picked folder wins");
+        let gone = std::env::temp_dir().join(format!("dissent-no-such-folder-{}", std::process::id()));
+        assert!(download_dir_problem(&gone, false).is_some_and(|p| p.contains("no longer exists")));
+        assert!(check_writable_dir(&gone).is_err());
+        let here = std::env::temp_dir().join(format!("dissent-a-folder-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        assert_eq!(download_dir_problem(&here, false), None);
+        assert_eq!(std::fs::read_dir(&here).unwrap().count(), 0, "reading the settings writes nothing there");
+        assert!(download_dir_problem(&here, true).is_some_and(|p| p.contains("cannot save")), "a failed save's write test counts");
+        let mut marked = std::fs::metadata(&here).unwrap().permissions();
+        marked.set_readonly(true);
+        std::fs::set_permissions(&here, marked.clone()).unwrap();
+        assert!(download_dir_problem(&here, false).is_some_and(|p| p.contains("cannot save")), "marked read-only");
+        #[allow(clippy::permissions_set_readonly_false)]
+        marked.set_readonly(false);
+        std::fs::set_permissions(&here, marked).unwrap();
+        let file = here.join("a-file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(download_dir_problem(&file, false).is_some_and(|p| p.contains("cannot save")), "a file is not a folder");
+        let _ = std::fs::remove_dir_all(&here);
         assert_eq!(resolve_download_dir(None, Some(os), profile), os, "reset to the default gives the OS folder");
         assert_eq!(resolve_download_dir(None, None, profile), profile, "no OS folder gives the profile folder");
     }
@@ -2096,6 +2126,9 @@ pub struct TransferSettings {
     pub download_dir: String,
     /// True until the user picks a folder. Then the reset to the default is offered.
     pub download_dir_is_default: bool,
+    /// Why downloads may not reach that folder now, for the person to act on.
+    #[serde(default)]
+    pub download_dir_problem: Option<String>,
 }
 
 /// What the encrypted file store holds on this device.
@@ -2203,13 +2236,17 @@ impl Engine {
 }
 impl Engine {
     pub fn transfer_settings(&self) -> TransferSettings {
-        let w = self.read();
+        let (auto_accept_bytes, dir, download_dir_is_default, unwritable) = {
+            let w = self.read();
+            let dir = resolve_download_dir(w.attach.download_dir.as_deref(), w.attach.default_download_dir.as_deref(), &w.paths.downloads());
+            let unwritable = w.attach.unwritable_dir.as_deref() == Some(dir.as_path());
+            (w.attach.auto_accept_bytes, dir, w.attach.download_dir.is_none(), unwritable)
+        };
         TransferSettings {
-            auto_accept_bytes: w.attach.auto_accept_bytes,
-            download_dir: resolve_download_dir(w.attach.download_dir.as_deref(), w.attach.default_download_dir.as_deref(), &w.paths.downloads())
-                .to_string_lossy()
-                .into_owned(),
-            download_dir_is_default: w.attach.download_dir.is_none(),
+            auto_accept_bytes,
+            download_dir_problem: download_dir_problem(&dir, unwritable),
+            download_dir: dir.to_string_lossy().into_owned(),
+            download_dir_is_default,
         }
     }
 
@@ -2324,6 +2361,7 @@ impl Engine {
         {
             let mut guard = self.write();
             guard.attach.download_dir = dir;
+            guard.attach.unwritable_dir = None;
             guard.attach.save(&guard.paths)?;
         }
         Ok(self.transfer_settings())
@@ -2336,14 +2374,25 @@ pub(crate) fn resolve_download_dir(picked: Option<&Path>, os_default: Option<&Pa
     picked.or(os_default).unwrap_or(profile).to_path_buf()
 }
 
+/// What stands between `dir` and the next download. This is read whenever settings are, and the folder may be synced or
+/// watched, so it writes nothing: `known_unwritable` is what a write test found when a save failed. A missing folder is made
+/// again when a download starts, if it can be.
+fn download_dir_problem(dir: &Path, known_unwritable: bool) -> Option<String> {
+    let Ok(meta) = std::fs::metadata(dir) else {
+        return Some("This folder no longer exists. Dissent will try to make it again for the next download, or you can choose another.".into());
+    };
+    (known_unwritable || !meta.is_dir() || meta.permissions().readonly())
+        .then(|| "Dissent cannot save to this folder, so downloads will fail until you choose another.".into())
+}
+
 /// Fails unless `dir` is an existing directory that this process can write a file into.
 fn check_writable_dir(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
-        return Err(CoreError::Invalid(format!("{} is not an existing folder", dir.display())));
+        return Err(CoreError::Invalid(format!("{} is not an existing folder. Choose another.", dir.display())));
     }
     let probe = dir.join(".dissent-write-check");
     std::fs::write(&probe, b"ok").map_err(|e| {
-        CoreError::Invalid(format!("{} is not writable: {e}", dir.display()))
+        CoreError::Invalid(format!("Dissent cannot save to {}, so it was not changed. Choose another folder. ({e})", dir.display()))
     })?;
     let _ = std::fs::remove_file(&probe);
     Ok(())

@@ -2,7 +2,7 @@
 // chat surface. Esc or the close button returns to the window, and focus goes back to whatever opened it. Ported from
 // views/settings.js.
 import { useEffect, useRef, useState } from 'react';
-import { Download, Inbox, Info, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon } from 'lucide-react';
+import { Download, Inbox, Info, KeyRound, Mic, Palette, Server, ShieldCheck, User, Volume2, Wifi, X, type LucideIcon, FolderDown } from 'lucide-react';
 import { AboutPage } from '@/components/settings/about-page';
 import { AccountPage } from '@/components/settings/account-page';
 import { AppearancePage } from '@/components/settings/appearance-page';
@@ -12,6 +12,7 @@ import { NetworkPage } from '@/components/settings/network-page';
 import { PrivacyPage } from '@/components/settings/privacy-page';
 import { RecoveryPage } from '@/components/settings/recovery-page';
 import { SoundsPage } from '@/components/settings/sounds-page';
+import { DownloadFolder } from '@/components/transfers/download-folder';
 import { UpdatesPage } from '@/components/settings/updates-page';
 import { VoicePage } from '@/components/settings/voice-page';
 import { Button } from '@/components/ui/button';
@@ -29,6 +30,7 @@ const NAV: { key: SettingsSection; label: string; icon: LucideIcon; feature?: Fe
   { key: 'appearance', label: 'Appearance', icon: Palette },
   { key: 'sounds', label: 'Notifications & sounds', icon: Volume2 },
   { key: 'voice', label: 'Voice', icon: Mic },
+  { key: 'downloads', label: 'Downloads', icon: FolderDown },
   { key: 'network', label: 'Network', icon: Wifi },
   { key: 'updates', label: 'Updates', icon: Download },
   { key: 'about', label: 'About', icon: Info },
@@ -46,6 +48,7 @@ function Body({ section }: { section: SettingsSection }) {
     case 'appearance': return <AppearancePage />;
     case 'sounds': return <SoundsPage />;
     case 'voice': return <VoicePage />;
+    case 'downloads': return <DownloadFolder />;
     case 'network': return <NetworkPage />;
     case 'updates': return <UpdatesPage />;
     case 'about': return <AboutPage />;

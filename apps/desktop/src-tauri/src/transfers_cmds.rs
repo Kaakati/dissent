@@ -10,7 +10,6 @@ use dissent_core::{
 };
 use serde::Deserialize;
 use tauri::{AppHandle, State};
-use tauri_plugin_dialog::DialogExt;
 
 use crate::commands::{engine, err, mentions_of_arg, parse, AppState, MentionsArg};
 
@@ -42,13 +41,9 @@ pub async fn pick_download_dir(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TransferSettings, String> {
-    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(picked) = picked else {
+    let Some(dir) = crate::tracker_cmds::ask_folder(app).await? else {
         return Ok(engine(&state).await?.transfer_settings());
     };
-    let dir: PathBuf = picked.into_path().map_err(err)?;
     engine(&state).await?.set_download_dir(Some(dir)).map_err(err)
 }
 

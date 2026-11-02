@@ -243,6 +243,7 @@ if (!window.__TAURI__) {
     max_accept_bytes: 10 * GB,
     download_dir: pickedDownloadDir ?? 'C:/Users/ada/Downloads',
     download_dir_is_default: pickedDownloadDir === null,
+    download_dir_problem: window.__mockDownloadDirProblem ?? null,
     auto_accept_bytes: 25 * MB,
   });
   generalMessages[13].attachments = [
@@ -428,6 +429,7 @@ if (!window.__TAURI__) {
     // Relays the server can use for voice channels. The engine does not report these yet.
     relays: ['https://relay-eu.riverside.example', 'https://relay-us.riverside.example'],
     my_role: myRole(c),
+    history: c.history ?? null,
     // The mention-everyone permission: owners and admins hold it by default.
     can_mention_everyone: ['owner', 'admin'].includes(myRole(c)),
     // The layout as the engine resolves it: each live channel once, the ones left out at the end, outside categories.
@@ -935,7 +937,7 @@ if (!window.__TAURI__) {
           const mine = f.listings.filter((l) => l.category === cat.id);
           return { ...cat, readable: true, restricted: false, can_add: staff || cat.add.min_rank === 'member', files: mine.length, bytes: mine.reduce((n, l) => n + l.size, 0) };
         }),
-        listings: f.listings,
+        listings: [...f.listings],
         locked: 0,
         standing: { level: 1, level_name: 'Newcomer', next: { level: 2, name: 'Sharer', bytes_needed: 5e9, members_needed: 5, progress: 0 }, credited_bytes: 0, served_members: 0, uploaded: 0, downloaded: 0, ratio: null },
         rules: f.rules,
@@ -2196,6 +2198,7 @@ if (!window.__TAURI__) {
     transfer_settings: () => transferSettings(),
     set_transfer_settings: ({ settings }) => settings,
     pick_download_dir: () => {
+      if (window.__mockDownloadDirRefused) throw window.__mockDownloadDirRefused;
       pickedDownloadDir = 'C:/Users/ada/Downloads/Dissent';
       return transferSettings();
     },
@@ -2425,6 +2428,26 @@ if (!window.__TAURI__) {
   };
   // Takes away the edit right, as replay would for someone who is neither lister nor file manager.
   window.__mockCannotEdit = (communityId, name) => { servers[communityId].files.listings.find((x) => x.name === name).can_edit = false; };
+  // Fills a server's catalog, each file tagged by its number, and tells the page.
+  window.__mockManyListings = (communityId, count, prefix = 'item') => {
+    handlers.files_view({ communityId });
+    const f = servers[communityId].files;
+    if (!f.categories.length) handlers.create_category({ communityId, category: { name: 'Everything', icon: 'folder', types: [], default_tags: [], rules: {}, add: { min_rank: 'member', roles: [], members: [], min_level: 0 }, visible: null } });
+    const category = f.categories[0].id;
+    for (let i = 0; i < count; i++) {
+      const n = f.listings.length;
+      f.listings.push({
+        id: `${prefix}-${n}`, category, name: `${prefix}-${String(n).padStart(5, '0')}.png`, ext: 'PNG', kind: 'Image', mime: 'image/png', size: 1000 + n, cipher_size: 1016 + n, pieces: 1, fingerprint: `9f2c41${String(n % 10).repeat(52)}e07e1a`,
+        tags: [n % 2 ? 'odd' : 'even'], description: '', lister: LINUS, lister_name: people[LINUS], added_ms: 1_700_000_000_000 + n, also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine: false, local: 'none', local_path: null, progress: 0, can_edit: false,
+      });
+    }
+    emit({ kind: 'community_updated', community_id: communityId });
+  };
+  window.__mockRemoveListings = (communityId, count) => {
+    const f = servers[communityId].files;
+    f.listings.splice(f.listings.length - count, count);
+    emit({ kind: 'community_updated', community_id: communityId });
+  };
   window.__mockDragOver = () => emitTo('dissent://drag-over', null);
   window.__mockDragLeave = () => emitTo('dissent://drag-leave', null);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.

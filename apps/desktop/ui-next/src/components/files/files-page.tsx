@@ -1,6 +1,6 @@
 // The server's Files area (the tracker): Browse with category, type, tag and health filters and a sortable table, the
 // file page, My seeding and Uploads. Opened from the server sidebar. See docs/design/14-file-tracker.md.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { ArrowLeft, Download, FolderOpen, FolderPlus, Link2, Lock, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -35,6 +35,29 @@ interface FilesUi {
   desc: boolean;
   query: string;
   open: string | null; // the listing whose page is shown
+  page: number; // 1 is the first
+  pageSize: number; // remembered on this device
+}
+
+export const PAGE_SIZES = [15, 25, 50, 75];
+const PAGE_SIZE_KEY = 'dissent.files.pageSize';
+
+function savedPageSize(): number {
+  try {
+    const n = Number(window.localStorage.getItem(PAGE_SIZE_KEY));
+    return PAGE_SIZES.includes(n) ? n : 25;
+  } catch {
+    return 25;
+  }
+}
+
+function setPageSize(n: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_KEY, String(n));
+  } catch {
+    // Kept for this run only.
+  }
+  useFilesUi.setState({ pageSize: n });
 }
 
 export const useFilesUi = create<FilesUi>(() => ({
@@ -47,7 +70,19 @@ export const useFilesUi = create<FilesUi>(() => ({
   desc: true,
   query: '',
   open: null,
+  page: 1,
+  pageSize: savedPageSize(),
 }));
+
+// What the list shows changed, so it starts again from the first page. A listing arriving changes none of this.
+const listKey = (s: FilesUi) => JSON.stringify([s.tab, s.category, s.hiddenTypes, s.tag, s.health, s.sort, s.desc, s.query, s.pageSize]);
+let lastListKey = listKey(useFilesUi.getState());
+useFilesUi.subscribe((s) => {
+  const key = listKey(s);
+  if (key === lastListKey) return;
+  lastListKey = key;
+  if (s.page !== 1) useFilesUi.setState({ page: 1 });
+});
 
 const healthOf = (l: ListingView): Health => (l.seeders >= 5 ? 'well' : l.seeders > 0 ? 'needs' : 'dead');
 const SEED_COLOR: Record<Health, string> = { all: '', well: 'text-success-text', needs: 'text-warn', dead: 'text-danger-text' };
@@ -258,9 +293,62 @@ function filtered(view: FilesView, ui: FilesUi): ListingView[] {
   return list;
 }
 
+// Which page numbers to offer: the first, the last, and those around this one. Null stands for a gap.
+export function pageNumbers(page: number, pages: number): (number | null)[] {
+  const out: (number | null)[] = [];
+  for (let n = 1; n <= pages; n++) {
+    if (n === 1 || n === pages || Math.abs(n - page) <= 1) out.push(n);
+    else if (out[out.length - 1] !== null) out.push(null);
+  }
+  return out;
+}
+
+function Pager({ page, pages, total, first, last, size }: { page: number; pages: number; total: number; first: number; last: number; size: number }) {
+  const go = (n: number) => useFilesUi.setState({ page: n });
+  return (
+    <nav aria-label="File pages" data-files-pager className="flex shrink-0 flex-wrap items-center gap-s-2 border-t border-border px-s-4 py-s-2 text-sm text-muted-foreground">
+      <span data-files-showing className="mr-auto tabular-nums">{total ? `Showing ${first}–${last} of ${total.toLocaleString()}` : 'Nothing to show'}</span>
+      <label className="flex items-center gap-s-1">
+        Per page
+        <select aria-label="Files per page" value={size} onChange={(e) => setPageSize(Number(e.target.value))} className="h-8 rounded-md border border-input-border bg-input px-s-1 text-ui text-text">
+          {PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>{n}</option>
+          ))}
+        </select>
+      </label>
+      <Button variant="ghost" size="sm" disabled={page <= 1} onClick={() => go(page - 1)}>Previous</Button>
+      {pageNumbers(page, pages).map((n, i) =>
+        n === null ? (
+          <span key={`gap-${i}`} aria-hidden="true">…</span>
+        ) : (
+          <Button key={n} variant={n === page ? 'secondary' : 'ghost'} size="sm" aria-label={`Page ${n}`} aria-current={n === page ? 'page' : undefined} onClick={() => go(n)}>{n}</Button>
+        ),
+      )}
+      <Button variant="ghost" size="sm" disabled={page >= pages} onClick={() => go(page + 1)}>Next</Button>
+    </nav>
+  );
+}
+
 function Listings({ community, view }: { community: CommunityView; view: FilesView }) {
   const ui = useFilesUi();
-  const rows = filtered(view, ui);
+  // Only the filters and the catalog can change the result, so a page turn neither filters nor sorts again.
+  const { tab, category, hiddenTypes, tag, health, sort, desc, query } = ui;
+  const rows = useMemo(() => filtered(view, ui), [view, tab, category, hiddenTypes, tag, health, sort, desc, query]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pages = Math.max(1, Math.ceil(rows.length / ui.pageSize));
+  // A list that shrank past this page moves to its last page, and stays there if it grows again.
+  const page = Math.min(ui.page, pages);
+  useEffect(() => {
+    if (ui.page !== page) useFilesUi.setState({ page });
+  }, [ui.page, page]);
+  useEffect(() => {
+    useFilesUi.setState({ page: 1 });
+  }, [community.id]);
+  const firstIndex = (page - 1) * ui.pageSize;
+  const shown = rows.slice(firstIndex, firstIndex + ui.pageSize);
+  const table = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    table.current?.scrollTo?.({ top: 0 });
+  }, [page]);
   const cats = new Map(view.categories.map((c) => [c.id, c]));
   const target = ui.category !== 'all' ? cats.get(ui.category) : view.categories.find((c) => c.can_add && c.readable);
   const canAdd = !!target?.can_add && target.readable;
@@ -295,7 +383,7 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
           </Tip>
         ) : null}
       </div>
-      <div role="table" aria-label="File list" className="flex min-h-0 flex-col overflow-y-auto px-s-4 pb-s-4">
+      <div ref={table} role="table" aria-label="File list" className="flex min-h-0 flex-1 flex-col overflow-y-auto px-s-4 pb-s-4">
         <div role="row" className={cn(GRID, 'sticky top-0 z-[1] h-9 bg-chat text-meta font-semibold text-muted-foreground uppercase')}>
           {COLUMNS.map((c) => (
             <button
@@ -310,7 +398,7 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
             </button>
           ))}
         </div>
-        {rows.map((l) => (
+        {shown.map((l) => (
           <div
             key={l.id}
             role="row"
@@ -339,6 +427,7 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
         {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet. Drop files here to add them.'}</p> : null}
         {view.locked ? <p className="text-sm text-muted-foreground">{view.locked} more are locked until a member shares this server’s files key.</p> : null}
       </div>
+      <Pager page={page} pages={pages} total={rows.length} first={firstIndex + 1} last={firstIndex + shown.length} size={ui.pageSize} />
     </section>
   );
 }

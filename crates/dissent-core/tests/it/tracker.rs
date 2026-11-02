@@ -420,6 +420,34 @@ async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
     .await;
 }
 
+/// The Files page reloads this view on every change, and pages it locally. 3000 listings took a median of 224 ms in this
+/// build, so 300 under a scaled 10 s leaves ample room for a slow, busy runner and still catches a view that went badly wrong.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_files_view_stays_quick_with_many_listings() {
+    heavy(1, async {
+        let alice = peer("tracker-many").await;
+        let server = alice.engine.create_community("Many".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.expect("category");
+        let dir = scratch("tracker-many-src");
+        let total = 300;
+        let paths: Vec<_> = (0..total).map(|i| write(&dir, &format!("f{i}.bin"), format!("{i}").as_bytes())).collect();
+        alice.engine.prepare_listing(id, cat, paths.clone()).await.unwrap();
+        let items: Vec<_> = paths.iter().map(|p| item(p, &["tag"])).collect();
+        alice.engine.list_files(id, cat, items, SeedLimit::Forever).await.unwrap();
+        let at = std::time::Instant::now();
+        let view = alice.engine.files_view(id).unwrap();
+        let took = at.elapsed();
+        assert_eq!(view.listings.len(), total);
+        assert!(took < scaled(Duration::from_secs(10)), "files_view took {took:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
