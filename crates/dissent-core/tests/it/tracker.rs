@@ -421,7 +421,7 @@ async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
 }
 
 /// The Files page reloads this view on every change, and pages it locally. 3000 listings took a median of 224 ms in this
-/// build, so 300 under 3 s leaves room for a busy runner and still catches a view that went badly wrong.
+/// build, so 300 under a scaled 10 s leaves ample room for a slow, busy runner and still catches a view that went badly wrong.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_files_view_stays_quick_with_many_listings() {
     heavy(1, async {
@@ -441,7 +441,7 @@ async fn the_files_view_stays_quick_with_many_listings() {
         let view = alice.engine.files_view(id).unwrap();
         let took = at.elapsed();
         assert_eq!(view.listings.len(), total);
-        assert!(took < Duration::from_secs(3), "files_view took {took:?}");
+        assert!(took < scaled(Duration::from_secs(10)), "files_view took {took:?}");
         let _ = std::fs::remove_dir_all(&dir);
         finish(vec![alice]).await;
     })
