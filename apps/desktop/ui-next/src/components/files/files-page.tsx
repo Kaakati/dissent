@@ -17,6 +17,7 @@ import { DangerNote } from '@/components/chat/attachments';
 import '@/components/chat/chat.css';
 import { openAddFiles } from './add-files-dialog';
 import { openAddFolder } from './add-folder-dialog';
+import { openCategoryEditor } from '@/components/server-settings/files-section';
 import { FilesDropOverlay, openEditListing } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
 import { FolderContents, FolderDownload, openFolderContents } from './folder-contents';
@@ -149,7 +150,7 @@ export function FilesBody() {
         <SeedingPanel communityId={community.id} trigger={view} />
       ) : (
         <div data-files className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)_260px]">
-          <Filters view={view} />
+          <Filters view={view} community={community} />
           <Listings community={community} view={view} />
           <Standing view={view} />
         </div>
@@ -178,7 +179,13 @@ function FilterButton({ on, onClick, children, label }: { on: boolean; onClick: 
 
 const HEAD = 'px-s-2 pt-s-3 pb-s-1 text-meta font-semibold tracking-[.02em] text-muted-foreground uppercase';
 
-function Filters({ view }: { view: FilesView }) {
+// A category made from the Files page becomes the filter; one deleted there gives way to all files.
+const newCategory = (community: CommunityView, view: FilesView) =>
+  openCategoryEditor(community, view, null, (id) => useFilesUi.setState({ category: id ?? 'all' }));
+const editCategory = (community: CommunityView, view: FilesView, c: CategoryView) =>
+  openCategoryEditor(community, view, c, (id) => useFilesUi.setState({ category: id ?? 'all' }));
+
+function Filters({ view, community }: { view: FilesView; community?: CommunityView }) {
   const ui = useFilesUi();
   const tags = useMemo(() => {
     const counts = new Map<string, number>();
@@ -187,18 +194,44 @@ function Filters({ view }: { view: FilesView }) {
   }, [view.listings]);
   return (
     <nav aria-label="File filters" className="flex min-h-0 flex-col overflow-y-auto border-r border-border p-s-2">
-      <h2 className={HEAD}>Categories</h2>
+      <div className="flex items-center justify-between pr-s-1">
+        <h2 className={HEAD}>Categories</h2>
+        {view.can_manage && community ? (
+          <Tip label="New category">
+            <button type="button" aria-label="New category" data-new-category className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-hover hover:text-text" onClick={() => newCategory(community, view)}>
+              <Plus className="size-4" aria-hidden />
+            </button>
+          </Tip>
+        ) : null}
+      </div>
       <FilterButton on={ui.category === 'all'} onClick={() => useFilesUi.setState({ category: 'all' })}>
         <span className="flex-1 truncate">All files</span>
         <span className="text-meta tabular-nums">{view.listings.length}</span>
       </FilterButton>
       {view.categories.map((c) => (
-        <FilterButton key={c.id} on={ui.category === c.id} onClick={() => useFilesUi.setState({ category: c.id })}>
-          {c.readable ? null : <Lock className="size-3.5" aria-label="Locked" />}
-          <span className="flex-1 truncate">{c.readable ? c.name : 'Locked category'}</span>
-          {c.folder ? <Link2 className="size-3.5" aria-label="Linked to a folder" /> : null}
-          <span className="text-meta tabular-nums">{c.files}</span>
-        </FilterButton>
+        <div key={c.id} className="group relative" onContextMenu={(e) => {
+          if (!view.can_manage || !community || !c.readable) return;
+          e.preventDefault();
+          editCategory(community, view, c);
+        }}>
+          <FilterButton on={ui.category === c.id} onClick={() => useFilesUi.setState({ category: c.id })}>
+            {c.readable ? null : <Lock className="size-3.5" aria-label="Locked" />}
+            <span className="flex-1 truncate">{c.readable ? c.name : 'Locked category'}</span>
+            {c.folder ? <Link2 className="size-3.5" aria-label="Linked to a folder" /> : null}
+            <span className={cn('text-meta tabular-nums', view.can_manage && c.readable && 'group-hover:invisible group-focus-within:invisible')}>{c.files}</span>
+          </FilterButton>
+          {view.can_manage && community && c.readable ? (
+            <button
+              type="button"
+              aria-label={`Edit ${c.name}`}
+              data-edit-category={c.id}
+              className="absolute top-1 right-1 grid size-6 place-items-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-hover hover:text-text"
+              onClick={() => editCategory(community, view, c)}
+            >
+              <Pencil className="size-3.5" aria-hidden />
+            </button>
+          ) : null}
+        </div>
       ))}
       <h2 className={HEAD}>Type</h2>
       {view.all_types.map((t) => {
@@ -441,7 +474,14 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
             <span role="cell" className="truncate text-right">{l.lister_name}</span>
           </div>
         ))}
-        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : 'No files listed yet. Drop files here to add them.'}</p> : null}
+        {!rows.length ? <p className="py-s-8 text-center text-body text-muted-foreground">{view.listings.length ? 'No files match these filters.' : view.categories.length || !view.can_manage ? 'No files listed yet. Drop files here to add them.' : null}</p> : null}
+        {!rows.length && !view.categories.length && view.can_manage ? (
+          <div className="flex justify-center">
+            <Button data-first-category onClick={() => newCategory(community, view)}>
+              <Plus className="size-4" /> Create the first category
+            </Button>
+          </div>
+        ) : null}
         {view.locked ? <p className="text-sm text-muted-foreground">{view.locked} more are locked until a member shares this server’s files key.</p> : null}
       </div>
       <Pager page={page} pages={pages} total={rows.length} first={firstIndex + 1} last={firstIndex + shown.length} size={ui.pageSize} />

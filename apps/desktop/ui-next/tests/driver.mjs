@@ -5692,6 +5692,54 @@ await ev(`window.__mockFolder = null`);
 check('FO14 nothing listed twice', (await ev(`window.__TAURI__.core.invoke('files_view', { communityId: 'c2' }).then((v) => v.listings.filter((l) => l.folder).length)`)) === 3 && small.length > 0);
 }
 
+// Categories from the Files page: a manager makes and edits them there; anyone else sees no control.
+async function section_filecategories() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9837, profile: `${SCRATCH}/filecategories-next-profile` });
+const { ev } = b;
+await sleep(1500);
+await until(async () => (await ev(`!!document.querySelector('button[aria-label="Open Source Arabic"]')`)) === true, 10000);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const openFilesOf = async (server) => {
+  await ev(`document.querySelector('button[aria-label=' + JSON.stringify(${JSON.stringify(server)}) + ']').click()`);
+  await sleep(600);
+  await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.trim() === 'Files').click()`);
+  await until(async () => (await ev(`!!document.querySelector('[data-files]')`)) === true, 5000);
+  await sleep(200);
+};
+await openFilesOf('Open Source Arabic');
+check('FC1 a manager sees New category beside the filters', (await ev(`!!document.querySelector('nav[aria-label="File filters"] [data-new-category]')`)) === true);
+check('FC2 with no categories, a manager is offered the first one', (await ev(`document.querySelector('[data-first-category]')?.textContent.trim()`)) === 'Create the first category');
+await ev(`document.querySelector('[data-first-category]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-category-dialog] input[aria-label="Category name"]')`)) === true, 3000);
+check('FC3 it opens the category editor in a dialog', true);
+await ev(`(() => { const n = document.querySelector('[data-category-dialog] input[aria-label="Category name"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, 'Screenshots'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`[...document.querySelectorAll('[data-category-dialog] button')].find((n) => n.textContent.trim() === 'Save changes').click()`);
+await until(async () => (await ev(`!document.querySelector('[data-category-dialog]')`)) === true, 3000);
+await until(async () => (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Screenshots')`)) === true, 3000);
+check('FC4 the new category appears and is the active filter', (await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] [aria-pressed="true"]')].map((n) => n.textContent).join()`)).includes('Screenshots'));
+check('FC4 the empty state no longer offers the first category', (await ev(`!document.querySelector('[data-first-category]')`)) === true);
+await ev(`document.querySelector('[data-new-category]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-category-dialog]')`)) === true, 3000);
+await ev(`(() => { const n = document.querySelector('[data-category-dialog] input[aria-label="Category name"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, 'Music'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`[...document.querySelectorAll('[data-category-dialog] button')].find((n) => n.textContent.trim() === 'Save changes').click()`);
+await until(async () => (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Music')`)) === true, 3000);
+check('FC5 New category beside the filters creates one and selects it', (await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] [aria-pressed="true"]')].map((n) => n.textContent).join()`)).includes('Music'));
+// Edit from the category's own button.
+const editId = await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] [data-edit-category]')].find((n) => n.getAttribute('aria-label') === 'Edit Screenshots')?.dataset.editCategory`);
+await ev(`document.querySelector('[data-edit-category="${editId}"]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-category-dialog]')`)) === true, 3000);
+check('FC6 Edit opens that category', (await ev(`document.querySelector('[data-category-dialog] input[aria-label="Category name"]').value`)) === 'Screenshots');
+await ev(`(() => { const n = document.querySelector('[data-category-dialog] input[aria-label="Category name"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, 'Captures'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await ev(`[...document.querySelectorAll('[data-category-dialog] button')].find((n) => n.textContent.trim() === 'Save changes').click()`);
+await until(async () => (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Captures')`)) === true, 3000);
+check('FC6 an edit shows in the filters and selects it', (await ev(`[...document.querySelectorAll('nav[aria-label="File filters"] [aria-pressed="true"]')].map((n) => n.textContent).join()`)).includes('Captures'));
+// Someone without Manage files sees neither control, and the old empty text.
+await ev(`window.__mockSetMyRole('c1', 'member')`);
+await openFilesOf('Riverside Makers');
+check('FC7 a member sees no New category and no Edit', (await ev(`!document.querySelector('[data-new-category]') && !document.querySelector('[data-edit-category]')`)) === true);
+check('FC7 nor the first-category offer, but the usual empty text', (await ev(`!document.querySelector('[data-first-category]') && document.querySelector('[data-files]').textContent.includes('No files listed yet')`)) === true);
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -6276,6 +6324,7 @@ const SECTIONS = [
   ['filepages', section_filepages],
   ['downloadfolder', section_downloadfolder],
   ['folderlisting', section_folderlisting],
+  ['filecategories', section_filecategories],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],
