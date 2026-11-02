@@ -34,6 +34,8 @@ MLS commits are not DAG events. Each applied commit is announced on the communit
 - Rank sets only how long a device waits before acting: owner, then admins, then moderators, then members by join time. A device waits 3 s for each higher-ranked member that is online, up to 15 s, and then acts unless the change is already done.
 - Collision: a commit for an epoch already applied is ignored, so the first one applied wins. Two members that commit at once can fork the group. The delay makes this rare, but full resolution needs deferred merge and is future work.
 
+- A device that is one commit behind holds an older key under the same call, until the commit arrives. A call survives that: see `04-calls.md`, "Rekey".
+
 ## Joining
 
 1. The joiner gets the community's events, authors its `Join`, and pushes the `Join` to the invite peers (as before).

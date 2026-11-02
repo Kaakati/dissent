@@ -144,6 +144,14 @@ impl<T: PacketTransport> Participant<T> {
         })
     }
 
+    /// Models a client from before the key fallback on every link it has now, for tests of a mixed call.
+    #[doc(hidden)]
+    pub fn without_key_fallback(&mut self) {
+        for call in self.links.values_mut() {
+            call.without_key_fallback();
+        }
+    }
+
     /// Replaces the media key, typically after the MLS group changes. Frames from now on are
     /// encrypted under `new_key` at `new_epoch`. Frames of the previous epoch still decrypt for
     /// the grace period on every forwarder link, and the epoch before that no longer does.

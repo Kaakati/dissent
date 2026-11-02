@@ -389,6 +389,9 @@ pub(crate) struct RxState {
     senders: BTreeMap<(u64, u64), SenderRx>,
     /// Epoch bits this link accepts, the current one and the previous one during its grace period.
     epochs: BTreeSet<u64>,
+    /// Key ids of frames that opened under the current key: they last as long as that key, whatever their id's epoch
+    /// does. See `SframeReceiver::open`.
+    adopted: BTreeSet<u64>,
     deadline: Duration,
 }
 
@@ -402,6 +405,7 @@ impl RxState {
             certs,
             senders: BTreeMap::new(),
             epochs: BTreeSet::new(),
+            adopted: BTreeSet::new(),
             deadline,
         }
     }
@@ -591,8 +595,27 @@ impl RxState {
         self.epochs.insert(lsb);
     }
 
+    /// Takes a key id whose frame opened under the current key: its digests are accepted, and its replay state stays.
+    pub(crate) fn adopt_epoch(&mut self, lsb: u64) {
+        self.epochs.insert(lsb);
+        self.adopted.insert(lsb);
+    }
+
+    /// The key changed, so the ids adopted under the old one mean nothing now, unless the new epoch uses that id itself.
+    pub(crate) fn drop_adopted(&mut self, except: u64) {
+        for lsb in std::mem::take(&mut self.adopted) {
+            if lsb != except {
+                self.epochs.remove(&lsb);
+                self.senders.retain(|(_, epoch), _| *epoch != lsb);
+            }
+        }
+    }
+
     /// Forgets a sender's state for an epoch whose grace period has ended.
     pub(crate) fn drop_epoch(&mut self, lsb: u64) {
+        if self.adopted.contains(&lsb) {
+            return;
+        }
         self.epochs.remove(&lsb);
         self.senders.retain(|(_, epoch), _| *epoch != lsb);
     }

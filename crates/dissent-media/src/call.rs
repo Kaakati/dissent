@@ -513,6 +513,15 @@ impl<T: PacketTransport> Call<T> {
 
     /// Accepts frames of `epoch` from now on. The previous epoch keeps decrypting for the grace
     /// period, see [`EPOCH_GRACE`]. Digests of the new epoch are signed under its key id bits.
+    /// Models a client from before the key fallback, for tests of a mixed call.
+    #[doc(hidden)]
+    pub fn without_key_fallback(&mut self) {
+        if let Some(keys) = self.keys.as_mut() {
+            keys.rx.without_fallback();
+            keys.video_rx.without_fallback();
+        }
+    }
+
     pub(crate) fn rotate_keys(&mut self, key: MediaKey, epoch: u64, now: Instant) -> Result<()> {
         let keys = self
             .keys
@@ -520,6 +529,7 @@ impl<T: PacketTransport> Call<T> {
             .ok_or(MediaError::BadState("a keyless call cannot rotate keys"))?;
         let video = key.video();
         keys.rx.rotate(key, epoch, now, EPOCH_GRACE)?;
+        self.state.lock().expect("receiver state").drop_adopted(epoch_lsb(epoch));
         keys.video_rx
             .rotate(video.clone(), epoch, now, EPOCH_GRACE)?;
         keys.video_tx = keys.video_tx.rekeyed(&video, keys.sender_id, epoch)?;
@@ -765,6 +775,9 @@ impl<T: PacketTransport> Call<T> {
                 return;
             }
         };
+        if opened.under_current {
+            self.state.lock().expect("receiver state").adopt_epoch(opened.lsb);
+        }
         if !self.video_replay.accept(opened.sender, opened.counter) {
             self.stats.frames_replayed += 1;
             return;
@@ -1045,6 +1058,9 @@ impl<T: PacketTransport> Call<T> {
                 let mut step = Step::default();
                 {
                     let mut state = self.state.lock().expect("receiver state");
+                    if opened.under_current {
+                        state.adopt_epoch(opened.lsb);
+                    }
                     if let Some(recovered) = opened.recovered {
                         step.extend(state.on_redundant(
                             opened.sender,

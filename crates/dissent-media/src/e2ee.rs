@@ -281,6 +281,9 @@ pub(crate) struct Opened {
     pub(crate) lsb: u64,
     pub(crate) counter: u64,
     pub(crate) plaintext: Vec<u8>,
+    /// The frame opened under the current key although its key id belongs to no epoch of ours. See
+    /// [`SframeReceiver::open`].
+    pub(crate) under_current: bool,
     /// The previous frame, carried for redundancy, if the sender included it.
     pub(crate) recovered: Option<Recovered>,
 }
@@ -331,11 +334,19 @@ fn unpack(payload: &[u8]) -> Result<(Option<Recovered>, &[u8])> {
     }
 }
 
+/// One attempt at a frame under `material`, with the key its sender derived for `key_id`.
+fn open_under(view: &EncryptedFrameView<'_>, material: &MediaKey, key_id: MlsKeyId) -> Result<Vec<u8>> {
+    let key = DecryptionKey::derive_from_mls(CIPHER_SUITE, material, key_id)?;
+    Ok(view.decrypt(&key)?.payload().to_vec())
+}
+
 /// Decrypts incoming frames. It holds the current epoch's key, and the previous epoch's key for
 /// a grace period after a rekey.
 pub(crate) struct SframeReceiver {
     current: EpochKey,
     previous: Option<(EpochKey, Instant)>,
+    /// Whether a frame may fall back to the current key. Off only to model a released client in tests.
+    fallback: bool,
 }
 
 impl SframeReceiver {
@@ -346,7 +357,13 @@ impl SframeReceiver {
                 key: media_key,
             },
             previous: None,
+            fallback: true,
         }
+    }
+
+    /// Stops the fallback in [`SframeReceiver::open`], as a client from before it behaves.
+    pub(crate) fn without_fallback(&mut self) {
+        self.fallback = false;
     }
 
     /// Starts accepting `epoch` with `media_key`. The old epoch keeps decrypting until
@@ -386,20 +403,34 @@ impl SframeReceiver {
     }
 
     /// Decrypts a wire frame. Replay checks are the caller's job.
+    ///
+    /// A key id does not always name the epoch of the key. Every leaf of a new tier starts at id 0, with the group's
+    /// key as it reads then, so a device one commit behind starts on the old key, and its rekey moves it to the commit's
+    /// id while the others stay on id 0 with that same key. So a frame that does not open under its id's key gets one
+    /// more try under the current key, and only that one: an older key is never tried under another id. The key is
+    /// derived for the frame's own id, as its sender did, and the id stays bound by the AEAD, so it cannot be changed on
+    /// a captured frame. A frame costs at most two attempts.
     pub(crate) fn open(&self, wire: &[u8], now: Instant) -> Result<Opened> {
         let rest = wire.get(1..).ok_or(MediaError::MalformedFrame)?;
         let view = EncryptedFrameView::try_with_meta_data(rest, &wire[..1])?;
         let key_id = MlsKeyId::from_key_id(view.header().key_id(), bit_range());
         let counter = view.header().counter();
-        let material = self.key_for(key_id.epoch_lsb(), now)?;
-        let key = DecryptionKey::derive_from_mls(CIPHER_SUITE, material, key_id)?;
-        let frame = view.decrypt(&key)?;
-        let (recovered, body) = unpack(frame.payload())?;
+        let lsb = key_id.epoch_lsb();
+        let (payload, under_current) = match self.key_for(lsb, now).and_then(|material| open_under(&view, material, key_id)) {
+            Ok(payload) => (payload, false),
+            Err(e) if !self.fallback || lsb == self.current.lsb => return Err(e),
+            Err(e) => match open_under(&view, &self.current.key, key_id) {
+                Ok(payload) => (payload, true),
+                Err(_) => return Err(e),
+            },
+        };
+        let (recovered, body) = unpack(&payload)?;
         Ok(Opened {
             sender: key_id.member_index(),
-            lsb: key_id.epoch_lsb(),
+            lsb,
             counter,
             plaintext: body.to_vec(),
+            under_current,
             recovered,
         })
     }
@@ -681,5 +712,84 @@ mod red_tests {
         assert!(redundancy_for(0.11, false), "11% turns it on");
         assert!(redundancy_for(0.07, true), "7% keeps it on");
         assert!(!redundancy_for(0.04, true), "4% turns it off");
+    }
+
+    // ---- A key id that names no epoch of ours: see `SframeReceiver::open` ----
+
+    fn frame(key_: &MediaKey, sender: u64, epoch: u64) -> Vec<u8> {
+        SframeSender::new(key_, sender, epoch).unwrap().encrypt(b"hello", None, DEFAULT_LEVEL).unwrap()
+    }
+
+    #[test]
+    fn a_frame_under_another_id_opens_under_the_current_key_during_and_after_the_grace() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(2);
+        let mut rx = SframeReceiver::new(key(5), 0);
+        rx.rotate(key(6), 6, now, grace).unwrap();
+        let wire = frame(&key(6), 1, 0);
+        for at in [now, now + grace * 2] {
+            let _ = rx.expire_previous(at);
+            let opened = rx.open(&wire, at).expect("the current key opens it");
+            assert!(opened.under_current);
+            assert_eq!((opened.sender, opened.lsb), (1, 0), "it stays under its own id, for the replay state");
+        }
+        let plain = rx.open(&frame(&key(6), 1, 6), now).unwrap();
+        assert!(!plain.under_current, "a frame of the current id needs no fallback");
+    }
+
+    #[test]
+    fn a_frame_under_a_key_replaced_by_a_rekey_is_refused_under_every_id() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(2);
+        let mut rx = SframeReceiver::new(key(5), 3);
+        rx.rotate(key(6), 4, now, grace).unwrap();
+        let after = now + grace * 2;
+        let _ = rx.expire_previous(after);
+        for id in [0u64, 3, 4, 5, 200] {
+            assert!(rx.open(&frame(&key(5), 1, id), after).is_err(), "the old key under id {id}");
+        }
+        // Within the grace the old key opens only under its own id, as ever. The fallback never reaches it.
+        let mut rx = SframeReceiver::new(key(5), 3);
+        rx.rotate(key(6), 4, now, grace).unwrap();
+        assert!(rx.open(&frame(&key(5), 1, 3), now).is_ok_and(|o| !o.under_current));
+        for id in [0u64, 4, 5, 200] {
+            assert!(rx.open(&frame(&key(5), 1, id), now).is_err(), "the old key under id {id}, in the grace");
+        }
+    }
+
+    #[test]
+    fn a_captured_frame_does_not_open_with_its_id_changed() {
+        let now = Instant::now();
+        let mut rx = SframeReceiver::new(key(5), 0);
+        rx.rotate(key(6), 6, now, Duration::from_secs(2)).unwrap();
+        let (under_zero, under_one) = (frame(&key(6), 1, 0), frame(&key(6), 1, 1));
+        assert_eq!(under_zero.len(), under_one.len());
+        // Where the two differ first after the level byte is the id in the header. Everything else stays as captured.
+        let at = (1..under_zero.len()).find(|i| under_zero[*i] != under_one[*i]).unwrap();
+        let mut moved = under_zero.clone();
+        moved[at] = under_one[at];
+        assert!(rx.open(&under_zero, now).is_ok());
+        assert!(rx.open(&moved, now).is_err(), "the id is bound to the frame");
+    }
+
+    #[test]
+    fn junk_costs_at_most_one_more_attempt() {
+        let now = Instant::now();
+        let mut rx = SframeReceiver::new(key(5), 0);
+        rx.rotate(key(6), 6, now, Duration::from_secs(600)).unwrap();
+        // A frame no key opens, of an ordinary audio frame's size, under the id that takes both attempts.
+        let wire = frame(&key(9), 1, 0);
+        let mut strict = SframeReceiver::new(key(5), 0);
+        strict.rotate(key(6), 6, now, Duration::from_secs(600)).unwrap();
+        strict.without_fallback();
+        let timed = |rx: &SframeReceiver| {
+            let start = Instant::now();
+            for _ in 0..2_000 {
+                assert!(rx.open(&wire, now).is_err());
+            }
+            start.elapsed()
+        };
+        let (before, after) = (timed(&strict), timed(&rx));
+        println!("2000 failing frames: {before:?} with one attempt, {after:?} with two");
     }
 }
