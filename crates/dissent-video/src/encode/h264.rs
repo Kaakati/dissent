@@ -6,7 +6,7 @@
 use std::os::raw::c_int;
 
 use openh264::encoder::{
-    BitRate, Encoder, EncoderConfig as OpenH264Config, FrameRate, FrameType, RateControlMode,
+    BitRate, Encoder, EncoderConfig as OpenH264Config, FrameRate, FrameType, IntraFramePeriod, RateControlMode,
     UsageType,
 };
 use openh264::formats::YUVSlices;
@@ -122,6 +122,8 @@ fn build(config: &EncoderConfig) -> Result<Encoder> {
         .bitrate(BitRate::from_bps(config.bitrate_kbps * 1_000))
         .max_frame_rate(FrameRate::from_hz(config.fps as f32))
         .rate_control_mode(RateControlMode::Bitrate)
+        // A keyframe on a clock, as a safety net: one a receiver asked for and lost would otherwise never come.
+        .intra_frame_period(IntraFramePeriod::from_num_frames(config.keyframe_interval))
         // Screen-content mode turns this off itself, with a warning on the console.
         .adaptive_quantization(!config.screen)
         .usage_type(if config.screen {
