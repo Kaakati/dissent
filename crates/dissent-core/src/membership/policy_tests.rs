@@ -312,6 +312,21 @@ mod banned_add {
         .await;
     }
 
+    /// The guard is for the others. The banned device's own send is refused as it always was, at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_banned_sender_is_refused_at_once_with_the_usual_reason() {
+        crate::testutil::bounded(async {
+            let (alice, _bob, _carol, dave, id) = after_a_ban().await;
+            let channel = general(&alice.engine, id);
+            let started = std::time::Instant::now();
+            let sent = dave.engine.send_message(id, channel, "after my ban".into()).await;
+            assert!(matches!(sent, Err(crate::CoreError::Rejected(_))), "refused for the ban: {sent:?}");
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "not held by the guard: {:?}", started.elapsed());
+            assert!(!dave.engine.banned_device_in_group(id));
+        })
+        .await;
+    }
+
     /// A device that refuses the add, as a client from before this does, is modelled by one that is off. The rest go on.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_others_go_on_without_a_device_that_does_not_take_the_add() {

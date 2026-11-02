@@ -194,6 +194,11 @@ impl Engine {
     /// them until it is removed.
     pub(crate) fn banned_device_in_group(&self, community: CommunityId) -> bool {
         let rules = self.commit_rules(community);
+        // The guard keeps this device from sealing to someone banned. If the one banned is this device's own person, there
+        // is nothing to keep from them, and what it sends is refused by replay as before, with that reason and at once.
+        if rules.is_banned_person(&self.inner.me) {
+            return false;
+        }
         let members = self.with_mls_read(|mls| mls.members(&community.0).ok()).unwrap_or_default();
         let w = self.read();
         members
