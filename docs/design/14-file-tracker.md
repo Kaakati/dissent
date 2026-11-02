@@ -319,6 +319,12 @@ Attachments lose identifying details by default (`scrub`). A listing never does:
 disk, and a linked file is served in place, so a scrubbed copy would not match and could not be seeded from the folder.
 The Add files dialog says so; a member who wants a photo cleaned sends it as an attachment or cleans it first.
 
+## Browsing
+
+The whole catalog is on the device, so the Files page pages it locally, with no wire change: the page shows 15, 25, 50 or 75
+files (25 at first, remembered per device), of what the filters and search match. Changing a filter, the search, the sort or the
+size returns to page 1. A listing arriving leaves the page number alone. A page left empty moves to the last valid page.
+
 ## Adding files
 
 Adding must not make anyone wait on a file being read (`tracker::adding`). The picker's command returns what can be told

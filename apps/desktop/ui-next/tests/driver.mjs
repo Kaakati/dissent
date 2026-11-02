@@ -5430,6 +5430,114 @@ check('FD16 no console errors', (await b.errors?.() ?? []).length === 0);
 b.close?.();
 }
 
+// The Files page's pages: on what matches the filters and search, whatever the size.
+async function section_filepages() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9834, profile: `${SCRATCH}/filepages-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+await ev(`document.querySelector('button[aria-label="Open Source Arabic"]').click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.trim() === 'Files').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-files]')`)) === true, 5000);
+const showing = () => ev(`document.querySelector('[data-files-showing]')?.textContent ?? ''`);
+const rowCount = () => ev(`document.querySelectorAll('[data-files] [data-listing]').length`);
+const current = () => ev(`document.querySelector('[data-files-pager] [aria-current="page"]')?.textContent ?? ''`);
+const setSize = (n) => ev(`(() => { const box = document.querySelector('select[aria-label="Files per page"]'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(box, ${JSON.stringify(String(n))}); box.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+const goTo = async (label) => {
+  const pager = await ev(`document.querySelector('[data-files-pager]')?.textContent ?? 'no pager'`);
+  const found = await ev(`(() => { const n = [...document.querySelectorAll('[data-files-pager] button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); n?.click(); return !!n; })()`);
+  if (!found) throw new Error(`no page button ${label} in ${pager}`);
+};
+const search = (text) => ev(`(() => { const n = document.querySelector('input[aria-label="Search files"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, ${JSON.stringify(text)}); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const tagButton = (t) => `[...document.querySelectorAll('nav[aria-label="File filters"] button')].find((n) => n.textContent.trim() === ${JSON.stringify(`#${t}`)})`;
+await ev(`window.__mockManyListings('c2', 212)`);
+await until(async () => (await showing()).includes('of 212'), 5000);
+check('FP1 the default is 25 per page', (await showing()) === 'Showing 1–25 of 212' && (await rowCount()) === 25, await showing());
+await goTo('2');
+await sleep(100);
+check('FP2 a page number moves to that page', (await showing()) === 'Showing 26–50 of 212' && (await current()) === '2', await showing());
+await goTo('Next');
+await sleep(100);
+check('FP2 Next moves on', (await showing()) === 'Showing 51–75 of 212');
+await goTo('Previous');
+await sleep(100);
+check('FP2 Previous moves back', (await showing()) === 'Showing 26–50 of 212');
+// A listing arriving leaves the person on their page.
+await ev(`window.__mockManyListings('c2', 3, 'arrived')`);
+await until(async () => (await showing()).includes('of 215'), 3000);
+check('FP3 new listings do not move the page', (await showing()) === 'Showing 26–50 of 215' && (await current()) === '2', await showing());
+await ev(`window.__mockRemoveListings('c2', 3)`);
+await until(async () => (await showing()).includes('of 212'), 3000);
+for (const size of [15, 25, 50, 75]) {
+  await goTo('2');
+  await sleep(50);
+  await setSize(size);
+  await sleep(100);
+  check(`FP4 ${size} per page returns to page 1 and shows ${size}`, (await rowCount()) === size && (await showing()) === `Showing 1–${size} of 212` && (await current()) === '1', await showing());
+  // A tag filter pages what matches.
+  await goTo('2');
+  await sleep(50);
+  await ev(`${tagButton('odd')}.click()`);
+  await sleep(100);
+  const oddLast = Math.min(size, 106);
+  check(`FP5 ${size}: a tag filter counts what matches and returns to page 1`, (await showing()) === `Showing 1–${oddLast} of 106` && (await current()) === '1' && (await rowCount()) === oddLast, await showing());
+  const pages = Math.ceil(106 / size);
+  await goTo(String(pages));
+  await sleep(100);
+  const start = (pages - 1) * size + 1;
+  check(`FP5 ${size}: the last page holds the rest`, (await showing()) === `Showing ${start}–106 of 106` && (await rowCount()) === 106 - start + 1 && (await ev(`document.querySelector('[data-files-pager] button:last-of-type').disabled`)) === true, await showing());
+  await ev(`${tagButton('odd')}.click()`);
+  await sleep(100);
+  // Search pages what matches. 'item-0001' names items 10 to 19.
+  await goTo('2');
+  await sleep(50);
+  await search('item-0001');
+  await sleep(150);
+  const hits = Math.min(size, 10);
+  check(`FP6 ${size}: search counts what matches and returns to page 1`, (await showing()) === `Showing 1–${hits} of 10` && (await rowCount()) === hits, await showing());
+  await search('');
+  await sleep(100);
+}
+// A sort returns to page 1.
+await setSize(25);
+await goTo('2');
+await sleep(50);
+await ev(`[...document.querySelectorAll('[role="columnheader"]')].find((n) => n.textContent.includes('Name')).click()`);
+await sleep(100);
+check('FP7 a sort returns to page 1', (await current()) === '1');
+// The page emptied: move to the last valid page.
+await goTo(String(Math.ceil(212 / 25)));
+await sleep(100);
+check('FP8 on the last page', (await showing()) === 'Showing 201–212 of 212', await showing());
+await ev(`window.__mockRemoveListings('c2', 20)`);
+await until(async () => (await showing()).includes('of 192'), 3000);
+check('FP8 an emptied page moves to the last valid page', (await showing()) === 'Showing 176–192 of 192' && (await current()) === '8', await showing());
+await ev(`window.__mockManyListings('c2', 20)`);
+await until(async () => (await showing()).includes('of 212'), 3000);
+check('FP8 it stays there when the list grows back', (await current()) === '8', await current());
+// Remembered on this device.
+await setSize(50);
+await sleep(100);
+check('FP9 the size is remembered', (await ev(`window.localStorage.getItem('dissent.files.pageSize')`)) === '50');
+await ev(`location.reload()`);
+await sleep(1500);
+await ev(`document.querySelector('button[aria-label="Open Source Arabic"]').click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.trim() === 'Files').click()`);
+await sleep(500);
+await ev(`window.__mockManyListings('c2', 60)`);
+await until(async () => (await showing()).includes('of '), 3000);
+check('FP9 it survives a reload', (await ev(`document.querySelector('select[aria-label="Files per page"]').value`)) === '50' && (await rowCount()) === 50, await showing());
+// Thousands of listings stay quick: a page turn and a search over 5000.
+await ev(`window.__mockManyListings('c2', 5000, 'bulk')`);
+await until(async () => (await showing()).includes('5,'), 8000);
+const turnMs = await ev(`(async () => { const t = performance.now(); [...document.querySelectorAll('[data-files-pager] button')].find((n) => n.textContent.trim() === 'Next').click(); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); return performance.now() - t; })()`);
+const searchMs = await ev(`(async () => { const t = performance.now(); const n = document.querySelector('input[aria-label="Search files"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, 'bulk-0049'); n.dispatchEvent(new Event('input', { bubbles: true })); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); return performance.now() - t; })()`);
+check(`FP10 5000 listings: a page turn takes ${Math.round(turnMs)} ms and a search ${Math.round(searchMs)} ms`, turnMs < 200 && searchMs < 300);
+check('FP10 only one page is in the DOM', (await rowCount()) <= 50);
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -5980,6 +6088,7 @@ const SECTIONS = [
   ['channelorder', section_channelorder],
   ['memberonly', section_memberonly],
   ['filedrop', section_filedrop],
+  ['filepages', section_filepages],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],

@@ -420,6 +420,42 @@ async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
     .await;
 }
 
+/// The Files page reloads this view on every change, and pages it locally. No network, only slow to set up.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow: makes thousands of listings"]
+async fn the_files_view_stays_quick_with_thousands_of_listings() {
+    bounded_within(Duration::from_secs(1500), async {
+        let alice = peer("tracker-many").await;
+        let server = alice.engine.create_community("Many".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.expect("category");
+        let dir = scratch("tracker-many-src");
+        let total = 3000;
+        let started = std::time::Instant::now();
+        for batch in 0..(total / 100) {
+            let paths: Vec<_> = (0..100).map(|i| write(&dir, &format!("f{batch}-{i}.bin"), format!("{batch}-{i}").as_bytes())).collect();
+            alice.engine.prepare_listing(id, cat, paths.clone()).await.unwrap();
+            let items: Vec<_> = paths.iter().map(|p| item(p, &["tag"])).collect();
+            alice.engine.list_files(id, cat, items, SeedLimit::Forever).await.unwrap();
+        }
+        eprintln!("listing {total} took {:?}", started.elapsed());
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let at = std::time::Instant::now();
+            let view = alice.engine.files_view(id).unwrap();
+            times.push(at.elapsed());
+            assert_eq!(view.listings.len(), total);
+        }
+        times.sort();
+        eprintln!("files_view with {total} listings: median {:?}, worst {:?}", times[2], times[4]);
+        let _ = std::fs::remove_dir_all(&dir);
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {
