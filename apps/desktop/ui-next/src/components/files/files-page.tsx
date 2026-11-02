@@ -19,6 +19,7 @@ import { openAddFiles } from './add-files-dialog';
 import { openAddFolder } from './add-folder-dialog';
 import { FilesDropOverlay, openEditListing } from './file-adds';
 import { SeedingPanel } from './seeding-panel';
+import { FolderContents, FolderDownload, openFolderContents } from './folder-contents';
 import { SwarmPanel } from './swarm-panel';
 
 type Tab = 'browse' | 'seeding' | 'uploads';
@@ -412,8 +413,24 @@ function Listings({ community, view }: { community: CommunityView; view: FilesVi
               <span className="grid h-8 w-10 shrink-0 place-items-center rounded text-[10px] font-bold text-white" style={tileStyle(l.kind)}>{l.ext || 'FILE'}</span>
               <span className="min-w-0">
                 <span className="block truncate font-medium text-text-strong">{l.name}</span>
-                <span className="block truncate text-meta text-muted-foreground">{l.tags.slice(0, 3).map((t) => `#${t}`).join(' ')}</span>
+                <span className="block truncate text-meta text-muted-foreground">
+                  {l.folder ? `${l.folder.files.toLocaleString()} ${l.folder.files === 1 ? 'file' : 'files'} · ` : ''}
+                  {l.tags.slice(0, 3).map((t) => `#${t}`).join(' ')}
+                </span>
               </span>
+              {l.folder ? (
+                <button
+                  type="button"
+                  data-folder-contents-button
+                  className="ml-auto shrink-0 rounded-md px-s-2 py-0.5 text-sm text-link hover:bg-hover"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openFolderContents(community.id, l);
+                  }}
+                >
+                  Contents
+                </button>
+              ) : null}
             </span>
             <span role="cell" className="truncate text-muted-foreground">{cats.get(l.category)?.name}</span>
             <span role="cell" className="text-right tabular-nums">{formatBytes(l.size)}</span>
@@ -482,7 +499,8 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
   const download = async () => {
     setBusy(true);
     try {
-      await filesApi.download(community.id, l.id);
+      if (l.folder) await filesApi.downloadFolder(community.id, l.id);
+      else await filesApi.download(community.id, l.id);
       await useShell.getState().loadTransfers();
       await reloadFiles(community.id);
     } catch (err) {
@@ -501,9 +519,9 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
     }
   };
   const facts: [string, string, boolean?][] = [
-    ['Fingerprint', `b3:${l.fingerprint.slice(0, 6)}…${l.fingerprint.slice(-6)}`, true],
+    [l.folder ? 'Contents fingerprint' : 'Fingerprint', `b3:${l.fingerprint.slice(0, 6)}…${l.fingerprint.slice(-6)}`, true],
     ['Size', `${formatBytes(l.size)} · ${l.size.toLocaleString()} bytes`],
-    ['Pieces', `${l.pieces.toLocaleString()} × 64 KiB`],
+    l.folder ? ['Files', l.folder.files.toLocaleString()] : ['Pieces', `${l.pieces.toLocaleString()} × 64 KiB`],
     ['Category', category?.name ?? ''],
     ['Encryption', 'AES-256-GCM, server key'],
   ];
@@ -532,7 +550,7 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
         </div>
         <div className="flex shrink-0 flex-col items-end gap-s-1">
           {l.local === 'downloaded' || l.local === 'seeding' || l.local === 'paused' ? (
-            <span className="text-sm font-semibold text-success-text">{l.local === 'downloaded' ? 'Downloaded' : l.local === 'paused' ? 'Seeding paused' : 'You seed this file'}</span>
+            <span className="text-sm font-semibold text-success-text">{l.local === 'downloaded' ? 'Downloaded' : l.local === 'paused' ? 'Seeding paused' : l.folder ? 'You seed this folder' : 'You seed this file'}</span>
           ) : l.local === 'downloading' ? (
             <span data-download-progress className="text-sm font-semibold text-text tabular-nums">Downloading · {Math.round((own?.progress ?? l.progress) * 100)}%{own?.rate_bps ? ` · ${formatBytes(own.rate_bps)}/s` : ''}</span>
           ) : (
@@ -563,7 +581,16 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
           </div>
         ))}
       </dl>
-      <SwarmPanel communityId={community.id} listing={l} />
+      {l.folder ? (
+        <>
+          <FolderDownload communityId={community.id} listing={l} />
+          <div className="max-w-[760px]">
+            <FolderContents communityId={community.id} listing={l} />
+          </div>
+        </>
+      ) : (
+        <SwarmPanel communityId={community.id} listing={l} />
+      )}
       <section aria-label="Activity" className="flex max-w-[760px] flex-col gap-1 text-sm text-text">
         <p className="m-0">Downloaded completely {l.completed.toLocaleString()} {l.completed === 1 ? 'time' : 'times'}</p>
         <p className="m-0">First listed by {l.lister_name} · {dateOf(l.added_ms)}</p>

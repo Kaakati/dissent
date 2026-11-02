@@ -142,6 +142,17 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
         .store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Lists `manifest` as a folder with no files behind it, as a lying lister would.
+pub async fn list_raw_folder(
+    engine: &crate::Engine,
+    community: crate::CommunityId,
+    category: dissent_events::CategoryId,
+    name: &str,
+    manifest: &crate::tracker::folder::Manifest,
+) -> crate::Result<String> {
+    engine.list_raw_folder(community, category, name, manifest).await
+}
+
 /// Makes `engine` answer `Request::Features` with `bits`. Zero models a device from before the probe.
 pub fn set_features(engine: &crate::Engine, bits: u64) {
     engine.inner.features.store(bits, std::sync::atomic::Ordering::Relaxed);

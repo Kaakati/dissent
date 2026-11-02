@@ -11,9 +11,11 @@
 //!   files: linked folders, auto-import, what it seeds, and the secret its receipt tags are keyed with.
 
 pub(crate) mod bodies;
+pub use bodies::FileType;
 pub mod adding;
 pub mod catalog;
 pub mod drops;
+pub mod folder;
 pub mod folders;
 pub(crate) mod gate;
 pub(crate) mod restricted;
@@ -114,6 +116,8 @@ pub(crate) struct Local {
     pub(crate) offered: BTreeSet<PathBuf>,
     /// Paths to seed from where they are, with no copy, as a linked folder's files are. See `folders`. In memory only.
     pub(crate) in_place: BTreeSet<PathBuf>,
+    /// Folder manifests this device knows, by manifest blob, once loaded. See `folder`.
+    pub(crate) manifests: Option<BTreeMap<[u8; 32], folder::Manifest>>,
     /// Fingerprints made this run, by path, with the file's size and modification time then. Adding a file reads it once
     /// less. The encrypt pass still checks the bytes against the fingerprint.
     pub(crate) fingerprints: BTreeMap<PathBuf, (u64, Option<u64>, [u8; 32])>,
@@ -145,6 +149,8 @@ pub(crate) struct TrackerState {
     /// The fingerprint checks running, by job, with what stops each.
     pub(crate) checks: BTreeMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) next_check: u64,
+    /// Each file of a folder download, by transfer id. In memory only.
+    pub(crate) folder_progress: BTreeMap<String, Vec<folder::FolderFileProgress>>,
     /// What moves through each blob now. See `live`.
     pub(crate) meters: std::collections::HashMap<[u8; 32], live::BlobMeters>,
 }

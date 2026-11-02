@@ -199,6 +199,30 @@ export function startAdds(communityId: string, rows: AddRow[], options: { tagsFo
   });
 }
 
+// Lists a whole folder as one listing in the background, shown as one row in the tray, with Undo and Add tags after.
+export function startFolderListing(communityId: string, name: string, categoryName: string, run: () => Promise<string>): void {
+  const id = ++batchSeq;
+  const row: AddRow = { path: `folder:${id}`, name: `${name} (folder)`, size: 0, category: null, categoryName, state: 'listing', progress: 0, skip: null, listing: null };
+  useFileAdds.setState((s) => ({ batches: [...s.batches, { id, communityId, rows: [row], cancel: () => {} }] }));
+  run().then(
+    (listing) => {
+      useFileAdds.setState((s) => ({ batches: s.batches.filter((b) => b.id !== id) }));
+      void reloadFiles(communityId);
+      toast(`Folder ${name} added to ${categoryName}.`, 'info', {
+        actions: [
+          { label: 'Undo', run: () => void filesApi.removeListing(communityId, listing).then(() => reloadFiles(communityId)).then(() => toast('Took back the folder', 'info'), (err: unknown) => toast(err)) },
+          { label: 'Add tags', run: () => void editListingById(communityId, listing) },
+        ],
+        ms: 15000,
+      });
+    },
+    (err: unknown) => {
+      useFileAdds.setState((s) => ({ batches: s.batches.filter((b) => b.id !== id) }));
+      toast(`Folder ${name} could not be added: ${String(err).replace(/^invalid: /, '')}`);
+    },
+  );
+}
+
 async function addFilesManually(communityId: string): Promise<void> {
   const s = useShell.getState();
   if (s.community?.id !== communityId) return;

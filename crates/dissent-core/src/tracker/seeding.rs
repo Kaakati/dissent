@@ -174,6 +174,11 @@ pub struct SeedRowView {
     pub limit: String,
     pub since_ms: u64,
     pub downloaded: bool,
+    /// Linked files of it that changed on disk since it was listed, or went away. They are no longer served.
+    pub changed: u32,
+    /// Set for a folder listing: its files, and the folder it was listed from on this device, if linked.
+    pub folder_files: Option<u32>,
+    pub folder_root: Option<String>,
 }
 
 /// My seeding, for one server.
@@ -269,12 +274,17 @@ impl Engine {
     /// The state of each seed of `community`, by blob.
     pub(crate) fn seed_states(&self, community: CommunityId) -> std::collections::BTreeMap<[u8; 32], SeedState> {
         let sizes: std::collections::BTreeMap<[u8; 32], u64> =
-            self.opened_listings(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
+            self.opened_blobs(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
         let book = self.with_tracker(community, |l| l.book.seeds.clone());
         let seeds: Vec<([u8; 32], SeedRecord)> = book.into_iter().collect();
         let refs: Vec<(&SeedRecord, u64)> = seeds.iter().map(|(b, r)| (r, sizes.get(b).copied().unwrap_or(0))).collect();
         let states = states(&refs, &self.cached_seeding_settings(), self.device_conditions(), now_ms(), self.utc_offset_min());
-        seeds.iter().map(|(b, _)| *b).zip(states).collect()
+        // A linked file that changed on disk, or went away, cannot be served, so it is not announced either.
+        seeds
+            .iter()
+            .zip(states)
+            .map(|((b, r), state)| (*b, if r.linked && changed_on_disk(r) { SeedState::Stopped } else { state }))
+            .collect()
     }
 
     /// My seeding for `community`.
@@ -322,6 +332,58 @@ impl Engine {
                 limit: limit_text(record.limit),
                 since_ms: record.since_ms,
                 downloaded: record.downloaded,
+                changed: self.changed_since_listed(community, o.id),
+                folder_files: None,
+                folder_root: None,
+            });
+        }
+        // A folder is one row, over all its files: seeding while any file is.
+        for f in self.opened_folders(community) {
+            let records: Vec<(&[u8; 32], &SeedRecord)> = book.seeds.iter().filter(|(_, r)| r.listing == f.id).collect();
+            let Some((_, first)) = records.first() else { continue };
+            let state = records
+                .iter()
+                .filter_map(|(b, _)| states.get(*b).copied())
+                .min_by_key(|s| match s {
+                    SeedState::Seeding => 0,
+                    SeedState::Queued => 1,
+                    SeedState::Scheduled => 2,
+                    SeedState::Paused => 3,
+                    SeedState::Stopped => 4,
+                })
+                .unwrap_or(SeedState::Stopped);
+            let changed = self.changed_since_listed(community, f.id);
+            let uploaded: u64 = records.iter().map(|(_, r)| r.uploaded).sum();
+            let note = match state {
+                _ if changed > 0 => format!("{changed} {} changed since listed, so {} no longer served", if changed == 1 { "file" } else { "files" }, if changed == 1 { "it is" } else { "they are" }),
+                SeedState::Seeding => "Serving now".to_string(),
+                SeedState::Paused => "Paused by you".to_string(),
+                SeedState::Stopped if first.stopped => "Stopped by you".to_string(),
+                SeedState::Stopped => "Seed limit reached".to_string(),
+                _ => "Waiting to serve".to_string(),
+            };
+            let root = if first.linked || records.iter().any(|(_, r)| r.linked) { self.relist_root(community, f.id) } else { None };
+            rows.push(SeedRowView {
+                limit_reached: false,
+                blob: data_encoding::BASE32_NOPAD.encode(&f.body.manifest_blob).to_lowercase(),
+                listing: f.id.to_string(),
+                ext: "DIR".into(),
+                kind: "Folder".into(),
+                name: f.body.name.clone(),
+                category: f.category.to_string(),
+                folder: None,
+                path: root.clone(),
+                state,
+                note,
+                size: f.body.size,
+                uploaded,
+                ratio: if f.body.size == 0 { 0.0 } else { uploaded as f64 / f.body.size as f64 },
+                limit: limit_text(first.limit),
+                since_ms: first.since_ms,
+                downloaded: first.downloaded,
+                changed,
+                folder_files: Some(f.body.files),
+                folder_root: root,
             });
         }
         rows.sort_by_key(|r| std::cmp::Reverse(r.since_ms));
@@ -346,7 +408,7 @@ impl Engine {
         if linked.is_empty() {
             return;
         }
-        let opened = self.opened_listings(community);
+        let opened = self.opened_blobs(community);
         for (blob, record) in linked {
             let want = states.get(&blob) == Some(&SeedState::Seeding);
             let have = self.inner.files.is_linked(blob);
@@ -378,13 +440,15 @@ impl Engine {
         }
     }
 
-    fn edit_seed(&self, community: CommunityId, blob: [u8; 32], f: impl FnOnce(&mut SeedRecord)) -> Result<()> {
-        let found = self.with_tracker(community, |l| match l.book.seeds.get_mut(&blob) {
-            Some(r) => {
+    fn edit_seed(&self, community: CommunityId, blob: [u8; 32], f: impl FnMut(&mut SeedRecord)) -> Result<()> {
+        // Every file of the same listing changes with it, so a folder's row acts on the whole folder.
+        let found = self.with_tracker(community, |l| {
+            let Some(listing) = l.book.seeds.get(&blob).map(|r| r.listing) else { return false };
+            let mut f = f;
+            for r in l.book.seeds.values_mut().filter(|r| r.listing == listing) {
                 f(r);
-                true
             }
-            None => false,
+            true
         });
         if !found {
             return Err(CoreError::NotFound("that file is not seeded here".into()));
@@ -432,6 +496,14 @@ impl Engine {
         self.emit(EngineEvent::CommunityUpdated { community_id: community.to_string() });
         Ok(())
     }
+}
+
+/// Whether a linked file is gone or was modified since it was linked.
+pub(crate) fn changed_on_disk(record: &SeedRecord) -> bool {
+    record.path.as_deref().is_none_or(|p| {
+        let now = super::modified_ms(p);
+        now.is_none() || now != record.modified_ms
+    })
 }
 
 #[cfg(test)]

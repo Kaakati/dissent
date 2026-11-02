@@ -448,6 +448,197 @@ async fn the_files_view_stays_quick_with_many_listings() {
     .await;
 }
 
+/// A nested folder for folder listings: three files, one of them an executable.
+fn album(root: &std::path::Path) -> (std::path::PathBuf, Vec<(String, Vec<u8>)>) {
+    let dir = root.join("Album");
+    let files = vec![
+        ("a.png".to_string(), sample(120_000, 21)),
+        ("sub/b.txt".to_string(), b"notes".to_vec()),
+        ("sub/deeper/c.exe".to_string(), sample(70_000, 22)),
+    ];
+    for (rel, bytes) in &files {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    (dir, files)
+}
+
+/// Checks every file of `dir` the folder dialog would, so it can be listed.
+async fn check_folder(engine: &dissent_core::Engine, id: CommunityId, dir: &std::path::Path) -> Vec<String> {
+    engine.allow_paths([dir.to_path_buf()]);
+    let scan = engine.scan_folder(id, dir.to_path_buf(), None).await.expect("scan");
+    let mut events = engine.subscribe();
+    let job = engine.start_file_check(id, scan.files.iter().map(|f| std::path::PathBuf::from(&f.path)).collect()).unwrap();
+    checked(&mut events, job).await;
+    let mut rel: Vec<String> = scan.files.iter().map(|f| f.relative.clone()).collect();
+    rel.sort();
+    rel
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_is_one_listing_with_its_contents_and_a_changed_file_shows() {
+    heavy(1, async {
+        let alice = peer("tracker-folder-one").await;
+        let server = alice.engine.create_community("Folders".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.unwrap();
+        let (dir, files) = album(&scratch("tracker-folder-one-src"));
+        let rel = check_folder(&alice.engine, id, &dir).await;
+        let listing = alice.engine.list_folder(id, cat, dir.clone(), rel, vec!["trip".into()], "Photos".into(), SeedLimit::Forever).await.expect("listed");
+
+        let view = alice.engine.files_view(id).unwrap();
+        assert_eq!(view.listings.len(), 1, "one listing for the folder");
+        let l = &view.listings[0];
+        assert_eq!((l.kind.as_str(), l.name.as_str(), l.size), ("Folder", "Album", files.iter().map(|(_, b)| b.len() as u64).sum()));
+        assert_eq!(l.folder.as_ref().map(|f| (f.files, f.dangerous)), Some((3, 1)));
+        assert_eq!(l.local, "seeding");
+        assert_eq!(view.categories[0].files, 1);
+
+        let contents = alice.engine.folder_contents(id, listing.parse().unwrap()).await.expect("contents");
+        let mut paths: Vec<&str> = contents.entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["a.png", "sub/b.txt", "sub/deeper/c.exe"]);
+        assert_eq!((contents.files, contents.dangerous, contents.unavailable), (3, 1, 0));
+        assert!(contents.entries.iter().find(|e| e.name == "c.exe").unwrap().danger.is_some());
+
+        // Tags edit like a file's.
+        alice.engine.update_listing(id, listing.parse().unwrap(), vec!["holiday".into()], "Edited".into()).await.unwrap();
+        assert_eq!(alice.engine.files_view(id).unwrap().listings[0].tags, vec!["holiday"]);
+
+        // My seeding shows the folder as one row; a file changed on disk shows, and is no longer served.
+        let seeding = alice.engine.seeding_view(id).unwrap();
+        let row = seeding.rows.iter().find(|r| r.listing == listing).expect("a row for the folder");
+        assert_eq!((row.folder_files, row.changed), (Some(3), 0));
+        assert_eq!(seeding.rows.len(), 1, "one row, not one per file");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("sub/b.txt"), b"other notes").unwrap();
+        let seeding = alice.engine.seeding_view(id).unwrap();
+        let row = seeding.rows.iter().find(|r| r.listing == listing).unwrap();
+        assert_eq!(row.changed, 1);
+        assert!(row.note.contains("changed since listed"), "{}", row.note);
+        assert_eq!(row.folder_root.as_deref(), Some(dir.to_string_lossy().as_ref()));
+        assert_eq!(alice.engine.relist_folder(id, listing.parse().unwrap()).unwrap(), dir, "listed again from where it was");
+
+        // Removing it takes its seeds.
+        alice.engine.remove_listing(id, listing.parse().unwrap()).await.unwrap();
+        assert!(alice.engine.files_view(id).unwrap().listings.is_empty());
+        assert!(alice.engine.seeding_view(id).unwrap().rows.is_empty());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        finish(vec![alice]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_member_downloads_a_nested_folder_byte_for_byte_and_holds_it() {
+    heavy(2, async {
+        let alice = peer("tracker-folder-alice").await;
+        let bob = peer("tracker-folder-bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.unwrap();
+        let (dir, files) = album(&scratch("tracker-folder-alice-src"));
+        let rel = check_folder(&alice.engine, id, &dir).await;
+        let listing: dissent_events::EventId = alice.engine.list_folder(id, cat, dir.clone(), rel, vec![], String::new(), SeedLimit::Forever).await.unwrap().parse().unwrap();
+
+        until_event(&bob.engine, Duration::from_secs(60), "bob sees the folder", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings.iter().any(|l| l.folder.is_some())).map(|_| ())
+        })
+        .await;
+        let contents = bob.engine.folder_contents(id, listing).await.expect("bob reads the contents from alice");
+        assert_eq!((contents.files, contents.dangerous), (3, 1));
+        let downloads = scratch("tracker-folder-bob-downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        // A folder of the same name is already there, so this one lands beside it.
+        std::fs::create_dir_all(downloads.join("Album")).unwrap();
+        bob.engine.set_download_dir(Some(downloads.clone())).unwrap();
+        bob.engine.download_folder(id, listing).await.expect("download");
+        until_event(&bob.engine, Duration::from_secs(120), "bob has the folder", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings[0].local == "seeding").map(|_| ())
+        })
+        .await;
+        let landed = downloads.join("Album (2)");
+        for (rel, bytes) in &files {
+            assert_eq!(&std::fs::read(landed.join(rel)).unwrap(), bytes, "{rel} byte for byte");
+        }
+        assert!(!std::fs::read_dir(&downloads).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".dissent-partial")), "no staging left");
+        #[cfg(windows)]
+        assert!(std::fs::read_to_string(format!("{}:Zone.Identifier", landed.join("sub/deeper/c.exe").display())).is_ok(), "marked as from the internet");
+        assert_eq!(bob.engine.folder_download_files_of(id, listing).iter().filter(|f| f.done).count(), 3);
+
+        // Alice learns bob holds the folder.
+        until_event(&alice.engine, Duration::from_secs(90), "alice counts bob as a holder", || {
+            alice.engine.files_view(id).ok().filter(|v| v.listings[0].seeders >= 2).map(|_| ())
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&downloads);
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_folder_with_a_changed_file_or_a_lying_manifest_is_reported() {
+    heavy(2, async {
+        let alice = peer("tracker-folder-part-alice").await;
+        let bob = peer("tracker-folder-part-bob").await;
+        let id = rustaceans(&alice, &bob).await;
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.unwrap();
+        let (dir, _) = album(&scratch("tracker-folder-part-src"));
+        let rel = check_folder(&alice.engine, id, &dir).await;
+        let listing: dissent_events::EventId = alice.engine.list_folder(id, cat, dir.clone(), rel, vec![], String::new(), SeedLimit::Forever).await.unwrap().parse().unwrap();
+        // One file changes on disk after it was listed: nobody can be served it any more.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("a.png"), b"changed").unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob sees the folder", || {
+            bob.engine.files_view(id).ok().filter(|v| !v.listings.is_empty()).map(|_| ())
+        })
+        .await;
+        let deadline = std::time::Instant::now() + scaled(Duration::from_secs(90));
+        let contents = loop {
+            if let Ok(c) = bob.engine.folder_contents(id, listing).await {
+                if c.unavailable == 1 {
+                    break c;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "bob never learned a file is gone");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        assert_eq!(contents.entries.iter().find(|e| e.holders == 0).map(|e| e.path.as_str()), Some("a.png"));
+
+        // A lister who sends a manifest that escapes the folder is refused before anything is written.
+        let entry = |path: &str| dissent_core::tracker::folder::ManifestEntry {
+            path: path.into(),
+            size: 4,
+            kind: dissent_core::tracker::FileType::Other,
+            fingerprint: [3; 32],
+            blob: [4; 32],
+            cipher_size: dissent_files::cipher_len(4),
+        };
+        let bad = dissent_core::tracker::folder::Manifest { entries: vec![entry("ok.txt"), entry("../../escape.txt")] };
+        let lying: dissent_events::EventId = dissent_core::test_support::list_raw_folder(&alice.engine, id, cat, "Trap", &bad).await.unwrap().parse().unwrap();
+        until_event(&bob.engine, Duration::from_secs(60), "bob sees the trap", || {
+            bob.engine.files_view(id).ok().filter(|v| v.listings.len() == 2).map(|_| ())
+        })
+        .await;
+        let refused = bob.engine.folder_contents(id, lying).await;
+        assert!(refused.as_ref().is_err_and(|e| e.to_string().contains("unsafe")), "{refused:?}");
+        assert!(bob.engine.download_folder(id, lying).await.is_err());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_joiner_reads_the_catalog_and_downloads_a_listing() {

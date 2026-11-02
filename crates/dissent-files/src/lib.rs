@@ -18,6 +18,11 @@ pub mod tracker;
 
 pub use crypt::{chunk_count, cipher_len, decrypt, encrypt, FileKey, CHUNK_SIZE, MAX_PLAINTEXT};
 pub use error::{FilesError, Result};
+
+/// Bytes free on the volume that holds `dir`.
+pub fn available_space(dir: &std::path::Path) -> std::io::Result<u64> {
+    fs4::available_space(dir)
+}
 pub use file_ref::FileRef;
 pub use inplace::{FilesProtocol, Linked, ServedHook};
 pub use iroh_blobs::provider::events::EventSender;

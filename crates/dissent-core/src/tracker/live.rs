@@ -164,38 +164,40 @@ impl Engine {
 
     /// What is moving for `listing`, from this device's own counts. Never touches the network.
     pub async fn listing_live(&self, community: CommunityId, listing: EventId) -> Result<LiveSwarm> {
-        let opened = self.opened_listings(community);
-        let o = opened
-            .iter()
-            .find(|o| o.id == listing)
-            .ok_or_else(|| CoreError::NotFound(format!("listing {listing}")))?;
-        let (blob, size) = (o.body.blob, o.body.cipher_size);
-        let heard: BTreeMap<DeviceId, (u64, u64)> = self.with_tracker(community, |l| {
-            l.heard
+        // A file is one blob; a folder is the sum of its files, as far as this device knows them.
+        let folder = self.opened_folders(community).into_iter().any(|f| f.id == listing);
+        let blobs: Vec<([u8; 32], u64)> = if folder {
+            self.opened_blobs(community).into_iter().filter(|o| o.id == listing && o.body.name != "manifest.bin").map(|o| (o.body.blob, o.body.cipher_size)).collect()
+        } else {
+            let opened = self.opened_listings(community);
+            let o = opened
                 .iter()
-                .filter_map(|(d, h)| h.holdings.iter().find(|x| x.blob == blob).map(|x| (*d, (x.bytes, h.at_ms))))
-                .collect()
-        });
-        let now = now_ms();
-        let (sent, received): (Vec<SentTo>, Vec<(DeviceId, u64)>) = {
-            let state = self.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            match state.meters.get(&blob) {
-                Some(m) => (
-                    m.sent
-                        .iter()
-                        .map(|(d, meter)| {
-                            let holds = meter.holds(heard.get(d).copied());
-                            (*d, meter.rate(now), holds)
-                        })
-                        .collect(),
-                    m.received.iter().map(|(d, meter)| (*d, meter.rate(now))).collect(),
-                ),
-                None => (Vec::new(), Vec::new()),
-            }
+                .find(|o| o.id == listing)
+                .ok_or_else(|| CoreError::NotFound(format!("listing {listing}")))?;
+            vec![(o.body.blob, o.body.cipher_size)]
         };
+        let size: u64 = blobs.iter().map(|(_, s)| *s).sum();
+        let now = now_ms();
+        let mut sent: Vec<SentTo> = Vec::new();
+        let mut received: Vec<(DeviceId, u64)> = Vec::new();
+        for (blob, _) in &blobs {
+            let heard: BTreeMap<DeviceId, (u64, u64)> = self.with_tracker(community, |l| {
+                l.heard
+                    .iter()
+                    .filter_map(|(d, h)| h.holdings.iter().find(|x| x.blob == *blob).map(|x| (*d, (x.bytes, h.at_ms))))
+                    .collect()
+            });
+            let state = self.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(m) = state.meters.get(blob) {
+                sent.extend(m.sent.iter().map(|(d, meter)| (*d, meter.rate(now), meter.holds(heard.get(d).copied()))));
+                received.extend(m.received.iter().map(|(d, meter)| (*d, meter.rate(now))));
+            }
+        }
+        let blob = blobs.first().map(|(b, _)| *b).unwrap_or_default();
         let (progress, downloading) = {
             let w = self.read();
-            let wanted = format!("{TRANSFER_PREFIX}{community}:{listing}");
+            let prefix = if folder { super::folder::FOLDER_PREFIX } else { TRANSFER_PREFIX };
+            let wanted = format!("{prefix}{community}:{listing}");
             match w.attach.transfers.values().find(|t| t.message_id == wanted && t.state == "active") {
                 Some(t) => (Some(t.progress), true),
                 None => (None, false),
@@ -229,7 +231,7 @@ impl Engine {
         let eta_s = progress
             .filter(|_| down_bps > 0)
             .map(|p| (((1.0 - p).max(0.0) * size as f64) / down_bps as f64).ceil() as u64);
-        let own_pieces = if downloading { self.inner.files.held_pieces(blob, size).await.unwrap_or_default() } else { Vec::new() };
+        let own_pieces = if downloading && !folder { self.inner.files.held_pieces(blob, size).await.unwrap_or_default() } else { Vec::new() };
         Ok(LiveSwarm {
             active: downloading || down_bps > 0 || up_bps > 0,
             down_bps,

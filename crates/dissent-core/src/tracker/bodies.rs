@@ -20,6 +20,8 @@ pub(crate) enum BodyKind {
     Category = 1,
     Listing = 2,
     ListingUpdate = 3,
+    /// A folder listing's body. See `tracker::folder`.
+    Folder = 4,
 }
 
 /// Coarse file types a category allows. Appended only: postcard writes the position.

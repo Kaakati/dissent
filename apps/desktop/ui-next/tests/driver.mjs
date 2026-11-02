@@ -5350,6 +5350,8 @@ await ev(`[...document.querySelectorAll('[data-files] button')].find((n) => n.te
 await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
 const rowOf = (name) => `[...document.querySelectorAll('[data-add-folder] [data-folder-row]')].find((n) => n.textContent.includes(${JSON.stringify(name)}))`;
 check('FF1 a folder opens a dialog at once and Add waits for the check', (await ev(`${folderButton('Checking')}?.disabled`)) === true);
+// These checks list the files one by one; a folder as one listing has its own section.
+await ev(`[...document.querySelectorAll('[data-add-folder] input[name="folder-as"]')][1].click()`);
 const body = await ev(`document.querySelector('[data-add-folder]').textContent`);
 check('FF2 it says hidden and system files are left out, and which folders', body.includes('Hidden and system files start unticked') && body.includes('.git'), body.slice(0, 200));
 check('FF3 it warns on likely credentials', body.includes('look like passwords or keys'));
@@ -5588,6 +5590,106 @@ await until(async () => (await ev(`!!document.querySelector('[data-download-prob
 check('DL6 a missing folder is reported', (await ev(`document.querySelector('[data-download-problem]').textContent`)).includes('no longer exists'));
 await ev(`window.__mockDownloadDirProblem = null`);
 await closeSettings();
+}
+
+// Folder listings: a folder is one listing, people see inside it, and download it whole.
+async function section_folderlisting() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9836, profile: `${SCRATCH}/folderlisting-next-profile` });
+const ev = async (expression) => {
+  try {
+    return await b.ev(expression);
+  } catch (err) {
+    throw new Error(`${expression.slice(0, 160)} :: ${String(err).slice(0, 160)}`, { cause: err });
+  }
+};
+await sleep(1500);
+await until(async () => (await ev(`!!document.querySelector('button[aria-label="Open Source Arabic"]')`)) === true, 10000);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+await ev(`document.querySelector('button[aria-label="Open Source Arabic"]').click()`);
+await sleep(600);
+await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.trim() === 'Files').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-files]')`)) === true, 5000);
+await ev(`window.__TAURI__.core.invoke('create_category', { communityId: 'c2', category: { name: 'Anything', icon: 'folder', types: [], default_tags: [], rules: {}, add: { min_rank: 'member', roles: [], members: [], min_level: 0 }, visible: null } })`);
+const fileOf = (relative, kind, size = 2000) => ({ path: `C:\\pics\\${relative.replaceAll('/', '\\')}`, relative, name: relative.split('/').pop(), ext: relative.split('.').pop().toUpperCase(), kind, size, flag: '' });
+const files = [fileOf('a.png', 'Image'), fileOf('sub/b.txt', 'Document'), fileOf('sub/deeper/setup.exe', 'Installer')];
+await ev(`window.__mockFolder = ${JSON.stringify({ files, tag: 'pics' })}`);
+await ev(`window.__mockPickFolder = 'C:\\\\pics'`);
+await ev(`window.__mockPickFiles = []`);
+await ev(`window.__mockCheckMs = 40`);
+// The page hears of the new category.
+await ev(`window.__mockManyListings('c2', 0)`);
+await until(async () => (await ev(`document.querySelector('nav[aria-label="File filters"]').textContent.includes('Anything')`)) === true, 3000);
+await ev(`[...document.querySelectorAll('[data-files] button')].find((n) => n.textContent.trim() === 'Add folder').click()`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+check('FO1 the folder dialog lists the folder as one by default', (await ev(`document.querySelector('[data-add-folder] input[name="folder-as"]').checked`)) === true);
+await until(async () => (await ev(`!![...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim().startsWith('List folder · 3'))`)) === true, 3000);
+await ev(`[...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim().startsWith('List folder')).click()`);
+await until(async () => (await ev(`[...document.querySelectorAll('[aria-live="polite"] [role="status"]')].some((n) => n.textContent.includes('Folder pics added'))`)) === true, 4000);
+const rows = () => ev(`[...document.querySelectorAll('[data-files] [data-listing]')].map((r) => r.textContent)`);
+check('FO2 it is one listing, showing its file count', (await rows()).length === 1 && (await rows())[0].includes('3 files'), JSON.stringify(await rows()));
+// The contents popover from the row.
+await ev(`document.querySelector('[data-folder-contents-button]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[role="dialog"] [data-folder-contents]')`)) === true, 3000);
+const totals = await ev(`document.querySelector('[role="dialog"] [data-folder-totals]').textContent`);
+check('FO3 the contents show totals', totals.startsWith('3 files') && totals.includes('5.9 KB'), totals);
+check('FO3 a small folder opens all the way, with a file’s type and size', (await ev(`document.querySelectorAll('[role="dialog"] [data-folder-file]').length`)) === 3);
+check('FO4 a file that can run code is flagged, and the folder says so', (await ev(`document.querySelector('[role="dialog"] [data-folder-danger]')?.textContent ?? ''`)).includes('1 file in this folder can run code') && (await ev(`!!document.querySelector('[role="dialog"] [data-folder-file="sub/deeper/setup.exe"] [aria-label="Can run code"]')`)) === true);
+await ev(`document.querySelector('[role="dialog"] [data-folder-dir="sub"] button').click()`);
+await sleep(100);
+check('FO5 a folder collapses', (await ev(`document.querySelectorAll('[role="dialog"] [data-folder-file]').length`)) === 1);
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(300);
+// Hundreds of files: it scrolls, a big folder starts collapsed, and a search narrows it.
+await ev(`window.__mockFolderListing('c2', 'Big archive', 300)`);
+await until(async () => (await rows()).length === 2, 3000);
+await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('Big archive')).querySelector('[data-folder-contents-button]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[role="dialog"] [data-folder-totals]')`)) === true, 3000);
+check('FO6 300 files show their totals and the files no one online has', (await ev(`document.querySelector('[role="dialog"] [data-folder-totals]').textContent`)).includes('300 files') && (await ev(`document.querySelector('[role="dialog"] [data-folder-totals]').textContent`)).includes('1 file no one online has'));
+check('FO6 a big folder starts at its top level, in a scrolling list', (await ev(`document.querySelectorAll('[role="dialog"] [data-folder-dir]').length`)) === 6 && (await ev(`getComputedStyle(document.querySelector('[role="dialog"] [role="tree"]')).overflowY`)) === 'auto');
+const t0 = Date.now();
+await ev(`(() => { const n = document.querySelector('[role="dialog"] input[aria-label="Search this folder"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(n, 'file-0123'); n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await sleep(100);
+check(`FO7 search finds one file among 300 (${Date.now() - t0} ms)`, (await ev(`[...document.querySelectorAll('[role="dialog"] [data-folder-file]')].map((n) => n.dataset.folderFile).join()`)) === 'part-2/file-0123.txt');
+check('FO7 the note counts every file that can run code', (await ev(`document.querySelector('[role="dialog"] [data-folder-danger]').textContent`)).includes('4 files in this folder can run code'));
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(300);
+// Downloading someone else's folder: one entry, its files one by one, then seeded.
+await ev(`window.__mockFolderStepMs = 400`);
+const small = await ev(`window.__mockFolderListing('c2', 'Small set', 4)`);
+await until(async () => (await rows()).length === 3, 3000);
+await ev(`[...document.querySelectorAll('[data-files] [data-listing]')].find((r) => r.textContent.includes('Small set')).click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-file-page] [data-folder-contents]')`)) === true, 3000);
+check('FO8 the file page shows the folder’s contents', (await ev(`document.querySelector('[data-file-page] [data-folder-totals]').textContent`)).startsWith('4 files'));
+await ev(`[...document.querySelectorAll('[data-file-page] button')].find((n) => n.textContent.trim().startsWith('Download')).click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-folder-download] [data-folder-progress]')`)) === true, 3000);
+await until(async () => (await ev(`document.querySelectorAll('[data-folder-file-progress="done"]').length`)) >= 1, 3000);
+const midway = await ev(`document.querySelector('[data-folder-progress]').textContent`);
+check('FO9 the download shows one progress line with the files done and the speed', /Downloading · \d+% · \d of 4 files/.test(midway) && midway.includes('↓'), midway);
+check('FO9 each file is listed', (await ev(`document.querySelectorAll('[data-folder-file-progress]').length`)) === 4);
+await until(async () => (await ev(`document.querySelector('[data-file-page]').textContent.includes('You seed this folder')`)) === true, 5000);
+check('FO10 a downloaded folder is seeded', true);
+await ev(`[...document.querySelectorAll('[data-file-page] button')].find((b) => b.textContent.trim() === 'Files').click()`);
+await sleep(300);
+// My seeding: a folder is one row. A changed file shows, and the folder can be listed again.
+await ev(`window.__mockFolderChanged = 1`);
+await ev(`[...document.querySelectorAll('[role="tablist"][aria-label="Files"] [role="tab"]')].find((t) => t.firstChild.textContent === 'My seeding').click()`);
+await until(async () => (await ev(`document.querySelectorAll('[data-seeding] [data-seed-row]').length`)) >= 1, 3000);
+const seedRow = `[...document.querySelectorAll('[data-seeding] [data-seed-row]')].find((r) => r.textContent.includes('pics'))`;
+check('FO11 a folder is one row in My seeding', (await ev(`${seedRow}?.textContent.includes('Folder · 3 files')`)) === true);
+check('FO11 a file changed since listed is shown', (await ev(`${seedRow}.querySelector('[data-seed-note]').textContent`)).includes('1 file changed since listed'));
+await ev(`${seedRow}.querySelector('[data-relist]').click()`);
+await until(async () => (await ev(`document.querySelector('[data-add-folder]')?.dataset.addFolder`)) === 'ready', 3000);
+check('FO12 List again opens the folder dialog for that folder', (await ev(`document.querySelector('[role="dialog"]').textContent.includes('Add folder pics')`)) === true);
+// Each file separately still works.
+await ev(`[...document.querySelectorAll('[data-add-folder] input[name="folder-as"]')][1].click()`);
+await sleep(100);
+await until(async () => (await ev(`!![...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim().startsWith('Add 3'))`)) === true, 3000);
+check('FO13 List each file separately offers the files one by one', true);
+await ev(`[...document.querySelectorAll('[data-add-folder] button')].find((n) => n.textContent.trim() === 'Cancel').click()`);
+await sleep(200);
+await ev(`window.__mockFolderChanged = 0`);
+await ev(`window.__mockFolder = null`);
+check('FO14 nothing listed twice', (await ev(`window.__TAURI__.core.invoke('files_view', { communityId: 'c2' }).then((v) => v.listings.filter((l) => l.folder).length)`)) === 3 && small.length > 0);
 }
 
 async function section_memberonly() {
@@ -6173,6 +6275,7 @@ const SECTIONS = [
   ['filedrop', section_filedrop],
   ['filepages', section_filepages],
   ['downloadfolder', section_downloadfolder],
+  ['folderlisting', section_folderlisting],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],

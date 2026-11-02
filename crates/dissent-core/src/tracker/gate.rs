@@ -92,7 +92,7 @@ impl Engine {
     pub(crate) fn sync_tracker_gate(&self, community: CommunityId, states: &std::collections::BTreeMap<[u8; 32], SeedState>) {
         let serving: BTreeSet<[u8; 32]> = states.iter().filter(|(_, s)| **s == SeedState::Seeding).map(|(b, _)| *b).collect();
         let category_of: HashMap<[u8; 32], dissent_events::CategoryId> =
-            self.opened_listings(community).into_iter().map(|o| (o.body.blob, o.category)).collect();
+            self.opened_blobs(community).into_iter().map(|o| (o.body.blob, o.category)).collect();
         let prefix = format!("{TRANSFER_PREFIX}{community}:");
         let downloading: Vec<[u8; 32]> = {
             let w = self.read();

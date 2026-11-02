@@ -107,7 +107,7 @@ impl Engine {
             .map(|(b, _)| b)
             .collect();
         let sizes: BTreeMap<[u8; 32], u64> =
-            self.opened_listings(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
+            self.opened_blobs(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
         let prefix = format!("{TRANSFER_PREFIX}{community}:");
         let w = self.read();
         let mut out: Vec<Holding> =
@@ -152,7 +152,7 @@ impl Engine {
         }
         // A restricted category's blobs go only to its readers.
         let hidden: std::collections::BTreeSet<[u8; 32]> = {
-            let opened = self.opened_listings(community);
+            let opened = self.opened_blobs(community);
             let w = self.read();
             let root = w.directory.root_of(&from);
             w.communities
@@ -236,7 +236,7 @@ impl Engine {
     /// Records which roots were seen holding each listing whole, for its "downloaded completely" count.
     fn note_completions(&self, community: CommunityId) {
         let sizes: BTreeMap<[u8; 32], u64> =
-            self.opened_listings(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
+            self.opened_blobs(community).into_iter().map(|o| (o.body.blob, o.body.cipher_size)).collect();
         let changed = self.with_tracker(community, |l| {
             let mut changed = false;
             for heard in l.heard.values() {

@@ -374,6 +374,40 @@ is walked (4 levels, 500 files), and is seeded in place, with no copy, as a link
 - Add stays off until ticked rows are checked. Progress, Cancel and Undo are the drop's. What the dialog checked is not read again
   by the batch, though `list_files` itself still reads the file.
 
+## Folder listings
+
+A folder is listed as one item by default (`tracker::folder`); the folder dialog's "List each file separately" keeps the per-file
+way. Nothing syncs: the listing is a snapshot, and a later change is a new listing.
+
+- **Wire.** A folder listing is a `FileListing` whose sealed body is a `FolderBody` under `BodyKind::Folder` (4, appended). No new
+  payload and no replay change: replay checks the outer layer as for a file. A release that predates it cannot open the body, so it
+  counts the listing among those locked, and agrees on everything else.
+- **Manifest.** `Manifest { entries: [ManifestEntry { path, size, kind, fingerprint, blob, cipher_size }] }`, postcard, frozen at
+  listing time. At 500 files it is far past the 16 KiB sealed field, so it is a blob of its own: encrypted like a listed file, under
+  the files key and its own fingerprint, which the body names with its blob and sizes. The outer `blob` is the manifest's, so the gate
+  scopes it to the category and storage seeders mirror it, and a restricted category keeps it out of the clear as for a file. A member
+  fetches it from holders before showing the contents, and believes it only if its fingerprint matches, it decodes, its counts and
+  sizes agree with the body, and every path passes `check_manifest`. Known manifests are kept in `folder_manifests.bin`, sealed like
+  every store file.
+- **Paths.** `check_manifest` refuses empty or `.`/`..` parts, absolute paths, drives, backslashes, Windows-illegal characters and
+  reserved names (`CON`, `NUL`, `COM1`, ...), a leading or trailing space or dot, a part over 120 characters, a path over 200 or
+  more than 6 parts deep, names that clash ignoring case, a file that is also a folder, and sizes that disagree.
+- **Files.** Each file is a blob of its own, keyed by its fingerprint as a single listing's is, so it dedupes with listings of the
+  same bytes under the same generation. `Engine::opened_blobs` gives every blob a listing names, a folder's files and manifest
+  included, so the gate, holdings, seeding and reconcile treat them as files. Holders are per file. Someone who downloaded the whole
+  folder holds every file, and so counts as a holder of the folder.
+- **Seeded in place.** The lister's files are linked as a linked folder's are. A file changed on disk since, or gone, cannot be served
+  (its fingerprint would not match), so its seed reads as stopped and is not announced. My seeding shows the folder as one row with
+  "N files changed since listed" and offers "List again as a new folder", which opens the folder dialog on that folder.
+- **Contents.** The file page and a Contents button on the row show the tree, with types and sizes, totals, files no one online
+  holds, a search for big folders, and the danger check per file with a note on the folder.
+- **Download.** One Transfers entry (`folder:<community>:<listing>`). The space for the whole folder is checked first. Each file is
+  fetched from its holders into a staging folder beside where the folder lands (`.dissent-partial-...`), checked against its
+  fingerprint, and marked as from the internet. Nothing opens. A file already staged whole is not fetched again, so a retry resumes.
+  Every path is checked again, and nothing is written through a link in staging. The staging folder is then moved into place under the
+  folder's name, `Name (2)` beside one already there. The files are then seeded like a downloaded file. No receipt is sent for a
+  folder yet.
+
 ## Seeding
 
 Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inplace`).
