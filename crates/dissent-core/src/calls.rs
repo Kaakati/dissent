@@ -162,7 +162,7 @@ pub(crate) enum CallMsg {
 }
 
 /// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
-const FEATURE_BOOST_TIERS: u64 = 1;
+pub(crate) const FEATURE_BOOST_TIERS: u64 = 1;
 /// `CallMsg::Features` bit: the sender takes `VideoLayers`, `TileWidths` and `WantedLayers`.
 pub(crate) const FEATURE_VIDEO_LAYERS: u64 = 2;
 /// `CallMsg::Features` bit: the sender takes `ForwardOffer`, and can be a leaf of a forwarder that
@@ -173,9 +173,13 @@ pub(crate) const FEATURE_VOLUNTEERS: u64 = 4;
 pub(crate) const FEATURE_SEEDER_FORWARDERS: u64 = 8;
 /// `CallMsg::Features` bit: the sender takes `PausedVideo`.
 pub(crate) const FEATURE_PAUSED_VIDEO: u64 = 16;
+/// `CallMsg::Features` bit: the sender elects no member outside the call, only a seeder. It no longer sends
+/// `FEATURE_VOLUNTEERS`, so a client from before this elects nobody outside a call that has one of these in it. See
+/// `volunteers`.
+pub(crate) const FEATURE_SEEDERS_ONLY: u64 = 32;
 /// Every call feature this device supports.
 const FEATURES: u64 =
-    FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS | FEATURE_VOLUNTEERS | FEATURE_SEEDER_FORWARDERS | FEATURE_PAUSED_VIDEO;
+    FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS | FEATURE_SEEDERS_ONLY | FEATURE_SEEDER_FORWARDERS | FEATURE_PAUSED_VIDEO;
 
 /// A device's roster for the DM or group call it is in.
 #[derive(Debug, Serialize, Deserialize)]
@@ -4558,7 +4562,10 @@ impl Engine {
             let weak = Arc::downgrade(room);
             let msg = CallMsg::Features {
                 room: room.id,
-                bits: FEATURES,
+                bits: match self.inner.call_features_override.load(Ordering::Relaxed) {
+                    0 => FEATURES,
+                    bits => bits,
+                },
             };
             self.spawn_task(async move {
                 match engine.call_rpc(device, msg).await {

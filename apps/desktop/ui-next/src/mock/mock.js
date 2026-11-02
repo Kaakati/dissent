@@ -1760,7 +1760,7 @@ if (!window.__TAURI__) {
   // ---- feature surfaces (design boards): contacts, groups, calls, transfers, guardians, devices, pins ----
   // The engine has none of these yet. The mock answers every command so each board can be checked in the browser.
   // `window.__mockNoCapabilities = true` makes `capabilities` return nothing, which hides every new surface.
-  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'forward_calls', 'channel_order', 'channel_categories', 'dm_mentions'];
+  const FEATURES = ['groups', 'contacts', 'calls', 'guardians', 'transfers', 'multi_source', 'offline_delivery', 'embeds', 'key_change', 'safety', 'devices', 'pins', 'notes', 'mute', 'onboarding', 'topics', 'close_dm', 'ignore', 'status', 'avatars', 'member_only', 'mentions', 'server_prefs', 'private_channels', 'channel_order', 'channel_categories', 'dm_mentions'];
   const ignoredSet = new Set();
   // The DHT and relay latencies the title bar shows. The engine sends them with each probe, so the mock does too.
   const mockNetLatency = { dht_ms: 2529, relay_ms: 42 };
@@ -2122,15 +2122,6 @@ if (!window.__TAURI__) {
     join_group_call: ({ groupId }) => (calls.current = callFor(groupId)),
     join_dm_call: ({ peer }) => (calls.current = callFor(peer)),
     get_server_prefs: ({ communityId }) => prefsNow(communityId),
-    // Help Forward Calls, per server. `window.__mockForwardCalls` lists the servers it is on for, so the driver can read it.
-    get_forward_calls: ({ communityId }) => (window.__mockForwardCalls ?? []).includes(communityId),
-    set_forward_calls: ({ communityId, on }) => {
-      const set = new Set(window.__mockForwardCalls ?? []);
-      if (on) set.add(communityId);
-      else set.delete(communityId);
-      window.__mockForwardCalls = [...set];
-      return null;
-    },
     // `window.__mockMuteMs` shortens a timed mute, so the driver can watch one run out.
     set_server_prefs: ({ communityId, prefs }) => {
       const timed = prefs.muted_until !== null && prefs.muted_until < 2 ** 63;

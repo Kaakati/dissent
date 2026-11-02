@@ -270,8 +270,6 @@ pub fn run() {
             server_prefs_cmds::get_server_prefs,
             server_prefs_cmds::set_server_prefs,
             server_prefs_cmds::server_alerts,
-            server_prefs_cmds::get_forward_calls,
-            server_prefs_cmds::set_forward_calls,
             paging_cmds::channel_messages_before,
             paging_cmds::dm_messages_before,
             paging_cmds::group_messages_before,

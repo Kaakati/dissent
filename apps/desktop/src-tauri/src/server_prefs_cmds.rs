@@ -28,16 +28,3 @@ pub async fn server_alerts(state: State<'_, AppState>, community_id: String, men
     Ok(engine(&state).await?.server_alerts(community, mentioned, by_name))
 }
 
-/// Whether this device helps forward voice calls in the server ("Help forward calls in this server").
-#[tauri::command]
-pub async fn get_forward_calls(state: State<'_, AppState>, community_id: String) -> Result<bool, String> {
-    let community: CommunityId = parse("community id", &community_id)?;
-    Ok(engine(&state).await?.forwards_calls(community))
-}
-
-/// Turns forwarding calls in the server on or off for this device. Off by default.
-#[tauri::command]
-pub async fn set_forward_calls(state: State<'_, AppState>, community_id: String, on: bool) -> Result<(), String> {
-    let community: CommunityId = parse("community id", &community_id)?;
-    engine(&state).await?.set_forward_calls(community, on).map_err(err)
-}

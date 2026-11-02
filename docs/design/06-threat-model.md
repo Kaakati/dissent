@@ -579,7 +579,14 @@ device keys it moves between.
 
 ## A forwarder who is not in the call: what a volunteer sees
 
-A member can turn on "Help Forward Calls" for one server (off by default). While their device is in
+**Since v0.1.24 only a seeder the owner allows forwards a call it is not in.** A member holds the server's key, so a
+member who carried a call it was not in could have joined the key it already holds to the media it relayed and
+listened. Current clients refuse a member's offer and elect no member outside the call, and a call with one current
+client in it elects nobody outside the call on older clients either. Calls of older clients only, with a member who
+turned volunteering on, still can. What follows describes what any outside forwarder sees, which still applies to a
+seeder.
+
+Before v0.1.24, a member could turn on "Help Forward Calls" for one server (off by default). While their device is in
 no call of its own, it may be elected to forward a voice channel call in that server that it is not
 in (`docs/design/13-forwarded-calls.md`, phase 3). Every participant's media then goes through it.
 Its relay holds no media key and forwards SFrame frames unchanged, so it cannot read what is said

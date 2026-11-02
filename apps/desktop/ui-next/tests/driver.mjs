@@ -3872,7 +3872,7 @@ check('W24 no console errors', errors.length === 0, errors.slice(0, 3).join(' | 
 await b.close();
 }
 
-// ---- Volunteer forwarders: the rail menu's Help Forward Calls, and a call forwarded by a member who is not in it ----
+// ---- Forwarders outside the call: no Help Forward Calls for members, and a call a seeder forwards ----
 async function section_volunteers() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9813, profile: `${SCRATCH}/volunteers-next-profile` });
 const { ev } = b;
@@ -3881,24 +3881,9 @@ const openRailMenu = (name) => ev(`(() => { const b = document.querySelector('bu
 const forwardItem = () => ev(`(() => { const n = [...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')); return n ? { checked: n.getAttribute('aria-checked'), text: n.textContent.trim() } : null; })()`);
 const closeMenus = async () => { await ev(`document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(250); };
 
-// The toggle is off by default, says what it does, and turns on and back off for that server only.
-await openRailMenu('Riverside Makers');
-await sleep(400);
-const off = await forwardItem();
-check('V1 a member sees Help Forward Calls in the server menu, off by default', off?.checked === 'false', JSON.stringify(off));
-check('V1 the item says the call shows your name', off?.text.includes('The call shows your name') === true, JSON.stringify(off));
-await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
-await sleep(400);
-check('V2 picking it turns forwarding on for that server', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === JSON.stringify(['c1']), String(await ev(`JSON.stringify(window.__mockForwardCalls)`)));
-await openRailMenu('Riverside Makers');
-await sleep(400);
-check('V2 the item shows it is on', (await forwardItem())?.checked === 'true');
-await ev(`[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((n) => n.textContent.trim().startsWith('Help Forward Calls')).click()`);
-await sleep(400);
-check('V3 picking it again turns it off', (await ev(`JSON.stringify(window.__mockForwardCalls)`)) === '[]');
-await closeMenus();
+check('V1 the server menu has no Help Forward Calls: members do not forward calls they are not in', await (async () => { await openRailMenu('Riverside Makers'); await sleep(400); const none = (await forwardItem()) === null; await closeMenus(); return none; })());
 
-// A call forwarded by a member who is not in it names them, and lists only the people in the call.
+// A call a seeder forwards names it, and lists only the people in the call.
 await ev(`window.__mockForwardedBy = 'Yusuf'`);
 await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
 await sleep(700);

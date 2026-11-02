@@ -101,6 +101,9 @@ screen ladder already reached 1080p15. So no level ever lowers a ceiling.
 - **Video.** The sender's adaptation ladder skips rungs above the level's frame size and frame rate.
   A rung may be missing, as when the ladder has no 1080p60 rung. Then the ceiling has no effect until
   one is added. Calls own the ladder.
+- **Forwarders outside the call.** Since v0.1.24 members never forward a call they are not in, since they hold the
+  server's key. Only a seeder the owner allows does. A big call on weak links is forwarded by its best participant
+  otherwise. See `13-forwarded-calls.md`, "Member volunteers, removed".
 - **Mesh.** A call stays a mesh up to the level's limit, then is forwarded. Forwarded calls already
   run (`04-calls.md`). `TierPolicy` takes the level's limit, but only while every device in the
   call has sent `CallMsg::Features` and has the upload for the bigger mesh. Otherwise it uses level

@@ -143,6 +143,17 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
 }
 
 /// Makes `engine` answer `Request::Features` with `bits`. Zero models a device from before the probe.
+/// Makes `engine` send the call features of a client from before `FEATURE_SEEDERS_ONLY`: it says it elects a member
+/// outside the call. Only what it says changes; it still elects as this build does.
+pub fn send_old_call_features(engine: &crate::Engine) {
+    let old = crate::calls::FEATURE_BOOST_TIERS
+        | crate::calls::FEATURE_VIDEO_LAYERS
+        | crate::calls::FEATURE_VOLUNTEERS
+        | crate::calls::FEATURE_SEEDER_FORWARDERS
+        | crate::calls::FEATURE_PAUSED_VIDEO;
+    engine.inner.call_features_override.store(old, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn set_features(engine: &crate::Engine, bits: u64) {
     engine.inner.features.store(bits, std::sync::atomic::Ordering::Relaxed);
 }

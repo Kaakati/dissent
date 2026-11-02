@@ -615,7 +615,7 @@ function PrivacySection({ community }: { community: CommunityView }) {
 }
 
 // Seeder may forward calls: the owner lets the server's seeders forward its voice calls when nobody in a call
-// forwards better, as members who turn on Help Forward Calls do. Off by default. Admins see it, but only the owner
+// forwards better. A seeder holds no key, so it carries the call sealed; members never forward a call they are not in. Off by default. Admins see it, but only the owner
 // changes it, which the engine enforces too.
 function SeederForwardsBlock({ community }: { community: CommunityView }) {
   const [on, setOn] = useState<boolean | null>(null);

@@ -194,8 +194,6 @@ export const api = {
   getServerPrefs: (communityId: Id) => call<ServerPrefs>('get_server_prefs', { communityId }),
   setServerPrefs: (communityId: Id, prefs: ServerPrefs) => call<void>('set_server_prefs', { communityId, prefs }),
   serverAlerts: (communityId: Id, mentioned: boolean, byName: boolean) => call<boolean>('server_alerts', { communityId, mentioned, byName }),
-  getForwardCalls: (communityId: Id) => call<boolean>('get_forward_calls', { communityId }),
-  setForwardCalls: (communityId: Id, on: boolean) => call<void>('set_forward_calls', { communityId, on }),
   react: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
     call<void>('react', { communityId, channelId, messageId, emoji }),
   unreact: (communityId: Id, channelId: Id, messageId: Id, emoji: string) =>
