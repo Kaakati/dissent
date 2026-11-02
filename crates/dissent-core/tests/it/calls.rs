@@ -1536,7 +1536,9 @@ async fn a_forwarder_passes_a_screens_sound_to_every_viewer() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
-    heavy(7, async {
+    // Seven engines, and the sender encodes 1440p with two layers below it, which costs about what three more
+    // engines do on a debug build. The count stretches every wait to match. `heavy` already runs it alone.
+    heavy(10, async {
     let (everyone, forwarder) = simulcast_call(&[]).await;
     let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
     let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
@@ -1557,10 +1559,20 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     let plan = dissent_core::test_support::screen_plan(&sender.engine).expect("a share runs");
     assert_eq!((plan.0, plan.1), (2560, 1440), "the top layer is the screen's own size");
     assert!(dissent_core::test_support::set_viewer_budget(&everyone[forwarder].engine, &root(wide), 1_200).await);
-    eventually_within(Duration::from_secs(60), "the constrained viewer moves to the middle layer", || {
-        (received(wide) == Some(1)).then_some(())
-    })
-    .await;
+    // A failure says what the viewer last got and what the forwarder and the sender were doing.
+    let deadline = tokio::time::Instant::now() + scaled(Duration::from_secs(60));
+    while received(wide) != Some(1) {
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "the constrained viewer moves to the middle layer did not happen: got {}; forwarder: {}; sender plan {:?}, layers {:?}",
+                dissent_core::test_support::video_received_debug(&wide.engine, &root(sender), true),
+                dissent_core::test_support::forwarder_video_debug(&everyone[forwarder].engine, &root(wide), &root(sender), true).await,
+                dissent_core::test_support::screen_plan(&sender.engine),
+                dissent_core::test_support::wanted_layers(&sender.engine, true),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     sender.engine.set_screen_share(false, None).expect("screen share off");
     finish(everyone).await;
     }).await;
