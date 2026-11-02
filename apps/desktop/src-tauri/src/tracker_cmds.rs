@@ -48,7 +48,7 @@ pub async fn delete_category(state: State<'_, AppState>, community_id: String, c
 }
 
 /// Asks for a folder through the OS picker. `None` when it is cancelled. See the `test-folder-hook` feature.
-async fn ask_folder(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+pub(crate) async fn ask_folder(app: tauri::AppHandle) -> Result<Option<PathBuf>, String> {
     use tauri_plugin_dialog::DialogExt;
     #[cfg(feature = "test-folder-hook")]
     if let Some(file) = std::env::var_os("DISSENT_TEST_PICK_FOLDER_FILE") {

@@ -232,6 +232,7 @@ if (!window.__TAURI__) {
     max_accept_bytes: 10 * GB,
     download_dir: pickedDownloadDir ?? 'C:/Users/ada/Downloads',
     download_dir_is_default: pickedDownloadDir === null,
+    download_dir_problem: window.__mockDownloadDirProblem ?? null,
     auto_accept_bytes: 25 * MB,
   });
   generalMessages[13].attachments = [
@@ -417,6 +418,7 @@ if (!window.__TAURI__) {
     // Relays the server can use for voice channels. The engine does not report these yet.
     relays: ['https://relay-eu.riverside.example', 'https://relay-us.riverside.example'],
     my_role: myRole(c),
+    history: c.history ?? null,
     // The mention-everyone permission: owners and admins hold it by default.
     can_mention_everyone: ['owner', 'admin'].includes(myRole(c)),
     // The layout as the engine resolves it: each live channel once, the ones left out at the end, outside categories.
@@ -2170,6 +2172,7 @@ if (!window.__TAURI__) {
     transfer_settings: () => transferSettings(),
     set_transfer_settings: ({ settings }) => settings,
     pick_download_dir: () => {
+      if (window.__mockDownloadDirRefused) throw window.__mockDownloadDirRefused;
       pickedDownloadDir = 'C:/Users/ada/Downloads/Dissent';
       return transferSettings();
     },

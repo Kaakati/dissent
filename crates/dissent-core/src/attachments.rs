@@ -2013,6 +2013,15 @@ mod tests {
         let os = Path::new("/home/ada/Downloads");
         let picked = Path::new("/mnt/shared");
         assert_eq!(resolve_download_dir(Some(picked), Some(os), profile), picked, "a picked folder wins");
+        let gone = std::env::temp_dir().join(format!("dissent-no-such-folder-{}", std::process::id()));
+        assert!(download_dir_problem(&gone).is_some_and(|p| p.contains("no longer exists")));
+        assert!(check_writable_dir(&gone).is_err());
+        let here = std::env::temp_dir();
+        assert_eq!(download_dir_problem(&here), None);
+        let file = here.join(format!("dissent-a-file-{}", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        assert!(download_dir_problem(&file).is_some_and(|p| p.contains("cannot save")), "a file is not a folder");
+        let _ = std::fs::remove_file(&file);
         assert_eq!(resolve_download_dir(None, Some(os), profile), os, "reset to the default gives the OS folder");
         assert_eq!(resolve_download_dir(None, None, profile), profile, "no OS folder gives the profile folder");
     }
@@ -2096,6 +2105,9 @@ pub struct TransferSettings {
     pub download_dir: String,
     /// True until the user picks a folder. Then the reset to the default is offered.
     pub download_dir_is_default: bool,
+    /// Why downloads may not reach that folder now, for the person to act on.
+    #[serde(default)]
+    pub download_dir_problem: Option<String>,
 }
 
 /// What the encrypted file store holds on this device.
@@ -2203,13 +2215,19 @@ impl Engine {
 }
 impl Engine {
     pub fn transfer_settings(&self) -> TransferSettings {
-        let w = self.read();
+        let (auto_accept_bytes, dir, download_dir_is_default) = {
+            let w = self.read();
+            (
+                w.attach.auto_accept_bytes,
+                resolve_download_dir(w.attach.download_dir.as_deref(), w.attach.default_download_dir.as_deref(), &w.paths.downloads()),
+                w.attach.download_dir.is_none(),
+            )
+        };
         TransferSettings {
-            auto_accept_bytes: w.attach.auto_accept_bytes,
-            download_dir: resolve_download_dir(w.attach.download_dir.as_deref(), w.attach.default_download_dir.as_deref(), &w.paths.downloads())
-                .to_string_lossy()
-                .into_owned(),
-            download_dir_is_default: w.attach.download_dir.is_none(),
+            auto_accept_bytes,
+            download_dir_problem: download_dir_problem(&dir),
+            download_dir: dir.to_string_lossy().into_owned(),
+            download_dir_is_default,
         }
     }
 
@@ -2336,14 +2354,24 @@ pub(crate) fn resolve_download_dir(picked: Option<&Path>, os_default: Option<&Pa
     picked.or(os_default).unwrap_or(profile).to_path_buf()
 }
 
+/// What stands between `dir` and the next download. A missing folder is made again when a download starts, if it can be.
+fn download_dir_problem(dir: &Path) -> Option<String> {
+    if !dir.exists() {
+        return Some("This folder no longer exists. Dissent will try to make it again for the next download, or you can choose another.".into());
+    }
+    check_writable_dir(dir)
+        .err()
+        .map(|_| "Dissent cannot save to this folder, so downloads will fail until you choose another.".into())
+}
+
 /// Fails unless `dir` is an existing directory that this process can write a file into.
 fn check_writable_dir(dir: &Path) -> Result<()> {
     if !dir.is_dir() {
-        return Err(CoreError::Invalid(format!("{} is not an existing folder", dir.display())));
+        return Err(CoreError::Invalid(format!("{} is not an existing folder. Choose another.", dir.display())));
     }
     let probe = dir.join(".dissent-write-check");
     std::fs::write(&probe, b"ok").map_err(|e| {
-        CoreError::Invalid(format!("{} is not writable: {e}", dir.display()))
+        CoreError::Invalid(format!("Dissent cannot save to {}, so it was not changed. Choose another folder. ({e})", dir.display()))
     })?;
     let _ = std::fs::remove_file(&probe);
     Ok(())

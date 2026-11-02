@@ -1,5 +1,6 @@
 // The Transfers page (views/pages.js): Active, Completed and Failed tabs in the header, the rows in the main column, and
 // the storage panel in the right column. The actions on each row go through lib/transfers.ts. Ported from transfersPage().
+import { DownloadFolder } from './download-folder';
 import { useEffect, type ReactNode } from 'react';
 import { create } from 'zustand';
 import { Folder, Pause, Play, RotateCcw, Trash2, X } from 'lucide-react';
@@ -8,10 +9,8 @@ import { Tip } from '@/components/ui/tip';
 import { useShell } from '@/lib/store';
 import {
   cancelTransfer,
-  changeDownloadDir,
   pauseTransfer,
   removeTransfer,
-  resetDownloadDir,
   resumeTransfer,
   retryTransfer,
   revealTransfer,
@@ -221,18 +220,7 @@ export function TransfersAside() {
         <div className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{formatBytes(max)}. Bigger files are refused before any data moves.</div>
       </div>
       {settings && 'auto_accept_bytes' in settings ? <AutoAccept value={settings.auto_accept_bytes ?? null} /> : null}
-      <div className="flex flex-col gap-s-2">
-        <h4 className="text-sm font-semibold text-text-strong">Save downloads to</h4>
-        <div className="text-meta break-all text-muted-foreground">{settings?.download_dir ?? 'Not set'}</div>
-        <Button variant="outline" className="self-start" disabled={!settings} onClick={() => void changeDownloadDir()}>
-          Change
-        </Button>
-        {settings && !settings.download_dir_is_default ? (
-          <Button variant="ghost" className="self-start" onClick={() => void resetDownloadDir()}>
-            Reset to default
-          </Button>
-        ) : null}
-      </div>
+      <DownloadFolder />
     </aside>
   );
 }

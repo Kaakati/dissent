@@ -5538,6 +5538,58 @@ check(`FP10 5000 listings: a page turn takes ${Math.round(turnMs)} ms and a sear
 check('FP10 only one page is in the DOM', (await rowCount()) <= 50);
 }
 
+// The download folder in Settings and on the Transfers page: one setting, both ways.
+async function section_downloadfolder() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9835, profile: `${SCRATCH}/downloads-next-profile` });
+const { ev } = b;
+await sleep(1500);
+const SIDE = 'aside[aria-label="Channels and conversations"]';
+const path = () => ev(`document.querySelector('[data-download-path]')?.textContent ?? ''`);
+const click = (t) => ev(`[...document.querySelectorAll('[data-download-folder] button')].find((n) => n.textContent.trim() === ${JSON.stringify(t)}).click()`);
+const openSettings = async () => {
+  await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+  await sleep(400);
+  await ev(`[...document.querySelectorAll('[aria-label="Settings"] nav button, [data-settings-page] nav button')].find((n) => n.textContent.trim() === 'Downloads').click()`);
+  await until(async () => (await ev(`!!document.querySelector('[data-settings-page] [data-download-folder], [aria-label="Settings"] [data-download-folder]')`)) === true, 3000);
+};
+const closeSettings = async () => { await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(300); };
+const openTransfers = async () => { await ev(`[...document.querySelectorAll('${SIDE} button')].find((n) => n.textContent.trim().startsWith('Transfers')).click()`); await until(async () => (await ev(`!!document.querySelector('[data-download-folder]')`)) === true, 3000); };
+await openSettings();
+check('DL1 Settings shows the default folder with no reset', (await path()) === 'C:/Users/ada/Downloads' && (await ev(`![...document.querySelectorAll('[data-download-folder] button')].some((n) => n.textContent.trim() === 'Reset to default')`)) === true, await path());
+const hint = await ev(`document.querySelector('[data-download-folder]').textContent`);
+check('DL2 it says what happens to running downloads', hint.includes('already running finish in the folder they started in'), hint);
+await click('Change');
+await until(async () => (await path()).endsWith('/Dissent'), 2000);
+check('DL3 Change in Settings saves the folder', (await path()) === 'C:/Users/ada/Downloads/Dissent', await path());
+await closeSettings();
+await openTransfers();
+check('DL3 the Transfers page shows that folder', (await path()) === 'C:/Users/ada/Downloads/Dissent', await path());
+await click('Reset to default');
+await until(async () => (await path()) === 'C:/Users/ada/Downloads', 2000);
+await openSettings();
+check('DL4 a reset on the Transfers page shows in Settings', (await path()) === 'C:/Users/ada/Downloads', await path());
+// A refused folder keeps the old one and says why, in either place.
+await ev(`window.__mockDownloadDirRefused = 'invalid: Dissent cannot save to D:/readonly, so it was not changed. Choose another folder. (Access is denied.)'`);
+await click('Change');
+await until(async () => (await ev(`!!document.querySelector('[data-download-problem]')`)) === true, 2000);
+const refused = await ev(`document.querySelector('[data-download-problem]').textContent`);
+check('DL5 a read-only folder is refused with a clear message', refused.startsWith('Dissent cannot save to D:/readonly') && (await path()) === 'C:/Users/ada/Downloads', refused);
+await ev(`window.__mockDownloadDirRefused = null`);
+await click('Change');
+await until(async () => (await path()).endsWith('/Dissent'), 2000);
+check('DL5 a good folder clears the message', (await ev(`!document.querySelector('[data-download-problem]')`)) === true);
+await click('Reset to default');
+await sleep(200);
+await closeSettings();
+// The folder went away after it was chosen.
+await ev(`window.__mockDownloadDirProblem = 'This folder no longer exists. Dissent will try to make it again for the next download, or you can choose another.'`);
+await openSettings();
+await until(async () => (await ev(`!!document.querySelector('[data-download-problem]')`)) === true, 2000);
+check('DL6 a missing folder is reported', (await ev(`document.querySelector('[data-download-problem]').textContent`)).includes('no longer exists'));
+await ev(`window.__mockDownloadDirProblem = null`);
+await closeSettings();
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -6089,6 +6141,7 @@ const SECTIONS = [
   ['memberonly', section_memberonly],
   ['filedrop', section_filedrop],
   ['filepages', section_filepages],
+  ['downloadfolder', section_downloadfolder],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],

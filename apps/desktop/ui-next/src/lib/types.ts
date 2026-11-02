@@ -364,6 +364,7 @@ export interface TransferRates {
 export interface TransferSettings {
   max_accept_bytes: number;
   download_dir: string;
+  download_dir_problem?: string | null; // why downloads may not reach it now
   download_dir_is_default: boolean; // true until the user picks a folder; then a reset to the default is offered
   auto_accept_bytes?: number | null; // null: always ask
 }
