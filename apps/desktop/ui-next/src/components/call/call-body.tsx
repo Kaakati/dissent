@@ -3,7 +3,7 @@
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, Video, VideoOff, Volume2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MessageCircle, Pause, PhoneOff, ShieldCheck, TriangleAlert, Video, VideoOff, Volume2, X } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import { Composer } from '@/components/chat/composer';
 import { listKey, rowsFor } from '@/components/chat/message-list';
@@ -291,6 +291,14 @@ function RouteBanner({ call }: { call: CallState }) {
   const reading = quality
     ? `${quality.rtt_ms === null ? '—' : Math.round(quality.rtt_ms)} ms · ${quality.loss_pct.toFixed(1)}% loss · ${Math.round(quality.jitter_ms)} ms jitter`
     : null;
+  if (call.cannot_decrypt) {
+    return (
+      <div role="alert" data-call-cannot-decrypt className="mx-s-3 mt-s-3 flex items-center gap-s-3 rounded-lg bg-sidebar px-s-4 py-2.5 text-ui text-danger-text">
+        <TriangleAlert className="size-5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1">You can’t hear this call: its audio is arriving, and this device can’t decrypt it. Try leaving and joining again.</span>
+      </div>
+    );
+  }
   return (
     <div role="status" className="mx-s-3 mt-s-3 flex items-center gap-s-3 rounded-lg bg-sidebar px-s-4 py-2.5 text-ui">
       <ShieldCheck className="size-5 shrink-0 text-accent-text" aria-hidden="true" />

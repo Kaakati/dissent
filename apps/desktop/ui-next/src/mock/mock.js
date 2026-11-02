@@ -555,6 +555,10 @@ if (!window.__TAURI__) {
   window.__mockEngineEvent = (ev) => emit(ev);
   // Who speaks in the call: `who` is 'me', or a participant's display name. Sends the call state, as the engine's
   // `call_speaking` does.
+  window.__mockCannotDecrypt = (on) => {
+    calls.current.cannot_decrypt = on;
+    emitTo('dissent://call-state', { ...calls.current });
+  };
   window.__mockSpeaking = (who, on) => {
     if (!calls.current) return false;
     if (who === 'me') calls.current.self_speaking = on;

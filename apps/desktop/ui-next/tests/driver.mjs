@@ -1877,6 +1877,12 @@ check('C7 the voice channel call chat says anyone who can read the channel reads
 check('C7 the voice roster lists you first in the channel you joined', (await b.ev(`[...document.querySelectorAll('[role="list"][aria-label="In workshop"] [role="listitem"]')][0]?.textContent.includes('Sami') === true`)) === true);
 check('C7 the call details show the route sections the call has (no route block)', (await b.ev(`!document.querySelector('aside[aria-label="Details"]')?.textContent.includes('ROUTE') && !document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Route')`)) === true);
 check('C7 the call details show Forwarded by and Backup for a forwarded call', (await b.ev(`document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Forwarded by') && document.querySelector('aside[aria-label="Details"]')?.textContent.includes('Backup')`)) === true);
+await b.ev(`window.__mockCannotDecrypt(true)`);
+await sleep(200);
+check('C7b a call that decrypts nothing says so, in place of the route', String(await b.ev(`document.querySelector('[data-call-cannot-decrypt]')?.textContent`)).includes('can’t decrypt'));
+await b.ev(`window.__mockCannotDecrypt(false)`);
+await sleep(200);
+check('C7b the note goes once it decrypts again', (await b.ev(`document.querySelector('[data-call-cannot-decrypt]') === null`)) === true);
 await b.screenshot(`${SCRATCH}/shots/C-next-voice-channel.png`);
 
 // The voice rows' tooltips follow the connection.

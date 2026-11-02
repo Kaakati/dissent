@@ -569,6 +569,43 @@ struct Quality {
     loss_pct: f64,
     frames_received: u64,
     flagged: u64,
+    deaf: DeafWatch,
+}
+
+/// How long frames arrive and none opens before a call says so.
+const DEAF_AFTER: Duration = Duration::from_secs(5);
+
+/// Notices a call whose frames arrive and do not decrypt, which looks like a normal call to its user. It watches the
+/// whole link, so a call that opens some senders' frames does not count.
+#[derive(Default)]
+struct DeafWatch {
+    undecryptable: u64,
+    received: u64,
+    since: Option<Instant>,
+    warned: bool,
+}
+
+impl DeafWatch {
+    /// Takes the links' totals. Returns true the first time the call has been deaf for `DEAF_AFTER`.
+    fn note(&mut self, undecryptable: u64, received: u64, now: Instant) -> bool {
+        if received > self.received {
+            self.since = None;
+            self.warned = false;
+        } else if undecryptable > self.undecryptable {
+            self.since.get_or_insert(now);
+        }
+        self.undecryptable = undecryptable;
+        self.received = received;
+        if self.is_deaf(now) && !self.warned {
+            self.warned = true;
+            return true;
+        }
+        false
+    }
+
+    fn is_deaf(&self, now: Instant) -> bool {
+        self.since.is_some_and(|since| now.duration_since(since) >= DEAF_AFTER)
+    }
 }
 
 /// A call in progress on this device.
@@ -853,6 +890,8 @@ pub struct CallView {
     pub key_epoch: u64,
     /// Frames decrypted and delivered so far, for diagnostics.
     pub frames_received: u64,
+    /// Frames have been arriving and none has decrypted for a while, so this device hears nothing.
+    pub cannot_decrypt: bool,
     /// The display name of a member who forwards the call without being in it, as the call
     /// screen's "Forwarded by" names them. `None` when a participant forwards, or nobody does.
     pub forwarded_by: Option<String>,
@@ -1221,6 +1260,8 @@ async fn pump_forwarded(engine: &Engine, room: &Room, forwarding: &Forwarding) {
     let Some(participant) = leaf.as_mut() else {
         return;
     };
+    let (undecryptable, received) = participant.link_stats().values().fold((0, 0), |(u, r), s| (u + s.frames_undecryptable, r + s.frames_received));
+    note_deaf(&mut lock(&room.quality), room, undecryptable, received);
     while let Ok(Ok(Some(frame))) =
         tokio::time::timeout(Duration::from_millis(1), participant.next_received_frame()).await
     {
@@ -1247,6 +1288,13 @@ async fn pump_forwarded(engine: &Engine, room: &Room, forwarding: &Forwarding) {
         }
     }
     pump_video_leaf(engine, room, participant).await;
+}
+
+/// Takes the links' frame totals, and warns once when the call has stopped decrypting anything.
+fn note_deaf(quality: &mut Quality, room: &Room, undecryptable: u64, received: u64) {
+    if quality.deaf.note(undecryptable, received, Instant::now()) {
+        warn!(epoch = room.epoch.load(Ordering::Relaxed), undecryptable, "frames arrive in this call and none decrypts");
+    }
 }
 
 /// Fallback audio target for the budget, in kbps, before the call has measured one.
@@ -3136,6 +3184,7 @@ impl Engine {
             },
             key_epoch: room.epoch.load(Ordering::Relaxed),
             frames_received: quality.frames_received,
+            cannot_decrypt: quality.deaf.is_deaf(now),
             forwarded_by,
             self_speaking: room.self_speaking(now),
             channel_name,
@@ -3298,6 +3347,10 @@ impl Engine {
             sent += s.packets_sent;
         }
         let mut quality = lock(&room.quality);
+        if room.forwarding.is_none() {
+            let (undecryptable, received) = stats.values().fold((0, 0), |(u, r), s| (u + s.frames_undecryptable, r + s.frames_received));
+            note_deaf(&mut quality, room, undecryptable, received);
+        }
         quality.rtt_ms = if rtts.is_empty() {
             None
         } else {
@@ -4049,6 +4102,28 @@ pub(crate) fn better_forwarder(current: u64, caps: &BTreeMap<u64, u32>, live: &[
 mod reelect_tests {
     use super::better_forwarder;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_call_is_deaf_only_while_frames_arrive_and_none_opens() {
+        use super::DeafWatch;
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        let mut watch = DeafWatch::default();
+        assert!(!watch.note(0, 0, start), "nothing yet");
+        assert!(!watch.note(10, 0, start));
+        assert!(!watch.is_deaf(later(4)));
+        assert!(watch.note(20, 0, later(6)), "the first time it warns");
+        assert!(watch.is_deaf(later(6)));
+        assert!(!watch.note(30, 0, later(7)), "and only once");
+        assert!(!watch.note(30, 1, later(8)), "one frame that opens ends it");
+        assert!(!watch.is_deaf(later(8)));
+        // A quiet call is not deaf: nothing failing means nothing to say.
+        let mut quiet = DeafWatch::default();
+        assert!(!quiet.note(0, 50, start));
+        assert!(!quiet.note(0, 50, later(60)));
+        assert!(!quiet.is_deaf(later(60)));
+    }
 
     #[test]
     fn a_candidate_needs_thirty_percent_more_capacity() {

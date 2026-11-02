@@ -268,6 +268,7 @@ export interface CallState {
   route?: CallRoute;
   quality?: CallQuality;
   forwarded_by?: string | null; // a member who forwards the call without being in it, never listed as a participant
+  cannot_decrypt?: boolean; // frames arrive and none decrypts, so this device hears nothing
   self_speaking?: boolean; // this device's person is speaking now: it sent audio within the hold
   channel_name?: string;
   community_name?: string;
