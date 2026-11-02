@@ -66,10 +66,9 @@ fn no_start_of_sending_repeats_a_key_id_and_counter() {
 fn the_keystream_of_one_start_says_nothing_about_another() {
     let (a, b) = (vec![0x11u8; 160], vec![0x22u8; 160]);
     let (one, two) = (mesh().wire_for_test(&a), leaf().wire_for_test(&b));
-    assert_eq!(one.len(), two.len());
-    // The stamp and flag ahead of the frame are the same in both, and the tag at the end is not keystream.
-    let end = one.len() - 16;
-    let repeats = one[end - 160..end].iter().zip(&two[end - 160..end]).all(|(x, y)| x ^ y == 0x11 ^ 0x22);
+    // A random context can be shorter on the wire, so these line up from the end. The tag at the end is not keystream.
+    let body = |wire: &[u8]| wire[wire.len() - 16 - 160..wire.len() - 16].to_vec();
+    let repeats = body(&one).iter().zip(&body(&two)).all(|(x, y)| x ^ y == 0x11 ^ 0x22);
     println!("first bytes {:02x?} and {:02x?}, keystream repeats: {repeats}", &one[..12], &two[..12]);
     assert!(!repeats, "the two frames share a keystream");
 }

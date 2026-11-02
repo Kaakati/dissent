@@ -198,10 +198,15 @@ impl SframeSender {
     /// key and counter do not repeat. Receivers derive from the id on the wire and read only its epoch and sender bits,
     /// so released clients need nothing new. See `docs/design/06-threat-model.md`, "Audio and video nonces".
     pub(crate) fn new(media_key: &MediaKey, sender_id: u64, epoch: u64) -> Result<Self> {
+        Self::in_context(media_key, sender_id, epoch, u64::from(rand::random::<u32>()))
+    }
+
+    /// A sender with a given context. A forger can pick any it has seen on the wire.
+    pub(crate) fn in_context(media_key: &MediaKey, sender_id: u64, epoch: u64, context: u64) -> Result<Self> {
         if sender_id > MAX_SENDER_ID {
             return Err(MediaError::SenderIdOutOfRange(sender_id));
         }
-        let key_id = MlsKeyId::try_new(u64::from(rand::random::<u32>()), epoch, sender_id, bit_range())?;
+        let key_id = MlsKeyId::try_new(context, epoch, sender_id, bit_range())?;
         let key = EncryptionKey::derive_from_mls(CIPHER_SUITE, media_key, key_id)?;
         Ok(Self {
             key,
@@ -291,6 +296,8 @@ struct EpochKey {
 pub(crate) struct Opened {
     pub(crate) sender: u64,
     pub(crate) lsb: u64,
+    /// The random context of the sender's start of sending. See [`SframeSender::new`].
+    pub(crate) context: u64,
     pub(crate) counter: u64,
     pub(crate) plaintext: Vec<u8>,
     /// The frame opened under the current key although its key id belongs to no epoch of ours. See
@@ -440,6 +447,7 @@ impl SframeReceiver {
         Ok(Opened {
             sender: key_id.member_index(),
             lsb,
+            context: key_id.context_id(),
             counter,
             plaintext: body.to_vec(),
             under_current,

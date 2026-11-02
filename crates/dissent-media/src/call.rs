@@ -775,10 +775,11 @@ impl<T: PacketTransport> Call<T> {
                 return;
             }
         };
-        if opened.under_current {
-            self.state.lock().expect("receiver state").adopt_epoch(opened.lsb);
+        if opened.under_current && !self.state.lock().expect("receiver state").adopt_epoch(opened.lsb) {
+            self.stats.frames_undecryptable += 1;
+            return;
         }
-        if !self.video_replay.accept(opened.sender, opened.counter) {
+        if !self.video_replay.accept(opened.sender, opened.context, opened.counter) {
             self.stats.frames_replayed += 1;
             return;
         }
@@ -1058,22 +1059,26 @@ impl<T: PacketTransport> Call<T> {
                 let mut step = Step::default();
                 {
                     let mut state = self.state.lock().expect("receiver state");
-                    if opened.under_current {
-                        state.adopt_epoch(opened.lsb);
+                    if opened.under_current && !state.adopt_epoch(opened.lsb) {
+                        drop(state);
+                        self.stats.frames_undecryptable += 1;
+                        return;
                     }
                     if let Some(recovered) = opened.recovered {
                         step.extend(state.on_redundant(
                             opened.sender,
                             opened.lsb,
+                            opened.context,
                             recovered.counter,
                             recovered.hash,
                             recovered.plaintext,
                             now,
                         ));
                     }
-                    step.extend(state.on_frame(
+                    step.extend(state.on_frame_in(
                         opened.sender,
                         opened.lsb,
+                        opened.context,
                         opened.counter,
                         frame_hash(wire),
                         opened.plaintext,

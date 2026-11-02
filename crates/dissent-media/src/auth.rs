@@ -18,7 +18,7 @@
 //! A frame more than [`AHEAD_SLACK`] counters past the last verified counter is held until a
 //! digest covers it, so a far-ahead forgery never plays.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,14 @@ pub(crate) fn batch_span(frames: usize) -> Duration {
 pub(crate) const PENDING_DEADLINE: Duration = Duration::from_millis(500);
 /// How far past the last verified counter a frame may be before it is held.
 pub(crate) const AHEAD_SLACK: u64 = 50;
+/// Earlier starts of sending remembered per sender and key id. Contexts are random, so one older than these cannot be
+/// told from a new one. A session is retired only by a digest its sender signed, so only the sender's own sessions push
+/// one out: replaying an old session takes this many later ones in one MLS epoch, and a place on the media path.
+pub(crate) const MAX_RETIRED_SESSIONS: usize = 32;
+/// Key ids this link takes under the current key until the next rekey. An honest call has one or two.
+pub(crate) const MAX_ADOPTED_IDS: usize = 4;
+/// Senders with no certificate this link keeps state for. A member holds the key, so it can name any sender id.
+pub(crate) const MAX_UNKNOWN_SENDERS: usize = 64;
 
 /// The authentication a participant brings to a call: its device key, and the device
 /// certificate of every member, keyed by member index.
@@ -348,9 +356,67 @@ struct SenderRx {
     pending: BTreeMap<u64, Vec<Pending>>,
     verified_high: Option<u64>,
     muted: bool,
+    /// The sender's start of sending this state is for. Each start counts from 0, so it has its own window.
+    context: u64,
+    /// Starts of sending this one replaced, whose frames are refused. See [`MAX_RETIRED_SESSIONS`].
+    retired: VecDeque<u64>,
+    /// A start of sending not yet proven to be the sender's. See [`RxState::on_frame_in`].
+    candidate: Option<Box<SenderRx>>,
+    /// This session is such a candidate, so its frames wait for a digest.
+    unproven: bool,
 }
 
 impl SenderRx {
+    /// Makes `next` the sender's session, keeping the record of this one and of the earlier ones.
+    fn retire_for(&mut self, next: SenderRx) {
+        let (muted, old, mut retired) = (self.muted, self.context, std::mem::take(&mut self.retired));
+        retired.push_back(old);
+        if retired.len() > MAX_RETIRED_SESSIONS {
+            retired.pop_front();
+        }
+        *self = next;
+        self.unproven = false;
+        self.muted = muted;
+        self.retired = retired;
+        self.candidate = None;
+    }
+
+    /// Takes a decrypted frame of this session.
+    #[allow(clippy::too_many_arguments)]
+    fn take_frame(&mut self, authenticated: bool, sender: u64, counter: u64, hash: [u8; HASH_LEN], plaintext: Vec<u8>, now: Instant, step: &mut Step) {
+        if !self.window.accepts(counter) {
+            step.replayed += 1;
+            return;
+        }
+        if !authenticated {
+            // Without authentication the window is the only guard, so it advances at once.
+            self.window.accept(counter);
+            step.deliver.push((sender, plaintext));
+            return;
+        }
+        let seen = self
+            .pending
+            .get(&counter)
+            .is_some_and(|list| list.iter().any(|p| p.hash == hash));
+        if seen {
+            step.replayed += 1;
+            return;
+        }
+        let far_ahead = self
+            .verified_high
+            .is_some_and(|high| counter > high + AHEAD_SLACK);
+        let hold = self.muted || far_ahead || self.unproven;
+        let held = if hold { Some(plaintext.clone()) } else { None };
+        self.pending.entry(counter).or_default().push(Pending {
+            hash,
+            held,
+            arrived: now,
+        });
+        if !hold {
+            step.deliver.push((sender, plaintext));
+        }
+    }
+
     /// Drops pending frames past their deadline, and returns how many were never verified.
     fn expire(&mut self, now: Instant, deadline: Duration) -> u64 {
         let mut expired = 0;
@@ -431,11 +497,28 @@ impl RxState {
         self.senders.retain(|(id, _), _| *id != sender);
     }
 
+    /// Whether this link keeps state for a new `sender`.
+    fn has_room_for(&self, sender: u64) -> bool {
+        let known = |id: &u64| self.certs.as_ref().is_some_and(|certs| certs.contains_key(id));
+        if known(&sender) {
+            return true;
+        }
+        let unknown: BTreeSet<u64> = self.senders.keys().map(|(id, _)| *id).filter(|id| !known(id)).collect();
+        unknown.contains(&sender) || unknown.len() < MAX_UNKNOWN_SENDERS
+    }
+
     /// Handles a decrypted frame.
-    pub(crate) fn on_frame(
+    ///
+    /// A start of sending counts from 0 again, so it needs its own replay window. A frame of a context not seen yet is
+    /// kept apart as a candidate and does not play. It takes over when a digest its sender signed covers one of its
+    /// frames, which a member naming that sender cannot make, and its frames then play. Until then the sender's session
+    /// stands, so someone who comes back is heard about half a second late.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn on_frame_in(
         &mut self,
         sender: u64,
         lsb: u64,
+        context: u64,
         counter: u64,
         hash: [u8; HASH_LEN],
         plaintext: Vec<u8>,
@@ -443,73 +526,74 @@ impl RxState {
     ) -> Step {
         let authenticated = self.certs.is_some();
         let deadline = self.deadline;
+        let fresh = !self.senders.contains_key(&(sender, lsb));
+        if fresh && !self.has_room_for(sender) {
+            return Step::default();
+        }
         let state = self.senders.entry((sender, lsb)).or_default();
+        if fresh {
+            state.context = context;
+        }
         let mut step = Step {
             unauthenticated: state.expire(now, deadline),
             ..Step::default()
         };
-
-        if !state.window.accepts(counter) {
+        if context == state.context {
+            state.take_frame(authenticated, sender, counter, hash, plaintext, now, &mut step);
+            return step;
+        }
+        if state.retired.contains(&context) {
             step.replayed = 1;
             return step;
         }
         if !authenticated {
-            // Without authentication the window is the only guard, so it advances at once.
-            state.window.accept(counter);
-            step.deliver.push((sender, plaintext));
+            // Nothing can prove a session here, so a new one takes over at once.
+            state.retire_for(SenderRx { context, ..SenderRx::default() });
+            state.take_frame(authenticated, sender, counter, hash, plaintext, now, &mut step);
             return step;
         }
-
-        let seen = state
-            .pending
-            .get(&counter)
-            .is_some_and(|list| list.iter().any(|p| p.hash == hash));
-        if seen {
-            step.replayed = 1;
-            return step;
-        }
-
-        let far_ahead = state
-            .verified_high
-            .is_some_and(|high| counter > high + AHEAD_SLACK);
-        let hold = state.muted || far_ahead;
-        let held = if hold { Some(plaintext.clone()) } else { None };
-        state.pending.entry(counter).or_default().push(Pending {
-            hash,
-            held,
-            arrived: now,
-        });
-        if !hold {
-            step.deliver.push((sender, plaintext));
-        }
+        let candidate = match &mut state.candidate {
+            Some(candidate) if candidate.context == context => candidate,
+            slot => slot.insert(Box::new(SenderRx { context, unproven: true, ..SenderRx::default() })),
+        };
+        step.unauthenticated += candidate.expire(now, deadline);
+        candidate.take_frame(authenticated, sender, counter, hash, plaintext, now, &mut step);
         step
     }
 
     /// Handles a frame recovered from the redundancy of another frame. A copy the state already
     /// holds is dropped quietly, and is not counted as a replay, because redundancy sends copies
     /// on purpose.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_redundant(
         &mut self,
         sender: u64,
         lsb: u64,
+        context: u64,
         counter: u64,
         hash: [u8; HASH_LEN],
         plaintext: Vec<u8>,
         now: Instant,
     ) -> Step {
         let known = self.senders.get(&(sender, lsb)).is_some_and(|state| {
-            !state.window.accepts(counter)
-                || state
-                    .pending
-                    .get(&counter)
-                    .is_some_and(|list| list.iter().any(|p| p.hash == hash))
+            let session = match &state.candidate {
+                _ if state.context == context => Some(state),
+                Some(candidate) if candidate.context == context => Some(&**candidate),
+                _ => None,
+            };
+            session.is_some_and(|session| {
+                !session.window.accepts(counter)
+                    || session
+                        .pending
+                        .get(&counter)
+                        .is_some_and(|list| list.iter().any(|p| p.hash == hash))
+            })
         });
         if known {
             return Step::default();
         }
-        self.on_frame(sender, lsb, counter, hash, plaintext, now)
+        self.on_frame_in(sender, lsb, context, counter, hash, plaintext, now)
     }
-
     /// Handles a digest packet from a sender.
     pub(crate) fn on_digest(&mut self, wire: &[u8], now: Instant) -> Step {
         let mut step = Step::default();
@@ -543,6 +627,40 @@ impl RxState {
             }
             state.muted = true;
             return step;
+        }
+
+        // A digest the sender signed covers a frame of a new start of sending: that session is the sender's now.
+        let covers = |session: &SenderRx| {
+            parsed.hashes.iter().enumerate().any(|(offset, hash)| {
+                session.pending.get(&(parsed.first + offset as u64)).is_some_and(|list| list.iter().any(|p| p.hash == *hash))
+            })
+        };
+        if !covers(state) && state.candidate.as_deref().is_some_and(covers) {
+            if let Some(candidate) = state.candidate.take() {
+                // What stood as the session has another frame at a counter the sender signed: it was not the sender.
+                let forged = (0..parsed.hashes.len()).any(|offset| state.pending.contains_key(&(parsed.first + offset as u64)));
+                if forged {
+                    if !state.muted {
+                        step.impersonations += 1;
+                    }
+                    state.muted = true;
+                }
+                state.retire_for(*candidate);
+            }
+        }
+        // A frame of another context at a counter this digest covers, with another hash, is sealed in the sender's name.
+        // It never played. It is the same forgery as a mismatch in the session itself, and is treated the same.
+        if let Some(candidate) = state.candidate.as_mut() {
+            let mut forged = false;
+            for offset in 0..parsed.hashes.len() {
+                forged |= candidate.pending.remove(&(parsed.first + offset as u64)).is_some();
+            }
+            if forged {
+                if !state.muted {
+                    step.impersonations += 1;
+                }
+                state.muted = true;
+            }
         }
 
         // Frames before this digest's range were never covered by it.
@@ -596,9 +714,15 @@ impl RxState {
     }
 
     /// Takes a key id whose frame opened under the current key: its digests are accepted, and its replay state stays.
-    pub(crate) fn adopt_epoch(&mut self, lsb: u64) {
+    ///
+    /// Returns false when the link already took [`MAX_ADOPTED_IDS`]: a member with the key could name any of them.
+    pub(crate) fn adopt_epoch(&mut self, lsb: u64) -> bool {
+        if !self.adopted.contains(&lsb) && self.adopted.len() >= MAX_ADOPTED_IDS {
+            return false;
+        }
         self.epochs.insert(lsb);
         self.adopted.insert(lsb);
+        true
     }
 
     /// The key changed, so the ids adopted under the old one mean nothing now, unless the new epoch uses that id itself.
@@ -638,6 +762,8 @@ mod tests {
     use std::time::Duration;
 
     const SENDER: u64 = 2;
+    /// The victim's context in the forgery tests. A forger reads it off the wire.
+    const VICTIM_CONTEXT: u64 = 1234;
 
     fn media_key() -> MediaKey {
         MediaKey::new([5; 32])
@@ -661,7 +787,7 @@ mod tests {
     impl Sender {
         fn new(device: DeviceKey) -> Self {
             Self {
-                tx: SframeSender::new(&media_key(), SENDER, 0).unwrap(),
+                tx: SframeSender::in_context(&media_key(), SENDER, 0, VICTIM_CONTEXT).unwrap(),
                 signer: FrameSigner::new(device, SENDER, 0, 10),
                 now: Instant::now(),
             }
@@ -708,9 +834,10 @@ mod tests {
         fn frame(&mut self, wire: &[u8]) -> Step {
             self.now += Duration::from_millis(1);
             let opened = self.rx.open(wire, self.now).unwrap();
-            self.state.on_frame(
+            self.state.on_frame_in(
                 opened.sender,
                 opened.lsb,
+                opened.context,
                 opened.counter,
                 frame_hash(wire),
                 opened.plaintext,
@@ -871,7 +998,7 @@ mod tests {
         let mut receiver = Receiver::new(certs_for(SENDER, cert));
 
         // A forger shares the media key, and sends under the victim's sender id from counter 0.
-        let mut forger = SframeSender::new(&media_key(), SENDER, 0).unwrap();
+        let mut forger = SframeSender::in_context(&media_key(), SENDER, 0, VICTIM_CONTEXT).unwrap();
         let forged = forger.encrypt(b"forged voice", None, DEFAULT_LEVEL).unwrap();
 
         receiver.frame(&forged);
@@ -900,7 +1027,7 @@ mod tests {
         let (device, cert) = member();
         let mut sender = Sender::new(device);
         let mut receiver = Receiver::new(certs_for(SENDER, cert));
-        let mut forger = SframeSender::new(&media_key(), SENDER, 0).unwrap();
+        let mut forger = SframeSender::in_context(&media_key(), SENDER, 0, VICTIM_CONTEXT).unwrap();
         let forged = forger.encrypt(b"forged", None, DEFAULT_LEVEL).unwrap();
 
         // First batch: the forged frame collides with the real frame 0, and the digest exposes it.
@@ -993,7 +1120,7 @@ mod tests {
         let late = receiver.now + PENDING_DEADLINE + Duration::from_millis(1);
         let step = receiver
             .state
-            .on_frame(SENDER, 0, 99, [0; HASH_LEN], vec![0], late);
+            .on_frame_in(SENDER, 0, 0, 99, [0; HASH_LEN], vec![0], late);
         assert_eq!(step.unauthenticated, 1, "the old frame expired unverified");
     }
 
@@ -1055,6 +1182,118 @@ mod tests {
             "an unknown epoch's digest is ignored"
         );
         assert!(!receiver.muted(SENDER));
+    }
+
+    // ---- Starts of sending: see `RxState::on_frame_in` ----
+
+    /// A second start of sending by the same device, as after a rejoin: same key, same sender, counting from 0.
+    fn rejoin(seed: u8) -> (Sender, HashMap<u64, DeviceCert>) {
+        let device = DeviceKey::from_seed([seed; 32]);
+        let cert = RootKey::from_seed([seed; 32]).certify(device.id(), 0);
+        let mut sender = Sender::new(device);
+        sender.tx = SframeSender::new(&media_key(), SENDER, 0).unwrap();
+        (sender, certs_for(SENDER, cert))
+    }
+
+    fn played_after_digest(rx: &mut Receiver, tx: &mut Sender, frames: u8) -> (usize, Vec<Vec<u8>>) {
+        let (mut played, mut wires) = (0, Vec::new());
+        for i in 0..frames {
+            let (wire, digests) = tx.frame(i);
+            played += rx.frame(&wire).deliver.len();
+            wires.push(wire);
+            for digest in digests {
+                played += rx.digest(&digest).deliver.len();
+            }
+        }
+        (played, wires)
+    }
+
+    #[test]
+    fn a_sender_that_starts_again_is_heard_and_its_old_session_stays_refused() {
+        let (mut first, certs) = rejoin(1);
+        let mut rx = Receiver::new(certs);
+        let (played, old) = played_after_digest(&mut rx, &mut first, 30);
+        assert_eq!(played, 30);
+        let (mut second, _) = rejoin(1);
+        let (played, _) = played_after_digest(&mut rx, &mut second, 30);
+        assert_eq!(played, 30, "the new start is heard, though its counters are ones the old one used");
+        let session = rx.state.senders.get(&(SENDER, 0)).unwrap();
+        assert_eq!(session.retired.len(), 1, "the digest made it the sender's session");
+        for wire in &old {
+            let step = rx.frame(wire);
+            assert!(step.deliver.is_empty(), "a frame of the old session is not played again");
+            assert_eq!(step.replayed, 1);
+        }
+    }
+
+    /// A member holds the key, so it can seal frames in another's name, under any context. It cannot sign their digests.
+    #[test]
+    fn a_member_naming_a_sender_under_new_contexts_does_not_replace_its_session() {
+        let (mut real, certs) = rejoin(2);
+        let mut rx = Receiver::new(certs);
+        played_after_digest(&mut rx, &mut real, 20);
+        for byte in 0..100u8 {
+            let forged = SframeSender::new(&media_key(), SENDER, 0).unwrap().encrypt(&[byte; 160], None, DEFAULT_LEVEL).unwrap();
+            rx.frame(&forged);
+        }
+        let session = rx.state.senders.get(&(SENDER, 0)).unwrap();
+        assert!(session.retired.is_empty(), "no forged context took over, or pushed out a record");
+        assert_eq!(rx.state.senders.len(), 1);
+        let (played, _) = played_after_digest(&mut rx, &mut real, 20);
+        assert_eq!(played, 20, "the sender is still heard");
+        assert!(!rx.muted(SENDER));
+    }
+
+    /// The forger's frame arrives first, so it stands as the session until the real sender's digest proves its own.
+    #[test]
+    fn a_forged_first_frame_under_its_own_context_gives_way_to_the_signed_session() {
+        let (mut real, certs) = rejoin(4);
+        let mut rx = Receiver::new(certs);
+        let forged = SframeSender::new(&media_key(), SENDER, 0).unwrap().encrypt(b"forged voice", None, DEFAULT_LEVEL).unwrap();
+        assert_eq!(rx.frame(&forged).deliver.len(), 1, "a sender's first frame plays before its digest, as ever");
+        let mut flagged = 0;
+        let mut played = 0;
+        for i in 0..10 {
+            let (wire, digests) = real.frame(i);
+            played += rx.frame(&wire).deliver.len();
+            for digest in digests {
+                let step = rx.digest(&digest);
+                flagged += step.impersonations;
+                played += step.deliver.len();
+            }
+        }
+        assert_eq!(played, 10, "the real frames wait for the digest, then play");
+        assert_eq!(flagged, 1, "the forged frame at a counter the digest covers is caught");
+        assert!(rx.muted(SENDER));
+    }
+
+    #[test]
+    fn the_record_of_old_sessions_is_bounded() {
+        let (mut first, certs) = rejoin(3);
+        let mut rx = Receiver::new(certs);
+        played_after_digest(&mut rx, &mut first, 11);
+        for _ in 0..MAX_RETIRED_SESSIONS * 2 {
+            let (mut again, _) = rejoin(3);
+            played_after_digest(&mut rx, &mut again, 11);
+        }
+        assert_eq!(rx.state.senders.get(&(SENDER, 0)).unwrap().retired.len(), MAX_RETIRED_SESSIONS);
+    }
+
+    #[test]
+    fn senders_nobody_knows_and_adopted_ids_are_bounded() {
+        let mut state = RxState::new(Some(HashMap::new()));
+        let now = Instant::now();
+        for sender in 0..100_000u64 {
+            state.on_frame_in(sender, 0, 7, 0, [0; HASH_LEN], vec![0], now);
+        }
+        assert_eq!(state.senders.len(), MAX_UNKNOWN_SENDERS);
+        for lsb in 0..MAX_ADOPTED_IDS as u64 {
+            assert!(state.adopt_epoch(lsb));
+        }
+        assert!(state.adopt_epoch(0), "one already taken stays taken");
+        assert!(!state.adopt_epoch(100), "no more are taken until the next rekey");
+        state.drop_adopted(100);
+        assert!(state.adopt_epoch(100));
     }
 }
 

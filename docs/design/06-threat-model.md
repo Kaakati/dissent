@@ -832,6 +832,10 @@ Who could use it, in calls before v0.1.23:
 
 Since v0.1.23 every sender has a random 32-bit context in its key id, and the key is derived from the whole key id, so each start of sending has its own key. It needs no storage, so a restart is covered. Two starts by one device in one epoch collide with a chance of 2^-32. A frame is 4 bytes longer. Released clients open these frames, since they derive the key from the id on the wire, but a released client's own frames still repeat until it updates.
 
+Each start of sending also has its own replay window, since each counts from 0: before this, someone who left and came back in one epoch was refused as a replay by whoever stayed. A new context takes over only when a digest its sender signed covers one of its frames, and its frames wait for that, about half a second, so a member who holds the key cannot take over or silence someone else's session by naming a new context, or play forged audio that way. The last 32 replaced contexts of a sender stay refused. Contexts are random and carry no order, so an older one cannot be told from a new one. What remains: something on the media path, which among non-members means a seeder forwarding calls, could replay a session it recorded, once that sender has had more than 32 later sessions in the same MLS epoch. It would be old genuine audio in that person's voice, and a rekey ends it. Video has no such proof at the point it is checked, so it keeps the last 8 contexts of a sender and forgets older ones rather than refusing them, because refusing could silence the real sender; there, a replay takes more than 8 later sessions.
+
+A member holding the key can name any sender or key id, so state from those is capped: 64 senders with no certificate per link, 1024 senders for video, and 4 key ids taken under the current key until the next rekey. A frame costs at most two decrypt attempts.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
