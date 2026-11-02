@@ -820,6 +820,18 @@ What that costs, and who decides it: the owner chooses, by device, after being t
 - **Names in the warning** are what the owner can already read in the member list. The probe tells the owner which member
   devices are online right now, as any request to them does.
 
+## Audio and video nonces: what a repeated counter exposed
+
+Call frames are AES-GCM under SFrame. The key comes from the MLS epoch's media key and the key id, and the nonce from the key and the frame counter. Before v0.1.23, a device that started sending again in one MLS epoch used the same key id and started the counter at 0 again, so its frames repeated keys and nonces. This happened on every tier move, on every leave and rejoin, and on a restart and rejoin, when the group had not changed since. Video repeated in the same cases, under the video key. Two devices of one person never shared a key id, and stopping and starting a camera did not repeat, since the sender kept counting. DM calls have a fresh key per call.
+
+Who could use it, in calls before v0.1.23:
+
+- **Relays and the network: nothing.** Frames travel inside DTLS-SRTP inside QUIC, so they never see SFrame bytes.
+- **A participant, a forwarder in the call, or a member volunteer: nothing new.** They hold the media key or can derive it.
+- **A seeder forwarding calls, the one case that gains.** It has no key and it sees SFrame frames. If it forwarded both sessions, it could XOR their frames to get the XOR of two audio streams, and could recover the GCM authentication key for that key id. A frame forged with it still fails its sender's signed digest, which is what mutes a sender, but it may play for the moments before a digest is due. This needs an owner to have let the seeder forward calls, and a session that repeated in one epoch through it. Nothing suggests it was used, and no stored data is at risk: a seeder would have had to keep the frames at the time.
+
+Since v0.1.23 every sender has a random 32-bit context in its key id, and the key is derived from the whole key id, so each start of sending has its own key. It needs no storage, so a restart is covered. Two starts by one device in one epoch collide with a chance of 2^-32. A frame is 4 bytes longer. Released clients open these frames, since they derive the key from the id on the wire, but a released client's own frames still repeat until it updates.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

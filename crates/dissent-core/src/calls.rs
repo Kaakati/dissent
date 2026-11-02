@@ -4075,6 +4075,13 @@ fn group_room_id(conv: &ConvId) -> RoomId {
 impl Engine {
     /// The MLS key and epoch of a group, for media. A group call's key comes from its MLS group,
     /// as a channel's does.
+    /// What `test_support::call_key_state` reads.
+    pub(crate) fn call_key_state(&self) -> Option<([u8; 4], u64, u64)> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        let (key, epoch) = self.group_key_of(room.scope.group_id()?).ok()?;
+        Some((key.fingerprint(), epoch, room.my_sid))
+    }
+
     fn group_key_of(&self, group: [u8; 32]) -> Result<(MediaKey, u64)> {
         let (epoch, secret) = self
             .with_mls_read(|mls| -> dissent_mls::Result<(u64, Vec<u8>)> {

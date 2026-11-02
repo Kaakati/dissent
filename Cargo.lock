@@ -2562,6 +2562,7 @@ dependencies = [
  "dissent-identity",
  "dissent-net",
  "postcard",
+ "rand 0.10.3",
  "serde",
  "sframe",
  "str0m",

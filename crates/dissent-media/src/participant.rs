@@ -144,6 +144,12 @@ impl<T: PacketTransport> Participant<T> {
         })
     }
 
+    /// The next audio frame this participant would put on the wire.
+    #[cfg(test)]
+    pub(crate) fn wire_for_test(&mut self, frame: &[u8]) -> Vec<u8> {
+        self.tx.encrypt(frame, None, crate::e2ee::DEFAULT_LEVEL).unwrap()
+    }
+
     /// Models a client from before the key fallback on every link it has now, for tests of a mixed call.
     #[doc(hidden)]
     pub fn without_key_fallback(&mut self) {

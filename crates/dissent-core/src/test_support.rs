@@ -309,3 +309,8 @@ pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::Devi
         .map(|stored| stored.addr.direct.len())
         .sum()
 }
+
+/// A hash of the media key and the sender id of `engine`'s current channel call, and the epoch that key belongs to.
+pub fn call_key_state(engine: &crate::Engine) -> Option<([u8; 4], u64, u64)> {
+    engine.call_key_state()
+}

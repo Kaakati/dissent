@@ -68,6 +68,14 @@ pub(crate) fn peek_sender(wire: &[u8]) -> Option<u64> {
     Some(MlsKeyId::from_key_id(view.header().key_id(), bit_range()).member_index())
 }
 
+/// The whole key id of a wire frame, read without any key.
+#[cfg(test)]
+pub(crate) fn peek_key_id(wire: &[u8]) -> Option<u64> {
+    let rest = wire.get(1..)?;
+    let view = EncryptedFrameView::try_with_meta_data(rest, &wire[..1]).ok()?;
+    Some(view.header().key_id())
+}
+
 /// The SFrame counter of a wire frame, read without any key.
 pub(crate) fn peek_counter(wire: &[u8]) -> Option<u64> {
     let rest = wire.get(1..)?;
@@ -184,12 +192,16 @@ pub(crate) struct SframeSender {
 }
 
 impl SframeSender {
-    /// Derives the sending key of `sender_id` for `epoch` from the media key.
+    /// Derives the sending key of `sender_id` for `epoch` from the media key. A device can start sending again with the
+    /// same key and sender id, after a tier move, a rejoin or a restart, and each start counts from 0. So every sender
+    /// has a random context in its key id. The key is derived from the whole key id, so each start has its own key, and a
+    /// key and counter do not repeat. Receivers derive from the id on the wire and read only its epoch and sender bits,
+    /// so released clients need nothing new. See `docs/design/06-threat-model.md`, "Audio and video nonces".
     pub(crate) fn new(media_key: &MediaKey, sender_id: u64, epoch: u64) -> Result<Self> {
         if sender_id > MAX_SENDER_ID {
             return Err(MediaError::SenderIdOutOfRange(sender_id));
         }
-        let key_id = MlsKeyId::try_new(0u64, epoch, sender_id, bit_range())?;
+        let key_id = MlsKeyId::try_new(u64::from(rand::random::<u32>()), epoch, sender_id, bit_range())?;
         let key = EncryptionKey::derive_from_mls(CIPHER_SUITE, media_key, key_id)?;
         Ok(Self {
             key,
@@ -791,5 +803,15 @@ mod red_tests {
         };
         let (before, after) = (timed(&strict), timed(&rx));
         println!("2000 failing frames: {before:?} with one attempt, {after:?} with two");
+    }
+
+    #[test]
+    fn a_receiver_without_the_fallback_opens_a_frame_with_a_context_in_its_key_id() {
+        let now = Instant::now();
+        let mut released = SframeReceiver::new(key(6), 0);
+        released.without_fallback();
+        let opened = released.open(&frame(&key(6), 7, 0), now).expect("it derives from the id on the wire");
+        assert_eq!((opened.sender, opened.lsb), (7, 0), "the context does not disturb the sender and epoch bits");
+        assert_eq!(peek_sender(&frame(&key(6), 7, 0)), Some(7), "a forwarder routes as before");
     }
 }

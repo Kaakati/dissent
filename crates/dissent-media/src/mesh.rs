@@ -130,6 +130,12 @@ impl<T: PacketTransport> Mesh<T> {
 
     /// Drops the call to `peer`. Frames of this mesh stop reaching it at once. The caller should
     /// then rekey with [`Mesh::set_key`], so the peer cannot decrypt later frames either.
+    /// The next audio frame this mesh would put on the wire.
+    #[cfg(test)]
+    pub(crate) fn wire_for_test(&mut self, frame: &[u8]) -> Vec<u8> {
+        self.tx.encrypt(frame, None, DEFAULT_LEVEL).unwrap()
+    }
+
     pub fn remove_peer(&mut self, peer: u64) -> bool {
         self.calls.remove(&peer).is_some()
     }

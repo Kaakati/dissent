@@ -1626,3 +1626,29 @@ async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_vi
     finish(everyone).await;
     }).await;
 }
+
+/// A device that sends again within one MLS epoch has the same key and the same sender id: after leaving and rejoining,
+/// and after a restart as well. So a key id and counter must not repeat. See `dissent_media::e2ee` and the threat model,
+/// "Audio and video nonces".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoin_and_a_restart_in_one_epoch_have_the_same_key_and_sender() {
+    bounded(async {
+        let alice = peer("rejoin-key").await;
+        let server = alice.engine.create_community("Rejoin".into()).await.expect("create");
+        let community: CommunityId = server.id.parse().unwrap();
+        let info = alice.engine.create_voice_channel(community, "Lounge".into()).await.expect("voice channel");
+        let channel: ChannelId = info.id.parse().expect("channel id");
+        alice.engine.join_call(community, channel).await.expect("join");
+        let first = dissent_core::test_support::call_key_state(&alice.engine).expect("in a call");
+        alice.engine.leave_call().await.expect("leave");
+        alice.engine.join_call(community, channel).await.expect("rejoin");
+        assert_eq!(dissent_core::test_support::call_key_state(&alice.engine), Some(first), "a rejoin");
+        alice.engine.leave_call().await.expect("leave again");
+        let (identity, dir) = stop(alice).await;
+        let alice = start(identity, dir).await;
+        alice.engine.join_call(community, channel).await.expect("rejoin after a restart");
+        assert_eq!(dissent_core::test_support::call_key_state(&alice.engine), Some(first), "a restart");
+        finish(vec![alice]).await;
+    })
+    .await;
+}
