@@ -37,6 +37,10 @@ const MAX_PART_CHARS: usize = 120;
 const STAGING_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 /// The start of a staging folder's name, in the download folder.
 const STAGING_PREFIX: &str = ".dissent-partial-";
+/// The file Dissent writes into a staging folder when it makes one. Only a folder with the prefix and this file, holding
+/// exactly `STAGING_MAGIC`, is ever treated as staging: reused, swept or deleted.
+const STAGING_MARKER: &str = ".dissent-staging";
+const STAGING_MAGIC: &[u8] = b"dissent/folder-staging/v1\n";
 /// Room left on the disk beyond what a download needs.
 const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -210,6 +214,66 @@ fn free_dir(dir: &Path, name: &str) -> PathBuf {
         .map(|n| dir.join(format!("{name} ({n})")))
         .find(|p| std::fs::symlink_metadata(p).is_err())
         .unwrap_or(first)
+}
+
+/// Whether `path` is a staging folder Dissent made: a real folder, not a link, whose name has the prefix, holding the
+/// marker as a real file with exactly the magic bytes.
+fn is_staging(path: &Path) -> bool {
+    let named = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(STAGING_PREFIX));
+    let folder = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+    let marker = path.join(STAGING_MARKER);
+    let marked = std::fs::symlink_metadata(&marker).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink() && m.len() == STAGING_MAGIC.len() as u64)
+        && std::fs::read(&marker).is_ok_and(|b| b == STAGING_MAGIC);
+    named && folder && marked
+}
+
+/// Makes the staging folder at `path`, or reuses one Dissent made there. Anything else at that path is left alone and
+/// refused. The marker is written again on reuse, so its age is the time since the download last ran.
+fn open_staging(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)?;
+        }
+        Err(e) => return Err(e.into()),
+        Ok(_) if is_staging(path) => {}
+        Ok(_) => {
+            return Err(CoreError::Invalid(format!("{} is in the way and was not made by Dissent, so it is left alone", path.display())));
+        }
+    }
+    std::fs::write(path.join(STAGING_MARKER), STAGING_MAGIC)?;
+    Ok(())
+}
+
+/// Deletes a staging folder Dissent made, and nothing else. `remove_dir_all` removes a link inside it as a link, without
+/// following it. Returns whether it deleted.
+fn remove_staging(path: &Path) -> bool {
+    if !is_staging(path) {
+        return false;
+    }
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not clear a folder download's staging");
+            false
+        }
+    }
+}
+
+/// Deletes the staging folders in `dir` whose marker is older than `max_age`. Returns how many.
+fn sweep_staging(dir: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_staging(&path) {
+            continue;
+        }
+        let age = std::fs::symlink_metadata(path.join(STAGING_MARKER)).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+        if age.is_some_and(|age| age >= max_age) && remove_staging(&path) {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Fails if anything between `root` and `target` (exclusive of `root`) exists as a link. A resumed download must not write
@@ -823,10 +887,8 @@ impl Engine {
             .ok_or_else(|| CoreError::Invalid("this device lacks the key that folder was listed under".into()))?;
         let dest = self.download_dir();
         let staging = self.folder_staging(id);
-        std::fs::create_dir_all(&staging)?;
-        if std::fs::symlink_metadata(&staging)?.file_type().is_symlink() {
-            return Err(CoreError::Invalid("the staging folder is a link".into()));
-        }
+        std::fs::create_dir_all(&dest)?;
+        open_staging(&staging)?;
         let mut progress: Vec<FolderFileProgress> =
             manifest.entries.iter().map(|e| FolderFileProgress { path: e.path.clone(), size: e.size, progress: 0.0, done: false }).collect();
         let total = manifest.entries.iter().map(|e| e.size).sum::<u64>().max(1);
@@ -887,6 +949,7 @@ impl Engine {
             progress[i] = FolderFileProgress { path: e.path.clone(), size: e.size, progress: 1.0, done: true };
             self.set_folder_progress(id, progress.clone());
         }
+        std::fs::remove_file(staging.join(STAGING_MARKER))?;
         let name = if check_part(&f.body.name).is_ok() { f.body.name.clone() } else { "Folder".into() };
         let final_dir = free_dir(&dest, &name);
         std::fs::rename(&staging, &final_dir)?;
@@ -939,29 +1002,14 @@ impl Engine {
         self.download_dir().join(format!("{STAGING_PREFIX}{}", &id[..id.len().min(16)]))
     }
 
-    /// Clears a folder download's staged files, once it cannot resume.
+    /// Clears a folder download's staged files, once it cannot resume. Only a staging folder Dissent made is deleted.
     pub(crate) fn remove_folder_staging(&self, id: &str) {
-        let staging = self.folder_staging(id);
-        if std::fs::symlink_metadata(&staging).is_ok_and(|m| m.is_dir()) {
-            if let Err(e) = std::fs::remove_dir_all(&staging) {
-                tracing::warn!(error = %e, "could not clear a cancelled folder download");
-            }
-        }
+        remove_staging(&self.folder_staging(id));
     }
 
     /// Clears staging folders left in the download folder for more than `STAGING_KEPT`. Called at startup.
     pub(crate) fn sweep_folder_staging(&self) {
-        let Ok(entries) = std::fs::read_dir(self.download_dir()) else { return };
-        for entry in entries.flatten() {
-            if !entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX) {
-                continue;
-            }
-            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
-            let old = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > STAGING_KEPT);
-            if meta.is_dir() && old {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
+        sweep_staging(&self.download_dir(), STAGING_KEPT);
     }
 
     /// The folder a linked folder listing of this device was listed from, so it can be listed again. It may be read: the
@@ -1142,6 +1190,81 @@ mod tests {
         assert_eq!(free_dir(&dir, "Album"), dir.join("Album (3)"));
         assert_eq!(free_dir(&dir, "Other"), dir.join("Other"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dissent-staging-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_user_folder_that_looks_like_staging_is_never_touched() {
+        let downloads = scratch("lookalike");
+        // A user's folder with the very name, and one with a marker that is not Dissent's.
+        let mine = downloads.join(format!("{STAGING_PREFIX}0123456789abcdef"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("holiday.png"), b"keep me").unwrap();
+        let fake = downloads.join(format!("{STAGING_PREFIX}fake"));
+        std::fs::create_dir_all(&fake).unwrap();
+        std::fs::write(fake.join(STAGING_MARKER), b"something else").unwrap();
+        // And a marked folder without the prefix.
+        let unnamed = downloads.join("Photos");
+        std::fs::create_dir_all(&unnamed).unwrap();
+        std::fs::write(unnamed.join(STAGING_MARKER), STAGING_MAGIC).unwrap();
+
+        assert_eq!(sweep_staging(&downloads, std::time::Duration::ZERO), 0);
+        assert!(!remove_staging(&mine) && !remove_staging(&fake) && !remove_staging(&unnamed));
+        assert!(open_staging(&mine).is_err(), "a download never reuses a folder it did not make");
+        assert_eq!(std::fs::read(mine.join("holiday.png")).unwrap(), b"keep me");
+        assert!(!mine.join(STAGING_MARKER).exists(), "nor writes its marker into it");
+        assert!(fake.exists() && unnamed.exists());
+
+        // One Dissent made is swept once old enough, and only then.
+        let ours = downloads.join(format!("{STAGING_PREFIX}ours"));
+        open_staging(&ours).unwrap();
+        std::fs::write(ours.join("part.bin"), b"x").unwrap();
+        assert_eq!(sweep_staging(&downloads, std::time::Duration::from_secs(3600)), 0, "too young");
+        assert_eq!(sweep_staging(&downloads, std::time::Duration::ZERO), 1);
+        assert!(!ours.exists());
+        assert!(mine.exists() && fake.exists() && unnamed.exists());
+        let _ = std::fs::remove_dir_all(&downloads);
+    }
+
+    /// Makes `link` point at the folder `target`: a symlink on unix, a junction on Windows (no privilege needed).
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+            assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        }
+    }
+
+    #[test]
+    fn deleting_staging_does_not_follow_a_link_inside_it() {
+        let downloads = scratch("links");
+        let outside = scratch("links-outside");
+        std::fs::write(outside.join("precious.txt"), b"keep me").unwrap();
+        let ours = downloads.join(format!("{STAGING_PREFIX}links"));
+        open_staging(&ours).unwrap();
+        link_dir(&outside, &ours.join("planted"));
+        assert!(remove_staging(&ours));
+        assert!(!ours.exists());
+        assert_eq!(std::fs::read(outside.join("precious.txt")).unwrap(), b"keep me", "the link's target is untouched");
+        // A staging path that is itself a link is not Dissent's, so it is neither used nor deleted.
+        let linked = downloads.join(format!("{STAGING_PREFIX}linked"));
+        std::fs::write(outside.join(STAGING_MARKER), STAGING_MAGIC).unwrap();
+        link_dir(&outside, &linked);
+        assert!(!is_staging(&linked));
+        assert!(!remove_staging(&linked) && open_staging(&linked).is_err());
+        assert_eq!(sweep_staging(&downloads, std::time::Duration::ZERO), 0);
+        assert!(outside.join("precious.txt").exists());
+        let _ = std::fs::remove_dir(&linked);
+        let _ = std::fs::remove_dir_all(&downloads);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[cfg(unix)]

@@ -407,7 +407,11 @@ way. Nothing syncs: the listing is a snapshot, and a later change is a new listi
   Every path is checked again, and nothing is written through a link in staging. The staging folder is then moved into place under the
   folder's name, `Name (2)` beside one already there. The files are then seeded like a downloaded file. The staging folder stays
   only while the download can resume, after a pause or a failure: cancelling or removing the download clears it, and any left
-  in the download folder for more than 7 days is cleared at startup.
+  in the download folder for more than 7 days is cleared at startup. A folder counts as staging only if Dissent made it: a real
+  folder (not a link) named `.dissent-partial-...`, holding a real file `.dissent-staging` with exactly
+  `dissent/folder-staging/v1\n`, which is written when the folder is made and on each resume (the sweep goes by its age). A
+  folder at that path that is not marked is left alone and the download refuses to use it. Deleting uses `remove_dir_all`, which
+  removes a link inside as a link and never follows it.
 - **A listing that fails partway** undoes the links it made for no earlier seed, and a manifest it stored but could not publish, so
   nothing is served without a seed record.
 - **Not built: receipts.** A folder download sends no `FileReceipt`, so it earns its providers no reputation yet.
