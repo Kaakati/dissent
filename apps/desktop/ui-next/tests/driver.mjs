@@ -5678,6 +5678,37 @@ check('Q6 Check again clears it once they answer', (await ev(`document.querySele
 await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 await sleep(400);
 
+// The history dropdown: an offline member is named before it changes, and Cancel keeps it as it was.
+await ev(`window.__mockGate = { offline: [{ device: 'dev-maya', root_id: 'r1', name: 'Maya' }] }`);
+await reopenPrivacy();
+await ev(`[...document.querySelectorAll('${SS} nav button')].find((n) => n.textContent.trim() === 'Server Profile').click()`);
+const HISTORY = `${SS} select[aria-label="New members can read"]`;
+await until(async () => (await ev(`!!document.querySelector('${HISTORY}')`)) === true, 3000);
+const before = await ev(`document.querySelector('${HISTORY}').value`);
+const after = before === 'all' ? 'since_join' : 'all';
+const chooseHistory = () => ev(`(() => { const box = document.querySelector('${HISTORY}'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(box, ${JSON.stringify(after)}); box.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await chooseHistory();
+await until(async () => (await alertText()) !== '', 3000);
+check('Q8 changing history names the offline member and says what they see', (await alertText()).includes('Maya') && (await alertText()).includes('keeps following the old one') && (await alertText()).includes('Updating the app catches them up'), await alertText());
+await answerAlert('Cancel');
+await sleep(300);
+check('Q8 Cancel leaves it as it was', (await ev(`document.querySelector('${HISTORY}').value`)) === before);
+await chooseHistory();
+await until(async () => (await alertText()) !== '', 3000);
+await answerAlert('Change it');
+await until(async () => (await ev(`document.querySelector('${HISTORY}').value`)) === after, 3000);
+check('Q8 confirming changes it', (await ev(`document.querySelector('${HISTORY}').value`)) === after);
+check('Q8 the engine refuses it without the names', (await ev(`window.__TAURI__.core.invoke('set_history_visibility', { communityId: 'c2', setting: ${JSON.stringify(before)} }).then(() => 'set', (e) => String(e))`)).includes('must be confirmed'));
+await ev(`window.__mockGate = null`);
+await chooseHistory();
+await sleep(300);
+const restored = before;
+await ev(`(() => { const box = document.querySelector('${HISTORY}'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(box, ${JSON.stringify(restored)}); box.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+await sleep(300);
+check('Q8 with nobody listed it asks nothing', (await alertText()) === '' && (await ev(`document.querySelector('${HISTORY}').value`)) === before);
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+await sleep(400);
+
 // An admin sees the setting, but only the owner changes it.
 await ev(`window.__mockSetMyRole('c1', 'admin')`);
 await openPrivacy('Riverside Makers');
