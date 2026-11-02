@@ -43,6 +43,8 @@ pub(crate) struct LayerSignals {
     pub busy: bool,
     /// The layer of the last frame received of each (sender id, screen) stream.
     pub received: BTreeMap<(u64, bool), u8>,
+    /// When the last frame of each (sender id, screen) stream came, and how many have come.
+    pub received_at: BTreeMap<(u64, bool), (std::time::Instant, u64)>,
     /// On a forwarder: the paused streams last sent to each viewer, by viewer sender id.
     pub told_paused: BTreeMap<u64, Vec<(u64, bool)>>,
     /// The streams this device's forwarder pauses for it, as (sender id, screen).
@@ -332,6 +334,36 @@ impl Engine {
         let room = crate::calls::lock(&self.inner.calls.current).clone()?;
         let sid = room.sid_of_root(root_id)?;
         room.with_layers(|l| l.received.get(&(sid, screen)).copied())
+    }
+
+    /// For tests: what this device received of `sender_root`'s camera or screen, and what its forwarder does with it for
+    /// this device, when it forwards for itself or `forwarder` names the engine that does.
+    pub(crate) fn video_received_debug(&self, sender_root: &str, screen: bool) -> String {
+        let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
+            return "no call".into();
+        };
+        let Some(sid) = room.sid_of_root(sender_root) else {
+            return "no such sender".into();
+        };
+        room.with_layers(|l| {
+            let at = l.received_at.get(&(sid, screen)).map(|(at, n)| format!("{n} frames, last {} ms ago", at.elapsed().as_millis()));
+            format!("layer {:?}, {}", l.received.get(&(sid, screen)), at.unwrap_or_else(|| "no frames".into()))
+        })
+    }
+
+    /// For tests: on the forwarder, what it does with `sender_root`'s camera or screen for `viewer_root`.
+    pub(crate) async fn forwarder_video_debug(&self, viewer_root: &str, sender_root: &str, screen: bool) -> String {
+        let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
+            return "no call".into();
+        };
+        let (Some(viewer), Some(sender)) = (room.sid_of_root(viewer_root), room.sid_of_root(sender_root)) else {
+            return "no such viewer or sender".into();
+        };
+        let Some(forwarding) = room.forwarding() else {
+            return "not forwarded".into();
+        };
+        let sfu = forwarding.sfu().lock().await;
+        sfu.as_ref().map_or("this device does not forward".into(), |sfu| sfu.video_debug(viewer, sender, screen))
     }
 
     /// For tests: the root id of the active speaker as this device's relay ranks them, the one a

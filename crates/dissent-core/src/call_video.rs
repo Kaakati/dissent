@@ -287,8 +287,10 @@ mod capture {
     use super::{encode_jpeg, simulcast_layers, Encoded, LayerInfo, Plan, Preview, PREVIEW_WIDTH};
     use crate::error::{CoreError, Result};
 
-    /// Keyframes every this many seconds, so a late joiner or a lost frame recovers quickly.
-    const KEYFRAME_SECONDS: u32 = 2;
+    /// A camera's keyframe every this many seconds, as a safety net. A receiver that lost a frame or just joined asks for
+    /// its own, and this covers a request that was lost. On H.264 it counts coded frames, so a camera whose encoder skips
+    /// most frames, as on a still picture, waits longer.
+    const KEYFRAME_SECONDS: u32 = 10;
     /// Frames the capture thread may queue for the call loop, per layer, before it drops one and
     /// asks for a keyframe.
     const QUEUE: usize = 4;

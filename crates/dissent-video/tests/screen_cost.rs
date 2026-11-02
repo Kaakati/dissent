@@ -136,3 +136,40 @@ fn openh264_settings_at_native_sizes() {
         }
     }
 }
+
+/// What a keyframe every 10 s costs a camera on H.264, against none. The encoder keeps its rate, so the cost shows as
+/// the share of the bytes the keyframes take from the deltas. The page is mostly skipped and has keyframes of its own at
+/// scene changes, so noise, where every frame is coded, shows the period itself.
+#[test]
+#[ignore = "measurement: run in release with --ignored --nocapture"]
+fn h264_keyframe_period_cost() {
+    const SECONDS: u64 = 30;
+    for (name, width, height, kbps) in [("720p", 1280u32, 720u32, 1_500u32), ("1080p", 1920, 1080, 3_000)] {
+        for (scene, noisy) in [("page", false), ("noise", true)] {
+            let frames = pictures(width, height, noisy);
+            for (label, interval) in [("no period", 1_000_000u32), ("every 10 s", 300)] {
+                let config = EncoderConfig { width, height, fps: 30, bitrate_kbps: kbps, keyframe_interval: interval, screen: false };
+                let mut encoder = encode::open(Codec::H264, config).expect("an encoder");
+                let (mut total, mut keys, mut key_bytes, mut coded) = (0usize, 0usize, 0usize, 0usize);
+                for index in 0..(SECONDS * 30) as usize {
+                    for chunk in encoder.encode(&frames[index % frames.len()]).expect("encodes") {
+                        total += chunk.data.len();
+                        coded += 1;
+                        if chunk.keyframe {
+                            keys += 1;
+                            key_bytes += chunk.data.len();
+                        }
+                    }
+                }
+                println!(
+                    "PERIOD {name} {scene} {kbps} kbps {label}: {:.0} kbps sent, {keys} keyframes of {} KB in all ({:.0}% of the bytes), {coded} frames coded of {}",
+                    total as f64 * 8.0 / SECONDS as f64 / 1_000.0,
+                    key_bytes / 1_000,
+                    100.0 * key_bytes as f64 / total.max(1) as f64,
+                    SECONDS * 30
+                );
+            }
+        }
+    }
+}
+

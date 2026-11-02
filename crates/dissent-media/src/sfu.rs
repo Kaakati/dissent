@@ -34,6 +34,10 @@ use crate::signal::Signal;
 use crate::transport::PacketTransport;
 use crate::video::{layer_key, stream_key, RawFrame, RawVideo, MAX_LAYERS};
 
+/// How long a viewer waiting for a keyframe of a stream waits before its source is asked again. Also the least time
+/// between two requests to one source, whatever the number of viewers waiting on it: at most two a second.
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+
 /// How recently a participant must have sent a frame to count as an active speaker.
 const ACTIVE_WINDOW: Duration = Duration::from_secs(1);
 
@@ -72,6 +76,8 @@ pub struct SfuStats {
     pub links_lost: u64,
     /// Times the active parent was lost and the forwarder moved to a standby.
     pub upstream_failovers: u64,
+    /// Keyframe requests sent to the sources of streams, for a viewer that starts or switches a layer.
+    pub keyframes_requested: u64,
 }
 
 /// Where a packet came from, or where it goes.
@@ -109,8 +115,10 @@ pub struct Sfu<T: PacketTransport> {
     use_estimates: bool,
     /// Each (downlink, sender) pair that has received a keyframe, so its deltas may follow.
     video_started: HashSet<(Link, u64)>,
-    /// Each (downlink, sender) pair that has asked for a keyframe and not yet got one.
-    video_wanted: HashSet<(Link, u64)>,
+    /// Each (downlink, stream or layer) waiting for a keyframe, with when its source was last asked for one.
+    video_wanted: BTreeMap<(Link, u64), Instant>,
+    /// When each source link was last asked for a keyframe, so the waits of many viewers ask it once.
+    asked_source: BTreeMap<Link, Instant>,
     /// The link each sender's video arrives on, for keyframe requests.
     video_source: BTreeMap<u64, Link>,
     /// Each stream's layers, as its sender announced them. A stream with none has one layer.
@@ -142,7 +150,8 @@ impl<T: PacketTransport> Sfu<T> {
             estimated: BTreeMap::new(),
             use_estimates: true,
             video_started: HashSet::new(),
-            video_wanted: HashSet::new(),
+            video_wanted: BTreeMap::new(),
+            asked_source: BTreeMap::new(),
             video_source: BTreeMap::new(),
             layers: BTreeMap::new(),
             tiles: BTreeMap::new(),
@@ -677,9 +686,7 @@ impl<T: PacketTransport> Sfu<T> {
                     if raw.layer == want && now != Some(want) {
                         // A switch, or the first frame: it starts at a keyframe of the new layer.
                         if !raw.keyframe {
-                            if self.video_wanted.insert((target, layer_key(stream, want))) {
-                                self.request_keyframe_from(from);
-                            }
+                            self.want_keyframe((target, layer_key(stream, want)), from);
                             continue;
                         }
                         self.video_wanted.remove(&(target, layer_key(stream, want)));
@@ -691,9 +698,7 @@ impl<T: PacketTransport> Sfu<T> {
             }
             let key = (target, if multi { layer_key(stream, raw.layer) } else { stream });
             if !raw.keyframe && !self.video_started.contains(&key) {
-                if self.video_wanted.insert(key) {
-                    self.request_keyframe_from(from);
-                }
+                self.want_keyframe(key, from);
                 continue;
             }
             if raw.keyframe {
@@ -737,7 +742,45 @@ impl<T: PacketTransport> Sfu<T> {
         self.video_wanted.remove(&(target, stream));
     }
 
+    /// Asks `source` for a keyframe that `key` waits for, unless it was asked within `KEYFRAME_RETRY`. A request
+    /// once a wait began was not enough: a lost PLI, or an entry left from a switch that a newer plan overtook,
+    /// left a viewer on its old layer until some other request came, and H.264 sends no keyframe of its own.
+    fn want_keyframe(&mut self, key: (Link, u64), source: Link) {
+        let now = Instant::now();
+        let due = self.video_wanted.get(&key).is_none_or(|asked| now.duration_since(*asked) >= KEYFRAME_RETRY);
+        if due {
+            self.video_wanted.insert(key, now);
+            self.request_keyframe_from(source);
+        }
+    }
+
+    /// For tests: what this forwarder does with `sender`'s camera or screen for `viewer`. The layer planned, the
+    /// layer being sent, the layers started, and the keyframes waited for with how long ago they were asked for.
+    pub fn video_debug(&self, viewer: PeerId, sender: u64, screen: bool) -> String {
+        let stream = stream_key(sender, screen);
+        let target = Link::Down(viewer);
+        let started: Vec<u8> = (0..MAX_LAYERS).filter(|l| self.video_started.contains(&(target, layer_key(stream, *l)))).collect();
+        let waiting: Vec<String> = (0..MAX_LAYERS)
+            .filter_map(|l| self.video_wanted.get(&(target, layer_key(stream, l))).map(|at| format!("layer {l} asked {} ms ago", at.elapsed().as_millis())))
+            .collect();
+        format!(
+            "planned {:?}, sending {:?}, started {started:?}, waiting {waiting:?}, layers {:?}, keyframes asked in all {}",
+            self.plan_for(viewer).get(&stream),
+            self.sending_layer.get(&(target, stream)),
+            self.sender_layers(sender, screen).iter().map(|l| l.width).collect::<Vec<_>>(),
+            self.stats.keyframes_requested,
+        )
+    }
+
+    /// Asks `source` for a keyframe, unless it was asked within `KEYFRAME_RETRY`. One keyframe serves every viewer
+    /// waiting on a source, so the waits and requests of many viewers ask it at most twice a second.
     fn request_keyframe_from(&mut self, source: Link) {
+        let now = Instant::now();
+        if self.asked_source.get(&source).is_some_and(|asked| now.duration_since(*asked) < KEYFRAME_RETRY) {
+            return;
+        }
+        self.asked_source.insert(source, now);
+        self.stats.keyframes_requested += 1;
         let call = match source {
             Link::Down(peer) => self.links.get_mut(&peer),
             Link::Up(peer) => self.upstream.get_mut(&peer),
@@ -779,7 +822,7 @@ impl<T: PacketTransport> Sfu<T> {
         for peer in asked {
             let link = Link::Down(peer);
             self.video_started.retain(|(target, _)| *target != link);
-            self.video_wanted.retain(|(target, _)| *target != link);
+            self.video_wanted.retain(|(target, _), _| *target != link);
             self.sending_layer.retain(|(target, _), _| *target != link);
             // Every stream that is on is forwarded, so every source is asked.
             let sources: Vec<Link> = self.video_source.values().copied().collect();
