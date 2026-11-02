@@ -70,6 +70,8 @@ export function openUpdateDialog(info: UpdateInfo | null): void {
   if (!info) return;
   openDialog({
     title: 'Update available',
+    // Twice the standard width, so the release notes read as lines rather than a narrow column.
+    className: 'w-[min(1040px,92vw)]',
     content: (close) => (info.portable ? <PortableBody info={info} close={close} /> : <UpdateBody info={info} close={close} />),
   });
 }
