@@ -36,6 +36,20 @@ MLS commits are not DAG events. Each applied commit is announced on the communit
 
 - A device that is one commit behind holds an older key under the same call, until the commit arrives. A call survives that: see `04-calls.md`, "Rekey".
 
+### Forks (proposal, not built)
+
+Two devices that each commit on the same epoch before hearing of the other's commit split the group into two branches with the same epoch number and different secrets. Each side refuses the other's commit as being for an epoch it already has, so the fork never heals. Messages, history and call keys sealed on one branch are locked on the other. Today nothing notices except as locked messages.
+
+The turn delay keeps commits apart only while gossip arrives within one step (3 s). Under load it can take longer. The banned-add follow-up shows this: with no follow-up, the owner removes the banned device at once and carol removes it 3 s later. If the owner's removal has not reached carol by then, the group forks (`an_add_nobody_followed_is_undone_by_reconcile` failed this way about 1 in 20 runs under load, and is `#[ignore]` until forks are detected and recovered; run it with `--ignored`). Waiting longer after an event shifts every device's turn by the same amount, so it does not help. Only a wider step does, and that slows every change.
+
+Options, in rising cost:
+
+1. **Detect.** Add the epoch authenticator (MLS `epoch_authenticator`, or a hash of an exported secret) to each `SignedCommit` announcement and to the periodic maintenance beacon. A device that hears the same epoch with another authenticator knows the group forked, logs it at warn level, and reports it in the community view. This is cheap, changes no keys, and turns silent locked messages into a known state. Older clients ignore the new field.
+2. **Prevent most forks.** Let only one device commit membership changes: the highest-ranked online device. Everyone else sends an MLS proposal (or a signed request) and the committer folds pending proposals into one commit. This needs agreement on who is highest-ranked, which the DAG and presence give approximately. Two devices that each believe they are first can still both commit, so detection is still needed.
+3. **Recover.** On detection, pick the winning branch deterministically, for example the commit whose hash sorts lowest among those for the forked epoch, so every device makes the same choice without talking. Devices on the losing branch rejoin the winner by external commit (or a welcome from a winner-side member's turn), then resend whatever they sealed on the losing branch. Their own sealed messages are still readable to them and can be re-sealed. Messages from others on the losing branch need those senders to resend them as well. Calls rekey on the new epoch as they already do.
+
+Suggested order: 1 first, since it is small and makes every fork visible in tests and in the field. Then 3, recovery by deterministic winner and external rejoin, which bounds the damage. Option 2 reduces how often recovery runs, but it changes who may commit and needs its own design.
+
 ## Joining
 
 1. The joiner gets the community's events, authors its `Join`, and pushes the `Join` to the invite peers (as before).
