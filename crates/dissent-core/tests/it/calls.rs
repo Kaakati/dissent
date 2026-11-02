@@ -1652,3 +1652,40 @@ async fn a_rejoin_and_a_restart_in_one_epoch_have_the_same_key_and_sender() {
     })
     .await;
 }
+
+/// Someone who leaves a channel call and comes back in one MLS epoch counts from 0 again. Whoever stayed must hear them
+/// at once, not only when their count passes where it had got to, here half a minute of talking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let (community, channel) = voice_community(&alice, &[&bob]).await;
+        alice.engine.join_call(community, channel).await.expect("alice joins");
+        bob.engine.join_call(community, channel).await.expect("bob joins");
+        eventually("alice hears bob", || alice.engine.call_state().filter(|v| v.frames_received > 0)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let epoch = alice.engine.call_state().expect("in call").key_epoch;
+
+        bob.engine.leave_call().await.expect("bob leaves");
+        eventually("alice sees bob leave", || alice.engine.call_state().filter(|v| v.participants.is_empty())).await;
+        let before = alice.engine.call_state().expect("in call").frames_received;
+        bob.engine.join_call(community, channel).await.expect("bob rejoins");
+        eventually("alice sees bob back", || alice.engine.call_state().filter(|v| !v.participants.is_empty())).await;
+
+        // Well inside the half minute bob talked before, and unscaled for that reason.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let view = alice.engine.call_state().expect("in call");
+            assert_eq!(view.key_epoch, epoch, "the test needs one epoch throughout");
+            if view.frames_received > before + 20 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "alice does not hear bob after he came back: {} frames then {}", before, view.frames_received);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
