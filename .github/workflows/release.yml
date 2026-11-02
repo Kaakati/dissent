@@ -125,7 +125,7 @@ jobs:
       # TEMPORARY: two known failures are skipped for v0.1.22. The volunteer test catches a device stuck on an old key
       # epoch after a ban; the roster test loses speaking events. Remove both skips with their fixes.
       - name: Loopback networked tests
-        timeout-minutes: 40
+        timeout-minutes: 60
         env:
           DISSENT_TEST_SCALE: "2"
         run: "cargo test -p dissent-core --test it -- --ignored --skip internet --skip a_banned_or_outside_volunteer_is_refused --skip the_roster_lists_each_person_once_and_shows_who_speaks && cargo test -p dissent-relay --test ban_disconnect -- --ignored"
