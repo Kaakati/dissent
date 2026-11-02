@@ -1432,7 +1432,11 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
         }
         return;
     }
-    room.with_layers(|l| l.received.insert((frame.sender, frame.screen), frame.layer));
+    room.with_layers(|l| {
+        l.received.insert((frame.sender, frame.screen), frame.layer);
+        let count = l.received_at.get(&(frame.sender, frame.screen)).map_or(0, |(_, n)| *n) + 1;
+        l.received_at.insert((frame.sender, frame.screen), (Instant::now(), count));
+    });
     room.with_layers(|l| l.video_at = Some(Instant::now()));
     if frame.screen && room.with_layers(|l| l.screen_seen.insert(frame.sender, Instant::now()).is_none()) {
         engine.emit(EngineEvent::CallUpdated);

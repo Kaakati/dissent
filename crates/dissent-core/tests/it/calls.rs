@@ -1629,12 +1629,32 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
     }
     // Live frames: the quiet cameras keep flowing, so each viewer's last frame of them moves down to
     // the base. Before, a camera whose sender stopped talking was not forwarded at all.
+    // A failure here says, per viewer and camera, what the viewer last got and what the forwarder was doing.
+    let deadline = tokio::time::Instant::now() + scaled(Duration::from_secs(30));
     for viewer in [constrained, free] {
-        eventually_within(Duration::from_secs(30), "the quiet cameras keep arriving, on the base", || {
-            (layer_of(viewer, speaker_peer).is_some_and(|l| l > 0) && quiet.iter().all(|q| layer_of(viewer, q) == Some(0)))
-                .then_some(())
-        })
-        .await;
+        loop {
+            if layer_of(viewer, speaker_peer).is_some_and(|l| l > 0) && quiet.iter().all(|q| layer_of(viewer, q) == Some(0)) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let mut report = Vec::new();
+                for v in [constrained, free] {
+                    for s in std::iter::once(speaker_peer).chain(quiet.iter().copied()) {
+                        let role = if root(s) == speaker { "speaker" } else { "quiet" };
+                        report.push(format!(
+                            "viewer {} {} {}: got {}; forwarder: {}",
+                            &root(v)[..8],
+                            role,
+                            &root(s)[..8],
+                            dissent_core::test_support::video_received_debug(&v.engine, &root(s), false),
+                            dissent_core::test_support::forwarder_video_debug(fwd, &root(v), &root(s), false).await,
+                        ));
+                    }
+                }
+                panic!("the quiet cameras keep arriving, on the base, did not happen:\n{}", report.join("\n"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
     assert_eq!(
         dissent_core::test_support::active_speaker(fwd).await.as_deref(),

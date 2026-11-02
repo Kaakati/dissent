@@ -218,6 +218,16 @@ pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()
 }
 
+/// What `engine` received of `sender_root`'s camera (or screen): the last frame's layer, how many came, and when the last did.
+pub fn video_received_debug(engine: &crate::Engine, sender_root: &str, screen: bool) -> String {
+    engine.video_received_debug(sender_root, screen)
+}
+
+/// On the forwarder `engine`: what it does with `sender_root`'s camera (or screen) for `viewer_root`.
+pub async fn forwarder_video_debug(engine: &crate::Engine, viewer_root: &str, sender_root: &str, screen: bool) -> String {
+    engine.forwarder_video_debug(viewer_root, sender_root, screen).await
+}
+
 /// On the forwarder `engine`: the root id of the active speaker, whom a tight budget keeps sharp.
 pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
     engine.active_speaker_now().await
