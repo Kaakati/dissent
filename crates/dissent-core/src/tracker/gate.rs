@@ -6,10 +6,11 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
-use dissent_identity::CommunityId;
+use dissent_identity::{CommunityId, DeviceId};
 
 use super::catalog::TRANSFER_PREFIX;
 use super::seeding::{caps, SeedState, SeedingSettings};
+use super::slots::{RequestKey, Take};
 use crate::blob_gate::Scope;
 use crate::engine::{now_ms, Engine};
 
@@ -20,7 +21,86 @@ pub(crate) struct UploadBucket {
     level: f64,
 }
 
+/// How long a device's answer to the features probe is trusted.
+const FEATURES_KEPT: Duration = Duration::from_secs(600);
+
 impl Engine {
+    /// Whether `blob` is a seed in some community's book. Only seeds take upload slots: chat files, pictures and
+    /// avatars are served whatever the slots say.
+    pub(crate) fn is_tracker_seed(&self, blob: &[u8; 32]) -> bool {
+        let state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        state.communities.values().any(|l| l.book.seeds.contains_key(blob))
+    }
+
+    /// The most upload transfers of seeds at once.
+    fn upload_slots_max(&self) -> usize {
+        self.cached_seeding_settings().max_active.max(1) as usize
+    }
+
+    /// Upload transfers of seeds running now, and the most at once.
+    pub(crate) fn upload_slots(&self) -> (u32, u32) {
+        let max = self.upload_slots_max() as u32;
+        let state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        (state.slots.active() as u32, max)
+    }
+
+    /// Whether `device` takes a busy answer. Until it has said, it is treated as a release that does not, and asked.
+    fn knows_busy(&self, device: DeviceId) -> bool {
+        let now = Instant::now();
+        let ask = {
+            let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+            match state.peer_features.get(&device) {
+                Some((Some(bits), at)) if now.duration_since(*at) < FEATURES_KEPT => {
+                    return bits & crate::custom_roles::FEATURE_SEED_SLOTS != 0;
+                }
+                Some((None, at)) if now.duration_since(*at) < FEATURES_KEPT => false,
+                _ => {
+                    state.peer_features.insert(device, (None, now));
+                    true
+                }
+            }
+        };
+        if ask {
+            let engine = self.clone();
+            self.spawn_task(async move {
+                let reply = tokio::time::timeout(Duration::from_secs(5), engine.call(device, &crate::rpc::Request::Features)).await;
+                if let Ok(Ok(crate::rpc::Response::Features(bits))) = reply {
+                    let mut state = engine.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+                    state.peer_features.insert(device, (Some(bits), Instant::now()));
+                }
+            });
+        }
+        false
+    }
+
+    /// Asks for an upload slot for the request `key` of `device`, for a seed.
+    pub(crate) fn take_slot(&self, key: RequestKey, device: DeviceId) -> Take {
+        let knows = self.knows_busy(device);
+        let max = self.upload_slots_max();
+        let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        let take = state.slots.take(key, device, max, knows, Instant::now());
+        match take {
+            Take::Busy => *state.slot_refusals.entry(device).or_default() += 1,
+            Take::Held(_) => *state.slot_holds.entry(device).or_default() += 1,
+            Take::Granted => {}
+        }
+        take
+    }
+
+    /// Ends the request `key`'s upload transfer, and hands its slot on.
+    pub(crate) fn release_slot(&self, key: RequestKey) {
+        let max = self.upload_slots_max();
+        let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        state.slots.release(key, max, Instant::now());
+    }
+
+    /// Forgets a held request that waited too long. It is refused.
+    pub(crate) fn forget_slot(&self, key: RequestKey, device: DeviceId) {
+        let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
+        state.slots.forget(key);
+        *state.slot_refusals.entry(device).or_default() += 1;
+    }
+
     /// Every blob the tracker keeps pinned for some community: the seeds in its books, whatever their state, since a
     /// paused or stopped seed keeps its copy until its listing is removed.
     pub(crate) fn tracker_kept_blobs(&self) -> Vec<[u8; 32]> {

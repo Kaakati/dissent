@@ -1128,7 +1128,7 @@ if (!window.__TAURI__) {
       const reads = (liveReads[listingId] = (liveReads[listingId] ?? 0) + 1);
       return {
         active: true, down_bps: 1000000 + reads * 300000, up_bps: 0, eta_s: 60, progress: Math.min(1, reads / 100),
-        own_pieces: [[0, reads * 8]], peers: [{ root_id: LINUS, name: people[LINUS], from_bps: 1000000 + reads * 300000, to_bps: 0, has: 1 }],
+        own_pieces: [[0, reads * 8]], peers: [{ root_id: LINUS, name: people[LINUS], from_bps: 1000000 + reads * 300000, to_bps: 0, has: 1, busy: false }],
       };
     },
     // My seeding, as `dissent_core::tracker::seeding` reports it. The mock keeps a record per seeded listing.
@@ -1146,10 +1146,10 @@ if (!window.__TAURI__) {
           state, note, limit_reached: reached, size: l.cipher_size, uploaded: 0, ratio: 0, limit: r.limit, since_ms: l.added_ms, downloaded: false,
         };
       });
-      return { rows, seeding: rows.filter((r) => r.state === 'seeding').length, uploaded: 0, settings: s, conditions: { metered: false, on_battery: false, metered_known: true }, caps_now: [s.upload_bps, s.download_bps], held_back: false };
+      return { rows, seeding: rows.filter((r) => r.state === 'seeding').length, uploaded: 0, settings: s, conditions: { metered: false, on_battery: false, metered_known: true }, caps_now: [s.upload_bps, s.download_bps], held_back: false, uploads: { active: 2, slots: s.max_active } };
     },
     set_seeding_settings: ({ settings }) => {
-      need(settings.max_active >= 1 && settings.max_active <= 100, 'seed between 1 and 100 files at once');
+      need(settings.max_active >= 1 && settings.max_active <= 100, 'between 1 and 100 uploads at once');
       seeding.settings = settings;
       return null;
     },

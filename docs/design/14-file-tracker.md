@@ -394,16 +394,39 @@ Built in phases 3 to 5 (`tracker::seeding`, `tracker::scan`, `dissent_files::inp
   category's default tags. Live file-system watching is not built.
 - **Limits per listing**: Forever, until ratio r, for n hours, until a date. States, worked out from the record, the
   settings and the time: Stopped (by hand, or limit reached), Paused, Scheduled (a metered network, battery, or an
-  alternative schedule whose upload cap is 0), Queued (past max active, newest first), Seeding. Only Seeding blobs
-  are announced in holdings and served: the blob gate asks `serves`, and a linked file is unlinked while not Seeding.
+  alternative schedule whose upload cap is 0), Seeding. There is no limit on how many files seed: every Seeding blob is
+  announced in holdings and served, subject to the upload slots below. Only Seeding blobs are announced and served: the blob gate asks `serves`, and a linked file is unlinked while not Seeding.
   The unpin sweep keeps every blob a seed book holds; removed seeds release through `release_blobs`.
 - **Global** (`SeedingSettings`, `seeding.bin`): upload and download caps; an alternative pair on a weekly window
-  in local time (the page reports its UTC offset); max active seeds; only on unmetered networks (on by default);
+  in local time (the page reports its UTC offset); uploads at once (`max_active`, see "Upload slots"); only on unmetered networks (on by default);
   pause on battery. The desktop app reads metered (Windows `GetNetworkConnectivityHint`, looked up at run time) and
   battery (Windows `GetSystemPowerStatus`, Linux `/sys/class/power_supply`, macOS `pmset`) every minute. The download
   cap is a token bucket shared by swarm downloads. The upload cap and the per-file upload counters run through the
   blob gate's `throttle` and `on_served` hooks, and, for linked files, through `FilesProtocol::with_served`.
 - **Not built**: queueing requests by the requester's level.
+
+### Upload slots
+
+`SeedingSettings::max_active` (default 5, 1 to 100) is the number of GET requests for seeds this device serves at once
+(`tracker::slots`). In v0.1.24 and earlier it was the number of seeds served at all, newest first; the field and its format are
+unchanged, only its meaning. Only blobs in this device's seed book take a slot: chat files, pictures and avatars are served
+whatever the slots say.
+
+- **Counted at the blob gate**, per request, from the GET until its transfer events end. Requests from one device count
+  together.
+- **Full**: a downloader whose app answers `Request::Features` with `FEATURE_SEED_SLOTS` is refused at once with
+  iroh-blobs' `RateLimited` (reset code `ERR_LIMIT`). Its swarm download puts the slice back for other holders, shows the
+  provider as busy, and asks it again after 250 ms, doubling to 4 s, back to 250 ms after a slice comes in. A busy answer is
+  not one of the two failures that drop a provider.
+- **Older downloaders**, and devices that have not answered the probe yet, would count a refusal as a failure, so their
+  request is held instead until a slot frees: at most 30 s, 16 requests in all and 4 per device, then refused.
+- **Fair**: a freed slot goes to whoever waited longest, held or refused in the last 10 s, before a device that just
+  finished a slice and asks again. No device takes more than half the slots, rounded up, while another wants one.
+- **Shown**: My seeding has "Uploading n of m"; a file page shows a busy provider as "Busy, asking again", and "Waiting
+  for a free upload slot" while every provider is busy.
+
+At 5,000 seeds on one device (release build, `many_seeds`): My seeding 34 ms, the Files view 0.22 s, a holdings answer
+of 5,000 blobs 170 KB (the RPC frame limit is 16 MiB), a restart 0.5 s.
 
 ## Storage seeders
 
@@ -549,7 +572,7 @@ waiting for the blob gate.
 | Seed limit popover | per-listing limit | missing |
 | Upload and download caps | throttle and limiter | missing |
 | Alternative schedule | settings | missing |
-| Max active seeds | queue | missing |
+| Max active seeds | upload slots (`tracker::slots`) | built |
 | Disk kept for seeding | `MirrorPolicy`, store stats | partial |
 | Unmetered only, pause on battery | OS signals | missing (`on_battery` hard-coded) |
 

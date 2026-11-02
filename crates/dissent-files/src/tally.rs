@@ -14,6 +14,8 @@ pub struct SourceCount {
     pub bytes: u64,
     /// Pieces this provider's bytes completed.
     pub pieces: u64,
+    /// Its upload slots were full at its last answer, and it is asked again shortly.
+    pub busy: bool,
 }
 
 /// The number of pieces in a ciphertext of `cipher_size` bytes. The last piece may be short.
@@ -47,6 +49,7 @@ impl<'a> Observer<'a> {
                     index,
                     bytes: 0,
                     pieces: 0,
+                    busy: false,
                 })
                 .collect(),
             cipher,
@@ -119,7 +122,8 @@ mod tests {
             SourceCount {
                 index: 0,
                 bytes: 2 * PIECE_BYTES,
-                pieces: 2
+                pieces: 2,
+                busy: false,
             }
         );
         assert_eq!(
@@ -127,7 +131,8 @@ mod tests {
             SourceCount {
                 index: 1,
                 bytes: 2 * PIECE_BYTES,
-                pieces: 2
+                pieces: 2,
+                busy: false,
             }
         );
         assert_eq!(counts.iter().map(|c| c.bytes).sum::<u64>(), cipher);

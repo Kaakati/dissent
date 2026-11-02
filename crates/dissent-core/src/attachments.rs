@@ -2607,6 +2607,7 @@ mod source_view_tests {
                     index,
                     bytes,
                     pieces,
+                    busy: false,
                 })
                 .collect(),
             cipher,

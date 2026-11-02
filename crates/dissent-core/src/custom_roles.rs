@@ -23,8 +23,11 @@ use crate::rpc::{Request, Response};
 pub const FEATURE_CUSTOM_ROLES: u64 = 1 << 0;
 /// This device's replay and views know the file tracker. See `tracker`.
 pub const FEATURE_TRACKER: u64 = 1 << 1;
+/// This device's downloads take a busy answer from a seeder whose upload slots are full, and ask again later, rather than
+/// counting it as a failure. See `tracker::slots`.
+pub const FEATURE_SEED_SLOTS: u64 = 1 << 2;
 /// Every feature this version answers `Request::Features` with.
-pub const FEATURES: u64 = FEATURE_CUSTOM_ROLES | FEATURE_TRACKER;
+pub const FEATURES: u64 = FEATURE_CUSTOM_ROLES | FEATURE_TRACKER | FEATURE_SEED_SLOTS;
 
 /// How long a device's answer to `Request::Features` counts before the device is asked again.
 const FEATURES_FRESH: Duration = Duration::from_secs(10 * 60);

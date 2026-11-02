@@ -24,8 +24,11 @@ use crate::tally::{SourceCount, PIECE_BYTES};
 const SLICE_CHUNKS: u64 = 4096;
 /// Most providers asked at once.
 pub const MAX_PARALLEL: usize = 8;
-/// A provider that fails this many slices is dropped from the download.
+/// A provider that fails this many slices is dropped from the download. A busy answer is not a failure.
 const MAX_FAILURES: u32 = 2;
+/// The pause after a busy answer, doubling up to the longest, and back to the first after a slice comes in.
+const BUSY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
+const BUSY_LONGEST: std::time::Duration = std::time::Duration::from_secs(4);
 /// The shortest time between two reports of a download. Bytes arrive per 16 KiB, thousands of times a second on a fast
 /// link, and each report takes a lock and may reach the UI.
 const REPORT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
@@ -62,6 +65,8 @@ impl DownloadCap {
 enum Event {
     /// A provider delivered `bytes` more verified bytes.
     Bytes { provider: usize, bytes: u64 },
+    /// A provider's upload slots are full. It is asked again after a pause.
+    Busy { provider: usize },
     /// A provider failed a slice.
     Failed { provider: usize, error: String },
 }
@@ -76,6 +81,12 @@ pub struct SwarmFetch {
 
 impl Files {
     /// Caps every swarm download together at `bps` bytes per second, or lifts the cap with `None`.
+    /// Makes busy answers count as failures, as a release before upload slots did. For tests.
+    #[doc(hidden)]
+    pub fn act_as_before_upload_slots(&self) {
+        self.busy_retry.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_download_cap(&self, bps: Option<u64>) {
         self.download_cap.bps.store(bps.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     }
@@ -152,6 +163,7 @@ impl Files {
         for (provider, addr) in from.iter().take(MAX_PARALLEL).enumerate() {
             let worker = Worker {
                 cap: self.download_cap.clone(),
+                busy_retry: self.busy_retry.load(std::sync::atomic::Ordering::Relaxed),
                 store: self.store.clone(),
                 timeouts: self.timeouts,
                 endpoint: endpoint.clone(),
@@ -164,7 +176,7 @@ impl Files {
             workers.spawn(worker.run());
         }
         drop(tx);
-        let mut counts: Vec<SourceCount> = (0..from.len()).map(|index| SourceCount { index, bytes: 0, pieces: 0 }).collect();
+        let mut counts: Vec<SourceCount> = (0..from.len()).map(|index| SourceCount { index, bytes: 0, pieces: 0, busy: false }).collect();
         let mut held = base;
         let mut last_error = String::from("no provider had the blob");
         let mut failed: Vec<usize> = Vec::new();
@@ -174,11 +186,18 @@ impl Files {
                 Event::Bytes { provider, bytes } => {
                     held = (held + bytes).min(cipher_size);
                     let c = &mut counts[provider];
+                    c.busy = false;
                     c.bytes += bytes;
                     c.pieces = c.bytes / PIECE_BYTES;
                     if reported.elapsed() >= REPORT_EVERY {
                         reported = std::time::Instant::now();
                         progress(held, cipher_size);
+                        sources(&counts);
+                    }
+                }
+                Event::Busy { provider } => {
+                    if !counts[provider].busy {
+                        counts[provider].busy = true;
                         sources(&counts);
                     }
                 }
@@ -259,8 +278,16 @@ async fn missing(store: &FsStore, hash: Hash) -> Result<ChunkRanges> {
     Ok(missing.ranges.as_single().map(|(_, r)| r.clone()).unwrap_or_else(ChunkRanges::empty))
 }
 
+/// Why one slice did not come from a provider.
+enum SliceError {
+    /// Its upload slots are full.
+    Busy,
+    Failed(FilesError),
+}
+
 struct Worker {
     cap: Arc<DownloadCap>,
+    busy_retry: bool,
     store: FsStore,
     timeouts: Timeouts,
     endpoint: Endpoint,
@@ -280,6 +307,7 @@ impl Worker {
             Err(_) => return self.fail("connect timed out".into()).await,
         };
         let mut failures = 0;
+        let mut pause = BUSY_FIRST;
         loop {
             let Some(slice) = self.queue.lock().unwrap_or_else(PoisonError::into_inner).pop_front() else {
                 break;
@@ -293,8 +321,19 @@ impl Worker {
                 continue;
             }
             match self.get(&conn, wanted).await {
-                Ok(()) => {}
+                Ok(()) => pause = BUSY_FIRST,
+                // Others may take the slice meanwhile; this provider is asked again after the pause, for whatever is left.
+                Err(SliceError::Busy) if self.busy_retry => {
+                    self.queue.lock().unwrap_or_else(PoisonError::into_inner).push_back(slice);
+                    let _ = self.tx.send(Event::Busy { provider: self.provider }).await;
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(BUSY_LONGEST);
+                }
                 Err(e) => {
+                    let e = match e {
+                        SliceError::Busy => FilesError::Fetch("the provider's upload slots are full".to_owned()),
+                        SliceError::Failed(e) => e,
+                    };
                     self.queue.lock().unwrap_or_else(PoisonError::into_inner).push_back(slice);
                     failures += 1;
                     let _ = self.tx.send(Event::Failed { provider: self.provider, error: e.to_string() }).await;
@@ -308,7 +347,7 @@ impl Worker {
     }
 
     /// Fetches one slice. A provider that sends more than a slice holds is cut off.
-    async fn get(&self, conn: &iroh::endpoint::Connection, ranges: ChunkRanges) -> Result<()> {
+    async fn get(&self, conn: &iroh::endpoint::Connection, ranges: ChunkRanges) -> std::result::Result<(), SliceError> {
         let limit = SLICE_CHUNKS * 1024;
         let timeouts = self.timeouts;
         let request = GetRequest::blob_ranges(self.hash, ranges);
@@ -317,10 +356,10 @@ impl Worker {
         let mut last = 0u64;
         loop {
             match tokio::time::timeout(timeouts.stall, stream.next()).await {
-                Err(_) => return Err(FilesError::Fetch(format!("no data for {} s", timeouts.stall.as_secs()))),
-                Ok(None) => return Err(FilesError::Fetch("stream ended early".to_owned())),
+                Err(_) => return Err(SliceError::Failed(FilesError::Fetch(format!("no data for {} s", timeouts.stall.as_secs())))),
+                Ok(None) => return Err(SliceError::Failed(FilesError::Fetch("stream ended early".to_owned()))),
                 Ok(Some(GetProgressItem::Progress(done))) if done > limit => {
-                    return Err(FilesError::Fetch("peer sent more than the slice".to_owned()));
+                    return Err(SliceError::Failed(FilesError::Fetch("peer sent more than the slice".to_owned())));
                 }
                 Ok(Some(GetProgressItem::Progress(done))) => {
                     if done > last {
@@ -333,7 +372,10 @@ impl Worker {
                     }
                 }
                 Ok(Some(GetProgressItem::Done(_))) => return Ok(()),
-                Ok(Some(GetProgressItem::Error(e))) => return Err(FilesError::Fetch(e.to_string())),
+                Ok(Some(GetProgressItem::Error(e))) if e.iroh_error_code() == Some(iroh_blobs::protocol::ERR_LIMIT) => {
+                    return Err(SliceError::Busy);
+                }
+                Ok(Some(GetProgressItem::Error(e))) => return Err(SliceError::Failed(FilesError::Fetch(e.to_string()))),
             }
         }
     }

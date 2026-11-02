@@ -462,6 +462,7 @@ async fn count_served(
     key: (u64, u64),
     sending: Sending,
     mut updates: RequestUpdates,
+    slot: bool,
 ) {
     // The blob, and where its last progress ended. Each request's offsets are in the whole blob, not from its own start.
     let mut current: Option<([u8; 32], Option<u64>)> = None;
@@ -488,6 +489,38 @@ async fn count_served(
         }
     }
     sending.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
+    if slot {
+        engine.release_slot(key);
+    }
+}
+
+/// Answers a GET for a seed under the upload slots: served now, refused as busy, or held until a slot frees.
+async fn answer_seed(engine: Engine, device: DeviceId, key: (u64, u64), sending: Sending, m: dissent_files::gate::GetRequestReceivedMsg) {
+    let granted = match engine.take_slot(key, device) {
+        crate::tracker::slots::Take::Granted => true,
+        crate::tracker::slots::Take::Busy => false,
+        crate::tracker::slots::Take::Held(wait) => {
+            // Its own task, so a held request does not hold the gate.
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                let granted = matches!(tokio::time::timeout(crate::tracker::slots::HOLD, wait).await, Ok(Ok(())));
+                if !granted {
+                    engine.forget_slot(key, device);
+                    m.tx.send(Err(AbortReason::RateLimited)).await.ok();
+                    return;
+                }
+                m.tx.send(Ok(())).await.ok();
+                count_served(engine, device, key, sending, m.rx, true).await;
+            });
+            return;
+        }
+    };
+    if granted {
+        m.tx.send(Ok(())).await.ok();
+        tokio::spawn(count_served(engine, device, key, sending, m.rx, true));
+    } else {
+        m.tx.send(Err(AbortReason::RateLimited)).await.ok();
+    }
 }
 
 async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<ProviderMessage>) {
@@ -567,10 +600,16 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
         let result = answer(verdict);
         let count = |updates| {
             if let (Verdict::Allow, Some(device)) = (verdict, device) {
-                tokio::spawn(count_served(engine.clone(), device, (conn, request), sending.clone(), updates));
+                tokio::spawn(count_served(engine.clone(), device, (conn, request), sending.clone(), updates, false));
             }
         };
         match msg {
+            // A seed takes an upload slot; anything else is served as the gate said.
+            ProviderMessage::GetRequestReceived(m) if verdict == Verdict::Allow && engine.is_tracker_seed(m.request.hash.as_bytes()) => {
+                if let Some(device) = device {
+                    answer_seed(engine.clone(), device, (conn, request), sending.clone(), m).await;
+                }
+            }
             ProviderMessage::GetRequestReceived(m) => {
                 m.tx.send(result).await.ok();
                 count(m.rx);
