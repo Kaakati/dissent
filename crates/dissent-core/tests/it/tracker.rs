@@ -420,11 +420,11 @@ async fn the_lister_and_file_managers_edit_a_listing_and_others_see_it() {
     .await;
 }
 
-/// The Files page reloads this view on every change, and pages it locally. No network, only slow to set up.
+/// The Files page reloads this view on every change, and pages it locally. 3000 listings took a median of 224 ms in this
+/// build, so 300 under 3 s leaves room for a busy runner and still catches a view that went badly wrong.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "slow: makes thousands of listings"]
-async fn the_files_view_stays_quick_with_thousands_of_listings() {
-    bounded_within(Duration::from_secs(1500), async {
+async fn the_files_view_stays_quick_with_many_listings() {
+    heavy(1, async {
         let alice = peer("tracker-many").await;
         let server = alice.engine.create_community("Many".into()).await.expect("create");
         let id: CommunityId = server.id.parse().unwrap();
@@ -432,24 +432,16 @@ async fn the_files_view_stays_quick_with_thousands_of_listings() {
         any.types = vec![];
         let cat = alice.engine.create_category(id, any).await.expect("category");
         let dir = scratch("tracker-many-src");
-        let total = 3000;
-        let started = std::time::Instant::now();
-        for batch in 0..(total / 100) {
-            let paths: Vec<_> = (0..100).map(|i| write(&dir, &format!("f{batch}-{i}.bin"), format!("{batch}-{i}").as_bytes())).collect();
-            alice.engine.prepare_listing(id, cat, paths.clone()).await.unwrap();
-            let items: Vec<_> = paths.iter().map(|p| item(p, &["tag"])).collect();
-            alice.engine.list_files(id, cat, items, SeedLimit::Forever).await.unwrap();
-        }
-        eprintln!("listing {total} took {:?}", started.elapsed());
-        let mut times = Vec::new();
-        for _ in 0..5 {
-            let at = std::time::Instant::now();
-            let view = alice.engine.files_view(id).unwrap();
-            times.push(at.elapsed());
-            assert_eq!(view.listings.len(), total);
-        }
-        times.sort();
-        eprintln!("files_view with {total} listings: median {:?}, worst {:?}", times[2], times[4]);
+        let total = 300;
+        let paths: Vec<_> = (0..total).map(|i| write(&dir, &format!("f{i}.bin"), format!("{i}").as_bytes())).collect();
+        alice.engine.prepare_listing(id, cat, paths.clone()).await.unwrap();
+        let items: Vec<_> = paths.iter().map(|p| item(p, &["tag"])).collect();
+        alice.engine.list_files(id, cat, items, SeedLimit::Forever).await.unwrap();
+        let at = std::time::Instant::now();
+        let view = alice.engine.files_view(id).unwrap();
+        let took = at.elapsed();
+        assert_eq!(view.listings.len(), total);
+        assert!(took < Duration::from_secs(3), "files_view took {took:?}");
         let _ = std::fs::remove_dir_all(&dir);
         finish(vec![alice]).await;
     })
