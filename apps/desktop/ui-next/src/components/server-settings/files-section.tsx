@@ -6,7 +6,7 @@ import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/se
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { formatBytes } from '@/components/transfers/format';
-import { confirm } from '@/lib/dialog';
+import { confirm, openDialog } from '@/lib/dialog';
 import { filesApi, reloadFiles, useFilesOf, type AddSpecView, type CategoryInput, type CategoryView, type FilesView, type ReputationRules } from '@/lib/files';
 import { toast } from '@/lib/toasts';
 import type { CommunityView } from '@/lib/types';
@@ -96,7 +96,7 @@ export function FilesSection({ community }: { community: CommunityView }) {
   );
 }
 
-function CategoryEditor({ community, view, category, onDone }: { community: CommunityView; view: FilesView; category: CategoryView | null; onDone: (id: string | null) => void }) {
+export function CategoryEditor({ community, view, category, onDone }: { community: CommunityView; view: FilesView; category: CategoryView | null; onDone: (id: string | null) => void }) {
   const [draft, setDraft] = useState<CategoryInput>(() => inputOf(category));
   const [tags, setTags] = useState(draft.default_tags.map((t) => `#${t}`).join(' '));
   const [ratioOn, setRatioOn] = useState(draft.rules.min_ratio_milli !== null);
@@ -333,6 +333,27 @@ function CategoryEditor({ community, view, category, onDone }: { community: Comm
       </div>
     </Block>
   );
+}
+
+// The same editor in a dialog, for the Files page. `onDone` gets the category saved, or null once one is deleted.
+export function openCategoryEditor(community: CommunityView, view: FilesView, category: CategoryView | null, onDone: (id: string | null) => void): void {
+  openDialog({
+    title: category ? `Edit ${category.name}` : 'New category',
+    wide: true,
+    content: (close) => (
+      <div data-category-dialog>
+        <CategoryEditor
+          community={community}
+          view={view}
+          category={category}
+          onDone={(id) => {
+            close();
+            onDone(id);
+          }}
+        />
+      </div>
+    ),
+  });
 }
 
 function LevelsBlock({ community, view }: { community: CommunityView; view: FilesView }) {

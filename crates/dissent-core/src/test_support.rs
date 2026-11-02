@@ -142,6 +142,27 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
         .store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.
+pub fn fail_folder_after(engine: &crate::Engine, files: u64) {
+    engine.inner.fail_folder_after.store(files, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many files `engine` serves in place.
+pub fn linked_count(engine: &crate::Engine) -> usize {
+    engine.inner.files.linked_count()
+}
+
+/// Lists `manifest` as a folder with no files behind it, as a lying lister would.
+pub async fn list_raw_folder(
+    engine: &crate::Engine,
+    community: crate::CommunityId,
+    category: dissent_events::CategoryId,
+    name: &str,
+    manifest: &crate::tracker::folder::Manifest,
+) -> crate::Result<String> {
+    engine.list_raw_folder(community, category, name, manifest).await
+}
+
 /// Makes `engine` answer `Request::Features` with `bits`. Zero models a device from before the probe.
 /// Makes `engine` send the call features of a client from before `FEATURE_SEEDERS_ONLY`: it says it elects a member
 /// outside the call. Only what it says changes; it still elects as this build does.

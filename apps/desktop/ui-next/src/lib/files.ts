@@ -63,6 +63,35 @@ export interface ListingView {
   danger?: FileDanger | null; // the file can run code: the page warns
   progress: number;
   can_edit: boolean;
+  folder?: { files: number; contents_known: boolean; dangerous: number } | null; // a folder listing
+}
+
+// One file of a folder listing's contents (`FolderEntryView` in dissent-core).
+export interface FolderEntryView {
+  path: string;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  danger: FileDanger | null;
+  holders: number;
+}
+
+export interface FolderContentsView {
+  listing: Id;
+  name: string;
+  files: number;
+  size: number;
+  dangerous: number;
+  unavailable: number;
+  entries: FolderEntryView[];
+}
+
+export interface FolderFileProgress {
+  path: string;
+  size: number;
+  progress: number;
+  done: boolean;
 }
 
 export interface LevelRule {
@@ -248,6 +277,12 @@ export const filesApi = {
   cancelCheck: (job: number) => invoke<void>('cancel_file_check', { job }),
   pickListingFolder: () => invoke<string | null>('pick_listing_folder', {}),
   scanListingFolder: (communityId: Id, folder: string, filter: Id | null) => invoke<FolderScan>('scan_listing_folder', { communityId, folder, filter }),
+  listFolder: (communityId: Id, categoryId: Id, root: string, files: string[], tags: string[], description: string, limit: string) =>
+    invoke<Id>('list_folder', { communityId, categoryId, root, files, tags, description, limit }),
+  folderContents: (communityId: Id, listingId: Id) => invoke<FolderContentsView>('folder_contents', { communityId, listingId }),
+  downloadFolder: (communityId: Id, listingId: Id) => invoke<TransferItem>('download_folder', { communityId, listingId }),
+  folderFiles: (listingId: Id) => invoke<FolderFileProgress[]>('folder_download_files', { communityId: useFiles.getState().communityId, listingId }),
+  relistFolder: (communityId: Id, listingId: Id) => invoke<string>('relist_folder', { communityId, listingId }),
   planDrop: (communityId: Id, paths: string[], filter: Id | null) => invoke<DropPlan>('plan_file_drop', { communityId, paths, filter }),
   list: (communityId: Id, categoryId: Id, items: AddItem[], limit: string, inPlace = false) => invoke<Id[]>('list_files', { communityId, categoryId, items, limit, inPlace }),
   updateListing: (communityId: Id, listingId: Id, tags: string[], description: string) =>
@@ -378,6 +413,9 @@ export interface SeedRowView {
   limit: string; // 'forever' | 'ratio:<thousandths>' | 'hours:<n>' | 'until:<ms>'
   since_ms: number;
   downloaded: boolean;
+  changed?: number; // linked files that changed on disk since listed
+  folder_files?: number | null; // set for a folder listing
+  folder_root?: string | null;
 }
 
 export interface SeedingView {

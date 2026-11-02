@@ -605,6 +605,32 @@ if (!window.__TAURI__) {
   };
   const findMessage = (c, channelId, messageId) => (c.msgs[channelId] ?? []).find((m) => m.id === messageId);
   const pause = () => new Promise((r) => setTimeout(r, window.__mockDelay ?? 0));
+  // Folder listings: each one's entries, root and download progress, by listing.
+  const mockFolders = {};
+  const mockFolderRoots = {};
+  const mockFolderProgress = {};
+  const mockFolderListing = (communityId, name, entries, { category, tags = [], mine = false, root = null } = {}) => {
+    handlers.files_view({ communityId });
+    const f = servers[communityId].files;
+    const listingId = id(`folder${f.listings.length}x${Date.now()}`);
+    mockFolders[listingId] = entries;
+    mockFolderRoots[listingId] = root;
+    f.listings.push({
+      id: listingId, category: category ?? f.categories[0].id, name, ext: 'DIR', kind: 'Folder', mime: 'inode/directory', size: entries.reduce((n, e) => n + e.size, 0),
+      cipher_size: 0, pieces: 0, fingerprint: `ab12cd${'7'.repeat(52)}ef34ab`, tags, description: '', lister: mine ? ME : LINUS, lister_name: people[mine ? ME : LINUS], added_ms: Date.now(),
+      also_listed_by: [], seeders: 1, leechers: 0, completed: 0, mine, local: mine ? 'seeding' : 'none', local_path: null, progress: mine ? 1 : 0, can_edit: mine,
+      danger: entries.find((e) => e.danger)?.danger ?? null, folder: { files: entries.length, contents_known: mine, dangerous: entries.filter((e) => e.danger).length },
+    });
+    emit({ kind: 'community_updated', community_id: communityId });
+    return listingId;
+  };
+  window.__mockFolderListing = (communityId, name, count) => {
+    const entries = Array.from({ length: count }, (_, i) => {
+      const path = `part-${Math.floor(i / 50)}/file-${String(i).padStart(4, '0')}.${i % 97 === 5 ? 'exe' : 'txt'}`;
+      return { path, name: path.split('/').pop(), ext: i % 97 === 5 ? 'EXE' : 'TXT', kind: i % 97 === 5 ? 'Installer' : 'Document', size: 1000 + i, danger: i % 97 === 5 ? 'executable' : null, holders: i === 7 ? 0 : 1 };
+    });
+    return mockFolderListing(communityId, name, entries);
+  };
   // What the mock's OS picker holds. See `pick_listing_files`.
   const mockPicks = () => [...(window.__mockFolder?.files ?? []), ...(window.__mockPickFiles ?? MOCK_PICKS())];
   const MOCK_PICKS = () => [
@@ -999,6 +1025,42 @@ if (!window.__TAURI__) {
       const chosen = addable.find((x) => x.id === filter) ?? addable[0];
       return { root: folder, name: folder.split(/[\\/]/).pop(), tag: 'mock-folder', over_limit: 0, flagged_more: 0, too_deep: 0, hidden_dirs: [], stopped_early: false, max_files: 500, max_depth: 4, category: chosen?.id ?? null, ...scan };
     },
+    // Folder listings. The mock keeps each folder's entries; `window.__mockFolderChanged` is how many of its files changed.
+    list_folder: ({ communityId, categoryId, root, files, tags }) => {
+      const scan = window.__mockFolder?.files ?? [];
+      const entries = files.map((rel) => {
+        const found = scan.find((x) => x.relative === rel);
+        return { path: rel, name: rel.split('/').pop(), ext: found?.ext ?? '', kind: found?.kind ?? 'Other', size: found?.size ?? 1, danger: /\.(exe|msi|bat|ps1)$/i.test(rel) ? 'executable' : null, holders: 1 };
+      });
+      return mockFolderListing(communityId, root.split(/[\\/]/).pop(), entries, { category: categoryId, tags: tags.map((t) => t.replace(/^#/, '').toLowerCase()), mine: true, root });
+    },
+    folder_contents: ({ communityId, listingId }) => {
+      const l = servers[communityId].files.listings.find((x) => x.id === listingId);
+      const entries = mockFolders[listingId] ?? [];
+      return {
+        listing: listingId, name: l.name, files: entries.length, size: entries.reduce((n, e) => n + e.size, 0),
+        dangerous: entries.filter((e) => e.danger).length, unavailable: entries.filter((e) => e.holders === 0).length, entries,
+      };
+    },
+    download_folder: ({ communityId, listingId }) => {
+      const l = servers[communityId].files.listings.find((x) => x.id === listingId);
+      const entries = mockFolders[listingId] ?? [];
+      Object.assign(l, { local: 'downloading', progress: 0 });
+      mockFolderProgress[listingId] = entries.map((e) => ({ path: e.path, size: e.size, progress: 0, done: false }));
+      const step = window.__mockFolderStepMs ?? 150;
+      entries.forEach((_, i) => setTimeout(() => {
+        mockFolderProgress[listingId][i] = { ...mockFolderProgress[listingId][i], progress: 1, done: true };
+        l.progress = (i + 1) / entries.length;
+        if (i === entries.length - 1) Object.assign(l, { local: 'seeding', progress: 1, local_path: `C:\\Users\\ada\\Downloads\\${l.name}` });
+        emit({ kind: 'community_updated', community_id: communityId });
+      }, step * (i + 1)));
+      return { id: `dir-${listingId}`, message_id: `folder:${communityId}:${listingId}`, direction: 'download', name: l.name, size: l.size, state: 'active', progress: 0, peers: 1, started_ms: Date.now(), local_path: null, error: null, sources: [], pieces: null };
+    },
+    folder_download_files: ({ listingId }) => mockFolderProgress[listingId] ?? [],
+    relist_folder: ({ listingId }) => {
+      window.__mockPickFolder = mockFolderRoots[listingId];
+      return mockFolderRoots[listingId];
+    },
     plan_file_drop: ({ communityId, paths, filter }) => {
       const c = servers[communityId];
       handlers.files_view({ communityId });
@@ -1136,6 +1198,14 @@ if (!window.__TAURI__) {
       const f = servers[communityId].files;
       const s = (seeding.settings ??= { upload_bps: null, download_bps: null, alt: null, alt_on: false, max_active: 5, unmetered_only: true, pause_on_battery: false });
       const rows = f.listings.filter((l) => l.local === 'seeding' || l.local === 'paused').map((l) => {
+        if (l.folder) {
+          const changed = l.mine ? window.__mockFolderChanged ?? 0 : 0;
+          return {
+            blob: l.id, listing: l.id, name: l.name, ext: 'DIR', kind: 'Folder', category: l.category, folder: null, path: mockFolderRoots[l.id] ?? null,
+            state: 'seeding', note: changed ? `${changed} ${changed === 1 ? 'file' : 'files'} changed since listed, so ${changed === 1 ? 'it is' : 'they are'} no longer served` : 'Serving now',
+            limit_reached: false, size: l.size, uploaded: 0, ratio: 0, limit: 'forever', since_ms: l.added_ms, downloaded: !l.mine, changed, folder_files: l.folder.files, folder_root: mockFolderRoots[l.id] ?? null,
+          };
+        }
         const r = (seeding.records[l.id] ??= { limit: 'forever', paused: false, stopped: false });
         // A check sets this to show a seed under a limit it has reached.
         const reached = !!window.__seedLimitReached && r.limit !== 'forever';

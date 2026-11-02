@@ -582,6 +582,11 @@ impl Files {
     }
 
     /// Fails with [`FilesError::DiskFull`] when the blobs volume has less than `needed` free.
+    pub async fn ensure_space(&self, needed: u64) -> Result<()> {
+        self.check_space(needed).await
+    }
+
+    /// Fails with [`FilesError::DiskFull`] when the blobs volume has less than `needed` free.
     pub(crate) async fn check_space(&self, needed: u64) -> Result<()> {
         let probe = Arc::clone(&self.free_space);
         let dir = self.blobs_dir.clone();

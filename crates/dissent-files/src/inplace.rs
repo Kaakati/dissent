@@ -241,6 +241,11 @@ impl Files {
     }
 
     /// Stops serving a linked file for good and drops its outboard.
+    /// How many files are served in place now.
+    pub fn linked_count(&self) -> usize {
+        self.linked.0.read().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
+
     pub fn forget_linked(&self, hash: [u8; 32]) {
         self.unlink(hash);
         let _ = std::fs::remove_file(self.outboard_path(&Hash::from_bytes(hash)));

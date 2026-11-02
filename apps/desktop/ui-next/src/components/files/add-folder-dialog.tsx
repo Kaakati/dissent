@@ -10,7 +10,7 @@ import { checkFiles, filesApi, tileStyle, type CandidateView, type FilesView, ty
 import { toast } from '@/lib/toasts';
 import type { CommunityView } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { startAdds, type AddRow } from './file-adds';
+import { startAdds, startFolderListing, type AddRow } from './file-adds';
 import { useFilesUi } from './files-page';
 
 // Why a file cannot be ticked at all. Everything else can, even what starts unticked.
@@ -55,6 +55,7 @@ function AddFolder({ community, view, folder, close }: { community: CommunityVie
   const [tag, setTag] = useState('');
   const [on, setOn] = useState<Record<string, boolean>>({});
   const [checked, setChecked] = useState<Record<string, CandidateView>>({});
+  const [separate, setSeparate] = useState(false);
   const targets = view.categories.filter((c) => c.can_add && c.readable);
   const category = targets.find((c) => c.id === categoryId);
 
@@ -125,7 +126,11 @@ function AddFolder({ community, view, folder, close }: { community: CommunityVie
       listing: null,
     }));
     const tags = [...category.default_tags, ...tag.split(/[\s,]+/).filter(Boolean)];
-    startAdds(community.id, rows, { tagsFor: () => tags, inPlace: true, checked: ticked.map((f) => checked[f.path]) });
+    if (separate) {
+      startAdds(community.id, rows, { tagsFor: () => tags, inPlace: true, checked: ticked.map((f) => checked[f.path]) });
+    } else {
+      startFolderListing(community.id, scan.name, category.name, () => filesApi.listFolder(community.id, category.id, scan.root, ticked.map((f) => f.relative), tags, '', 'forever'));
+    }
     close();
   };
 
@@ -183,11 +188,21 @@ function AddFolder({ community, view, folder, close }: { community: CommunityVie
           <Input aria-label="Tag" value={tag} onChange={(e) => setTag(e.target.value)} />
         </label>
       </div>
+      <fieldset className="m-0 flex flex-col gap-1 border-0 p-0 text-ui text-text-strong">
+        <label className="flex items-center gap-s-2">
+          <input type="radio" name="folder-as" checked={!separate} onChange={() => setSeparate(false)} />
+          List as one folder <span className="text-sm text-muted-foreground">Members see what is inside and download it whole.</span>
+        </label>
+        <label className="flex items-center gap-s-2">
+          <input type="radio" name="folder-as" checked={separate} onChange={() => setSeparate(true)} />
+          List each file separately
+        </label>
+      </fieldset>
       <div className="flex items-center gap-s-2">
         <span className="mr-auto text-sm text-muted-foreground">Every member can download these. Files go exactly as they are, photo details included. Keep the folder where it is, or they stop being seeded.</span>
         <Button variant="ghost" onClick={close}>Cancel</Button>
         <Button disabled={!category || checking > 0 || ticked.length === 0} onClick={add}>
-          {checking ? `Checking ${checking}…` : `Add ${ticked.length} ${ticked.length === 1 ? 'file' : 'files'}`}
+          {checking ? `Checking ${checking}…` : separate ? `Add ${ticked.length} ${ticked.length === 1 ? 'file' : 'files'}` : `List folder · ${ticked.length} ${ticked.length === 1 ? 'file' : 'files'}`}
         </Button>
       </div>
     </div>

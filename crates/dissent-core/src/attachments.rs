@@ -374,7 +374,7 @@ fn split_failure(error: Option<&str>) -> (&str, String) {
 }
 
 /// Why a download failed, as the attachment card says it.
-fn failure_reason(e: &FilesError) -> String {
+pub(crate) fn failure_reason(e: &FilesError) -> String {
     match e {
         FilesError::NoProviders => "No device that has this file is known yet. Try again when the sender is online.".into(),
         FilesError::Fetch(_) => "Could not reach a device that has this file. Try again when the sender is online.".into(),
@@ -1304,7 +1304,11 @@ impl Engine {
     /// Stops a download and drops its row. The partial bytes stay until they expire.
     pub fn cancel_transfer(&self, id: &str) -> Result<()> {
         self.abort_task(id);
-        self.write().attach.transfers.remove(id);
+        let removed = self.write().attach.transfers.remove(id);
+        // A folder's staged files are kept only while the download can still resume.
+        if removed.is_some_and(|t| t.message_id.starts_with(crate::tracker::folder::FOLDER_PREFIX)) {
+            self.remove_folder_staging(id);
+        }
         self.persist_attach();
         self.emit(EngineEvent::TransfersChanged);
         Ok(())
@@ -1373,6 +1377,10 @@ impl Engine {
     }
 
     async fn run_download(&self, id: &str) {
+        // A whole folder downloads file by file. See `tracker::folder`.
+        if self.read().attach.transfers.get(id).is_some_and(|t| t.message_id.starts_with(crate::tracker::folder::FOLDER_PREFIX)) {
+            return self.run_folder_download(id).await;
+        }
         let (file, providers, message_id) = {
             let w = self.read();
             match w.attach.transfers.get(id) {
@@ -1487,6 +1495,10 @@ impl Engine {
         }
     }
 
+    pub(crate) fn fail_transfer(&self, id: &str, state: &str, error: String) {
+        self.fail(id, state, error);
+    }
+
     fn fail(&self, id: &str, state: &str, error: String) {
         {
             let mut guard = self.write();
@@ -1500,7 +1512,7 @@ impl Engine {
         self.emit(EngineEvent::TransfersChanged);
     }
 
-    fn set_progress(&self, id: &str, progress: f64, message_id: &str, tell: bool) {
+    pub(crate) fn set_progress(&self, id: &str, progress: f64, message_id: &str, tell: bool) {
         let changed = {
             let mut guard = self.write();
             match guard.attach.transfers.get_mut(id) {

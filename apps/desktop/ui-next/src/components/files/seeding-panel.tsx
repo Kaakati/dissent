@@ -6,10 +6,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tip } from '@/components/ui/tip';
 import { formatBytes } from '@/components/transfers/format';
-import { limitLabel, seedingApi, tileStyle, type SeedingSettings, type SeedingView, type SeedRowView, type SeedState } from '@/lib/files';
+import { filesApi, limitLabel, seedingApi, tileStyle, type SeedingSettings, type SeedingView, type SeedRowView, type SeedState } from '@/lib/files';
+import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { Id } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import { openAddFolder } from './add-folder-dialog';
 
 const MB = 1024 * 1024;
 const STATE_LABEL: Record<SeedState, string> = { seeding: 'Seeding', paused: 'Paused', scheduled: 'Scheduled', queued: 'Queued', stopped: 'Stopped' };
@@ -103,6 +105,18 @@ function Tile({ k, v, sub }: { k: string; v: string; sub: string }) {
   );
 }
 
+// Lists the folder of a folder listing again, as it is now, through the folder dialog.
+async function relist(communityId: Id, listing: Id): Promise<void> {
+  try {
+    const root = await filesApi.relistFolder(communityId, listing);
+    const community = useShell.getState().community;
+    if (community?.id !== communityId) return;
+    await openAddFolder(community, await filesApi.view(communityId), root);
+  } catch (err) {
+    toast(err);
+  }
+}
+
 function Row({ row: r, open, onToggle, communityId, act }: { row: SeedRowView; open: boolean; onToggle: () => void; communityId: Id; act: (f: () => Promise<void>) => Promise<void> }) {
   const active = r.state === 'seeding' || r.state === 'scheduled' || r.state === 'queued';
   return (
@@ -112,12 +126,17 @@ function Row({ row: r, open, onToggle, communityId, act }: { row: SeedRowView; o
           <span className="grid h-8 w-10 shrink-0 place-items-center rounded text-[10px] font-bold text-white" style={tileStyle(r.kind)}>{r.ext || 'FILE'}</span>
           <span className="min-w-0">
             <span className="block truncate font-medium text-text-strong">{r.name}</span>
-            <span className="block truncate text-meta text-muted-foreground">{r.folder ?? r.path ?? ''}</span>
+            <span className="block truncate text-meta text-muted-foreground">{r.folder_files != null ? `Folder · ${r.folder_files} files · ` : ''}{r.folder ?? r.path ?? ''}</span>
           </span>
         </span>
         <span className="min-w-0">
           <span className={cn('inline-block rounded-full px-2 text-meta font-semibold', STATE_CLASS[r.state])} data-seed-state={r.state}>{STATE_LABEL[r.state]}</span>
-          <span className="block truncate text-meta text-muted-foreground">{r.note}</span>
+          <span className={cn('block truncate text-meta', r.changed ? 'text-warn' : 'text-muted-foreground')} data-seed-note>{r.note}</span>
+          {r.changed && r.folder_root ? (
+            <button type="button" data-relist className="text-left text-meta font-semibold text-link hover:underline" onClick={() => void relist(communityId, r.listing)}>
+              List again as a new folder
+            </button>
+          ) : null}
         </span>
         <span className={cn('text-right tabular-nums', r.ratio >= 1 ? 'text-success-text' : 'text-warn')}>{r.ratio.toFixed(1)}</span>
         <span className="text-right tabular-nums">{formatBytes(r.uploaded)}</span>

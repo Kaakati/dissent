@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use dissent_core::tracker::adding::PickedView;
 use dissent_core::tracker::catalog::{AddItem, CategoryInput, FilesView};
 use dissent_core::tracker::drops::DropPlan;
+use dissent_core::tracker::folder::{FolderContentsView, FolderFileProgress};
 use dissent_core::tracker::folders::FolderScan;
 use dissent_core::tracker::live::LiveSwarm;
 use dissent_core::tracker::swarm::SwarmView;
@@ -150,6 +151,58 @@ pub async fn scan_listing_folder(state: State<'_, AppState>, community_id: Strin
     let community: CommunityId = parse("community id", &community_id)?;
     let filter: Option<CategoryId> = filter.map(|f| parse("category id", &f)).transpose()?;
     engine(&state).await?.scan_folder(community, folder, filter).await.map_err(err)
+}
+
+/// Lists a whole folder as one listing: `files` below `root`, `/` between parts, each checked beforehand.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // a Tauri command takes its arguments flat, as the UI sends them
+pub async fn list_folder(
+    state: State<'_, AppState>,
+    community_id: String,
+    category_id: String,
+    root: PathBuf,
+    files: Vec<String>,
+    tags: Vec<String>,
+    description: String,
+    limit: String,
+) -> Result<String, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: CategoryId = parse("category id", &category_id)?;
+    let limit = parse_limit(&limit).map_err(err)?;
+    engine(&state).await?.list_folder(community, id, root, files, tags, description, limit).await.map_err(err)
+}
+
+/// What a folder listing holds, fetched from a member when this device does not have it yet.
+#[tauri::command]
+pub async fn folder_contents(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<FolderContentsView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.folder_contents(community, id).await.map_err(err)
+}
+
+/// Downloads a whole folder into the download folder. It shows in Transfers as one entry.
+#[tauri::command]
+pub async fn download_folder(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<TransferView, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.download_folder(community, id).await.map_err(err)
+}
+
+/// Each file of a folder download, by the folder listing.
+#[tauri::command]
+pub async fn folder_download_files(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<Vec<FolderFileProgress>, String> {
+    let engine = engine(&state).await?;
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    Ok(engine.folder_download_files_of(community, id))
+}
+
+/// The folder this device listed a folder listing from, so it can be listed again.
+#[tauri::command]
+pub async fn relist_folder(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<PathBuf, String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    let id: EventId = parse("listing id", &listing_id)?;
+    engine(&state).await?.relist_folder(community, id).map_err(err)
 }
 
 /// What a drop on the Files page will do with `paths`. A server with no category gets them here, when this person may make

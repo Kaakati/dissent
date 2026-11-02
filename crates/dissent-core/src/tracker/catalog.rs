@@ -88,6 +88,8 @@ pub struct ListingView {
     pub danger: Option<dissent_files::Danger>,
     pub progress: f64,
     pub can_edit: bool,
+    /// Set for a folder listing. See `tracker::folder`.
+    pub folder: Option<super::folder::FolderInfo>,
 }
 
 /// The next reputation level and how far this member is from it.
@@ -395,6 +397,7 @@ impl Engine {
                 danger,
                 progress,
                 can_edit: first.lister == me || manage,
+                folder: None,
             });
         }
 
@@ -465,8 +468,18 @@ impl Engine {
             downloaded,
             ratio: (downloaded > 0).then(|| uploaded as f64 / downloaded as f64),
         };
-        let locked = st.files.listings.len().saturating_sub(opened.len()) as u32;
+        let folders_count = self.opened_folders_count(community);
+        let locked = st.files.listings.len().saturating_sub(opened.len() + folders_count) as u32;
         drop(w);
+        // Folder listings, each one row, counted in their categories.
+        let folder_views = self.folder_views(community);
+        for v in &folder_views {
+            if let Some(c) = categories.iter_mut().find(|c| c.id == v.category) {
+                c.files += 1;
+                c.bytes += v.size;
+            }
+        }
+        listings.extend(folder_views);
         let locked_restricted: Vec<CategoryId> = categories
             .iter()
             .filter(|c| c.restricted && !c.readable)
@@ -644,7 +657,7 @@ impl Engine {
     }
 
     /// The fingerprint and size of the file at `path`, kept if the file is unchanged, or read now.
-    async fn fingerprint_of(&self, community: CommunityId, path: &Path) -> Result<([u8; 32], u64)> {
+    pub(super) async fn fingerprint_of(&self, community: CommunityId, path: &Path) -> Result<([u8; 32], u64)> {
         let kept = self.with_tracker(community, |l| l.fingerprints.get(path).copied());
         if let (Some((size, modified, fp)), Ok(meta)) = (kept, std::fs::symlink_metadata(path)) {
             if meta.len() == size && modified.is_some() && super::modified_ms(path) == modified {
@@ -704,7 +717,7 @@ impl Engine {
         view
     }
 
-    fn category_types(&self, community: CommunityId, category: CategoryId) -> Result<Vec<FileType>> {
+    pub(super) fn category_types(&self, community: CommunityId, category: CategoryId) -> Result<Vec<FileType>> {
         let keys = self.with_tracker(community, |l| l.keys.clone());
         let w = self.read();
         let c = w.communities.get(&community).ok_or_else(|| crate::engine::not_found(&community))?;
@@ -883,9 +896,10 @@ impl Engine {
 
     /// Removes a listing. This device stops seeding it, unless another listing names the same file.
     pub async fn remove_listing(&self, community: CommunityId, listing: EventId) -> Result<()> {
-        let blob = self.opened_listings(community).into_iter().find(|o| o.id == listing).map(|o| o.body.blob);
+        let mut blobs: Vec<[u8; 32]> = self.opened_listings(community).into_iter().filter(|o| o.id == listing).map(|o| o.body.blob).collect();
+        blobs.extend(self.folder_blobs(community, listing));
         self.author_publish(community, ChannelId::CONTROL, Payload::FileListingRemove { listing }).await?;
-        if let Some(blob) = blob {
+        for blob in blobs {
             self.drop_seed_if_unlisted(community, blob).await;
         }
         Ok(())
@@ -893,7 +907,7 @@ impl Engine {
 
     /// Stops seeding `blob` and lets its copy go when no listing names it any more.
     pub(crate) async fn drop_seed_if_unlisted(&self, community: CommunityId, blob: [u8; 32]) {
-        if self.opened_listings(community).iter().any(|o| o.body.blob == blob) {
+        if self.opened_blobs(community).iter().any(|o| o.body.blob == blob) {
             return;
         }
         let Some(record) = self.with_tracker(community, |l| l.book.seeds.remove(&blob)) else { return };
@@ -1019,7 +1033,7 @@ impl Engine {
         self.emit(EngineEvent::CommunityUpdated { community_id: community.to_string() });
     }
 
-    fn category_rules(&self, community: CommunityId, category: CategoryId) -> Option<DownloadRules> {
+    pub(super) fn category_rules(&self, community: CommunityId, category: CategoryId) -> Option<DownloadRules> {
         let keys = self.with_tracker(community, |l| l.keys.clone());
         let w = self.read();
         let st = w.communities.get(&community)?.state();
