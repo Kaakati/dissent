@@ -390,6 +390,12 @@ impl<T: PacketTransport> Mesh<T> {
             .collect()
     }
 
+    /// Whether each call has finished ICE and DTLS, for diagnostics.
+    #[doc(hidden)]
+    pub fn connected(&self) -> BTreeMap<u64, bool> {
+        self.calls.iter().map(|(peer, call)| (*peer, call.is_connected())).collect()
+    }
+
     fn ensure_new_peer(&self, peer: u64) -> Result<()> {
         if self.calls.contains_key(&peer) {
             return Err(MediaError::BadState("already connected to this peer"));

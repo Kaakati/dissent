@@ -26,6 +26,17 @@ pub(crate) struct Speaking {
     pub last_sent: Option<Instant>,
     /// The sender ids last reported as speaking, this device's included.
     shown: BTreeSet<u64>,
+    /// Checks run, for a test that timed out.
+    pub checks: u64,
+    /// Checks that found the speakers changed and announced it.
+    pub emits: u64,
+}
+
+impl Speaking {
+    /// How many speakers the window was last told of.
+    pub(crate) fn shown_len(&self) -> usize {
+        self.shown.len()
+    }
 }
 
 impl Room {
@@ -69,6 +80,8 @@ impl Engine {
             let mut state = lock(&room.speaking);
             let changed = state.shown != speaking;
             state.shown = speaking;
+            state.checks += 1;
+            state.emits += u64::from(changed);
             changed
         };
         if changed {

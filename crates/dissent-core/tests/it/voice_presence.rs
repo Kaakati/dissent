@@ -288,10 +288,11 @@ async fn the_roster_lists_each_person_once_and_shows_who_speaks() {
         while !announced() {
             assert!(
                 std::time::Instant::now() < deadline,
-                "timed out waiting for speaking changes to be announced: speaking events {}, lagged {}, {}",
+                "timed out waiting for speaking changes to be announced: speaking events {}, lagged {}, {} | {}",
                 speaking_events.load(std::sync::atomic::Ordering::Relaxed),
                 lagged.load(std::sync::atomic::Ordering::Relaxed),
                 crate::calls::call_summary(&alice),
+                crate::calls::call_summary(&bob),
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

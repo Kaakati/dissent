@@ -700,6 +700,47 @@ pub(crate) struct Room {
     keyframe_wanted: AtomicBool,
     /// Who speaks: this device's last sent frame, and the speakers last shown. See `speaking`.
     speaking: Mutex<speaking::Speaking>,
+    /// Audio sends that went out and those that did not, for a test that timed out.
+    sends: Mutex<SendCounts>,
+    /// The step the call loop is at, when it got there, and which code last took the mesh lock: atomics only, so a
+    /// watchdog can read them while the loop is stuck. See `Engine::call_breadcrumbs`.
+    step: AtomicU32,
+    step_at: AtomicU64,
+    mesh_by: AtomicU32,
+}
+
+/// What the call loop did with this device's audio, for a test that timed out.
+#[derive(Clone, Default)]
+struct SendCounts {
+    /// Frames the mesh took.
+    sent: u64,
+    /// Frames it refused, by error.
+    failed: BTreeMap<String, u64>,
+    /// Ticks with no audio to send.
+    empty: u64,
+}
+
+/// Which code last took a room's mesh lock, for `Room::mesh_by`.
+mod mesh_site {
+    pub const DRIVE: u32 = 1;
+    pub const OFFER: u32 = 3;
+    pub const ACCEPT: u32 = 4;
+    pub const LEAVE: u32 = 5;
+    pub const LEARN_MEMBER: u32 = 6;
+    pub const NAMES: [&str; 7] = ["none", "drive", "?", "offer", "accept", "leave", "learn_member"];
+}
+
+/// Call-loop steps, for `Room::step`.
+mod step {
+    pub const TICK: u32 = 1;
+    pub const MESH_LOCK: u32 = 2;
+    pub const MEMBERSHIP: u32 = 3;
+    pub const FORWARDED: u32 = 4;
+    pub const RECEIVE: u32 = 5;
+    pub const SEND: u32 = 6;
+    pub const VIDEO: u32 = 7;
+    pub const SPEAKING: u32 = 8;
+    pub const NAMES: [&str; 9] = ["none", "tick", "mesh_lock", "membership", "forwarded", "receive", "send", "video", "speaking"];
 }
 
 /// A received camera or screen frame, still encoded, for a window that decodes it itself.
@@ -1056,6 +1097,11 @@ fn path_is_direct(link: &MediaLink) -> bool {
 }
 
 impl Room {
+    fn at_step(&self, step: u32) {
+        self.step.store(step, Ordering::Relaxed);
+        self.step_at.store(now_ms(), Ordering::Relaxed);
+    }
+
     fn new(
         id: RoomId,
         scope: Scope,
@@ -1108,6 +1154,10 @@ impl Room {
             screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
             speaking: Mutex::new(speaking::Speaking::default()),
+            sends: Mutex::new(SendCounts::default()),
+            step: AtomicU32::new(0),
+            step_at: AtomicU64::new(0),
+            mesh_by: AtomicU32::new(0),
         }
     }
 
@@ -1628,6 +1678,9 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut since_check: u32 = 0;
     loop {
+        if let Some(room) = room.upgrade() {
+            room.at_step(step::TICK);
+        }
         let due = tick.tick().await;
         let (Some(inner), Some(room)) = (weak.upgrade(), room.upgrade()) else {
             break;
@@ -1642,19 +1695,25 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
             break;
         }
         let engine = Engine { inner };
+        room.at_step(step::MESH_LOCK);
         let mut mesh = room.mesh.lock().await;
+        room.mesh_by.store(mesh_site::DRIVE, Ordering::Relaxed);
         since_check += 1;
         if since_check >= MEMBERSHIP_EVERY {
             since_check = 0;
+            room.at_step(step::MEMBERSHIP);
             engine.check_membership(&room, &mut mesh).await;
             engine.refresh_quality(&room, &mesh);
         }
         if let Some(forwarding) = room.forwarding.as_ref() {
             drop(mesh);
+            room.at_step(step::FORWARDED);
             pump_forwarded(&engine, &room, forwarding).await;
+            room.at_step(step::SPEAKING);
             engine.check_speaking(&room);
             continue;
         }
+        room.at_step(step::RECEIVE);
         while let Ok(Ok(Some(frame))) =
             tokio::time::timeout(Duration::from_millis(1), mesh.next_received_frame()).await
         {
@@ -1666,15 +1725,27 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
         if room.sending.load(Ordering::SeqCst) {
             lock(&room.audio).outgoing(&mut outgoing);
         }
+        if outgoing.is_empty() {
+            lock(&room.sends).empty += 1;
+        }
+        room.at_step(step::SEND);
         if !room.is_muted() {
             for (timestamp, bytes) in outgoing {
                 match mesh.send_audio_frame_at(&bytes, timestamp).await {
-                    Ok(()) => room.note_sent_audio(),
-                    Err(e) => debug!(error = %e, "call frame not sent"),
+                    Ok(()) => {
+                        lock(&room.sends).sent += 1;
+                        room.note_sent_audio()
+                    }
+                    Err(e) => {
+                        *lock(&room.sends).failed.entry(e.to_string()).or_default() += 1;
+                        debug!(error = %e, "call frame not sent")
+                    }
                 }
             }
         }
+        room.at_step(step::SPEAKING);
         engine.check_speaking(&room);
+        room.at_step(step::VIDEO);
         pump_video_mesh(&engine, &room, &mut mesh).await;
     }
 }
@@ -2216,6 +2287,7 @@ impl Engine {
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
             let mut mesh = room.mesh.lock().await;
+            room.mesh_by.store(mesh_site::OFFER, Ordering::Relaxed);
             mesh.offer(sid, transport).await.map_err(call_err)?
         };
         let reply = self
@@ -3033,6 +3105,7 @@ impl Engine {
                 }
                 None => {
                     let mut mesh = room.mesh.lock().await;
+                    room.mesh_by.store(mesh_site::ACCEPT, Ordering::Relaxed);
                     mesh.accept(sid, transport, offer).await.map_err(call_err)?
                 }
             };
@@ -3359,6 +3432,7 @@ impl Engine {
         }
         let sids: Vec<u64> = lock(&room.peers).keys().copied().collect();
         let mut mesh = room.mesh.lock().await;
+        room.mesh_by.store(mesh_site::LEAVE, Ordering::Relaxed);
         for sid in sids {
             mesh.remove_peer(sid);
         }
@@ -3576,6 +3650,7 @@ impl Engine {
     /// Takes the media lock and starts (`Some`) or stops (`None`) verifying a member's digests.
     async fn learn_member_locked(&self, room: &Arc<Room>, sid: u64, cert: Option<DeviceCert>) {
         let mut mesh = room.mesh.lock().await;
+        room.mesh_by.store(mesh_site::LEARN_MEMBER, Ordering::Relaxed);
         self.learn_member(room, &mut mesh, sid, cert).await;
     }
 
@@ -4430,6 +4505,89 @@ impl Engine {
     /// The MLS key and epoch of a group, for media. A group call's key comes from its MLS group,
     /// as a channel's does.
     /// What `test_support::call_key_state` reads.
+    /// The call loop's step and how long it has been there, and whether the mesh lock is free, from atomics and
+    /// try-locks only, so a watchdog can read it while a thread holding a lock is stuck.
+    pub(crate) fn call_breadcrumbs(&self) -> String {
+        let room = match self.inner.calls.current.try_lock() {
+            Ok(current) => current.clone(),
+            Err(_) => return "calls.current is locked".into(),
+        };
+        let Some(room) = room else {
+            return "no call".into();
+        };
+        let step = room.step.load(Ordering::Relaxed);
+        let since = now_ms().saturating_sub(room.step_at.load(Ordering::Relaxed));
+        let mesh = match room.mesh.try_lock() {
+            Ok(_) => "free".to_string(),
+            Err(_) => format!(
+                "held, last taken by {}",
+                mesh_site::NAMES.get(room.mesh_by.load(Ordering::Relaxed) as usize).copied().unwrap_or("?")
+            ),
+        };
+        format!(
+            "step={} for {since} ms, ticks={}, mesh lock {mesh}",
+            step::NAMES.get(step as usize).copied().unwrap_or("?"),
+            room.loop_stats[0].load(Ordering::Relaxed),
+        )
+    }
+
+    /// Where this device's call loop stands, for a test that timed out: ticks run, speaking
+    /// checks and announcements, what the window last heard of, and each link's frame counters.
+    pub(crate) fn call_debug(&self) -> String {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return "no call".into();
+        };
+        let now = Instant::now();
+        let (checks, emits, shown, sent_ago) = {
+            let s = lock(&room.speaking);
+            (s.checks, s.emits, s.shown_len(), s.last_sent.map(|t| now.duration_since(t).as_millis()))
+        };
+        let peers: Vec<String> = lock(&room.peers)
+            .iter()
+            .map(|(sid, p)| format!("{sid}:muted={} last_frame_ago_ms={:?}", p.muted, p.last_frame.map(|t| now.duration_since(t).as_millis())))
+            .collect();
+        let links = match room.mesh.try_lock() {
+            Ok(mesh) => format!("connected={:?} ", mesh.connected())
+                + &mesh
+                .stats()
+                .iter()
+                .map(|(sid, s)| {
+                    format!(
+                        "{sid}:sent={} recv={} undecryptable={} replayed={} unauth={} impersonation={} retired={} sender_capped={} id_capped={} pkts_sent={} pkts_recv={}",
+                        s.frames_sent,
+                        s.frames_received,
+                        s.frames_undecryptable,
+                        s.frames_replayed,
+                        s.frames_unauthenticated,
+                        s.impersonation_detected,
+                        s.frames_retired_session,
+                        s.frames_sender_capped,
+                        s.frames_id_capped,
+                        s.packets_sent,
+                        s.packets_received,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+            Err(_) => "mesh locked".into(),
+        };
+        // Copied out under one guard. A `lock` in each format argument would hold the first guard while taking the
+        // next, and deadlock.
+        let sends = lock(&room.sends).clone();
+        format!(
+            "send_ok={} send_err={:?} empty_ticks={} ticks={} forwarded={} sending={} muted={} speaking_checks={checks} speaking_emits={emits} shown={shown} last_sent_ago_ms={sent_ago:?} peers=[{}] links=[{links}] receivers={}",
+            sends.sent,
+            sends.failed,
+            sends.empty,
+            room.loop_stats[0].load(Ordering::Relaxed),
+            room.forwarding.is_some(),
+            room.sending.load(Ordering::SeqCst),
+            room.is_muted(),
+            peers.join(", "),
+            self.inner.events.receiver_count(),
+        )
+    }
+
     pub(crate) fn call_key_state(&self) -> Option<([u8; 4], u64, u64)> {
         let room = lock(&self.inner.calls.current).clone()?;
         let (key, epoch) = self.group_key_of(room.scope.group_id()?).ok()?;

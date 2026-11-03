@@ -68,6 +68,7 @@ pub async fn start_on(identity: Identity, dir: PathBuf, port: u16) -> Peer {
     )
     .await
     .expect("engine starts");
+    watch_engine(&dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), &engine);
     Peer {
         engine,
         identity,
