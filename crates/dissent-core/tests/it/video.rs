@@ -419,3 +419,49 @@ async fn a_share_can_carry_the_computers_sound_at_each_viewers_volume() {
     .await;
 }
 
+/// A 1440p screen decoded into previews on the receiver must not hold up that device's call loop, which also
+/// carries its audio. Bob has no window decoding for him, so every frame goes through the engine's own decoder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_received_1440p_screen_does_not_hold_up_the_call_loop() {
+    let _serial = SERIAL.lock().await;
+    heavy(5, async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        make_contacts_ready(&alice, &bob).await;
+        let mut bob_events = bob.engine.subscribe();
+        alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
+        accept_incoming(&bob.engine, &mut bob_events).await;
+        eventually("the call is up on both sides", || {
+            alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)
+        })
+        .await;
+        let alice_root = alice.identity.root_id().to_string();
+        let measure = |label: &str| {
+            let stats = dissent_core::test_support::take_loop_stats(&bob.engine).expect("in a call");
+            println!("LOOP {label}: {} ticks, {} over 40 ms late, worst {:.0} ms, {} audio frames from Alice in 10 s", stats.0, stats.1, stats.2, stats.3);
+            stats
+        };
+        dissent_core::test_support::take_loop_stats(&bob.engine);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let quiet = measure("without a share");
+
+        alice.engine.set_test_capture(TestCapture::Document { width: 2560, height: 1440 });
+        alice.engine.set_screen_bitrate(6_000);
+        alice.engine.set_screen_share(true, None).expect("screen share on");
+        bob.engine.set_video_tile(&alice_root, true, 2560);
+        let (count, _) = previews_for(&mut bob_events, &alice_root, true, Duration::from_secs(20)).await;
+        assert!(count > 0, "Bob's engine makes previews of the share");
+        dissent_core::test_support::take_loop_stats(&bob.engine);
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let sharing = measure("receiving a 1440p share as previews");
+        assert!(quiet.3 >= 400, "audio flows without a share: {quiet:?}");
+        assert!(sharing.3 >= quiet.3 * 9 / 10, "the share does not cost Bob his audio: {sharing:?} against {quiet:?}");
+        assert!(sharing.2 < 100.0, "the call loop is never held up for long: {sharing:?}");
+
+        alice.engine.set_screen_share(false, None).expect("screen share off");
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
