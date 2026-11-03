@@ -52,7 +52,7 @@ function savedItem(ref: MessageRef): ViewItem {
   return {
     id: ref.message_id, author: ref.author_name, authorName: ref.author_name, text: ref.text, ms: Number(ref.ms),
     edited: false, deleted: false, locked: false, beforeJoin: false, own: false, pending: false, queued: false,
-    failed: false, failReason: null, retryable: false, system: false, replyTo: null, mentions: [], mentionsMe: false,
+    failed: false, failReason: null, retryable: false, system: false, notice: null, replyTo: null, mentions: [], mentionsMe: false,
     mentionsEveryone: false, reactions: null, attachments: null, embeds: [],
   };
 }

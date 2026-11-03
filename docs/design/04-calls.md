@@ -24,6 +24,24 @@ The media crate never touches the network for signalling. It returns a `Signal` 
 
 Host candidates ride inside the offer and answer, so the spike never sends trickled candidates.
 
+## Who can call you
+
+Settings › Contacts & privacy › "Who can call you": **Everyone** (the default, as before), **Friends only** (contacts) or **No one**. It covers DM calls and group calls that ring this device. Joining a server voice channel is not calling someone, so it is not covered, and the setting's hint says so. Code: `crates/dissent-core/src/call_privacy.rs`.
+
+- **Stored per device**, sealed like every store file (`call_privacy.bin`), as the DM policy is. Nothing syncs settings across a person's devices yet, so each device enforces its own: a call rings the devices that allow it.
+- **Enforced by the engine of the device being called**, in `on_join`, for a new incoming call only, before anything is kept: no ringing state, no `IncomingCall` or `CallMissed` event, no sound or notification, no room, no media key (the DM call's key in the join is dropped), and not even the caller's address. It holds whether or not the window is open. A call already in progress is not cut off by changing the setting.
+- **The caller sees an unanswered call.** The refused device answers the join with `Ringing`, as a ringing device does, and sends `Decline` after the ring timeout, as a device whose user did not pick up does. If the caller gives up first, its `Leave` ends the wait, as it ends a ring. A device already ringing for another call answers "busy" the same way it would. The caller's own timer ends its side at the same time either way. No other message goes to the caller, so neither timing, error text nor a missing step tells it apart. A DM caller the DM policy keeps out, a blocked one included, is now answered the same way instead of with an immediate refusal, so the caller cannot tell which turned it away.
+- **A missed entry.** A call this setting turned away leaves a quiet line in its conversation ("Missed call from X: not in your friends", or "...: you are not taking calls" under No one), kept on this device in `call_notes.bin` (the newest 500). The engine announces it with `DmChanged` or `ConversationChanged`, which redraw without alerting. A blocked caller, or one the DM policy keeps out, leaves nothing.
+- **Older clients** need no change: the refusal uses only `Ringing` and `Decline`, which every released client already handles.
+
+Tests: `call_privacy::tests` (the decision for each setting against a contact, a stranger, a blocked caller and one the DM policy keeps out); `tests/it/call_privacy.rs`, through fwtest:
+- a non-friend's DM call never rings and leaves the entry
+- each setting against a contact and a blocked caller
+- a group call rings only whom the settings let
+- a refused call looks to the caller like an unanswered one: the same call events in order, the same look while ringing, an end within 1.5 s of the unanswered call's
+
+The UI driver checks the setting (CP1-CP3) and the entry (CP4).
+
 ## Transports
 
 A call moves datagrams through a `PacketTransport`. The call logic does not depend on which one it gets.

@@ -237,6 +237,7 @@ impl Engine {
             },
             edited: ov.edits.contains_key(&m.id),
             deleted,
+            notice: None,
         }
     }
 

@@ -725,7 +725,7 @@ pub type EncodedSink = Arc<dyn Fn(EncodedVideo) -> bool + Send + Sync>;
 
 /// An incoming direct call the user has not answered yet. No media exists until they accept.
 pub(crate) struct Ringing {
-    id: RoomId,
+    pub(crate) id: RoomId,
     from: DeviceId,
     /// The person calling.
     peer: RootId,
@@ -765,8 +765,10 @@ pub(crate) struct CallHub {
     capacity_override: AtomicU32,
     incoming: Mutex<BTreeMap<DeviceId, MediaLink>>,
     arrived: Notify,
-    ringing: Mutex<Option<Ringing>>,
-    ring_timeout: Mutex<Duration>,
+    pub(crate) ringing: Mutex<Option<Ringing>>,
+    pub(crate) ring_timeout: Mutex<Duration>,
+    /// Calls this device answers as unanswered because of its call setting, by caller device. See `call_privacy`.
+    pub(crate) quiet: Mutex<BTreeMap<RoomId, DeviceId>>,
     /// DM and group calls other devices said they are in, by device.
     heard: Mutex<BTreeMap<DeviceId, Heard>>,
     /// Whether new calls use the voice pipeline instead of synthetic frames.
@@ -796,6 +798,7 @@ impl CallHub {
             arrived: Notify::new(),
             ringing: Mutex::new(None),
             ring_timeout: Mutex::new(timings.ring_timeout),
+            quiet: Mutex::new(BTreeMap::new()),
             heard: Mutex::new(BTreeMap::new()),
             voice: AtomicBool::new(false),
             sender_config: Mutex::new(SenderConfig::default()),
@@ -2340,6 +2343,7 @@ impl Engine {
                 }
                 CallReply::Ack
             }
+            CallMsg::Leave { room } if self.end_quiet_ring(&room, &from) => CallReply::Ack,
             CallMsg::Leave { room } => {
                 // The caller gave up while the call rang here. Stop ringing and report it missed.
                 let cancelled = {
@@ -2707,11 +2711,27 @@ impl Engine {
         // Someone who may not join hears what anyone hears for a call this device is not in, and
         // this device keeps nothing of theirs, not even the address.
         if let Err(why) = self.may_join(&scope, cert.root) {
+            // A DM caller the DM policy keeps out is answered as a call nobody picks up, as the call setting
+            // answers, so the caller cannot tell which turned it away.
+            if matches!(scope, Scope::Dm) && self.room_for(&id, None).is_none() {
+                return self.refuse_quietly(id, from, scope, cert.root, None);
+            }
             debug!(device = %from, why, "call join refused");
             return CallReply::Refused("not in this call".into());
         }
-        self.learn_peer(from, addr);
         let existing = self.room_for(&id, None);
+        if existing.is_none() {
+            // A new incoming call. Who can call this device (`call_privacy`) is decided before anything is kept
+            // of the caller, the address included.
+            match self.call_verdict(&scope, cert.root, ring) {
+                crate::call_privacy::Verdict::Ring => {}
+                crate::call_privacy::Verdict::Quiet(reason) => {
+                    return self.refuse_quietly(id, from, scope, cert.root, Some(reason))
+                }
+                crate::call_privacy::Verdict::Silent => return self.refuse_quietly(id, from, scope, cert.root, None),
+            }
+        }
+        self.learn_peer(from, addr);
         match existing {
             Some(room) if room.id == id => {
                 // A direct call takes one device. A second one that accepts late is refused.
@@ -2741,6 +2761,18 @@ impl Engine {
             Scope::Group { conv } if ring => self.ring_group(id, from, cert, conv),
             Scope::Group { .. } => CallReply::Refused("not in this call".into()),
         }
+    }
+
+    /// A refused call, answered as an unanswered one. See `call_privacy`.
+    fn refuse_quietly(
+        &self,
+        id: RoomId,
+        from: DeviceId,
+        scope: Scope,
+        caller: RootId,
+        note: Option<crate::call_privacy::NoteReason>,
+    ) -> CallReply {
+        self.ring_quietly(id, from, scope, caller, note)
     }
 
     /// The device is in this call: say so, and connect if this side has the lower id.

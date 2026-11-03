@@ -2,7 +2,7 @@
 //! the engine method of the same concept. Names and argument keys match `ui-next/src/lib/api.ts`.
 
 use dissent_core::{
-    ConversationSummary, ConvId, DmItem, DmPolicy, RootId, UserView,
+    CallPolicy, ConversationSummary, ConvId, DmItem, DmPolicy, RootId, UserView,
 };
 use tauri::State;
 
@@ -100,6 +100,17 @@ pub async fn dm_policy(state: State<'_, AppState>) -> Result<DmPolicy, String> {
 #[tauri::command]
 pub async fn set_dm_policy(state: State<'_, AppState>, policy: DmPolicy) -> Result<(), String> {
     engine(&state).await?.set_dm_policy(policy).map_err(err)
+}
+
+/// Who can call this device: `everyone`, `friends` or `no_one`.
+#[tauri::command]
+pub async fn call_policy(state: State<'_, AppState>) -> Result<CallPolicy, String> {
+    Ok(engine(&state).await?.call_policy())
+}
+
+#[tauri::command]
+pub async fn set_call_policy(state: State<'_, AppState>, policy: CallPolicy) -> Result<(), String> {
+    engine(&state).await?.set_call_policy(policy).map_err(err)
 }
 
 // ---- conversations and groups ----

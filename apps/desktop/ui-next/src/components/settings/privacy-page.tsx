@@ -1,15 +1,16 @@
-// Settings > Contacts & privacy: whether people can add you by address. On by default. Off takes your address off the
-// DHT; contact links keep working. Below it, your profile card as other people see it. Ported from the profile section of
+// Settings > Contacts & privacy: whether people can add you by address (on by default; off takes your address off the
+// DHT, and contact links keep working), and who can call you. Below it, your profile card as other people see it. Ported from the profile section of
 // views/settings.js.
 import { useEffect, useState } from 'react';
 import { ProfileCardBody } from '@/components/profile/profile-card';
 import { useUserProfile } from '@/components/profile/use-user-profile';
-import { Block, CheckRow, CHECK_CLASS, Hint } from '@/components/settings/settings-ui';
+import { Block, CheckRow, CHECK_CLASS, Choices, Hint } from '@/components/settings/settings-ui';
 import { api } from '@/lib/api';
 import { themeProps } from '@/lib/profile-theme';
 import { setShellPrefs, useShellPrefs } from '@/lib/shell-prefs';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
+import type { CallPolicy } from '@/lib/types';
 
 // Your card, read as others read it, with the actions left out.
 function CardPreview() {
@@ -21,6 +22,61 @@ function CardPreview() {
     <div className="w-[300px] overflow-hidden rounded-lg bg-ink" {...themeProps(load.view.theme)}>
       <ProfileCardBody view={load.view} userId={me.root_id} preview />
     </div>
+  );
+}
+
+// Who can call you: everyone (the default), friends only, or no one. A refused call does not ring; the conversation gets a
+// quiet "Missed call" line, and the caller sees an unanswered call. Kept on this device.
+function CallsBlock() {
+  const [policy, setPolicy] = useState<CallPolicy | null>(null);
+
+  useEffect(() => {
+    api
+      .callPolicy()
+      .then((value) => setPolicy(value))
+      .catch(() => {});
+  }, []);
+
+  const change = async (next: CallPolicy) => {
+    const previous = policy;
+    setPolicy(next);
+    try {
+      await api.setCallPolicy(next);
+    } catch (err) {
+      setPolicy(previous);
+      toast(err);
+    }
+  };
+
+  return (
+    <Choices legend="Who can call you">
+      {(
+        [
+          ['everyone', 'Everyone'],
+          ['friends', 'Friends only'],
+          ['no_one', 'No one'],
+        ] as const
+      ).map(([value, label]) => (
+        <CheckRow key={value}>
+          <input
+            type="radio"
+            name="call-policy"
+            value={value}
+            aria-label={label}
+            checked={policy === value}
+            onChange={() => void change(value)}
+            className="m-0 size-5 shrink-0 accent-accent border border-input-border bg-input"
+            data-call-policy={value}
+          />
+          <span>{label}</span>
+        </CheckRow>
+      ))}
+      <Hint>
+        Covers direct and group calls to you, on this device. A call you don't take doesn't ring: its conversation shows a
+        quiet missed call, and the caller sees an unanswered call. Server voice channels aren't calls to you, so anyone in the
+        server can still join one you're in.
+      </Hint>
+    </Choices>
   );
 }
 
@@ -194,6 +250,7 @@ export function PrivacyPage() {
           Your address is published on the Mainline DHT with your device ids, so people who have it can add you. Turning this off removes it. Contact links work either way.
         </Hint>
       </Block>
+      <CallsBlock />
       <PhotoDetailsBlock />
       <HandleChecksBlock />
       <LinkPreviewsBlock />

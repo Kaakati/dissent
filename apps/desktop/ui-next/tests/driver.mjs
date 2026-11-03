@@ -1449,6 +1449,8 @@ await sleep(250);
 await b.ev(`document.querySelector('button[aria-label="Message Jonas"]')?.click()`);
 await sleep(600);
 check('Message opens the direct conversation', (await b.ev(`!!document.querySelector('${RIGHT}') && !document.querySelector('[aria-label="Active now"]')`)) === true);
+// A call the call setting turned away shows as a quiet line in its conversation, not a message (call_privacy).
+check('CP4 a refused call shows as a quiet missed-call line', (await b.ev(`(() => { const n = document.querySelector('article.msg[data-notice]'); return !!n && n.textContent.includes('Missed call from Jonas: not in your friends') && !n.querySelector('button'); })()`)) === true);
 await b.press('Escape');
 await sleep(400);
 check('Esc in a DM returns to Friends', (await b.ev(`document.querySelector('h1')?.textContent === 'Friends'`)) === true);
@@ -1707,6 +1709,15 @@ check('switching the friends list off sticks', (await b.ev(`${friendsSel}.checke
 await b.ev(`${friendsSel}.click()`);
 await sleep(300);
 check('switching the friends list back on sticks', (await b.ev(`${friendsSel}.checked`)) === true);
+// Who can call you: Everyone by default; each choice sticks; the hint says voice channels are not covered.
+const callSel = (v) => `document.querySelector('input[data-call-policy="${v}"]')`;
+check('CP1 who can call you is Everyone by default', (await b.ev(`${callSel('everyone')}?.checked === true && ${callSel('friends')}?.checked === false && ${callSel('no_one')}?.checked === false`)) === true);
+check('CP2 the hint says server voice channels are not covered', (await b.ev(`[...document.querySelectorAll('fieldset')].some((f) => f.textContent.includes('Who can call you') && f.textContent.includes('voice channels'))`)) === true);
+for (const v of ['friends', 'no_one', 'everyone']) {
+  await b.ev(`${callSel(v)}.click()`);
+  await sleep(300);
+  check(`CP3 choosing ${v} sticks`, (await b.ev(`${callSel(v)}.checked`)) === true);
+}
 await b.ev(`${toggleSel}.click()`);
 await sleep(300);
 check('switching it back on sticks', (await b.ev(`${toggleSel}.checked`)) === true);

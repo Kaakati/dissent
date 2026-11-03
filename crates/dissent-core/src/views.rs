@@ -420,6 +420,9 @@ pub struct DmItem {
     pub mentions_me: bool,
     /// The members the message mentions, for the mention pills.
     pub mentions: Vec<MentionView>,
+    /// Set on an entry this device wrote itself, not a message: a call the call setting turned away
+    /// ("Missed call from X: not in your friends"). Shown as a quiet line. See `call_privacy`.
+    pub notice: Option<String>,
 }
 
 /// Change notifications. Serialised as `{"kind": "...", ...}`.

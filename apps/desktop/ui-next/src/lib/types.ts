@@ -760,7 +760,11 @@ export interface ConversationMessage extends MessageBase {
   from: Id;
   pending?: boolean;
   system?: boolean; // a membership line in a group, e.g. "added Omar and Rana."
+  notice?: string | null; // an entry this device wrote itself, e.g. "Missed call from Omar: not in your friends"
 }
+
+// Who can call this device. Server voice channels are not calls to someone and are not covered.
+export type CallPolicy = 'everyone' | 'friends' | 'no_one';
 
 // A chat target for typing signals and the chat's sends: a channel, a direct conversation or a group.
 export type ChatTarget =

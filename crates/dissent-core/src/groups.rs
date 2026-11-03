@@ -958,6 +958,11 @@ impl Engine {
     pub fn conversation_messages(&self, conv: ConvId, limit: usize) -> Vec<DmItem> {
         self.retry_missed_pictures();
         let mut items = self.conv_items(conv);
+        let notes = self.call_note_items(conv);
+        if !notes.is_empty() {
+            items.extend(notes);
+            items.sort_by_key(|m| m.ms);
+        }
         let start = items.len().saturating_sub(limit);
         items.split_off(start)
     }
