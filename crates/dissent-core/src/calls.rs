@@ -690,6 +690,10 @@ pub(crate) struct Room {
     /// How the call loop keeps time: ticks run, ticks that fired over `LATE_TICK` late, the worst lateness in
     /// microseconds, and audio frames received. For tests and diagnostics.
     loop_stats: [AtomicU64; 4],
+    /// The link's last bandwidth estimate, in kbps. Zero before the first. For tests and diagnostics.
+    link_estimate: AtomicU32,
+    /// For tests: an estimate that replaces the link's when above zero.
+    forced_estimate: AtomicU32,
     /// The sound of everyone's shared screens, for the playout.
     screen_sound: Mutex<crate::call_screen_audio::ScreenAudioMix>,
     /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
@@ -1096,6 +1100,8 @@ impl Room {
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
             loop_stats: Default::default(),
+            link_estimate: AtomicU32::new(0),
+            forced_estimate: AtomicU32::new(0),
             screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
             speaking: Mutex::new(speaking::Speaking::default()),
@@ -1370,6 +1376,12 @@ fn take_encoded(room: &Room) -> Vec<(Encoded, bool)> {
 
 /// Sizes every sending capture to the link's estimate, minus the audio reservation.
 fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
+    if let Some(kbps) = available_kbps {
+        room.link_estimate.store(kbps, Ordering::Relaxed);
+    }
+    // A test can hold the estimate, so it checks what follows from a rate rather than the machine's load.
+    let forced = room.forced_estimate.load(Ordering::Relaxed);
+    let available_kbps = if forced > 0 { Some(forced) } else { available_kbps };
     for slot in [&room.camera, &room.screen] {
         if let Some(sending) = lock(slot).as_mut() {
             sending.fit(available_kbps, audio_kbps);
@@ -3246,6 +3258,21 @@ impl Engine {
         let room = lock(&self.inner.calls.current).clone()?;
         let [ticks, late, worst, audio] = &room.loop_stats;
         Some((ticks.swap(0, Ordering::Relaxed), late.swap(0, Ordering::Relaxed), worst.swap(0, Ordering::Relaxed) as f64 / 1000.0, audio.swap(0, Ordering::Relaxed)))
+    }
+
+    /// For tests: the link's last bandwidth estimate in this call, in kbps.
+    pub(crate) fn link_estimate_now(&self) -> Option<u32> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        Some(room.link_estimate.load(Ordering::Relaxed)).filter(|kbps| *kbps > 0)
+    }
+
+    /// For tests: holds this device's estimate of its link at `kbps` when sizing its video, or lets it go with `None`.
+    pub(crate) fn force_link_estimate_now(&self, kbps: Option<u32>) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        room.forced_estimate.store(kbps.unwrap_or(0), Ordering::Relaxed);
+        true
     }
 
     /// For tests: the bitrate this device's screen may reach now.

@@ -379,7 +379,7 @@ impl Engine {
 
     /// For tests: the layers `sender_root`'s camera announced to this device's relay, as
     /// (width, kbps), smallest first.
-    pub(crate) async fn sender_layers_now(&self, sender_root: &str) -> Vec<(u32, u32)> {
+    pub(crate) async fn sender_layers_now(&self, sender_root: &str, screen: bool) -> Vec<(u32, u32)> {
         let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
             return Vec::new();
         };
@@ -388,7 +388,7 @@ impl Engine {
         };
         let sfu = forwarding.sfu().lock().await;
         sfu.as_ref()
-            .map(|sfu| sfu.sender_layers(sender, false).iter().map(|l| (l.width, l.kbps)).collect())
+            .map(|sfu| sfu.sender_layers(sender, screen).iter().map(|l| (l.width, l.kbps)).collect())
             .unwrap_or_default()
     }
 

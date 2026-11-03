@@ -239,6 +239,17 @@ pub fn take_loop_stats(engine: &crate::Engine) -> Option<(u64, u64, f64, u64)> {
     engine.take_loop_stats_now()
 }
 
+/// The link's last bandwidth estimate in `engine`'s call, in kbps.
+pub fn link_estimate(engine: &crate::Engine) -> Option<u32> {
+    engine.link_estimate_now()
+}
+
+/// Holds `engine`'s estimate of its link at `kbps` when it sizes its video, so a test checks what follows from a rate
+/// rather than the machine's load. `None` lets it go. False when `engine` is not in a call.
+pub fn force_link_estimate(engine: &crate::Engine, kbps: Option<u32>) -> bool {
+    engine.force_link_estimate_now(kbps)
+}
+
 /// What `engine`'s screen share sends now, as (width, height, fps, kbps).
 pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()
@@ -262,7 +273,12 @@ pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
 /// On the forwarder `engine`: the layers `sender_root`'s camera announced, as (width, kbps),
 /// smallest first.
 pub async fn sender_layers(engine: &crate::Engine, sender_root: &str) -> Vec<(u32, u32)> {
-    engine.sender_layers_now(sender_root).await
+    engine.sender_layers_now(sender_root, false).await
+}
+
+/// On the forwarder `engine`: the layers `sender_root`'s screen announced, as (width, kbps), smallest first.
+pub async fn sender_screen_layers(engine: &crate::Engine, sender_root: &str) -> Vec<(u32, u32)> {
+    engine.sender_layers_now(sender_root, true).await
 }
 
 /// On the forwarder `engine`: holds `viewer_root`'s downlink to `kbps` of video, as a measured
