@@ -253,7 +253,7 @@ mod banned_add {
     }
 
     /// Whether all three hold one group: the same epoch and the same secrets.
-    fn one_group(nodes: [&Node; 3], id: CommunityId, dave: &Node) -> bool {
+    fn one_group(nodes: &[&Node], id: CommunityId, dave: &Node) -> bool {
         let state = |n: &Node| (n.engine.mls_epoch(id), n.engine.with_mls_read(|m| m.export_secret(&id.0, "check", 16)).ok());
         let first = state(nodes[0]);
         let device = dave.identity.device_id();
@@ -273,15 +273,44 @@ mod banned_add {
             // Both commits reach each device together, as a catch-up brings them. Sent one by one over gossip, a device
             // can hold the add alone long enough for its own turn to remove dave too, and two removals at one epoch
             // fork the group (`05-encrypted-servers.md`, "Collision"), which is not what this test is about.
+            // A device may already have both from its own catch-up with bob, so a commit it has is fine too.
             for node in [&carol, &alice] {
-                assert!(matches!(node.engine.apply_commit(id, &add), Ok(true)), "it takes the add of someone since banned");
-                assert!(matches!(node.engine.apply_commit(id, &removal), Ok(true)), "and the removal after it");
+                let took = node.engine.apply_commit(id, &add);
+                assert!(took.is_ok(), "it takes the add of someone since banned: {took:?}");
+                let took = node.engine.apply_commit(id, &removal);
+                assert!(took.is_ok(), "and the removal after it: {took:?}, epoch {:?}", node.engine.mls_epoch(id));
             }
-            assert!(one_group([&alice, &bob, &carol], id, &dave), "one group, with dave out");
+            assert!(one_group(&[&alice, &bob, &carol], id, &dave), "one group, with dave out");
             carol.engine.send_message(id, channel, "after the add".into()).await.expect("carol sends");
             eventually("alice reads it", || readable(&alice.engine, id, channel, "after the add")).await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             assert!(!readable(&dave.engine, id, channel, "after the add"), "dave reads nothing new");
+        })
+        .await;
+    }
+
+    /// The owner takes the add, and the removal reaches it a second later. The owner's turn comes at once, so without a
+    /// wait it would remove dave itself at the same epoch as bob did, and the group would fork.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_owner_waits_for_the_removal_that_follows_an_add_and_the_group_stays_one() {
+        crate::testutil::bounded(async {
+            let (alice, bob, carol, dave, id) = after_a_ban().await;
+            // Carol is off: she could fetch the add alone from the owner during the wait and remove dave herself.
+            let _ = carol.stop().await;
+            let add = add_commit(&bob, &dave, id);
+            let removal = bob.engine.with_mls(|mls| mls.remove_members(&id.0, &[dave.identity.device_id()])).expect("bob removes dave");
+            // With no neighbours to catch up from, the removal reaches the owner only as this test hands it over.
+            alice.engine.inner.neighbours.lock().unwrap().remove(&id);
+            assert!(matches!(alice.engine.apply_commit(id, &add), Ok(true)), "the owner takes the add");
+            // What the owner's maintenance would do in its turn, which comes at once for the owner.
+            let reconcile = {
+                let engine = alice.engine.clone();
+                tokio::spawn(async move { engine.mls_reconcile(id).await })
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            assert!(matches!(alice.engine.apply_commit(id, &removal), Ok(true)), "the removal still applies: the owner made none");
+            reconcile.await.expect("the reconcile ends");
+            assert!(one_group(&[&alice, &bob], id, &dave), "one group, with dave out");
         })
         .await;
     }
@@ -295,7 +324,7 @@ mod banned_add {
             let (alice, bob, carol, dave, id) = after_a_ban().await;
             let add = add_commit(&bob, &dave, id);
             bob.engine.publish_commit(id, add).await;
-            eventually("everyone converges with dave out", || one_group([&alice, &bob, &carol], id, &dave)).await;
+            eventually("everyone converges with dave out", || one_group(&[&alice, &bob, &carol], id, &dave)).await;
         })
         .await;
     }

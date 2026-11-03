@@ -67,6 +67,9 @@ pub(crate) struct Inner {
     /// MLS commits that were refused for now, most often because the ban behind them has not
     /// reached this device yet. Retried whenever new events arrive.
     pub deferred_commits: Mutex<BTreeMap<CommunityId, Vec<Vec<u8>>>>,
+    /// When this device last took a commit that added someone since banned, per community. See
+    /// `Engine::mls_reconcile`.
+    pub banned_adds: Mutex<BTreeMap<CommunityId, std::time::Instant>>,
     /// When each community was last warmed, to rate-limit `Engine::warm`.
     pub warmed: Mutex<BTreeMap<CommunityId, std::time::Instant>>,
     pub clock: Mutex<HlcClock>,
@@ -275,6 +278,7 @@ impl Engine {
             mls_catching_up: Mutex::new(std::collections::BTreeSet::new()),
             private_fetching: Mutex::new(std::collections::BTreeSet::new()),
             deferred_commits: Mutex::new(BTreeMap::new()),
+            banned_adds: Mutex::new(BTreeMap::new()),
             warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),

@@ -6,6 +6,7 @@ use dissent_identity::{CommunityId, DeviceId};
 use dissent_net::PeerAddr;
 
 use crate::engine::Engine;
+use crate::membership::COMMIT_STEP;
 use crate::error::{CoreError, Result};
 use crate::rpc::{Request, Response};
 use crate::sealed::mls_err;
@@ -175,6 +176,13 @@ impl Engine {
             return;
         }
         self.wait_turn(community).await;
+        // A commit that added someone since banned is usually followed at once by the removal its author or another
+        // device made. Whoever took the add waits one step for that removal, the owner too, rather than make a second
+        // removal at the same epoch, which would fork the group.
+        let since = self.inner.banned_adds.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&community).copied();
+        if let Some(wait) = since.and_then(|at| COMMIT_STEP.checked_sub(at.elapsed())) {
+            tokio::time::sleep(wait).await;
+        }
         let departed = self.departed_devices(community);
         if departed.is_empty() {
             return;
@@ -226,6 +234,7 @@ impl Engine {
     /// After taking a commit that added someone since banned: the group has usually moved on, so this device asks for
     /// the commits that followed at once. If nobody has removed the device, `mls_maintenance` does in this device's turn.
     pub(crate) fn follow_a_banned_add(&self, community: CommunityId) {
+        self.inner.banned_adds.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(community, std::time::Instant::now());
         let engine = self.clone();
         self.spawn_task(async move {
             let neighbours: Vec<DeviceId> = engine
