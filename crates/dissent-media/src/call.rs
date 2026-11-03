@@ -648,6 +648,7 @@ impl<T: PacketTransport> Call<T> {
     }
 
     /// For tests: starts this link's bandwidth estimate again from `kbps`, as a delay spike leaves it.
+    #[cfg(feature = "test-hooks")]
     pub fn reset_estimate(&mut self, kbps: u32) {
         self.rtc.bwe().reset(Bitrate::kbps(u64::from(kbps)));
         self.video_available_kbps = Some(kbps);

@@ -380,6 +380,7 @@ impl<T: PacketTransport> Mesh<T> {
     }
 
     /// For tests: starts every link's bandwidth estimate again from `kbps`, as a delay spike leaves it.
+    #[cfg(feature = "test-hooks")]
     pub fn reset_estimates(&mut self, kbps: u32) {
         for call in self.calls.values_mut() {
             call.reset_estimate(kbps);
