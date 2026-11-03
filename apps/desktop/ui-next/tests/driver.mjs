@@ -5993,6 +5993,7 @@ await ev(`(() => { const a = document.createElement('a'); a.href = 'javascript:w
 await sleep(200);
 check('XL14 a javascript: link never runs or opens', (await ev('window.__ran ?? 0')) === 0 && (await ev(`!document.querySelector('[data-external-link]')`)) === true);
 check('XL15 the backend refuses what the dialog would never send', (await ev(`window.__TAURI__.core.invoke('open_external', { url: 'JavaScript:alert(1)' }).then(() => 'opened', (e) => String(e))`)).includes('not opened'));
+check('XL15 and one with an empty site, as http:///path', (await ev(`window.__TAURI__.core.invoke('open_external', { url: 'http:///path' }).then(() => 'opened', (e) => String(e))`)).includes('not written the usual way'));
 // A link the webview tried to open by itself comes back from the backend and asks too.
 await ev(`window.__mockEmitTo('dissent://external-link', 'https://popup.example.com/')`);
 await until(async () => (await dialog()) !== '', 2000);

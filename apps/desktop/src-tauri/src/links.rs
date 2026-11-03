@@ -25,6 +25,15 @@ pub fn external_url(raw: &str) -> Result<Url, String> {
     if !SCHEMES.contains(&url.scheme()) {
         return Err(format!("Links starting with {}: are not opened outside the app.", url.scheme()));
     }
+    // A web link is written `scheme://host...`. A parser forgives `http:///host`, `https:host`, `https:\\host` and the
+    // like by finding a host anyway; such a link is refused rather than guessed at.
+    if url.scheme() != "mailto" {
+        let after = raw.split_once(':').map_or("", |(_, rest)| rest);
+        let authority = after.strip_prefix("//").and_then(|rest| rest.chars().next());
+        if !authority.is_some_and(|c| c != '/' && c != '\\') {
+            return Err("This link is not written the usual way, so it was not opened.".into());
+        }
+    }
     if url.scheme() != "mailto" && url.host_str().is_none_or(str::is_empty) {
         return Err("This link has no site in it, so it was not opened.".into());
     }
@@ -109,6 +118,15 @@ mod tests {
             "about:blank",
             "https:",
             "https://",
+            "http:///path",
+            "https:///example.com",
+            "https:example.com",
+            "https:/example.com",
+            "https:\\\\example.com",
+            "https:/\\example.com",
+            "https://\\example.com",
+            "https:\\/example.com",
+            "HTTPS:///example.com",
             "example.com",
             "",
         ] {
@@ -133,6 +151,23 @@ mod tests {
         ] {
             assert!(external_url(bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    /// Everything that looks the main window up (tray, close to tray, deep links, a second launch, notification clicks)
+    /// expects it to exist once setup has begun. It is made in setup now, not from the config, so both must hold.
+    #[test]
+    fn the_main_window_is_made_first_thing_in_setup() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = config["app"]["windows"].as_array().unwrap().iter().find(|w| w["label"] == "main").unwrap();
+        assert_eq!(main["create"], false, "made by build_main_window, with its guards, and only there");
+        assert_eq!(main["visible"], false, "shown once the profile is open");
+        let lib = include_str!("lib.rs");
+        let setup = &lib[lib.find("fn setup(app: &mut tauri::App)").unwrap()..];
+        let body = &setup[setup.find('{').unwrap() + 1..];
+        let first = body.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("//")).unwrap();
+        assert_eq!(first, "links::build_main_window(app.handle())?;");
+        // The deep-link start runs after setup, so the window is there when a cold-start link is offered.
+        assert!(lib.find("deep_link::start(app.handle())").unwrap() > lib.find("if let Err(e) = setup(app)").unwrap());
     }
 
     #[test]

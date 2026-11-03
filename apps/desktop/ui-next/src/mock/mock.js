@@ -1014,6 +1014,8 @@ if (!window.__TAURI__) {
       need(typeof url === 'string' && url.trim() === url && ![...url].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127), 'This link has hidden characters in it, so it was not opened.');
       const parsed = new URL(url);
       need(['http:', 'https:', 'mailto:'].includes(parsed.protocol), `Links starting with ${parsed.protocol.replace(':', '')}: are not opened outside the app.`);
+      const after = url.slice(url.indexOf(':') + 1);
+      need(parsed.protocol === 'mailto:' || (after.startsWith('//') && after[2] !== undefined && !'/\\'.includes(after[2])), 'This link is not written the usual way, so it was not opened.');
       (window.__mockOpened ??= []).push(url);
       return null;
     },
