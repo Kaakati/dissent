@@ -220,10 +220,12 @@ impl Sending {
 
     /// Takes the link's estimate and the audio target and plans the capture to fit: the budget's
     /// plan goes to the capture, which switches to it. A budget too small for video pauses it.
-    /// Without an estimate yet, nothing changes.
-    pub(crate) fn fit(&mut self, available_kbps: Option<u32>, audio_kbps: u32) {
+    /// Without an estimate yet, nothing changes. With `cpu_held` (tests only) the encoder's time per frame is ignored.
+    pub(crate) fn fit(&mut self, available_kbps: Option<u32>, audio_kbps: u32, cpu_held: bool) {
         if let Some(share) = self.capture.take_cpu_share() {
-            self.budget.observe_cpu(Instant::now(), share);
+            if !cpu_held {
+                self.budget.observe_cpu(Instant::now(), share);
+            }
         }
         if let Some(size) = self.capture.take_native_size() {
             self.budget.set_screen_source(size);
@@ -1552,7 +1554,7 @@ mod tests {
         let mut sending = Sending::new(capture);
         let settled = |sending: &mut Sending, size: (u32, u32)| {
             wait_for(Duration::from_secs(15), || {
-                sending.fit(Some(50_000), 32);
+                sending.fit(Some(50_000), 32, false);
                 while sending.capture.try_next().is_some() {}
                 let plan = sending.capture.applied_plan();
                 (plan.width, plan.height) == size

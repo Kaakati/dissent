@@ -279,6 +279,8 @@ async fn share_reaches_its_own_size(size: (u32, u32)) {
     .await;
 
     alice.engine.set_test_capture(TestCapture::Document { width: size.0, height: size.1 });
+    // This tests that a share reaches its own size, so a loaded runner's slow encoding does not step it down.
+    assert!(dissent_core::test_support::hold_cpu_governor(&alice.engine, true));
     assert_eq!(alice.engine.set_screen_bitrate(3_000), 3_000);
     alice.engine.set_screen_share(true, None).expect("screen share on");
 

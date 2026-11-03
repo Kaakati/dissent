@@ -694,6 +694,8 @@ pub(crate) struct Room {
     link_estimate: AtomicU32,
     /// For tests: an estimate that replaces the link's when above zero.
     forced_estimate: AtomicU32,
+    /// For tests: set, the encoders' time per frame is not read, so a busy machine does not step video down.
+    cpu_held: AtomicBool,
     /// The sound of everyone's shared screens, for the playout.
     screen_sound: Mutex<crate::call_screen_audio::ScreenAudioMix>,
     /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
@@ -1102,6 +1104,7 @@ impl Room {
             loop_stats: Default::default(),
             link_estimate: AtomicU32::new(0),
             forced_estimate: AtomicU32::new(0),
+            cpu_held: AtomicBool::new(false),
             screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
             speaking: Mutex::new(speaking::Speaking::default()),
@@ -1382,9 +1385,10 @@ fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
     // A test can hold the estimate, so it checks what follows from a rate rather than the machine's load.
     let forced = room.forced_estimate.load(Ordering::Relaxed);
     let available_kbps = if forced > 0 { Some(forced) } else { available_kbps };
+    let cpu_held = room.cpu_held.load(Ordering::Relaxed);
     for slot in [&room.camera, &room.screen] {
         if let Some(sending) = lock(slot).as_mut() {
-            sending.fit(available_kbps, audio_kbps);
+            sending.fit(available_kbps, audio_kbps, cpu_held);
         }
     }
 }
@@ -3264,6 +3268,15 @@ impl Engine {
     pub(crate) fn link_estimate_now(&self) -> Option<u32> {
         let room = lock(&self.inner.calls.current).clone()?;
         Some(room.link_estimate.load(Ordering::Relaxed)).filter(|kbps| *kbps > 0)
+    }
+
+    /// For tests: while `on`, this device's video is not stepped down for a busy CPU.
+    pub(crate) fn hold_cpu_governor_now(&self, on: bool) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        room.cpu_held.store(on, Ordering::Relaxed);
+        true
     }
 
     /// For tests: holds this device's estimate of its link at `kbps` when sizing its video, or lets it go with `None`.

@@ -1441,12 +1441,13 @@ pub(crate) async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
     }
 }
 
-/// Holds each sender's estimate of its link at a rate that carries every layer. These tests check which layer the
-/// forwarder picks; on a loaded runner the machine's own delay reads as congestion and keeps senders off their top
-/// layers, which is not what they test.
+/// Holds each sender's estimate of its link at a rate that carries every layer, and its CPU governor. These tests
+/// check which layer the forwarder picks; on a loaded runner the machine's own delay reads as congestion, and slow
+/// encoding steps the camera down, either of which keeps senders off their top layers, which is not what they test.
 pub(crate) fn hold_sender_rates(senders: &[&Peer]) {
     for s in senders {
         assert!(dissent_core::test_support::force_link_estimate(&s.engine, Some(8_000)), "the sender is in a call");
+        assert!(dissent_core::test_support::hold_cpu_governor(&s.engine, true), "the sender is in a call");
     }
 }
 
@@ -1506,6 +1507,8 @@ async fn a_level_zero_voice_channel_shares_a_1440p_screen_at_its_own_size() {
     }
     all_see(&everyone, Topology::Mesh, "a mesh of three").await;
     let sender = &everyone[0];
+    // This tests the size a share goes out at, so a loaded runner's slow encoding does not step it down.
+    assert!(dissent_core::test_support::hold_cpu_governor(&sender.engine, true));
     sender.engine.set_screen_share(true, None).expect("screen share on");
     eventually_within(Duration::from_secs(30), "the share reaches 2560x1440", || {
         dissent_core::test_support::screen_plan(&sender.engine).filter(|plan| (plan.0, plan.1) == (2560, 1440))
@@ -1565,7 +1568,7 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     sender.engine.set_screen_bitrate(6_000);
     sender.engine.set_screen_share(true, None).expect("screen share on");
     // This tests the forwarder's choice of layer, so the sender's rate is held rather than left to the runner's load.
-    assert!(dissent_core::test_support::force_link_estimate(&sender.engine, Some(8_000)));
+    hold_sender_rates(&[sender]);
     narrow.engine.set_video_tile(&root(sender), true, 200);
     wide.engine.set_video_tile(&root(sender), true, 2400);
 
