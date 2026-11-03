@@ -1251,7 +1251,7 @@ pub(crate) fn call_summary(p: &Peer) -> String {
     };
     let forwarders = v.participants.iter().filter(|m| m.forwarder).map(|m| m.root_id[..8].to_string()).collect::<Vec<_>>();
     format!(
-        "{name} ({}): {:?} participants={} frames={} key_epoch={} forwarded_by={:?} forwarders={forwarders:?} route={:?} / {:?}",
+        "{name} ({}): {:?} participants={} frames={} key_epoch={} forwarded_by={:?} forwarders={forwarders:?} route={:?} / {:?} cannot_decrypt={} loop: {}",
         &p.identity.root_id().to_string()[..8],
         v.topology,
         v.participants.len(),
@@ -1260,6 +1260,8 @@ pub(crate) fn call_summary(p: &Peer) -> String {
         v.forwarded_by,
         v.route.title,
         v.route.detail,
+        v.cannot_decrypt,
+        dissent_core::test_support::call_debug(&p.engine),
     )
 }
 

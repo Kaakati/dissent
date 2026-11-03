@@ -346,6 +346,16 @@ pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::Devi
         .sum()
 }
 
+/// The call loop's step, its age and the mesh lock's state, without blocking. For a watchdog.
+pub fn call_breadcrumbs(engine: &crate::Engine) -> String {
+    engine.call_breadcrumbs()
+}
+
+/// Where `engine`'s call loop stands: ticks, speaking checks and each link's frame counters.
+pub fn call_debug(engine: &crate::Engine) -> String {
+    engine.call_debug()
+}
+
 /// A hash of the media key and the sender id of `engine`'s current channel call, and the epoch that key belongs to.
 pub fn call_key_state(engine: &crate::Engine) -> Option<([u8; 4], u64, u64)> {
     engine.call_key_state()

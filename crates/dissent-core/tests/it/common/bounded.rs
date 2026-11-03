@@ -54,6 +54,7 @@ pub async fn bounded(body: impl Future<Output = ()>) {
 /// Like `bounded`, for a test that needs longer than `TEST_LIMIT`.
 pub async fn bounded_within(limit: Duration, body: impl Future<Output = ()>) {
     let _shared = run_lock().read().await;
+    let _watch = Watchdog::start();
     let limit = scaled(limit);
     tokio::time::timeout(limit, body)
         .await
@@ -65,6 +66,7 @@ pub async fn bounded_within(limit: Duration, body: impl Future<Output = ()>) {
 /// `scaled`). The time spent waiting for the running tests to finish does not count.
 pub async fn heavy(engines: usize, body: impl Future<Output = ()>) {
     let _alone = run_lock().write().await;
+    let _watch = Watchdog::start();
     HEAVY_ENGINES
         .scope(engines, async {
             let limit = scaled(TEST_LIMIT);
@@ -73,4 +75,110 @@ pub async fn heavy(engines: usize, body: impl Future<Output = ()>) {
                 .unwrap_or_else(|_| panic!("test exceeded {limit:?}"));
         })
         .await;
+}
+
+/// The engines each running test started, by test name, for the watchdog. Kept until the test ends.
+type Watched = Vec<(String, String, dissent_core::Engine)>;
+
+fn engines() -> &'static std::sync::Mutex<Watched> {
+    static ENGINES: std::sync::OnceLock<std::sync::Mutex<Watched>> = std::sync::OnceLock::new();
+    ENGINES.get_or_init(Default::default)
+}
+
+fn test_name() -> String {
+    std::thread::current().name().unwrap_or("?").to_string()
+}
+
+/// Lists an engine under the running test, for the watchdog.
+pub fn watch_engine(name: &str, engine: &dissent_core::Engine) {
+    engines().lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((test_name(), name.to_string(), engine.clone()));
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A call loop's breadcrumb that has sat on one step for over `STALL`. Waiting that long for a 20 ms tick means the
+/// runtime did not poll the loop.
+fn stuck(crumb: &str) -> bool {
+    crumb
+            .split(" for ")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .is_some_and(|ms| ms > STALL)
+}
+
+const STALL: u64 = 5_000;
+
+/// Catches a stalled runtime or call loop in the act. A task on the test's runtime beats every 250 ms. An OS thread
+/// checks every second and prints when the beat, or an engine's call-loop step, is older than `STALL`: the test, how
+/// long, and every engine's call-loop breadcrumbs. Each stall is reported once, and again when it ends.
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    beat: tokio::task::JoinHandle<()>,
+    test: String,
+}
+
+impl Watchdog {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+        let test = test_name();
+        let done = Arc::new(AtomicBool::new(false));
+        let last = Arc::new(AtomicU64::new(now_ms()));
+        let beat = {
+            let last = last.clone();
+            tokio::spawn(async move {
+                loop {
+                    last.store(now_ms(), Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            })
+        };
+        let (watch_done, watch_test) = (done.clone(), test.clone());
+        std::thread::spawn(move || {
+            let mut stalled = false;
+            let mut stuck_loops = std::collections::BTreeSet::new();
+            while !watch_done.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(1));
+                let ours: Vec<(String, dissent_core::Engine)> = engines()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter(|(t, _, _)| *t == watch_test)
+                    .map(|(_, n, e)| (n.clone(), e.clone()))
+                    .collect();
+                let crumbs: Vec<(String, String)> =
+                    ours.iter().map(|(n, e)| (n.clone(), dissent_core::test_support::call_breadcrumbs(e))).collect();
+                let age = now_ms().saturating_sub(last.load(Ordering::Relaxed));
+                if age > STALL && !stalled {
+                    stalled = true;
+                    eprintln!("WATCHDOG {watch_test}: runtime heartbeat stalled {age} ms; engines: {crumbs:?}");
+                } else if age <= STALL && stalled {
+                    stalled = false;
+                    eprintln!("WATCHDOG {watch_test}: runtime heartbeat resumed");
+                }
+                for (name, crumb) in &crumbs {
+                    if stuck(crumb) {
+                        if stuck_loops.insert(name.clone()) {
+                            eprintln!("WATCHDOG {watch_test}: call loop of {name} stuck: {crumb}; all: {crumbs:?}");
+                        }
+                    } else if stuck_loops.remove(name) {
+                        eprintln!("WATCHDOG {watch_test}: call loop of {name} moving again: {crumb}");
+                    }
+                }
+            }
+        });
+        Watchdog { done, beat, test }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.beat.abort();
+        let test = &self.test;
+        engines().lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|(t, _, _)| t != test);
+    }
 }
