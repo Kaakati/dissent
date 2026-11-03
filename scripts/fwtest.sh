@@ -24,9 +24,10 @@ fi
 [[ -n "$exe" && -f "$exe" ]] || { echo "no executable: ${exe:-?}" >&2; exit 1; }
 
 mkdir -p target/fw
-lock=target/fw/.lock
+# One lock for every worktree of this repository, so runs from parallel worktrees never share the machine.
+lock="$(git rev-parse --path-format=absolute --git-common-dir)/fwtest.lock"
 got=
-for _ in $(seq 1200); do
+for _ in $(seq 3600); do
   if mkdir "$lock" 2>/dev/null; then got=1; break; fi
   # Take over a lock left by a killed run: owner pid gone and no dissent-test.exe running.
   owner=$(cat "$lock/pid" 2>/dev/null || true)
@@ -36,7 +37,7 @@ for _ in $(seq 1200); do
   fi
   sleep 1
 done
-[[ -n "$got" ]] || { echo "target/fw busy for 20 min" >&2; exit 1; }
+[[ -n "$got" ]] || { echo "another fwtest run held the lock for 60 min" >&2; exit 1; }
 echo $$ > "$lock/pid"
 trap 'rm -rf "$lock"' EXIT
 
