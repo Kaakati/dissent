@@ -273,6 +273,19 @@ pub fn force_link_estimate(engine: &crate::Engine, kbps: Option<u32>) -> bool {
     engine.force_link_estimate_now(kbps)
 }
 
+/// Starts `engine`'s estimate of each of its mesh links again from `kbps`, as a delay spike leaves it, so a test sees
+/// whether the estimate climbs back. False when `engine` is not in a call.
+#[cfg(feature = "test-hooks")]
+pub async fn dip_link_estimate(engine: &crate::Engine, kbps: u32) -> bool {
+    engine.dip_link_estimate_now(kbps).await
+}
+
+/// The share of its frame interval `engine`'s screen encoder last reported: above 0.8 it steps down.
+#[cfg(feature = "test-hooks")]
+pub fn screen_cpu_share(engine: &crate::Engine) -> Option<f64> {
+    engine.screen_cpu_share_now()
+}
+
 /// What `engine`'s screen share sends now, as (width, height, fps, kbps).
 pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()

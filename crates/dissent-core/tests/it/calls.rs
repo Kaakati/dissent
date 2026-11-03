@@ -1882,11 +1882,28 @@ async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
 }
 
 /// Measures how a sharer's estimate of its link responds to a busy CPU on loopback: a 1440p share, 15 s as is, 20 s
-/// with every core busy, then 30 s after. Prints the estimate every second. Loopback has no congestion, so any fall is
+/// with three busy threads per core, then 90 s after. Prints the estimate every second. Loopback has no congestion, so any fall is
 /// the machine's own delay read as the network's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
 async fn measure_a_shares_estimate_under_a_cpu_hog() {
+    share_under_a_cpu_hog(2560, 1440).await;
+}
+
+/// The same at 720p, which this machine encodes well within its frame time, so whether the frame rate comes back after
+/// the CPU frees up shows the governor rather than the encoder's limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
+async fn measure_a_720p_shares_frame_rate_after_a_cpu_hog() {
+    share_under_a_cpu_hog(1280, 720).await;
+}
+
+/// Measures whether a share's estimate climbs back after it fell: a 1440p share, 15 s as is, then its link's estimate
+/// starts again from 800 kbps, as a delay spike leaves it, and 120 s follow. A link estimate rises only on what is
+/// sent, so this shows how far a share's own traffic brings it back. Prints the estimate every second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
+async fn measure_a_shares_estimate_after_a_dip() {
     heavy(8, async {
         let alice = peer("alice").await;
         let bob = peer("bob").await;
@@ -1911,9 +1928,66 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
         for s in 0..15 {
             trace.push(sample(s, "before").await);
         }
+        assert!(dissent_core::test_support::dip_link_estimate(&alice.engine, 800).await);
+        for s in 15..45 {
+            trace.push(sample(s, "held").await);
+        }
+        for s in 45..135 {
+            trace.push(sample(s, "after").await);
+        }
+        let of = |phase: &str| trace.iter().filter(|t| t.1 == phase).filter_map(|t| t.2).collect::<Vec<u32>>();
+        let (before, held, after) = (of("before"), of("held"), of("after"));
+        let mean = |v: &[u32]| v.iter().map(|x| u64::from(*x)).sum::<u64>() / v.len().max(1) as u64;
+        let before_mean = mean(&before[5.min(before.len())..]);
+        let back = |pct: u64| trace.iter().filter(|t| t.1 != "before").find(|t| t.2.is_some_and(|e| u64::from(e) * 100 >= before_mean * pct)).map(|t| t.0 - 15);
+        let sent_after = trace.iter().filter(|t| t.1 == "after").filter_map(|t| t.3.map(|p| p.3)).collect::<Vec<u32>>();
+        println!(
+            "EST summary: before {before_mean} kbps, lowest in the 30 s after the dip {:?}, at 30 s {:?}, last {:?}, back to 50% {:?} s after the dip, to 80% {:?} s; plan kbps at 30 s {:?}, last {:?}",
+            held.iter().min(),
+            after.first(),
+            after.last(),
+            back(50),
+            back(80),
+            sent_after.first(),
+            sent_after.last()
+        );
+        alice.engine.set_screen_share(false, None).expect("screen share off");
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+async fn share_under_a_cpu_hog(width: u32, height: u32) {
+    heavy(8, async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        make_contacts_ready(&alice, &bob).await;
+        let mut bob_events = bob.engine.subscribe();
+        alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
+        crate::common::accept_incoming(&bob.engine, &mut bob_events).await;
+        eventually("the call is up", || alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)).await;
+        alice.engine.set_test_capture(dissent_core::TestCapture::Document { width, height });
+        alice.engine.set_screen_bitrate(6_000);
+        alice.engine.set_screen_share(true, None).expect("screen share on");
+        // (second, phase, estimate, the share's plan as width, height, fps and kbps)
+        type Sample = (u64, &'static str, Option<u32>, Option<(u32, u32, u32, u32)>);
+        let mut trace: Vec<Sample> = Vec::new();
+        let sample = async |second: u64, phase: &'static str| {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let e = dissent_core::test_support::link_estimate(&alice.engine);
+            let plan = dissent_core::test_support::screen_plan(&alice.engine);
+            let share = dissent_core::test_support::screen_cpu_share(&alice.engine).map(|s| (s * 100.0).round() / 100.0);
+            println!("EST {second:>3} s {phase:<6} estimate {e:?} kbps, plan {plan:?}, encoder share {share:?}");
+            (second, phase, e, plan)
+        };
+        for s in 0..15 {
+            trace.push(sample(s, "before").await);
+        }
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let hogs: Vec<_> = (0..cores)
+        // Three busy threads a core, so the call's own threads get a small share, as on a laptop under load.
+        let hogs_count = cores * 3;
+        let hogs: Vec<_> = (0..hogs_count)
             .map(|_| {
                 let stop = stop.clone();
                 std::thread::spawn(move || {
@@ -1932,7 +2006,7 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
         for hog in hogs {
             let _ = hog.join();
         }
-        for s in 35..65 {
+        for s in 35..125 {
             trace.push(sample(s, "after").await);
         }
         let of = |phase: &str| trace.iter().filter(|t| t.1 == phase).filter_map(|t| t.2).collect::<Vec<u32>>();

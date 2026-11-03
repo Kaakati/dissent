@@ -131,6 +131,9 @@ pub(crate) struct Sending {
     /// The simulcast layers the forwarder wants, as a bit mask (bit 0 is the 180p base). `None` is the mesh mode: one
     /// adaptive stream, tagged layer 0. A forwarded call only changes this when the forwarder asks for layers.
     wanted: Option<u8>,
+    /// The encoder's last reported share of its frame interval. For tests.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) last_share: Option<f64>,
     /// The sound of a screen share, when the sharer added it.
     pub(crate) sound: Option<crate::call_screen_audio::ScreenAudio>,
 }
@@ -177,6 +180,8 @@ impl Sending {
             budget,
             paused: false,
             wanted: None,
+            #[cfg(feature = "test-hooks")]
+            last_share: None,
             sound: None,
         }
     }
@@ -223,6 +228,10 @@ impl Sending {
     /// Without an estimate yet, nothing changes.
     pub(crate) fn fit(&mut self, available_kbps: Option<u32>, audio_kbps: u32) {
         if let Some(share) = self.capture.take_cpu_share() {
+            #[cfg(feature = "test-hooks")]
+            {
+                self.last_share = Some(share);
+            }
             self.budget.observe_cpu(Instant::now(), share);
         }
         if let Some(size) = self.capture.take_native_size() {
@@ -551,11 +560,17 @@ mod capture {
                         // Encode time in an exponential moving average, reported as a share of the frame
                         // interval. The call loop steps down or climbs on that share.
                         let ms = started.elapsed().as_secs_f64() * 1_000.0;
-                        ewma_ms = Some(match ewma_ms {
-                            None => ms,
-                            Some(prev) => prev * 0.9 + ms * 0.1,
-                        });
-                        timed += 1;
+                        // A keyframe costs several frames' time once, on a reshape or when a viewer asks for one. Left
+                        // in, it read as a slow encoder, so a climb that brought one was undone at once, and the wait
+                        // for the next climb doubled. Only the frames between keyframes count.
+                        let keyframe = out.iter().any(|(_, chunks)| chunks.iter().any(|c| c.keyframe));
+                        if !keyframe {
+                            ewma_ms = Some(match ewma_ms {
+                                None => ms,
+                                Some(prev) => prev * 0.9 + ms * 0.1,
+                            });
+                            timed += 1;
+                        }
                         if timed >= SLOW_FRAMES {
                             let share = ewma_ms.unwrap_or(0.0) / (period.as_secs_f64() * 1_000.0);
                             *lock(&thread_cpu) = Some(share);

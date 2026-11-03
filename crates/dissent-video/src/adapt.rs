@@ -550,6 +550,7 @@ impl VideoAdapter {
                 self.cpu_floor = (current + 1).min(last);
             }
             CpuVerdict::Upgrade => self.cpu_floor = self.cpu_floor.saturating_sub(1),
+            CpuVerdict::Recover => self.cpu_floor = 0,
         }
     }
 
@@ -600,6 +601,9 @@ pub enum CpuVerdict {
     Downgrade,
     /// The encoder has plenty of headroom. Try a better rung.
     Upgrade,
+    /// The encoder has been nearly idle for a while, as after a CPU spike that ended. Go back to the best rung the
+    /// bandwidth allows. A slow encoder there steps down again, one rung at a time.
+    Recover,
 }
 
 /// Decides from measured encode times whether the encoder keeps up at the current rung.
@@ -666,6 +670,11 @@ const CLIMB_WAIT: Duration = Duration::from_secs(30);
 const CLIMB_WAIT_MAX: Duration = Duration::from_secs(300);
 /// A downgrade is not repeated within this time, so one slow spell steps down one rung at a time.
 const STEP_COOLDOWN: Duration = Duration::from_secs(5);
+/// The share of the frame interval under which the encoder counts as nearly idle at its stepped-down rung.
+pub const CPU_IDLE_SHARE: f64 = 0.25;
+/// How long the encoder must be nearly idle before the stream goes back to its best rung in one step. Climbing one rung
+/// per `CLIMB_WAIT` took two minutes and more after a spike, and the frame rate stayed down for all of it.
+const IDLE_RECOVER: Duration = Duration::from_secs(10);
 
 /// Decides when a stream that stepped down may climb back. It works on the encoder's share of the
 /// frame interval, measured now, and on the time, so tests can drive it with fixed instants.
@@ -677,6 +686,7 @@ const STEP_COOLDOWN: Duration = Duration::from_secs(5);
 pub struct CpuRecovery {
     wait: Duration,
     headroom_since: Option<Instant>,
+    idle_since: Option<Instant>,
     last_climb: Option<Instant>,
     last_step: Option<Instant>,
 }
@@ -692,6 +702,7 @@ impl CpuRecovery {
         Self {
             wait: CLIMB_WAIT,
             headroom_since: None,
+            idle_since: None,
             last_climb: None,
             last_step: None,
         }
@@ -706,6 +717,18 @@ impl CpuRecovery {
         {
             self.last_climb = None;
             self.wait = CLIMB_WAIT;
+        }
+        if share < CPU_IDLE_SHARE && stepped_down {
+            let since = *self.idle_since.get_or_insert(now);
+            if now.duration_since(since) >= IDLE_RECOVER {
+                // Counts as a climb, so a slow spell soon after still doubles the wait.
+                self.idle_since = None;
+                self.headroom_since = None;
+                self.last_climb = Some(now);
+                return CpuVerdict::Recover;
+            }
+        } else {
+            self.idle_since = None;
         }
         if share > CPU_SLOW_SHARE {
             self.headroom_since = None;
@@ -1354,4 +1377,47 @@ mod tests {
         let small = ScreenSpec { source: (1280, 720), target_kbps: 6_000, max_height: Some(1080), ..ScreenSpec::default() };
         assert_eq!(screen_ladder(small, &Codec::ALL)[0].height, 720, "a chosen height never scales up");
     }
+
+    #[test]
+    fn a_nearly_idle_encoder_goes_back_to_the_best_rung_in_one_step() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut recovery = CpuRecovery::new();
+        assert_eq!(recovery.observe(at(0), 0.9, false), CpuVerdict::Downgrade);
+        assert_eq!(recovery.observe(at(6), 0.9, true), CpuVerdict::Downgrade, "a long spike steps down again");
+        assert_eq!(recovery.observe(at(12), 0.2, true), CpuVerdict::Keep);
+        assert_eq!(recovery.observe(at(21), 0.2, true), CpuVerdict::Keep, "not 10 s yet");
+        assert_eq!(recovery.observe(at(22), 0.2, true), CpuVerdict::Recover, "10 s nearly idle");
+        let mut adapter = adapter(Content::Screen);
+        run(&mut adapter, RESERVE + 50_000, 10);
+        for _ in 0..4 {
+            adapter.apply_cpu(CpuVerdict::Downgrade);
+        }
+        assert!(adapter.cpu_stepped_down());
+        adapter.apply_cpu(CpuVerdict::Recover);
+        assert_eq!(adapter.update(RESERVE + 50_000, AUDIO).rung, Some(0), "the best rung the bandwidth allows");
+    }
+
+    #[test]
+    fn a_recovery_that_fails_at_once_doubles_the_wait() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut recovery = CpuRecovery::new();
+        recovery.observe(at(0), 0.9, false);
+        recovery.observe(at(1), 0.2, true);
+        assert_eq!(recovery.observe(at(11), 0.2, true), CpuVerdict::Recover);
+        assert_eq!(recovery.observe(at(16), 0.9, false), CpuVerdict::Downgrade);
+        assert_eq!(recovery.wait(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn an_encoder_between_idle_and_slow_does_not_recover_at_once() {
+        let t0 = Instant::now();
+        let mut recovery = CpuRecovery::new();
+        recovery.observe(t0, 0.9, false);
+        for s in 1..25 {
+            assert_ne!(recovery.observe(t0 + Duration::from_secs(s), 0.4, true), CpuVerdict::Recover);
+        }
+    }
 }
+
