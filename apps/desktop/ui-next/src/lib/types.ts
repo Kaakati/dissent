@@ -334,6 +334,7 @@ export interface MicLevel {
 export interface VoiceConnection {
   communityId: Id;
   channelId: Id;
+  joining?: boolean; // shown at the click, until the engine answers the join
 }
 
 // One file transfer, from list_transfers and dissent://transfers. `route_kind` picks the colour of the route tag.

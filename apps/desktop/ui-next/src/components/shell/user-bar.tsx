@@ -160,24 +160,28 @@ function VoiceStrip() {
   const connection = useShell((s) => s.voiceConnection);
   const community = useShell((s) => s.community);
   const leaveCall = useShell((s) => s.leaveCall);
-  if (!call) return null;
+  const joining = Boolean(connection?.joining) && !call;
+  if (!call && !joining) return null;
   const connected = connection && community?.id === connection.communityId
     ? community.channels.find((c) => c.id === connection.channelId)
     : null;
   const where = connected && community
     ? `#${connected.name} · ${community.name}`
-    : (call.where ?? [call.channel_name, call.community_name].filter(Boolean).join(' / '));
+    : (call?.where ?? [call?.channel_name, call?.community_name].filter(Boolean).join(' / '));
+  // While joining, the engine has no call to leave yet, so Disconnect waits for it.
   return (
-    <div className="flex h-[60px] items-center gap-s-2 pr-s-2 pl-s-4 shadow-[inset_0_-1px_0_var(--border)]">
+    <div data-voice-strip={joining ? 'joining' : 'connected'} className="flex h-[60px] items-center gap-s-2 pr-s-2 pl-s-4 shadow-[inset_0_-1px_0_var(--border)]">
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-semibold text-success-text">Voice connected</div>
+        <div className={cn('text-sm font-semibold', joining ? 'text-warn' : 'text-success-text')}>{joining ? 'Connecting' : 'Voice connected'}</div>
         <div className="truncate text-meta text-muted-foreground">{where}</div>
       </div>
-      <Tip label="Disconnect">
-        <Button variant="ghost" size="icon" className="rounded-md text-danger-text" aria-label="Disconnect" onClick={() => void leaveCall()}>
-          <PhoneOff className="size-5" />
-        </Button>
-      </Tip>
+      {joining ? null : (
+        <Tip label="Disconnect">
+          <Button variant="ghost" size="icon" className="rounded-md text-danger-text" aria-label="Disconnect" onClick={() => void leaveCall()}>
+            <PhoneOff className="size-5" />
+          </Button>
+        </Tip>
+      )}
     </div>
   );
 }

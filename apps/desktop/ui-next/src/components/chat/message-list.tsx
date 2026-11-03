@@ -25,8 +25,7 @@ function filtered(items: ViewItem[], filter: string): ViewItem[] {
   return items.filter((item) => (item.text ?? '').toLowerCase().includes(q) || (item.authorName ?? '').toLowerCase().includes(q));
 }
 
-// Adds date dividers and groups consecutive messages from one author into a single header. The call chat uses it too, so
-// a message reads the same there.
+// Adds date dividers and groups consecutive messages from one author into a single header.
 export function rowsFor(items: ViewItem[], view: ChatView, newFromId: string | null): ReactNode[] {
   const communityId = view.target.kind === 'channel' ? view.target.communityId : null;
   const out: ReactNode[] = [];

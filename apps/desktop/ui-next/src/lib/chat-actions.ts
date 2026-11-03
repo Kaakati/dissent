@@ -4,7 +4,6 @@
 import { api } from './api';
 import { has } from './features';
 import { markOpenRead, reloadOpen } from './chat';
-import { reloadCallChat } from './call-chat';
 import { noteReaction } from './quick-reactions';
 import { guessMime } from './attachments';
 import type { StagedFile } from './chat';
@@ -28,8 +27,6 @@ async function run(fn: () => Promise<unknown>, { read = true, lists = false }: {
   } catch (err) {
     toast(err);
   }
-  // The call chat shows a conversation of its own, beside the open one, so it reads its messages again too.
-  reloadCallChat();
   return true;
 }
 

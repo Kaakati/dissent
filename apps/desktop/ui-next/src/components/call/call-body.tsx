@@ -1,20 +1,14 @@
 // The call pane (the old UI's views/call.js): the header of the call, and in the main column the route banner, the participants in a
-// grid with their speaking rings, the controls, and the call chat beside or below. The camera and screen share are disabled slots
+// grid with their speaking rings, and the controls; a direct or group call's conversation below. The camera and screen share are disabled slots
 // until the video batch lands. The right column shows the call's route, its quality and its encryption (callDetailsNodes).
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { useShallow } from 'zustand/react/shallow';
-import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MonitorOff, MessageCircle, Pause, PhoneOff, Settings2, ShieldCheck, TriangleAlert, Video, VideoOff, Volume2, X } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, MonitorOff, Pause, PhoneOff, Settings2, ShieldCheck, TriangleAlert, Video, VideoOff, Volume2 } from 'lucide-react';
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
-import { Composer } from '@/components/chat/composer';
-import { listKey, rowsFor } from '@/components/chat/message-list';
-import { buildView, type ChatView } from '@/components/chat/use-chat-view';
 import '@/components/chat/chat.css';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { Tip } from '@/components/ui/tip';
 import { UserAvatar } from '@/components/user-avatar';
-import { useCallRoom } from '@/lib/calls';
 import { applyHardwareVideo, hardwareVideoWanted, registerCanvas, resetForCall, useEncodedVideoOn } from '@/lib/webcodecs';
-import { callConversationOf, chatTargetOf, conversationKey, loadCallChat, useCallChat } from '@/lib/call-chat';
 import { api } from '@/lib/api';
 import { hueOf } from '@/lib/identity';
 import { useShell } from '@/lib/store';
@@ -44,7 +38,7 @@ export function CallHeader() {
       <div className="chat-title">
         <Volume2 aria-hidden="true" />
         <h2 title={name}>{name}</h2>
-        <span className="title-meta">{`${count} in call`}</span>
+        <span className="title-meta">{call ? `${count} in call` : 'Joining'}</span>
         <span className="pill ok">
           <Lock aria-hidden="true" />
           End-to-end encrypted
@@ -63,52 +57,8 @@ export function CallHeader() {
   );
 }
 
-const NEAR_BOTTOM_PX = 80; // within this distance of the end, a new message keeps the call chat at the end
-// A call pane at least this wide puts the chat beside the video, as Discord does. A narrower one puts it below.
-const SIDE_CHAT_MIN_PANE = 1000;
-// Where the call chat's open or closed state is kept, on this device.
-const CHAT_OPEN_KEY = 'dissent.callChatOpen';
-// Where a dragged size of the call chat is kept, on this device.
-const CHAT_SIZE_KEY = 'dissent.callChatSize';
-// What dragging the divider leaves each side at least, in px.
-const CHAT_MIN_PX = 200;
-const STAGE_MIN_PX = 320;
 // The space between tiles, in px. Matches gap-s-3.
 const TILE_GAP = 12;
-
-function readChatOpen(): boolean {
-  try {
-    return localStorage.getItem(CHAT_OPEN_KEY) !== 'false';
-  } catch {
-    return true;
-  }
-}
-
-function writeChatOpen(open: boolean): void {
-  try {
-    localStorage.setItem(CHAT_OPEN_KEY, String(open));
-  } catch {
-    // A window without storage keeps the choice for the session.
-  }
-}
-
-function readChatSize(): number | null {
-  try {
-    const saved = Number(localStorage.getItem(CHAT_SIZE_KEY));
-    return saved > 0 ? saved : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeChatSize(size: number | null): void {
-  try {
-    if (size === null) localStorage.removeItem(CHAT_SIZE_KEY);
-    else localStorage.setItem(CHAT_SIZE_KEY, String(Math.round(size)));
-  } catch {
-    // A window without storage keeps the size for the session.
-  }
-}
 
 // The content size of an element, kept current as it resizes.
 function useSize(ref: React.RefObject<HTMLElement | null>): { width: number; height: number } {
@@ -126,8 +76,9 @@ function useSize(ref: React.RefObject<HTMLElement | null>): { width: number; hei
   return size;
 }
 
-// The call pane. Replaces the chat while the call is open here. The video takes the space, and the chat sits beside it
-// in a wide pane or below it, capped, in a narrow one. The chat can be hidden, and that choice is kept on this device.
+// The call pane. Replaces the chat while the call is open here. A voice channel's stage fills the pane: the channel's
+// text is not shown beside it, so its board is the call alone. A direct or group call puts its conversation below the
+// stage (dm-call-split.tsx). Until the engine reports the call, a join shows that it is on its way.
 export function CallBody() {
   // Starts the encoded path when the window's setting asks for it and this window can decode H.264.
   useEffect(() => {
@@ -135,68 +86,24 @@ export function CallBody() {
     void applyHardwareVideo(hardwareVideoWanted());
   }, []);
   const call = useShell((s) => s.call);
-  const root = useRef<HTMLDivElement>(null);
-  const { width, height } = useSize(root);
-  const [chatOpen, setChatOpen] = useState(readChatOpen);
-  const [chatSize, setChatSize] = useState(readChatSize);
-  const saveChatSize = useCallback((size: number | null) => {
-    setChatSize(size);
-    writeChatSize(size);
-  }, []);
-  const toggleChat = useCallback(() => {
-    setChatOpen((open) => {
-      writeChatOpen(!open);
-      return !open;
-    });
-  }, []);
-  if (!call) return null;
-  // A direct or group call puts the conversation itself below the stage (dm-call-split.tsx). A voice channel keeps the
-  // call chat, since its board is not a text channel.
+  const joining = useShell((s) => Boolean(s.voiceConnection?.joining));
+  if (!call) return joining ? <CallJoining /> : null;
   if (call.scope !== 'channel') return <DmCallSplit call={call} />;
-  const side = width >= SIDE_CHAT_MIN_PANE;
-  // The chat's width beside the video or height below it, when dragged. Each keeps the other side at least its minimum.
-  const room = side ? width : height;
-  const chatPx = chatSize === null ? null : Math.max(CHAT_MIN_PX, Math.min(chatSize, room - STAGE_MIN_PX));
-  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-    const box = root.current?.getBoundingClientRect();
-    if (box) saveChatSize(side ? box.right - e.clientX : box.bottom - e.clientY);
-  };
-  const dividerKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const grow = side ? 'ArrowLeft' : 'ArrowUp';
-    const shrink = side ? 'ArrowRight' : 'ArrowDown';
-    if (e.key !== grow && e.key !== shrink) return;
-    e.preventDefault();
-    const now = chatPx ?? root.current?.querySelector('[aria-label="Call chat"]')?.getBoundingClientRect()[side ? 'width' : 'height'] ?? 300;
-    saveChatSize(now + (e.key === grow ? 32 : -32));
-  };
   return (
-    <div
-      ref={root}
-      data-call-layout={side ? 'side' : 'bottom'}
-      data-call-chat={chatOpen ? 'open' : 'closed'}
-      className={cn('flex min-h-0 min-w-0 gap-s-2 p-s-2', side ? 'flex-row' : 'flex-col')}
-    >
-      <CallStage call={call} chatOpen={chatOpen} onToggleChat={toggleChat} />
-      {chatOpen ? (
-        <div
-          role="separator"
-          aria-orientation={side ? 'vertical' : 'horizontal'}
-          aria-label="Resize the call and its chat"
-          tabIndex={0}
-          data-call-chat-divider
-          onPointerDown={(e) => {
-            e.preventDefault();
-            e.currentTarget.setPointerCapture(e.pointerId);
-          }}
-          onPointerMove={onDividerMove}
-          onDoubleClick={() => saveChatSize(null)}
-          onKeyDown={dividerKey}
-          className={cn('shrink-0 rounded-full bg-transparent hover:bg-elevated-hover focus-visible:outline-2 focus-visible:outline-ring', side ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize')}
-        />
-      ) : null}
-      {chatOpen ? <CallChat side={side} size={chatPx} onClose={toggleChat} /> : null}
+    <div data-call-layout="stage" className="flex min-h-0 min-w-0 p-s-2">
+      <CallStage call={call} />
     </div>
+  );
+}
+
+// The board between the click on a voice channel and the engine's call: the channel is joining.
+function CallJoining() {
+  const name = useCallName();
+  return (
+    <section aria-label="Call" data-call-joining className="flex min-h-0 min-w-0 flex-col items-center justify-center gap-s-2 p-s-8 text-center">
+      <Volume2 className="size-10 text-faint" aria-hidden="true" />
+      <p className="text-body text-muted-foreground">{name ? `Joining #${name}` : 'Joining the voice channel'}</p>
+    </section>
   );
 }
 
@@ -232,18 +139,14 @@ function TileGrid({ count, children }: { count: number; children: ReactNode }) {
   );
 }
 
-// The stage of a call: the route, the tiles and the controls. The call-chat button shows when `onToggleChat` is given;
-// the collapse button when `onToggleCompact` is. Compact, the stage is one strip: the people in the call and the controls.
+// The stage of a call: the route, the tiles and the controls. The collapse button shows when `onToggleCompact` is given.
+// Compact, the stage is one strip: the people in the call and the controls.
 export function CallStage({
   call,
-  chatOpen = false,
-  onToggleChat,
   compact = false,
   onToggleCompact,
 }: {
   call: CallState;
-  chatOpen?: boolean;
-  onToggleChat?: () => void;
   compact?: boolean;
   onToggleCompact?: () => void;
 }) {
@@ -353,11 +256,6 @@ export function CallStage({
             <Monitor className="size-7" />
           </ControlButton>
         )}
-        {onToggleChat ? (
-          <ControlButton label={chatOpen ? 'Hide call chat' : 'Show call chat'} expanded={chatOpen} onClick={onToggleChat}>
-            <MessageCircle className="size-7" />
-          </ControlButton>
-        ) : null}
         {onToggleCompact ? (
           <ControlButton label={compact ? 'Expand the call' : 'Collapse the call'} expanded={!compact} onClick={onToggleCompact}>
             {compact ? <ChevronDown className="size-7" /> : <ChevronUp className="size-7" />}
@@ -568,124 +466,6 @@ function ControlButton({
         {children}
       </button>
     </Tip>
-  );
-}
-
-// The call chat: the messages of the conversation the call sends into, and its composer. Rows and composer are the chat's
-// own (message-list.tsx, message-row.tsx, composer.tsx), so a message reads and acts the same here as in the chat:
-// formatting, mentions, link previews, invite cards, files, replies, reactions and the message menu.
-function CallChat({ side, size, onClose }: { side: boolean; size: number | null; onClose: () => void }) {
-  const view = useCallChatView();
-  const audience = view ? audienceOf(view) : null;
-  // The conversation the call sends into: its messages are the call chat's. Read again when the call moves to another one.
-  const groupId = useCallRoom((r) => r.groupId);
-  const conversation = useShell((s) => conversationKey(callConversationOf(s, groupId)));
-  useEffect(() => {
-    void loadCallChat();
-  }, [conversation]);
-  return (
-    <section
-      className={cn(
-        'flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-sidebar',
-        // Beside the video it is a column; below it, it takes at most a third of the pane, so the video keeps the rest.
-        side ? 'w-[360px]' : 'h-[min(33%,300px)] min-h-[200px]',
-      )}
-      style={size === null ? undefined : side ? { width: size } : { height: size }}
-      aria-label="Call chat"
-    >
-      <div className="flex h-12 shrink-0 items-center gap-s-2 pr-s-2 pl-s-4 shadow-[inset_0_-1px_0_var(--border)]">
-        <MessageCircle className="size-[18px] shrink-0 text-muted-foreground" aria-hidden="true" />
-        <h3 className="shrink-0 text-ui font-semibold text-text-strong">Call chat</h3>
-        {audience ? <span className="min-w-0 flex-1 truncate text-meta text-muted-foreground" title={audience} data-call-chat-audience>{`· ${audience}`}</span> : <span className="flex-1" />}
-        <Tip label="Hide call chat">
-          <button
-            type="button"
-            aria-label="Hide call chat"
-            onClick={onClose}
-            className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-elevated-hover hover:text-text-strong focus-visible:outline-2 focus-visible:outline-ring"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </button>
-        </Tip>
-      </div>
-      <CallMessages view={view} />
-      {view ? <Composer key={view.target.key} view={view} /> : null}
-    </section>
-  );
-}
-
-// Who reads the call chat. Its messages go into the call's conversation, so everyone who can read that conversation reads
-// them, in the call or not: for a voice channel, anyone who can read the channel.
-function audienceOf(view: ChatView): string {
-  switch (view.target.kind) {
-    case 'channel':
-      return `Messages go to #${view.title}. Anyone who can read #${view.title} can read them.`;
-    case 'dm':
-      return `Messages go to your chat with ${view.title}.`;
-    case 'group':
-      return `Messages go to ${view.title}. Everyone in the group can read them.`;
-  }
-}
-
-// The call chat's view: the call's conversation built as the chat builds the open one, with the call's own placeholder.
-function useCallChatView(): ChatView | null {
-  const shell = useShell(
-    useShallow((s) => ({ me: s.me, community: s.community, peerName: s.peerName, group: s.group, conversations: s.conversations })),
-  );
-  const conversation = useCallChat((s) => s.conversation);
-  const channel = useCallChat((s) => s.channel);
-  const direct = useCallChat((s) => s.direct);
-  return useMemo(() => {
-    const view = buildView(shell, chatTargetOf(conversation), channel, direct);
-    return view ? { ...view, placeholder: 'Message the call' } : null;
-  }, [shell, conversation, channel, direct]);
-}
-
-// The call chat's messages, kept at the end as they arrive unless scrolled up. Cards that load after their row (an invite,
-// a picture) grow the rows later, so a change of the rows' height keeps the end in view too. The scroll event of a move
-// made here can arrive after the rows have grown again, so it does not count as the reader scrolling up.
-function CallMessages({ view }: { view: ChatView | null }) {
-  const list = useRef<HTMLDivElement>(null);
-  const rows = useRef<HTMLDivElement>(null);
-  const atBottom = useRef(true);
-  const placed = useRef<number | null>(null); // the scroll position this component last set
-  const items = view?.items ?? [];
-  const toEnd = (el: HTMLDivElement) => {
-    el.scrollTop = el.scrollHeight;
-    placed.current = el.scrollTop;
-  };
-  useLayoutEffect(() => {
-    const el = list.current;
-    if (el && atBottom.current) toEnd(el);
-  });
-  useEffect(() => {
-    const el = list.current;
-    const inner = rows.current;
-    if (!el || !inner) return;
-    const observer = new ResizeObserver(() => {
-      if (atBottom.current) toEnd(el);
-    });
-    observer.observe(inner);
-    return () => observer.disconnect();
-  }, []);
-  return (
-    <div
-      ref={list}
-      className="messages min-h-0 flex-1"
-      role="log"
-      aria-label="Call messages"
-      aria-live="polite"
-      tabIndex={0}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        if (placed.current !== null && Math.abs(el.scrollTop - placed.current) < 2) return;
-        placed.current = null;
-        atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
-      }}
-      onKeyDown={(e) => listKey(e, list.current, items, view)}
-    >
-      <div ref={rows}>{view ? rowsFor(items, view, null) : null}</div>
-    </div>
   );
 }
 

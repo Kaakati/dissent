@@ -2083,6 +2083,8 @@ impl Engine {
         let room = Arc::new(room);
         lock(&room.leaves).extend(indexed.iter().map(|(s, d, _)| (*d, *s)));
         self.install(room.clone());
+        // The window shows the call from here: reaching the others can take seconds.
+        self.emit(EngineEvent::CallUpdated);
         if let Err(e) = self.connect_self(&room).await {
             warn!(error = %e, "forwarder's own link not made");
         }
@@ -2150,7 +2152,6 @@ impl Engine {
 
     /// As `join_devices`. `ring` asks devices that are not in the call to ring for it.
     async fn join_devices_ring(&self, room: &Arc<Room>, devices: &[DeviceId], key: Option<[u8; 32]>, ring: bool) -> usize {
-        let mut answered = 0;
         let muted = room.is_muted();
         *lock(&room.targets) = devices.to_vec();
         let from = match self.my_addr() {
@@ -2160,7 +2161,10 @@ impl Engine {
                 return 0;
             }
         };
-        for device in devices {
+        // Every device is asked at once. One after another, each offline device held up the rest for the request
+        // timeout, so joining a channel with members away took that long times their number.
+        let mut asks = tokio::task::JoinSet::new();
+        for device in devices.iter().copied() {
             let msg = CallMsg::Join(Box::new(JoinMsg {
                 ring,
                 room: room.id,
@@ -2174,28 +2178,44 @@ impl Engine {
                 },
                 from: from.clone(),
             }));
-            match self.call_rpc(*device, msg).await {
-                Ok(CallReply::Here { cert, .. }) if cert.device == *device => {
-                    answered += 1;
-                    if let Some(sid) = room.sid_of(device) {
-                        lock(&room.live).insert(sid, *device);
-                    }
-                    // A forwarded call shows everyone who is in it, even without a direct link.
-                    if let (Some(_), Some(sid)) = (&room.forwarding, room.sid_of(device)) {
-                        room.add_peer(sid, *device, cert.root);
-                    }
-                    if room.offers_to(device) {
-                        if let Err(e) = self.connect(room.clone(), *device).await {
-                            warn!(device = %device, error = %e, "call link not made");
-                        }
-                    }
-                }
-                Ok(CallReply::Ringing) => answered += 1,
-                Ok(reply) => debug!(device = %device, ?reply, "device is not in the call"),
-                Err(e) => debug!(device = %device, error = %e, "call join not delivered"),
-            }
+            let (engine, room) = (self.clone(), room.clone());
+            asks.spawn(async move { engine.join_one(room, device, msg).await });
+        }
+        let mut answered = 0;
+        while let Some(result) = asks.join_next().await {
+            answered += usize::from(result.unwrap_or(false));
         }
         answered
+    }
+
+    /// Asks one device to join, and links to it if it answers from the call. True when it answered.
+    async fn join_one(&self, room: Arc<Room>, device: DeviceId, msg: CallMsg) -> bool {
+        match self.call_rpc(device, msg).await {
+            Ok(CallReply::Here { cert, .. }) if cert.device == device => {
+                if let Some(sid) = room.sid_of(&device) {
+                    lock(&room.live).insert(sid, device);
+                }
+                // A forwarded call shows everyone who is in it, even without a direct link.
+                if let (Some(_), Some(sid)) = (&room.forwarding, room.sid_of(&device)) {
+                    room.add_peer(sid, device, cert.root);
+                }
+                if room.offers_to(&device) {
+                    if let Err(e) = self.connect(room.clone(), device).await {
+                        warn!(device = %device, error = %e, "call link not made");
+                    }
+                }
+                true
+            }
+            Ok(CallReply::Ringing) => true,
+            Ok(reply) => {
+                debug!(device = %device, ?reply, "device is not in the call");
+                false
+            }
+            Err(e) => {
+                debug!(device = %device, error = %e, "call join not delivered");
+                false
+            }
+        }
     }
 
     /// Offering side of one pair: dials the link, offers, and applies the answer.

@@ -732,6 +732,37 @@ if (!window.__TAURI__) {
   // My seeding: the settings and a record per seeded listing.
   const seeding = { settings: null, records: {} };
   const liveReads = {};
+  // Joins a voice channel's call, as join_call answers it.
+  function joinChannelCall({ communityId, channelId }) {
+    const c = servers[communityId];
+    const ch = c?.channels.find((x) => x.id === channelId && x.voice);
+    need(ch, 'not a voice channel');
+    // The workshop channel is the demo call, forwarded by Jonas. Other channels start with only this device.
+    // `window.__mockForwardedBy = 'Yusuf'` makes the demo call forwarded by a member who is not in it, as the engine's
+    // `forwarded_by` names one: nobody in the call forwards, and the route names no forwarder or backup.
+    const demo = channelId === 'vc1';
+    const volunteer = demo ? window.__mockForwardedBy : undefined;
+    calls.current = callView('channel', {
+      channel_name: ch.name,
+      community_name: c.name,
+      participants: demo ? CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p, ...(volunteer ? { forwarder: false } : {}) })) : [],
+      route: volunteer
+        ? { kind: 'forwarded', title: 'Forwarded call', detail: `${volunteer}, who is not in this call, relays audio between the ${CALL_PEOPLE.length} people in it.` }
+        : demo
+          ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
+          : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
+      forwarded_by: volunteer ?? null,
+      self_speaking: false,
+    });
+    // As the engine does, the voice roster lists this person once in the channel joined.
+    const roster = c.voice?.find((v) => v.id === channelId);
+    if (roster && !roster.participants.some((p) => p.root_id === ME)) {
+      roster.participants.unshift({ root_id: ME, display_name: people[ME], muted: false, deafened: false, speaking: false });
+      emit({ kind: 'community_updated', community_id: communityId });
+    }
+    return { ...calls.current };
+  }
+
   const handlers = {
     disclaimer_accepted: () => disclaimerSaved(),
     accept_disclaimer: ({ updated }) => {
@@ -2127,34 +2158,14 @@ if (!window.__TAURI__) {
       }, 4000);
       return { ...calls.current };
     },
-    join_call: ({ communityId, channelId }) => {
-      const c = servers[communityId];
-      const ch = c?.channels.find((x) => x.id === channelId && x.voice);
-      need(ch, 'not a voice channel');
-      // The workshop channel is the demo call, forwarded by Jonas. Other channels start with only this device.
-      // `window.__mockForwardedBy = 'Yusuf'` makes the demo call forwarded by a member who is not in it, as the engine's
-      // `forwarded_by` names one: nobody in the call forwards, and the route names no forwarder or backup.
-      const demo = channelId === 'vc1';
-      const volunteer = demo ? window.__mockForwardedBy : undefined;
-      calls.current = callView('channel', {
-        channel_name: ch.name,
-        community_name: c.name,
-        participants: demo ? CALL_PEOPLE.filter((p) => p.root_id !== ME).map((p) => ({ ...p, ...(volunteer ? { forwarder: false } : {}) })) : [],
-        route: volunteer
-          ? { kind: 'forwarded', title: 'Forwarded call', detail: `${volunteer}, who is not in this call, relays audio between the ${CALL_PEOPLE.length} people in it.` }
-          : demo
-            ? { kind: 'forwarded', title: 'Forwarded by Jonas', detail: 'Their computer passes everyone’s sealed streams along and can’t open them.', forwarder: 'Jonas', backup: 'Leila' }
-            : { kind: 'direct', title: `#${ch.name}`, detail: 'Peer to peer, end-to-end encrypted' },
-        forwarded_by: volunteer ?? null,
-        self_speaking: false,
-      });
-      // As the engine does, the voice roster lists this person once in the channel joined.
-      const roster = c.voice?.find((v) => v.id === channelId);
-      if (roster && !roster.participants.some((p) => p.root_id === ME)) {
-        roster.participants.unshift({ root_id: ME, display_name: people[ME], muted: false, deafened: false, speaking: false });
-        emit({ kind: 'community_updated', community_id: communityId });
-      }
-      return { ...calls.current };
+    // `window.__mockJoinWait` (ms) holds the answer back, as reaching members who are away does, and
+    // `window.__mockJoinFail` (a reason) makes the join fail after that wait.
+    join_call: (args) => {
+      window.__mockJoinCalls = (window.__mockJoinCalls ?? 0) + 1;
+      const wait = window.__mockJoinWait;
+      const fail = window.__mockJoinFail;
+      if (!wait && !fail) return joinChannelCall(args);
+      return new Promise((resolve, reject) => setTimeout(() => (fail ? reject(new Error(fail)) : resolve(joinChannelCall(args))), wait ?? 0));
     },
     leave_call: () => {
       calls.current = null;

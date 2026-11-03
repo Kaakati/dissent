@@ -500,31 +500,33 @@ function VoiceRow({ community, ch, canManage, lifted, style, rowRef, handlers, c
   const active = voiceChannelId === ch.id;
   const connected = connection?.channelId === ch.id;
   const voiceChannels = community.voice_channels;
-  // The engine lists everyone in the channel once per person, you included. In the channel you are connected to, you
-  // come first (added if the list has not caught up yet), and the call's live state says who speaks and your mute.
+  const joining = connected && Boolean(connection?.joining);
+  // The engine lists everyone in the channel once per person, you included. In the channel you are connected to, or
+  // joining, you come first (added if the list has not caught up yet), and the call's live state says who speaks and
+  // your mute.
   const participants: VoiceParticipant[] = useMemo(() => {
     const listed: VoiceParticipant[] = (voiceChannels ?? []).find((v) => v.id === ch.id)?.participants ?? [];
-    if (!(connected && me && call)) return listed;
-    const live = new Map(call.participants.map((p) => [p.root_id, p]));
+    if (!(connected && me && (call || joining))) return listed;
+    const live = new Map((call?.participants ?? []).map((p) => [p.root_id, p]));
     const listedMe = listed.find((p) => p.root_id === me.root_id);
     const you: VoiceParticipant = {
       root_id: me.root_id,
       display_name: listedMe?.display_name ?? me.display_name,
-      muted: call.muted,
-      deafened: call.deafened,
-      speaking: Boolean(call.self_speaking),
-      screen: Boolean(call.screen),
+      muted: call?.muted ?? false,
+      deafened: call?.deafened ?? false,
+      speaking: Boolean(call?.self_speaking),
+      screen: Boolean(call?.screen),
     };
     const others = listed.filter((p) => p.root_id !== me.root_id).map((p) => ({ ...p, speaking: live.get(p.root_id)?.speaking ?? p.speaking, screen: live.get(p.root_id)?.screen }));
     return [you, ...others];
-  }, [voiceChannels, ch.id, connected, me, call]);
+  }, [voiceChannels, ch.id, connected, joining, me, call]);
   return (
     <div ref={rowRef} style={style} className={cn('group relative flex flex-col gap-0.5', lifted && 'z-[3] opacity-80')}>
       <button
         type="button"
         className={cn(rowClass(active, false), 'font-medium', handlers.onPointerDown ? 'touch-none' : null)}
         aria-current={active ? 'true' : undefined}
-        title={connected ? `Connected to ${ch.name}` : `Join ${ch.name}`}
+        title={joining ? `Joining ${ch.name}` : connected ? `Connected to ${ch.name}` : `Join ${ch.name}`}
         onClick={() => {
           if (clickGoes()) void openVoiceChannel(ch.id);
         }}
@@ -538,7 +540,7 @@ function VoiceRow({ community, ch, canManage, lifted, style, rowRef, handlers, c
       {participants.length ? (
         <div role="list" aria-label={`In ${ch.name}`}>
           {participants.map((p) => (
-            <VoiceMember key={p.root_id} person={p} />
+            <VoiceMember key={p.root_id} person={p} joining={joining && p.root_id === me?.root_id} />
           ))}
         </div>
       ) : null}
@@ -547,9 +549,10 @@ function VoiceRow({ community, ch, canManage, lifted, style, rowRef, handlers, c
 }
 
 // One person in a voice channel: avatar, name, and mute and deafen flags.
-function VoiceMember({ person }: { person: VoiceParticipant }) {
+// You, while your join is still on its way, show faded until the engine confirms it.
+function VoiceMember({ person, joining = false }: { person: VoiceParticipant; joining?: boolean }) {
   return (
-    <div role="listitem" data-voice-member={person.root_id} data-speaking={person.speaking || undefined} className="flex h-[30px] shrink-0 items-center gap-s-2 pr-s-2 pl-9 text-sm font-medium text-muted-foreground">
+    <div role="listitem" data-voice-member={person.root_id} data-speaking={person.speaking || undefined} data-joining={joining || undefined} title={joining ? 'Joining' : undefined} className={cn('flex h-[30px] shrink-0 items-center gap-s-2 pr-s-2 pl-9 text-sm font-medium text-muted-foreground', joining && 'opacity-60')}>
       <UserAvatar name={person.display_name} seed={person.root_id} size="xs" className="size-[22px] text-[8px]" speaking={person.speaking} />
       <span className="min-w-0 flex-1 truncate" title={person.display_name}>{person.display_name}</span>
       {person.screen ? <span data-roster-live className="inline-flex h-4 shrink-0 items-center rounded bg-danger px-1 text-[10px] font-bold tracking-wide text-white">LIVE</span> : null}

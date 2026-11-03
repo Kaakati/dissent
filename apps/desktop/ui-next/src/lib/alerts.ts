@@ -71,6 +71,8 @@ export async function alertForChannelMessage(ev: { community_id: Id; channel_id:
   const cached = useShell.getState().community;
   const community = cached?.id === ev.community_id ? cached : await api.communityView(ev.community_id);
   const channel = community.channels?.find((c) => c.id === ev.channel_id);
+  // A voice channel shows no text, so a message there alerts no one: it could not be read.
+  if (channel?.voice) return;
   alertFor({
     kind: 'channel',
     key: `ch:${ev.community_id}:${ev.channel_id}`,

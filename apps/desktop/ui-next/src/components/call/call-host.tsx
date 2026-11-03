@@ -3,7 +3,6 @@
 import { useEffect } from 'react';
 import { onEngineEvent, listenTo } from '@/lib/api';
 import { dismissRinging, ringIncoming, watchCallSounds, watchLobbyDismissal } from '@/lib/calls';
-import { refreshCallChat } from '@/lib/call-chat';
 import type { IncomingCall } from '@/lib/types';
 import { IncomingCallDialog } from './incoming';
 
@@ -17,7 +16,6 @@ export function CallHost() {
       listenTo<IncomingCall>('dissent://call-ringing', ringIncoming).catch(() => () => {}),
       onEngineEvent((ev) => {
         if (ev.kind === 'call_missed' || ev.kind === 'call_answered_elsewhere') dismissRinging(ev.call_id);
-        refreshCallChat(ev);
       }).catch(() => () => {}),
     ];
     return () => {
