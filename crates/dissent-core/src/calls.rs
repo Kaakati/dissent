@@ -695,6 +695,7 @@ pub(crate) struct Room {
     /// For tests: an estimate that replaces the link's when above zero.
     forced_estimate: AtomicU32,
     /// For tests: set, the encoders' time per frame is not read, so a busy machine does not step video down.
+    #[cfg(feature = "test-hooks")]
     cpu_held: AtomicBool,
     /// The sound of everyone's shared screens, for the playout.
     screen_sound: Mutex<crate::call_screen_audio::ScreenAudioMix>,
@@ -1104,6 +1105,7 @@ impl Room {
             loop_stats: Default::default(),
             link_estimate: AtomicU32::new(0),
             forced_estimate: AtomicU32::new(0),
+            #[cfg(feature = "test-hooks")]
             cpu_held: AtomicBool::new(false),
             screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
@@ -1385,7 +1387,10 @@ fn fit_sending(room: &Room, available_kbps: Option<u32>, audio_kbps: u32) {
     // A test can hold the estimate, so it checks what follows from a rate rather than the machine's load.
     let forced = room.forced_estimate.load(Ordering::Relaxed);
     let available_kbps = if forced > 0 { Some(forced) } else { available_kbps };
+    #[cfg(feature = "test-hooks")]
     let cpu_held = room.cpu_held.load(Ordering::Relaxed);
+    #[cfg(not(feature = "test-hooks"))]
+    let cpu_held = false;
     for slot in [&room.camera, &room.screen] {
         if let Some(sending) = lock(slot).as_mut() {
             sending.fit(available_kbps, audio_kbps, cpu_held);
@@ -3271,6 +3276,7 @@ impl Engine {
     }
 
     /// For tests: while `on`, this device's video is not stepped down for a busy CPU.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn hold_cpu_governor_now(&self, on: bool) -> bool {
         let Some(room) = lock(&self.inner.calls.current).clone() else {
             return false;

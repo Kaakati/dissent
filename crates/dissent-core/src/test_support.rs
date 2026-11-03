@@ -248,6 +248,7 @@ pub fn link_estimate(engine: &crate::Engine) -> Option<u32> {
 
 /// While `on`, `engine`'s camera and screen are not stepped down for a busy CPU, so a test of layers or sizes is not at
 /// the mercy of the runner's load. False when `engine` is not in a call.
+#[cfg(feature = "test-hooks")]
 pub fn hold_cpu_governor(engine: &crate::Engine, on: bool) -> bool {
     engine.hold_cpu_governor_now(on)
 }
