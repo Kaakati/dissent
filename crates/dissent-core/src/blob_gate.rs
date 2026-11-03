@@ -500,7 +500,7 @@ async fn count_served(
 
 /// Answers a GET for a seed under the upload slots: served now, refused as busy, or held until a slot frees.
 async fn answer_seed(engine: Engine, device: DeviceId, key: (u64, u64), sending: Sending, m: dissent_files::gate::GetRequestReceivedMsg) {
-    let granted = match engine.take_slot(key, device) {
+    let granted = match engine.take_slot(key, device, m.request.hash.as_bytes()) {
         crate::tracker::slots::Take::Granted => true,
         crate::tracker::slots::Take::Busy => false,
         crate::tracker::slots::Take::Held(wait) => {
@@ -586,12 +586,11 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
             _ => continue,
         };
         let device = devices.get(&conn).copied();
-        let refused_by_test = {
-            let mut w = engine.write();
-            let on = w.blob_scopes.refuse_until.is_some_and(|until| Instant::now() < until);
-            w.blob_scopes.refused_by_test += u64::from(on);
-            on
-        };
+        // Read first: a write lock on every request would queue behind every reader of the world.
+        let refused_by_test = engine.read().blob_scopes.refuse_until.is_some_and(|until| Instant::now() < until);
+        if refused_by_test {
+            engine.write().blob_scopes.refused_by_test += 1;
+        }
         let verdict = match device {
             None => Verdict::Deny,
             Some(_) if refused_by_test => Verdict::Deny,

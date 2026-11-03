@@ -314,6 +314,9 @@ impl Engine {
                 .map(|t| (t.id.clone(), (t.state.clone(), t.progress, t.local_path.clone())))
                 .collect()
         };
+        // Before the read guard below: it reads the world itself, and a second read on one thread waits behind any writer
+        // queued meanwhile, which never gets in.
+        let folders_count = self.opened_folders_count(community);
         let w = self.read();
         let c = w.communities.get(&community).ok_or_else(|| crate::engine::not_found(&community))?;
         let st = c.state();
@@ -469,7 +472,6 @@ impl Engine {
             downloaded,
             ratio: (downloaded > 0).then(|| uploaded as f64 / downloaded as f64),
         };
-        let folders_count = self.opened_folders_count(community);
         let locked = st.files.listings.len().saturating_sub(opened.len() + folders_count) as u32;
         drop(w);
         // Folder listings, each one row, counted in their categories.

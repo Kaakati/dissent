@@ -1333,3 +1333,69 @@ async fn a_downloader_from_before_upload_slots_waits_for_a_full_seeder_and_finis
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_folder_from_a_seeder_with_one_upload_slot_shows_its_providers_and_finishes() {
+    heavy(3, async {
+        let alice = peer("slots-folder-alice").await;
+        let bob = peer("slots-folder-bob").await;
+        let carol = peer("slots-folder-carol").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let mut any = releases();
+        any.types = vec![];
+        let cat = alice.engine.create_category(id, any).await.expect("category");
+        for p in [&bob, &carol] {
+            let invite = alice.engine.create_invite(id).await.unwrap();
+            join_ready(&alice, p, &invite).await;
+        }
+        let dir = scratch("slots-folder-src").join("Big");
+        write(&dir, "one.bin", &sample(8 * 1024 * 1024, 10));
+        write(&dir, "two.bin", &sample(8 * 1024 * 1024, 11));
+        let rel = check_folder(&alice.engine, id, &dir).await;
+        let listing: dissent_events::EventId =
+            alice.engine.list_folder(id, cat, dir.clone(), rel, vec![], String::new(), SeedLimit::Forever).await.unwrap().parse().unwrap();
+        for p in [&bob, &carol] {
+            until_event(&p.engine, Duration::from_secs(60), "the folder arrives", || {
+                p.engine.files_view(id).ok().filter(|v| v.listings.iter().any(|l| l.folder.is_some())).map(|_| ())
+            })
+            .await;
+        }
+        // One upload at a time, slow enough that the two folder downloads overlap.
+        let settings = alice.engine.seeding_settings();
+        alice.engine.set_seeding_settings(SeedingSettings { max_active: 1, upload_bps: Some(6_000_000), ..settings }).unwrap();
+        bob.engine.download_folder(id, listing).await.expect("bob starts");
+        carol.engine.download_folder(id, listing).await.expect("carol starts");
+        let (mut counted, mut most) = (false, 0);
+        let until = std::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            most = most.max(alice.engine.seeding_view(id).unwrap().uploads.active);
+            for p in [&bob, &carol] {
+                let row = p.engine.transfers().into_iter().find(|t| t.message_id.contains(&listing.to_string()));
+                counted |= row.is_some_and(|r| r.sources.iter().any(|s| s.bytes > 0));
+            }
+            let done = [&bob, &carol].iter().all(|p| p.engine.files_view(id).unwrap().listings.iter().any(|l| l.folder.is_some() && l.local == "seeding"));
+            if done {
+                break;
+            }
+            if std::time::Instant::now() >= until {
+                let rows: Vec<_> = [&bob, &carol].iter().map(|p| p.engine.transfers().into_iter().map(|t| (t.state, t.progress, t.error)).collect::<Vec<_>>()).collect();
+                panic!("both folders finish: {rows:?}, seeder uploads {:?}", alice.engine.seeding_view(id).unwrap().uploads);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(most, 1, "never more than one upload at once");
+        assert!(counted, "the folder row counts what each provider delivered");
+        // A folder's files are seeded in place, so a request that finds the slot full waits for it rather than being refused.
+        let held = dissent_core::test_support::slot_holds(&alice.engine, bob.identity.device_id())
+            + dissent_core::test_support::slot_holds(&alice.engine, carol.identity.device_id());
+        assert!(held > 0, "the folder downloads met the full slot");
+        for p in [&bob, &carol] {
+            assert_eq!(dissent_core::test_support::slot_refusals(&alice.engine, p.identity.device_id()), 0, "nobody was refused");
+        }
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}

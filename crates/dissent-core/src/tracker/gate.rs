@@ -73,9 +73,11 @@ impl Engine {
         false
     }
 
-    /// Asks for an upload slot for the request `key` of `device`, for a seed.
-    pub(crate) fn take_slot(&self, key: RequestKey, device: DeviceId) -> Take {
-        let knows = self.knows_busy(device);
+    /// Asks for an upload slot for the request `key` of `device`, for the seed `blob`.
+    pub(crate) fn take_slot(&self, key: RequestKey, device: DeviceId, blob: &[u8; 32]) -> Take {
+        // A file seeded in place is answered outside iroh-blobs' handlers, which cannot send the busy code, so a request for
+        // one waits for a slot as an older downloader's does.
+        let knows = !self.inner.files.is_linked(*blob) && self.knows_busy(device);
         let max = self.upload_slots_max();
         let mut state = self.inner.tracker.lock().unwrap_or_else(PoisonError::into_inner);
         let take = state.slots.take(key, device, max, knows, Instant::now());
