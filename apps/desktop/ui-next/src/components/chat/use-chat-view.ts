@@ -145,7 +145,7 @@ export function conversationItems(
   });
 }
 
-// The view of `target`'s messages. The open chat and the call chat both build theirs here.
+// The view of `target`'s messages.
 export function buildView(shell: ShellSlice, target: ChatTarget | null, messages: ChannelMessage[], dmMessages: ConversationMessage[]): ChatView | null {
   if (!target) return null;
   const me = shell.me;

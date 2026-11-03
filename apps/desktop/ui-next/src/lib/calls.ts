@@ -1,4 +1,4 @@
-// Call actions: voice channels, live direct and group calls, ringing calls, the call chat, and the sounds that follow the
+// Call actions: voice channels, live direct and group calls, ringing calls, and the sounds that follow the
 // call. Each action calls the engine and then writes the shell store, so the views only read. Ported from the calls
 // section of the old UI's actions.js. Failures become toasts; nothing here throws into a view.
 import { create } from 'zustand';
@@ -47,28 +47,29 @@ export function watchLobbyDismissal(): () => void {
   });
 }
 
-// Clicking a voice channel joins it. Another call on this device is left first, so this one replaces it.
+// Clicking a voice channel joins it. Another call on this device is left first, so this one replaces it. The click
+// shows you in the channel at once; the engine's answer confirms it, or takes it back with the reason.
 export async function openVoiceChannel(channelId: Id): Promise<void> {
   const { community, voiceConnection, call } = useShell.getState();
   if (!has('calls') || !community) return;
-  if (voiceConnection?.channelId === channelId && call) {
+  if (voiceConnection?.channelId === channelId && (call || voiceConnection.joining)) {
     useShell.setState({ voiceChannelId: channelId, page: null });
     return;
   }
+  // One join at a time: a click on another channel while one is joining waits for no one and does nothing.
+  if (voiceConnection?.joining) return;
   if (call) await useShell.getState().leaveCall();
-  const joined = await joinChannel(community.id, channelId);
-  useShell.setState({ voiceChannelId: joined ? channelId : null, page: null });
-}
-
-async function joinChannel(communityId: Id, channelId: Id): Promise<boolean> {
+  const communityId = community.id;
+  useShell.setState({ voiceConnection: { communityId, channelId, joining: true }, voiceChannelId: channelId, page: null });
+  useCallRoom.setState({ groupId: null });
   try {
     applyCall((await api.joinCall(communityId, channelId)) as CallState);
     useShell.setState({ voiceConnection: { communityId, channelId } });
-    useCallRoom.setState({ groupId: null });
-    return true;
   } catch (err) {
-    toast(err);
-    return false;
+    const name = community.channels.find((c) => c.id === channelId)?.name;
+    const { voiceChannelId } = useShell.getState();
+    useShell.setState({ voiceConnection: null, call: null, voiceChannelId: voiceChannelId === channelId ? null : voiceChannelId });
+    toast(`Could not join ${name ? `#${name}` : 'the voice channel'}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

@@ -220,7 +220,8 @@ const normalizeStatus = (s: Partial<UserStatus> | null | undefined): UserStatus 
 function withCall(state: ShellState, next: CallState | null): Partial<ShellState> {
   return {
     call: next,
-    voiceConnection: next?.scope === 'channel' ? state.voiceConnection : null,
+    // A join in progress keeps its connection: the click shows it before the engine has a call to report.
+    voiceConnection: next?.scope === 'channel' || state.voiceConnection?.joining ? state.voiceConnection : null,
   };
 }
 
@@ -626,7 +627,12 @@ export const useShell = create<ShellState>()((set, get) => ({
         case 'message': {
           const { route, community, channelId } = get();
           const open = route.kind === 'server' && community?.id === ev.community_id && channelId === ev.channel_id;
-          if (!open) set({ unread: new Set([...get().unread, channelKey(ev.community_id, ev.channel_id)]) });
+          if (open) return;
+          // A voice channel shows no text, so a message there (an older version's call chat still posts one) is never
+          // unread: nothing could open it to clear the server's dot.
+          const view = community?.id === ev.community_id ? community : await api.communityView(ev.community_id).catch(() => null);
+          if (view?.channels.find((c) => c.id === ev.channel_id)?.voice) return;
+          set({ unread: new Set([...get().unread, channelKey(ev.community_id, ev.channel_id)]) });
           return;
         }
         case 'dm': {

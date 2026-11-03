@@ -15,9 +15,10 @@ export function liveCallOf(s: ShellState): LiveCall | null {
   return s.conversations.find((c) => c.kind === 'dm' && c.peer === s.peer)?.live_call ?? null;
 }
 
-// A channel call is open here when its voice channel is the one this device is connected to.
+// A channel call is open here when its voice channel is the one this device is connected to, or is joining.
 function channelCallHere(s: ShellState): boolean {
-  return s.call?.scope === 'channel' && s.voiceChannelId !== null && s.voiceChannelId === s.voiceConnection?.channelId;
+  const here = s.voiceChannelId !== null && s.voiceChannelId === s.voiceConnection?.channelId;
+  return here && (s.call?.scope === 'channel' || Boolean(s.voiceConnection?.joining));
 }
 
 // A direct or group call is open here when it belongs to the open conversation. A group call is matched by the group

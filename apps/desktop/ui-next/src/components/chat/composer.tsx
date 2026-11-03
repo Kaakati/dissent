@@ -64,8 +64,8 @@ async function copyContactLink(): Promise<void> {
 }
 
 export function Composer({ view }: { view: ChatView }) {
-  // A reply belongs to the view that holds its message, so one started in another chat (the call chat, or the chat behind
-  // a call) does not show here.
+  // A reply belongs to the view that holds its message, so one started in another chat (the chat behind a call) does
+  // not show here.
   const replying = useChat((s) => s.replyTo);
   const replyTo = replying && view.items.some((m) => m.id === replying.id) ? replying : null;
   const staged = useChat((s) => s.staged);

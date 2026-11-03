@@ -2141,3 +2141,45 @@ async fn share_under_a_cpu_hog(width: u32, height: u32) {
     .await;
 }
 
+/// Joining a voice channel shows the call at once, though some members' devices are offline. Each offline device took
+/// the 5 s call request timeout in turn before the join returned, so a click on the channel seemed to do nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn joining_a_voice_channel_does_not_wait_for_members_who_are_offline() {
+    heavy(4, async {
+        let owner = peer("owner").await;
+        let a = peer("member a").await;
+        let b = peer("member b").await;
+        let c = peer("member c").await;
+        let (community, channel) = voice_community(&owner, &[&a, &b, &c]).await;
+        // Two members go offline; their devices are still in the server's group.
+        stop(b).await;
+        stop(c).await;
+        let mut events = owner.engine.subscribe();
+        let started = std::time::Instant::now();
+        let join = {
+            let engine = owner.engine.clone();
+            tokio::spawn(async move { engine.join_call(community, channel).await })
+        };
+        // The window learns of the call from this event, so it is what a click waits on.
+        let shown = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match events.recv().await {
+                    Ok(dissent_core::EngineEvent::CallUpdated) if owner.engine.call_state().is_some() => return started.elapsed(),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => panic!("events ended"),
+                }
+            }
+        })
+        .await
+        .expect("the call shows");
+        join.await.expect("the join task").expect("the join works");
+        let returned = started.elapsed();
+        println!("JOIN shown after {} ms, join returned after {} ms", shown.as_millis(), returned.as_millis());
+        assert!(shown < Duration::from_secs(2), "the call shows at once: {shown:?}");
+        assert!(returned < Duration::from_secs(8), "offline members are asked side by side, not one after another: {returned:?}");
+        finish(vec![owner, a]).await;
+    })
+    .await;
+}
+
