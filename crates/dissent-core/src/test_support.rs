@@ -143,6 +143,7 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
 }
 
 /// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.
+#[cfg(feature = "test-hooks")]
 pub fn fail_folder_after(engine: &crate::Engine, files: u64) {
     engine.inner.fail_folder_after.store(files, std::sync::atomic::Ordering::Relaxed);
 }
@@ -153,6 +154,7 @@ pub fn linked_count(engine: &crate::Engine) -> usize {
 }
 
 /// Lists `manifest` as a folder with no files behind it, as a lying lister would.
+#[cfg(feature = "test-hooks")]
 pub async fn list_raw_folder(
     engine: &crate::Engine,
     community: crate::CommunityId,
