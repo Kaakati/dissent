@@ -1547,6 +1547,8 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     sender.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
     sender.engine.set_screen_bitrate(6_000);
     sender.engine.set_screen_share(true, None).expect("screen share on");
+    // This tests the forwarder's choice of layer, so the sender's rate is held rather than left to the runner's load.
+    assert!(dissent_core::test_support::force_link_estimate(&sender.engine, Some(8_000)));
     narrow.engine.set_video_tile(&root(sender), true, 200);
     wide.engine.set_video_tile(&root(sender), true, 2400);
 
@@ -1558,9 +1560,9 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     // A level 0 server: no boost ceiling applies to a screen.
     let plan = dissent_core::test_support::screen_plan(&sender.engine).expect("a share runs");
     assert_eq!((plan.0, plan.1), (2560, 1440), "the top layer is the screen's own size");
-    // The layers' rates are what the sender sends now, and a sender's top layer only climbs to its chosen rate as fast as
-    // its link allows. A fixed budget could sit above a top layer that has not climbed yet, so the plan would keep the
-    // top. The budget goes between the middle and the top once the top has climbed clear of the middle.
+    // The layers' rates are what the sender sends now. The sender's rate is held above, and the wait is a backstop: a
+    // budget above a top layer that has not climbed would rightly keep the top. The budget goes between the middle and
+    // the top.
     let fwd = &everyone[forwarder].engine;
     let mut table = Vec::new();
     let climbed = tokio::time::Instant::now() + scaled(Duration::from_secs(60));
@@ -1856,3 +1858,75 @@ async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
     })
     .await;
 }
+
+/// Measures how a sharer's estimate of its link responds to a busy CPU on loopback: a 1440p share, 15 s as is, 20 s
+/// with every core busy, then 30 s after. Prints the estimate every second. Loopback has no congestion, so any fall is
+/// the machine's own delay read as the network's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
+async fn measure_a_shares_estimate_under_a_cpu_hog() {
+    heavy(8, async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        make_contacts_ready(&alice, &bob).await;
+        let mut bob_events = bob.engine.subscribe();
+        alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
+        crate::common::accept_incoming(&bob.engine, &mut bob_events).await;
+        eventually("the call is up", || alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)).await;
+        alice.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
+        alice.engine.set_screen_bitrate(6_000);
+        alice.engine.set_screen_share(true, None).expect("screen share on");
+        // (second, phase, estimate, the share's plan as width, height, fps and kbps)
+        type Sample = (u64, &'static str, Option<u32>, Option<(u32, u32, u32, u32)>);
+        let mut trace: Vec<Sample> = Vec::new();
+        let sample = async |second: u64, phase: &'static str| {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let e = dissent_core::test_support::link_estimate(&alice.engine);
+            let plan = dissent_core::test_support::screen_plan(&alice.engine);
+            println!("EST {second:>3} s {phase:<6} estimate {e:?} kbps, plan {plan:?}");
+            (second, phase, e, plan)
+        };
+        for s in 0..15 {
+            trace.push(sample(s, "before").await);
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let hogs: Vec<_> = (0..cores)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut x = 0u64;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    }
+                    x
+                })
+            })
+            .collect();
+        for s in 15..35 {
+            trace.push(sample(s, "hog").await);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for hog in hogs {
+            let _ = hog.join();
+        }
+        for s in 35..65 {
+            trace.push(sample(s, "after").await);
+        }
+        let of = |phase: &str| trace.iter().filter(|t| t.1 == phase).filter_map(|t| t.2).collect::<Vec<u32>>();
+        let (before, hog, after) = (of("before"), of("hog"), of("after"));
+        let mean = |v: &[u32]| v.iter().map(|x| u64::from(*x)).sum::<u64>() / v.len().max(1) as u64;
+        let before_mean = mean(&before[5.min(before.len())..]);
+        let recovered = trace.iter().filter(|t| t.1 == "after").find(|t| t.2.is_some_and(|e| u64::from(e) * 10 >= before_mean * 8)).map(|t| t.0 - 35);
+        println!(
+            "EST summary on {cores} cores: before {before_mean} kbps, lowest under the hog {:?}, lowest after {:?}, last {:?}, back to 80% after {recovered:?} s",
+            hog.iter().min(),
+            after.iter().min(),
+            after.last()
+        );
+        alice.engine.set_screen_share(false, None).expect("screen share off");
+        finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+

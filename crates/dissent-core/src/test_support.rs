@@ -213,6 +213,17 @@ pub fn screen_target(engine: &crate::Engine) -> Option<u32> {
     engine.screen_target_now()
 }
 
+/// The link's last bandwidth estimate in `engine`'s call, in kbps.
+pub fn link_estimate(engine: &crate::Engine) -> Option<u32> {
+    engine.link_estimate_now()
+}
+
+/// Holds `engine`'s estimate of its link at `kbps` when it sizes its video, so a test checks what follows from a rate
+/// rather than the machine's load. `None` lets it go. False when `engine` is not in a call.
+pub fn force_link_estimate(engine: &crate::Engine, kbps: Option<u32>) -> bool {
+    engine.force_link_estimate_now(kbps)
+}
+
 /// What `engine`'s screen share sends now, as (width, height, fps, kbps).
 pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()
