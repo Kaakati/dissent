@@ -22,6 +22,7 @@ pub(crate) mod restricted;
 pub(crate) mod scan;
 pub mod live;
 pub mod seeding;
+pub(crate) mod slots;
 pub mod swarm;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -142,6 +143,14 @@ pub(crate) struct TrackerState {
     pub communities: BTreeMap<CommunityId, Local>,
     /// The upload cap's bucket, shared by every server. See `gate`.
     pub(crate) upload: gate::UploadBucket,
+    /// Upload transfers of seeds running now, and the requests waiting for one. See `slots`.
+    pub(crate) slots: slots::Slots,
+    /// What each downloading device said it supports, and when it was asked. `None` until it answers.
+    pub(crate) peer_features: std::collections::HashMap<DeviceId, (Option<u64>, Instant)>,
+    /// Requests refused for full slots since start, by device. For tests.
+    pub(crate) slot_refusals: std::collections::HashMap<DeviceId, u64>,
+    /// Requests held for a slot since start, by device. For tests.
+    pub(crate) slot_holds: std::collections::HashMap<DeviceId, u64>,
     /// The seeding settings as last read or saved.
     pub(crate) settings: Option<seeding::SeedingSettings>,
     /// Paths the person chose this run, through the OS picker or a native drop. See `adding`.

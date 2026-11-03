@@ -102,6 +102,8 @@ pub struct LivePeer {
     pub to_bps: u64,
     /// How much of the file they hold, 0 to 1: their last answer plus what they were sent since.
     pub has: f64,
+    /// Their upload slots were full when this device last asked; it asks again shortly.
+    pub busy: bool,
 }
 
 /// What is moving for one listing.
@@ -194,24 +196,37 @@ impl Engine {
             }
         }
         let blob = blobs.first().map(|(b, _)| *b).unwrap_or_default();
-        let (progress, downloading) = {
+        let (progress, downloading, busy) = {
             let w = self.read();
             let prefix = if folder { super::folder::FOLDER_PREFIX } else { TRANSFER_PREFIX };
             let wanted = format!("{prefix}{community}:{listing}");
             match w.attach.transfers.values().find(|t| t.message_id == wanted && t.state == "active") {
-                Some(t) => (Some(t.progress), true),
-                None => (None, false),
+                Some(t) => {
+                    // The providers whose upload slots were full at their last answer.
+                    let busy: Vec<DeviceId> = w
+                        .source_counts
+                        .get(&t.id)
+                        .map(|live| live.counts.iter().filter(|c| c.busy).filter_map(|c| live.providers.get(c.index).map(|p| p.id)).collect())
+                        .unwrap_or_default();
+                    (Some(t.progress), true, busy)
+                }
+                None => (None, false, Vec::new()),
             }
         };
         let mut peers: BTreeMap<RootId, LivePeer> = BTreeMap::new();
         {
             let w = self.read();
-            let blank = |root: RootId| LivePeer { root_id: root.to_string(), name: w.display_name(&root), from_bps: 0, to_bps: 0, has: 0.0 };
+            let blank = |root: RootId| LivePeer { root_id: root.to_string(), name: w.display_name(&root), from_bps: 0, to_bps: 0, has: 0.0, busy: false };
             for (device, rate, holds) in &sent {
                 if let Some(root) = w.directory.root_of(device) {
                     let peer = peers.entry(root).or_insert_with(|| blank(root));
                     peer.to_bps += *rate;
                     peer.has = peer.has.max((*holds as f64 / size.max(1) as f64).min(1.0));
+                }
+            }
+            for device in &busy {
+                if let Some(root) = w.directory.root_of(device) {
+                    peers.entry(root).or_insert_with(|| blank(root)).busy = true;
                 }
             }
             for (device, rate) in received.iter().filter(|_| downloading) {
@@ -223,7 +238,7 @@ impl Engine {
         if let Some(progress) = progress {
             let me = self.inner.me;
             let name = self.read().display_name(&me);
-            peers.entry(me).or_insert_with(|| LivePeer { root_id: me.to_string(), name, from_bps: 0, to_bps: 0, has: 0.0 }).has = progress;
+            peers.entry(me).or_insert_with(|| LivePeer { root_id: me.to_string(), name, from_bps: 0, to_bps: 0, has: 0.0, busy: false }).has = progress;
         }
         // A finished download's rate is not left to fade.
         let down_bps: u64 = received.iter().filter(|_| downloading).map(|(_, r)| *r).sum();

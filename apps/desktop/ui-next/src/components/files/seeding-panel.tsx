@@ -65,8 +65,9 @@ export function SeedingPanel({ communityId, trigger }: { communityId: Id; trigge
   return (
     <div data-seeding className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px]">
       <section aria-label="My seeding" className="flex min-h-0 flex-col gap-s-3 overflow-y-auto p-s-4">
-        <div className="grid grid-cols-3 gap-s-2">
-          <Tile k="Seeding" v={String(view.seeding)} sub={`of ${view.rows.length} files · max ${view.settings.max_active} at once`} />
+        <div className="grid grid-cols-4 gap-s-2">
+          <Tile k="Seeding" v={String(view.seeding)} sub={`of ${view.rows.length} files`} />
+          <Tile k="Uploading" v={`${view.uploads.active} of ${view.uploads.slots}`} sub="upload slots in use" />
           <Tile k="Uploaded" v={formatBytes(view.uploaded)} sub="from these files" />
           <Tile k="Right now" v={view.held_back ? 'Held back' : view.caps_now[0] ? `↑ ${(view.caps_now[0] / MB).toFixed(1)} MB/s cap` : '↑ No cap'} sub={view.conditions.metered ? 'Metered network' : view.conditions.on_battery ? 'On battery' : 'Unmetered, on power'} />
         </div>
@@ -257,7 +258,10 @@ function SpeedPanel({ settings, meteredKnown, onSave }: { settings: SeedingSetti
         </div>
       </div>
       <div className="flex items-center justify-between text-ui text-text-strong">
-        Max active seeds
+        <span className="flex flex-col">
+          Uploads at once
+          <span className="text-sm font-normal text-muted-foreground">Every file stays available. A downloader who finds these full tries another member, then this one again.</span>
+        </span>
         <span className="flex items-center gap-1">
           <Button variant="ghost" size="icon" aria-label="Fewer" onClick={() => onSave({ ...settings, max_active: Math.max(1, settings.max_active - 1) })}><Minus className="size-4" /></Button>
           <span className="w-6 text-center tabular-nums" data-max-active>{settings.max_active}</span>

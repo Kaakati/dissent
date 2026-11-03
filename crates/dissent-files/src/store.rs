@@ -154,6 +154,8 @@ pub struct Files {
     free_space: FreeSpaceFn,
     /// The cap on swarm downloads, shared by their workers. See `swarm`.
     pub(crate) download_cap: Arc<crate::swarm::DownloadCap>,
+    /// Whether a busy answer is waited out. Off only to act as a release that counts it as a failure, for tests.
+    pub(crate) busy_retry: Arc<AtomicBool>,
     /// Files seeded from where they are. See `inplace`.
     pub(crate) linked: crate::inplace::LinkedSet,
 }
@@ -208,6 +210,7 @@ impl Files {
             partial_ttl: DEFAULT_PARTIAL_TTL,
             free_space: Arc::new(|dir: &Path| fs4::available_space(dir)),
             download_cap: Arc::default(),
+            busy_retry: Arc::new(AtomicBool::new(true)),
             linked: Default::default(),
         };
         files.prune_partials().await?;

@@ -1,5 +1,5 @@
 //! What this device seeds, and when: the per-file seed limit, pause and stop, the global speed caps and their weekly
-//! alternative, the most files seeded at once, and the metered-network and battery pauses. The app crate reports the
+//! alternative, the most uploads at once, and the metered-network and battery pauses. The app crate reports the
 //! network and power state; core holds no OS code. See `docs/design/14-file-tracker.md`, "Seeding".
 //!
 //! A seed's state, decided from its record, the settings and the time:
@@ -7,7 +7,6 @@
 //! * **Paused**: paused by hand.
 //! * **Scheduled**: everything is held back for now: a metered network, battery power, or an alternative schedule
 //!   window whose upload cap is zero.
-//! * **Queued**: over the most files seeded at once. The newest seeds go first.
 //! * **Seeding**: served, and announced in holdings.
 
 use std::path::PathBuf;
@@ -73,7 +72,6 @@ pub enum SeedState {
     Seeding,
     Paused,
     Scheduled,
-    Queued,
     Stopped,
 }
 
@@ -119,8 +117,8 @@ pub fn held_back(settings: &SeedingSettings, conditions: DeviceConditions, now_m
         || caps(settings, now_ms, offset_min).0 == Some(0)
 }
 
-/// The states of `seeds`, each with its listing's ciphertext size, in the same order. Queued ones are those past
-/// `max_active` among the seeds that would otherwise seed, newest start first.
+/// The states of `seeds`, each with its listing's ciphertext size, in the same order. Every seed that is not paused,
+/// stopped or held back is available: `max_active` limits the upload transfers at once, not the seeds (`slots`).
 pub(crate) fn states(
     seeds: &[(&SeedRecord, u64)],
     settings: &SeedingSettings,
@@ -129,7 +127,7 @@ pub(crate) fn states(
     offset_min: i32,
 ) -> Vec<SeedState> {
     let held = held_back(settings, conditions, now_ms, offset_min);
-    let mut out: Vec<SeedState> = seeds
+    seeds
         .iter()
         .map(|(r, size)| {
             if r.stopped || limit_reached(r, *size, now_ms) {
@@ -142,13 +140,7 @@ pub(crate) fn states(
                 SeedState::Seeding
             }
         })
-        .collect();
-    let mut active: Vec<usize> = (0..seeds.len()).filter(|i| out[*i] == SeedState::Seeding).collect();
-    active.sort_by_key(|i| std::cmp::Reverse(seeds[*i].0.since_ms));
-    for i in active.into_iter().skip(settings.max_active.max(1) as usize) {
-        out[i] = SeedState::Queued;
-    }
-    out
+        .collect()
 }
 
 /// One row of My seeding.
@@ -191,6 +183,14 @@ pub struct SeedingView {
     pub conditions: DeviceConditions,
     pub caps_now: (Option<u64>, Option<u64>),
     pub held_back: bool,
+    pub uploads: UploadSlotsView,
+}
+
+/// Upload transfers of seeds running now, of the most at once.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct UploadSlotsView {
+    pub active: u32,
+    pub slots: u32,
 }
 
 pub fn limit_text(limit: SeedLimit) -> String {
@@ -237,7 +237,7 @@ impl Engine {
 
     pub fn set_seeding_settings(&self, settings: SeedingSettings) -> Result<()> {
         if settings.max_active == 0 || settings.max_active > 100 {
-            return Err(CoreError::Invalid("seed between 1 and 100 files at once".into()));
+            return Err(CoreError::Invalid("between 1 and 100 uploads at once".into()));
         }
         if let Some(alt) = settings.alt {
             if alt.start_min >= 24 * 60 || alt.end_min > 24 * 60 || alt.days & 0x80 != 0 {
@@ -309,7 +309,6 @@ impl Engine {
                 SeedState::Scheduled if settings.unmetered_only && conditions.metered => "Waits for an unmetered network".to_string(),
                 SeedState::Scheduled if settings.pause_on_battery && conditions.on_battery => "Waits for power".to_string(),
                 SeedState::Scheduled => "Paused by the schedule".to_string(),
-                SeedState::Queued => format!("Waits for a free slot · {} at once", settings.max_active),
                 SeedState::Stopped if record.stopped => "Stopped by you".to_string(),
                 SeedState::Stopped => "Seed limit reached".to_string(),
             };
@@ -346,10 +345,9 @@ impl Engine {
                 .filter_map(|(b, _)| states.get(*b).copied())
                 .min_by_key(|s| match s {
                     SeedState::Seeding => 0,
-                    SeedState::Queued => 1,
-                    SeedState::Scheduled => 2,
-                    SeedState::Paused => 3,
-                    SeedState::Stopped => 4,
+                    SeedState::Scheduled => 1,
+                    SeedState::Paused => 2,
+                    SeedState::Stopped => 3,
                 })
                 .unwrap_or(SeedState::Stopped);
             let changed = self.changed_since_listed(community, f.id);
@@ -393,6 +391,10 @@ impl Engine {
             rows,
             caps_now: caps(&settings, now, offset),
             held_back: held_back(&settings, conditions, now, offset),
+            uploads: {
+                let (active, slots) = self.upload_slots();
+                UploadSlotsView { active, slots }
+            },
             settings,
             conditions,
         })
@@ -567,8 +569,8 @@ mod tests {
         let free = DeviceConditions::default();
         assert_eq!(
             states(&seeds, &settings, free, 100, 0),
-            [SeedState::Paused, SeedState::Stopped, SeedState::Queued, SeedState::Seeding, SeedState::Seeding, SeedState::Stopped],
-            "the two newest take the two slots"
+            [SeedState::Paused, SeedState::Stopped, SeedState::Seeding, SeedState::Seeding, SeedState::Seeding, SeedState::Stopped],
+            "every seed is available, more than the two upload slots"
         );
         let metered = DeviceConditions { metered: true, ..DeviceConditions::default() };
         assert_eq!(states(&seeds, &settings, metered, 100, 0)[3], SeedState::Scheduled);

@@ -247,6 +247,7 @@ fn category_body(input: &CategoryInput) -> Result<CategoryBody> {
 }
 
 /// A listing with its opened body, for the view and for dedupe.
+#[derive(Clone)]
 pub(crate) struct Opened {
     pub id: EventId,
     pub category: CategoryId,
@@ -744,6 +745,9 @@ impl Engine {
             return Err(CoreError::Rejected("NoPermission".into()));
         }
         let mut out = Vec::new();
+        // Opened once for the batch, and kept current as it lists: opening every listing per file made a batch
+        // slower the more the server had.
+        let mut opened = self.opened_listings(community);
         for item in items {
             let path = PathBuf::from(&item.path);
             let offered = self.with_tracker(community, |l| l.offered.contains(&path));
@@ -773,7 +777,7 @@ impl Engine {
                         .unwrap_or(false)
                 }
             };
-            let mut existing = self.opened_listings(community).into_iter().find(|o| o.body.fingerprint == fp && scope_of(o));
+            let mut existing = opened.iter().find(|o| o.body.fingerprint == fp && scope_of(o)).cloned();
             let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
             // A file in the category's linked folder is seeded from there; any other is copied into the store.
             let linked = self.with_tracker(community, |l| {
@@ -835,7 +839,9 @@ impl Engine {
                     // A restricted category's blob stays sealed, so storage seeders never learn or mirror it.
                     let blob = (!restricted).then_some((fref.hash, fref.cipher_size));
                     let payload = Payload::FileListing { category, blob, inner };
-                    EventId(self.author_publish(community, ChannelId::CONTROL, payload).await?.event.id.0)
+                    let id = EventId(self.author_publish(community, ChannelId::CONTROL, payload).await?.event.id.0);
+                    opened.push(Opened { id, category, lister: me, added_ms: now_ms(), body });
+                    id
                 }
             };
             self.with_tracker(community, |l| {

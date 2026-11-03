@@ -381,3 +381,28 @@ pub fn refuse_blobs_for(engine: &crate::Engine, time: std::time::Duration) {
 pub fn refused_blobs(engine: &crate::Engine) -> u64 {
     engine.read().blob_scopes.refused_by_test
 }
+
+/// The number of blobs and the encoded size of this device's holdings answer for `community`, as a member asking with no
+/// digest would get it.
+pub fn holdings_answer(engine: &crate::Engine, community: dissent_identity::CommunityId) -> (usize, usize) {
+    let holdings = engine.my_holdings(community);
+    let answer: Vec<([u8; 32], u64)> = holdings.iter().map(|h| (h.blob, h.bytes)).collect();
+    (answer.len(), postcard::to_allocvec(&answer).map(|b| b.len()).unwrap_or(0))
+}
+
+/// Makes `engine` act as a release before upload slots: it does not say it takes a busy answer, and its downloads count one
+/// as a failure.
+pub fn act_as_before_upload_slots(engine: &crate::Engine) {
+    set_features(engine, crate::custom_roles::FEATURES & !crate::custom_roles::FEATURE_SEED_SLOTS);
+    engine.inner.files.act_as_before_upload_slots();
+}
+
+/// How many requests of `device` this seeder held for a free upload slot.
+pub fn slot_holds(engine: &crate::Engine, device: dissent_identity::DeviceId) -> u64 {
+    engine.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).slot_holds.get(&device).copied().unwrap_or(0)
+}
+
+/// How many requests of `device` this seeder refused for full upload slots.
+pub fn slot_refusals(engine: &crate::Engine, device: dissent_identity::DeviceId) -> u64 {
+    engine.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).slot_refusals.get(&device).copied().unwrap_or(0)
+}

@@ -1321,7 +1321,7 @@ impl Engine {
     }
 
     /// Stores the latest per-provider counts of a download, for the views.
-    fn record_sources(&self, id: &str, counts: &[SourceCount]) {
+    pub(crate) fn record_sources(&self, id: &str, counts: &[SourceCount]) {
         let totals = {
             let mut w = self.write();
             let hash = w.attach.transfers.get(id).map(|t| t.file.hash);
@@ -2656,6 +2656,7 @@ mod source_view_tests {
                     index,
                     bytes,
                     pieces,
+                    busy: false,
                 })
                 .collect(),
             cipher,

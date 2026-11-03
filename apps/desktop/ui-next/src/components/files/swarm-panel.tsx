@@ -93,7 +93,10 @@ export function SwarmPanel({ communityId, listing }: { communityId: Id; listing:
       .map((p) => ({ root_id: p.root_id, you: false, name: p.name, role: 'member', storage: false, online: true, has: p.has, level: 0 })),
   ];
   const downloading = peers.filter((p) => Math.max(p.has, rates.get(p.root_id)?.has ?? 0) < 1).length;
+  // Every holder this download asks has its upload slots full: it asks again shortly.
+  const waiting = now?.progress != null && !now.down_bps && (now.peers ?? []).some((p) => p.busy);
   const facts = [
+    waiting ? 'Waiting for a free upload slot' : '',
     now?.down_bps ? `↓ ${rateOf(now.down_bps)}` : '',
     now?.up_bps ? `↑ ${rateOf(now.up_bps)}` : '',
     now?.eta_s ? etaOf(now.eta_s) : '',
@@ -134,7 +137,7 @@ export function SwarmPanel({ communityId, listing }: { communityId: Id; listing:
           {peers.map((p) => {
             const moving = rates.get(p.root_id);
             const has = Math.max(p.has, moving?.has ?? 0);
-            const speed = moving ? [moving.from_bps ? `↓ ${rateOf(moving.from_bps)}` : '', moving.to_bps ? `↑ ${rateOf(moving.to_bps)}` : ''].filter(Boolean).join(' · ') : '';
+            const speed = moving ? [moving.busy && !moving.from_bps ? 'Busy, asking again' : '', moving.from_bps ? `↓ ${rateOf(moving.from_bps)}` : '', moving.to_bps ? `↑ ${rateOf(moving.to_bps)}` : ''].filter(Boolean).join(' · ') : '';
             return (
             <div key={p.root_id} role="row" data-peer={p.you ? 'you' : undefined} className="grid h-11 grid-cols-[minmax(0,2fr)_80px_180px_80px] items-center border-t border-border text-ui">
               <span className="min-w-0">

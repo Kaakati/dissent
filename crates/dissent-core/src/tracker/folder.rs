@@ -601,6 +601,11 @@ impl Engine {
 
     /// Devices to fetch `blob` of a folder from: whoever said they hold it, then the lister's devices.
     fn folder_providers(&self, community: CommunityId, f: &OpenedFolder, blob: [u8; 32]) -> Vec<iroh::EndpointAddr> {
+        self.folder_provider_peers(community, f, blob).into_iter().filter_map(|p| p.to_iroh().ok()).collect()
+    }
+
+    /// Who may hold `blob` of folder `f`: whole holders first, then partial ones, then the lister.
+    fn folder_provider_peers(&self, community: CommunityId, f: &OpenedFolder, blob: [u8; 32]) -> Vec<dissent_net::PeerAddr> {
         let sizes = BTreeMap::from([(blob, 0u64)]);
         let swarm = self.swarms(community, &sizes).remove(&blob).unwrap_or_default();
         let mut providers: Vec<dissent_net::PeerAddr> = {
@@ -621,7 +626,7 @@ impl Engine {
                 }
             }
         }
-        providers.into_iter().filter_map(|p| p.to_iroh().ok()).collect()
+        providers
     }
 
     /// What a folder listing holds, with who holds each file and which can run code.
@@ -915,7 +920,14 @@ impl Engine {
                     key: key.key,
                     nonce_prefix: key.nonce_prefix,
                 };
-                let from = self.folder_providers(community, &f, e.blob);
+                let peers: Vec<dissent_net::PeerAddr> =
+                    self.folder_provider_peers(community, &f, e.blob).into_iter().filter(|p| p.clone().to_iroh().is_ok()).collect();
+                let from: Vec<iroh::EndpointAddr> = peers.iter().filter_map(|p| p.clone().to_iroh().ok()).collect();
+                // Each file's counts go to the folder's row, so its speed and busy providers show as a file's do.
+                self.write().source_counts.insert(
+                    id.to_string(),
+                    crate::attachments::LiveSources { providers: peers, counts: Vec::new(), cipher: e.cipher_size, metered: None },
+                );
                 let before: u64 = manifest.entries[..i].iter().map(|x| x.size).sum();
                 let engine = self.clone();
                 let (tid, msg) = (id.to_string(), message_id.clone());
@@ -927,7 +939,10 @@ impl Engine {
                 let done = self
                     .inner
                     .files
-                    .fetch_swarm(node.endpoint(), &from, &fref, &dir, on_progress, |_| {})
+                    .fetch_swarm(node.endpoint(), &from, &fref, &dir, on_progress, {
+                        let (engine, tid) = (self.clone(), id.to_string());
+                        move |counts: &[dissent_files::SourceCount]| engine.record_sources(&tid, counts)
+                    })
                     .await
                     .map_err(|err| CoreError::Invalid(format!("{}: {}", e.path, crate::attachments::failure_reason(&err))))?;
                 if done.path != target {

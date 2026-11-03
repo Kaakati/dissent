@@ -6,7 +6,9 @@ use std::time::Duration;
 use crate::common::*;
 use dissent_core::tracker::catalog::{AddItem, AddSpecView, CategoryInput};
 use dissent_core::tracker::SeedLimit;
+use dissent_core::tracker::seeding::SeedingSettings;
 use dissent_core::CommunityId;
+use dissent_events::CategoryId;
 
 fn releases() -> CategoryInput {
     CategoryInput {
@@ -1216,6 +1218,118 @@ async fn an_upload_cap_still_holds_now_that_no_cap_means_no_wait() {
         assert!(took > 6.0, "the cap did not hold: {took:.1} s");
         let _ = std::fs::remove_dir_all(&dir);
         finish(vec![alice, bob]).await;
+    })
+    .await;
+}
+
+/// Lists `bytes` at `alice` and waits until each of `others` reads the listing. Returns its id.
+async fn list_and_share(alice: &Peer, others: &[&Peer], id: CommunityId, cat: CategoryId, name: &str, bytes: &[u8]) -> String {
+    let dir = scratch("tracker-slots-src");
+    let path = write(&dir, name, bytes);
+    alice.engine.prepare_listing(id, cat, vec![path.clone()]).await.unwrap();
+    let listed = alice.engine.list_files(id, cat, vec![item(&path, &[])], SeedLimit::Forever).await.unwrap();
+    for p in others {
+        until_event(&p.engine, Duration::from_secs(60), "the listing arrives", || {
+            p.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listed[0]))
+        })
+        .await;
+    }
+    listed[0].clone()
+}
+
+/// Waits until `p` seeds `listing`, which means its download finished.
+async fn finished(p: &Peer, id: CommunityId, listing: &str) {
+    until_event(&p.engine, Duration::from_secs(180), "the download finishes", || {
+        p.engine.files_view(id).ok().and_then(|v| v.listings.into_iter().find(|l| l.id == listing && l.local == "seeding"))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_seeder_with_one_upload_slot_serves_two_downloaders_and_both_finish() {
+    heavy(3, async {
+        let alice = peer("slots-alice").await;
+        let bob = peer("slots-bob").await;
+        let carol = peer("slots-carol").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        for p in [&bob, &carol] {
+            let invite = alice.engine.create_invite(id).await.unwrap();
+            join_ready(&alice, p, &invite).await;
+        }
+        let bytes = sample(24 * 1024 * 1024, 8);
+        let listing = list_and_share(&alice, &[&bob, &carol], id, cat, "two.zip", &bytes).await;
+        // One upload at a time, slow enough that the two downloads overlap.
+        let settings = alice.engine.seeding_settings();
+        alice.engine.set_seeding_settings(SeedingSettings { max_active: 1, upload_bps: Some(6_000_000), ..settings }).unwrap();
+        bob.engine.download_listing(id, listing.parse().unwrap()).await.expect("bob starts");
+        carol.engine.download_listing(id, listing.parse().unwrap()).await.expect("carol starts");
+        let mut most = 0;
+        let mut busy_seen = false;
+        let until = std::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            most = most.max(alice.engine.seeding_view(id).unwrap().uploads.active);
+            for p in [&bob, &carol] {
+                let live = p.engine.listing_live(id, listing.parse().unwrap()).await.unwrap();
+                busy_seen |= live.peers.iter().any(|x| x.busy);
+            }
+            let done = [&bob, &carol]
+                .iter()
+                .all(|p| p.engine.files_view(id).unwrap().listings.iter().any(|l| l.id == listing && l.local == "seeding"));
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "both downloads finish");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(most, 1, "never more than one upload at once");
+        let refused = dissent_core::test_support::slot_refusals(&alice.engine, bob.identity.device_id())
+            + dissent_core::test_support::slot_refusals(&alice.engine, carol.identity.device_id());
+        assert!(refused > 0, "the downloads met a full slot");
+        assert!(busy_seen, "a waiting downloader shows the seeder busy");
+        for p in [&bob, &carol] {
+            let row = p.engine.transfers().into_iter().find(|t| t.message_id.contains(&listing)).unwrap();
+            assert_eq!(row.state, "done", "{:?}", row.error);
+        }
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_downloader_from_before_upload_slots_waits_for_a_full_seeder_and_finishes() {
+    heavy(3, async {
+        let alice = peer("slots-old-alice").await;
+        let bob = peer("slots-old-bob").await;
+        let carol = peer("slots-old-carol").await;
+        let server = alice.engine.create_community("Builds".into()).await.expect("create");
+        let id: CommunityId = server.id.parse().unwrap();
+        let cat = alice.engine.create_category(id, releases()).await.expect("category");
+        for p in [&bob, &carol] {
+            let invite = alice.engine.create_invite(id).await.unwrap();
+            join_ready(&alice, p, &invite).await;
+        }
+        // Carol runs a release before upload slots: a busy answer would count as a failure and drop her only holder.
+        dissent_core::test_support::act_as_before_upload_slots(&carol.engine);
+        let bytes = sample(16 * 1024 * 1024, 9);
+        let listing = list_and_share(&alice, &[&bob, &carol], id, cat, "old.zip", &bytes).await;
+        let settings = alice.engine.seeding_settings();
+        alice.engine.set_seeding_settings(SeedingSettings { max_active: 1, upload_bps: Some(6_000_000), ..settings }).unwrap();
+        bob.engine.download_listing(id, listing.parse().unwrap()).await.expect("bob starts");
+        // Bob holds the one slot before carol asks.
+        until_event(&alice.engine, Duration::from_secs(30), "bob is being served", || {
+            (alice.engine.seeding_view(id).unwrap().uploads.active == 1).then_some(())
+        })
+        .await;
+        carol.engine.download_listing(id, listing.parse().unwrap()).await.expect("carol starts");
+        finished(&carol, id, &listing).await;
+        finished(&bob, id, &listing).await;
+        assert!(dissent_core::test_support::slot_holds(&alice.engine, carol.identity.device_id()) > 0, "carol met the full slot");
+        assert_eq!(dissent_core::test_support::slot_refusals(&alice.engine, carol.identity.device_id()), 0, "carol was held, never refused");
+        finish(vec![alice, bob, carol]).await;
     })
     .await;
 }

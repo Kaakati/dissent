@@ -145,6 +145,7 @@ export interface LivePeer {
   name: string;
   from_bps: number; // what this device receives from them
   to_bps: number; // what this device sends them
+  busy: boolean; // their upload slots are full; this device asks again shortly
   has: number; // 0 to 1, their last answer plus what they were sent since
 }
 
@@ -426,6 +427,7 @@ export interface SeedingView {
   conditions: { metered: boolean; on_battery: boolean; metered_known: boolean };
   caps_now: [number | null, number | null];
   held_back: boolean;
+  uploads: { active: number; slots: number }; // upload transfers running now, of the most at once
 }
 
 export const seedingApi = {

@@ -49,6 +49,12 @@ pub mod gate {
     };
     pub use iroh_blobs::Hash;
 
+    /// A GET the gate is asked to allow, with the channel its answer goes on and its transfer events.
+    pub type GetRequestReceivedMsg = irpc::WithChannels<
+        iroh_blobs::provider::events::RequestReceived<GetRequest>,
+        iroh_blobs::provider::events::ProviderProto,
+    >;
+
     /// The transfer events of one request the gate allowed, under `RequestMode::InterceptLog`.
     pub type RequestUpdates = irpc::channel::mpsc::Receiver<RequestUpdate>;
 }
