@@ -24,6 +24,10 @@ Dissent is a free, open-source chat app in the spirit of Discord: servers, text 
 
 It is written in Rust, with a desktop app built on [Tauri 2](https://tauri.app) and a React interface.
 
+<p align="center">
+  <img src="docs/screenshots/server-channels.png" alt="Dissent desktop app: a server with its channel list, the #general channel and a member's profile card" width="900">
+</p>
+
 > [!IMPORTANT]
 > **Dissent is early-stage software and has not had a security audit.** Servers, encrypted chat, direct messages, calls and file sharing work today between people who run it, but please don't rely on it yet for anything sensitive. See [Security model](#security-model) and [Known limits](#known-limits).
 
