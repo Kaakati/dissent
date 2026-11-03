@@ -49,6 +49,8 @@ pub(crate) type RoomId = [u8; 32];
 const KEY_LABEL: &str = "SFrame 1.0 Base Key";
 /// One synthetic audio frame every 20 ms, 160 bytes.
 const FRAME_MS: u64 = 20;
+/// A call loop tick that fires this much after it was due counts as late: two frames of audio.
+const LATE_TICK: Duration = Duration::from_millis(40);
 const FRAME_BYTES: usize = 160;
 /// How long the accepting side waits for the media link that the offering side dials.
 const LINK_WAIT: Duration = Duration::from_secs(10);
@@ -685,6 +687,9 @@ pub(crate) struct Room {
     screen: Mutex<Option<Sending>>,
     /// The decoders of the peers' cameras and screens.
     remote_video: Mutex<RemoteVideo>,
+    /// How the call loop keeps time: ticks run, ticks that fired over `LATE_TICK` late, the worst lateness in
+    /// microseconds, and audio frames received. For tests and diagnostics.
+    loop_stats: [AtomicU64; 4],
     /// The sound of everyone's shared screens, for the playout.
     screen_sound: Mutex<crate::call_screen_audio::ScreenAudioMix>,
     /// Set by a viewer that needs a keyframe. The pump asks the peers, then clears it.
@@ -1090,6 +1095,7 @@ impl Room {
             camera: Mutex::new(None),
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
+            loop_stats: Default::default(),
             screen_sound: Mutex::new(Default::default()),
             keyframe_wanted: AtomicBool::new(false),
             speaking: Mutex::new(speaking::Speaking::default()),
@@ -1137,6 +1143,7 @@ impl Room {
 
     /// Records one decrypted frame from `sid` and updates that peer's jitter.
     fn note_frame(&self, sid: u64, now: Instant) {
+        self.loop_stats[3].fetch_add(1, Ordering::Relaxed);
         let mut peers = lock(&self.peers);
         if let Some(peer) = peers.get_mut(&sid) {
             if let Some(prev) = peer.last_arrival {
@@ -1471,8 +1478,19 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
         (tiles.get(&tile).copied().unwrap_or(crate::call_video::PREVIEW_WIDTH), largest)
     };
     let interval = if largest.as_ref() == Some(&tile) { LARGE_PREVIEW_INTERVAL } else { PREVIEW_INTERVAL };
-    if let Some(preview) = lock(&room.remote_video).show(frame, width, interval) {
-        emit_preview(engine, preview.sender, &root_id, preview.screen, &preview);
+    // Decoded on the stream's own thread: this runs in the call loop, which also carries the audio.
+    let job = crate::call_video::DecodeJob { frame: frame.clone(), width, interval };
+    let sink = || -> crate::call_video::PreviewSink {
+        // Weak, so a decoder thread never keeps an engine that shut down alive.
+        let weak = std::sync::Arc::downgrade(&engine.inner);
+        std::sync::Arc::new(move |preview: Preview| {
+            if let Some(inner) = weak.upgrade() {
+                emit_preview(&Engine { inner }, preview.sender, &root_id, preview.screen, &preview);
+            }
+        })
+    };
+    if lock(&room.remote_video).push(job, sink) {
+        room.keyframe_wanted.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1596,10 +1614,16 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
     let mut since_check: u32 = 0;
     let mut since_speaking: u32 = 0;
     loop {
-        tick.tick().await;
+        let due = tick.tick().await;
         let (Some(inner), Some(room)) = (weak.upgrade(), room.upgrade()) else {
             break;
         };
+        let late = due.elapsed();
+        room.loop_stats[0].fetch_add(1, Ordering::Relaxed);
+        if late > LATE_TICK {
+            room.loop_stats[1].fetch_add(1, Ordering::Relaxed);
+        }
+        room.loop_stats[2].fetch_max(late.as_micros() as u64, Ordering::Relaxed);
         if !is_current(&inner, &room) {
             break;
         }
@@ -3218,6 +3242,14 @@ impl Engine {
     /// A small JPEG of a display or window, for the share picker.
     pub fn share_thumbnail(&self, target: crate::call_video::ShareTarget) -> Result<Vec<u8>> {
         crate::call_video::share_thumbnail(target, self.test_capture())
+    }
+
+    /// For tests: the call loop's timing since the last call, as (ticks, late ticks, worst lateness in ms, audio
+    /// frames received), and starts counting again.
+    pub(crate) fn take_loop_stats_now(&self) -> Option<(u64, u64, f64, u64)> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        let [ticks, late, worst, audio] = &room.loop_stats;
+        Some((ticks.swap(0, Ordering::Relaxed), late.swap(0, Ordering::Relaxed), worst.swap(0, Ordering::Relaxed) as f64 / 1000.0, audio.swap(0, Ordering::Relaxed)))
     }
 
     /// For tests: the bitrate this device's screen may reach now.

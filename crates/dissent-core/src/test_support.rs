@@ -234,6 +234,11 @@ pub fn screen_target(engine: &crate::Engine) -> Option<u32> {
     engine.screen_target_now()
 }
 
+/// The call loop's timing since the last call: (ticks, ticks over 40 ms late, worst lateness in ms, audio frames received).
+pub fn take_loop_stats(engine: &crate::Engine) -> Option<(u64, u64, f64, u64)> {
+    engine.take_loop_stats_now()
+}
+
 /// What `engine`'s screen share sends now, as (width, height, fps, kbps).
 pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()
