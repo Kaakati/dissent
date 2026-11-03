@@ -63,6 +63,7 @@ mod inbox;
 mod dm_devices;
 mod friends;
 mod history;
+mod forks;
 mod mirror_hint;
 mod invite_preview;
 mod invites;

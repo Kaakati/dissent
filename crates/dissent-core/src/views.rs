@@ -93,6 +93,18 @@ pub struct CommunityView {
     pub layout: Option<Vec<LayoutEntryView>>,
     /// Whether this user may arrange the channels: create categories and move channels.
     pub can_manage_channels: bool,
+    /// Set when this device noticed that the community's encryption group forked, so some members cannot read
+    /// what others send. See `forks`.
+    pub mls_fork: Option<ForkView>,
+}
+
+/// A fork of a community's encryption group, as this device noticed it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForkView {
+    /// The epoch both branches claim.
+    pub epoch: u64,
+    /// The people whose devices were heard on the other branch, as root ids.
+    pub roots: Vec<String>,
 }
 
 /// One entry of a channel layout across the Tauri boundary: a channel outside any category, or a category. A

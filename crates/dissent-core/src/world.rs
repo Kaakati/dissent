@@ -471,6 +471,7 @@ impl World {
             voice_channels: Vec::new(),
             layout,
             can_manage_channels,
+            mls_fork: None,
         }
     }
 

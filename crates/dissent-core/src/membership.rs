@@ -304,6 +304,7 @@ impl Engine {
         };
         self.log_commit(community, epoch, bytes.clone());
         self.broadcast_commit(community, epoch, &bytes).await;
+        self.after_epoch_change(community).await;
     }
 
     /// Sends a signed announcement of a commit to every neighbour on the community topic.
@@ -376,6 +377,8 @@ impl Engine {
                 if adds_banned {
                     self.follow_a_banned_add(community);
                 }
+                let engine = self.clone();
+                self.spawn_task(async move { engine.after_epoch_change(community).await });
                 Ok(true)
             }
             // The commit removed this device, so there is no group left to follow.
@@ -398,7 +401,11 @@ impl Engine {
         let Some(ours) = self.mls_epoch(community) else {
             return;
         };
-        if announce.epoch <= ours {
+        if announce.epoch == ours {
+            self.check_commit_at_our_epoch(community, ours, &announce.hash, announce.committer);
+            return;
+        }
+        if announce.epoch < ours {
             return;
         }
         if announce.epoch > ours + 1 {
@@ -490,6 +497,7 @@ impl Engine {
             self.mls_reconcile(community).await;
             self.rotate_if_due(community).await;
             self.refresh_secret(community).await;
+            self.epoch_check_if_due(community).await;
         }
     }
 }

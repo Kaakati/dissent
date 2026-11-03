@@ -53,7 +53,28 @@ pub fn fast_timings() -> crate::Timings {
         typing_every: Duration::from_secs(1),
         dht_probe_every: Duration::from_secs(2),
         forward_offer_every: Duration::from_secs(1),
+        epoch_check_every: Duration::from_secs(3),
+        epoch_check_gap: Duration::from_secs(1),
     }
+}
+
+/// Makes `engine` decode gossip as a client released before `GossipMsg::EpochCheck` does: it drops an epoch
+/// check as undecodable and handles every other message as before.
+pub fn act_as_released_gossip(engine: &crate::Engine) {
+    engine.inner.legacy_gossip.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The fork `engine` noticed in `community`: the epoch, and the devices heard on the other branch.
+pub fn fork_state(
+    engine: &crate::Engine,
+    community: dissent_identity::CommunityId,
+) -> Option<(u64, std::collections::BTreeSet<dissent_identity::DeviceId>)> {
+    engine.fork_state(community)
+}
+
+/// How many epoch checks `engine` has sent in `community`.
+pub fn epoch_checks_sent(engine: &crate::Engine, community: dissent_identity::CommunityId) -> u64 {
+    engine.epoch_checks_sent(community)
 }
 
 /// Asks `from` for the ciphertext of `hash` from `engine`'s node, as any device that learned the hash could, and keeps
