@@ -1605,6 +1605,121 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     }).await;
 }
 
+/// A forwarder's downlink whose estimate fell climbs back. Nothing probes a downlink, so a fallen estimate must rise on
+/// what is sent: a clean link brings the viewer back to the top layer within about half a minute, and a lossy one keeps
+/// it on the base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_viewer_whose_downlink_estimate_dipped_climbs_back_unless_the_link_loses_packets() {
+    heavy(7, async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let (sender, viewer) = (&everyone[others[0]], &everyone[others[1]]);
+    let fwd = &everyone[forwarder].engine;
+    only_senders_speak(&everyone, &[others[0]]).await;
+    hold_sender_rates(&[sender]);
+    sender.engine.set_camera(true).expect("camera on");
+    viewer.engine.set_video_tile(&root(sender), false, 1920);
+    let base = || (layer_of(viewer, sender) == Some(0)).then_some(());
+    eventually_within(Duration::from_secs(60), "the viewer gets a higher layer", || layer_of(viewer, sender).is_some_and(|l| l > 0).then_some(())).await;
+    let layers = dissent_core::test_support::sender_layers(fwd, &root(sender)).await;
+    println!("DIP the camera's layers: {layers:?}");
+    let top = u8::try_from(layers.len().saturating_sub(1)).expect("a few layers");
+    let high = || (layer_of(viewer, sender) == Some(top)).then_some(());
+    eventually_within(Duration::from_secs(60), "the viewer gets the top layer", high).await;
+
+    // A delay spike leaves the downlink's estimate at 250 kbps: the viewer drops to the base.
+    assert!(dissent_core::test_support::dip_viewer_estimate(fwd, &root(viewer), 250).await);
+    eventually_within(Duration::from_secs(15), "the viewer drops to the base layer", base).await;
+    let dipped = std::time::Instant::now();
+    let deadline = dipped + crate::common::scaled(Duration::from_secs(60));
+    let mut last_print = dipped;
+    while high().is_none() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for the viewer to climb back to the top layer");
+        if last_print.elapsed() >= Duration::from_secs(1) {
+            last_print = std::time::Instant::now();
+            println!("DIP {:>5} ms layer {:?}, estimate and cap {}", dipped.elapsed().as_millis(), layer_of(viewer, sender), dissent_core::test_support::viewer_estimate(fwd, &root(viewer)).await);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let back = dipped.elapsed();
+    println!("DIP back to the top layer {} ms after the base", back.as_millis());
+    assert!(back <= crate::common::scaled(Duration::from_secs(40)), "back after {back:?}");
+
+    // The same dip on a link that loses a tenth of its packets: the viewer stays on the base.
+    assert!(dissent_core::test_support::drop_to_viewer(fwd, &root(viewer), 10).await);
+    assert!(dissent_core::test_support::dip_viewer_estimate(fwd, &root(viewer), 250).await);
+    eventually_within(Duration::from_secs(15), "the viewer drops to the base layer over the lossy link", base).await;
+    for second in 0..40 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        println!("LOSSY {second:>2} s layer {:?}, estimate and cap {}", layer_of(viewer, sender), dissent_core::test_support::viewer_estimate(fwd, &root(viewer)).await);
+        assert_eq!(layer_of(viewer, sender), Some(0), "the lossy link keeps the base, {second} s after the dip");
+    }
+    assert!(dissent_core::test_support::drop_to_viewer(fwd, &root(viewer), 0).await);
+    sender.engine.set_camera(false).expect("camera off");
+    finish(everyone).await;
+    }).await;
+}
+
+/// Measures a viewer's layer through a forwarder while the machine is busy and after: a camera on its top layer, 20 s
+/// with three busy threads per core, then up to 60 s free. Prints the layer and the downlink's estimate each second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
+async fn measure_a_viewers_layer_through_a_forwarder_after_a_cpu_hog() {
+    heavy(7, async {
+    let (everyone, forwarder) = simulcast_call(&[]).await;
+    let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
+    let (sender, viewer) = (&everyone[others[0]], &everyone[others[1]]);
+    let fwd = &everyone[forwarder].engine;
+    only_senders_speak(&everyone, &[others[0]]).await;
+    hold_sender_rates(&[sender]);
+    sender.engine.set_camera(true).expect("camera on");
+    viewer.engine.set_video_tile(&root(sender), false, 1920);
+    eventually_within(Duration::from_secs(60), "the viewer gets a higher layer", || layer_of(viewer, sender).is_some_and(|l| l > 0).then_some(())).await;
+    let top = u8::try_from(dissent_core::test_support::sender_layers(fwd, &root(sender)).await.len().saturating_sub(1)).expect("a few layers");
+    eventually_within(Duration::from_secs(60), "the viewer gets the top layer", || (layer_of(viewer, sender) == Some(top)).then_some(())).await;
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let hogs: Vec<_> = (0..cores * 3)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                }
+                x
+            })
+        })
+        .collect();
+    let mut dipped = false;
+    for second in 0..20 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        dipped |= layer_of(viewer, sender) != Some(top);
+        println!("HOG {second:>2} s layer {:?}, estimate and cap {}", layer_of(viewer, sender), dissent_core::test_support::viewer_estimate(fwd, &root(viewer)).await);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for hog in hogs {
+        let _ = hog.join();
+    }
+    let freed = std::time::Instant::now();
+    let mut back = None;
+    for second in 0..60 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        println!("AFTER {second:>2} s layer {:?}, estimate and cap {}", layer_of(viewer, sender), dissent_core::test_support::viewer_estimate(fwd, &root(viewer)).await);
+        if layer_of(viewer, sender) == Some(top) && back.is_none() {
+            back = Some(freed.elapsed());
+            if second >= 5 {
+                break;
+            }
+        }
+    }
+    println!("HOG summary on {cores} cores: left the top layer under the hog {dipped}, on the top layer again after {back:?}");
+    sender.engine.set_camera(false).expect("camera off");
+    finish(everyone).await;
+    }).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_the_others() {

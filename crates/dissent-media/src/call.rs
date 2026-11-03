@@ -189,6 +189,10 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     /// The latest bandwidth estimate from str0m, in kbps, and the callback that hears it.
     _fine_timer: FineTimer,
     video_available_kbps: Option<u32>,
+    /// For tests: the share of outgoing datagrams dropped, in percent, as a lossy link does.
+    drop_percent: u32,
+    /// Counts outgoing datagrams for `drop_percent`.
+    sent_seq: u64,
     video_available_cb: Option<Box<dyn FnMut(u32) + Send>>,
     started: Instant,
     timeout: Instant,
@@ -448,6 +452,8 @@ impl<T: PacketTransport> Call<T> {
             video_replay: VideoReplay::default(),
             _fine_timer: FineTimer::new(),
             video_available_kbps: None,
+            drop_percent: 0,
+            sent_seq: 0,
             video_available_cb: None,
             started: now,
             timeout: now,
@@ -645,6 +651,18 @@ impl<T: PacketTransport> Call<T> {
     /// estimate arrives, which needs BWE on and sustained traffic.
     pub fn video_available_kbps(&self) -> Option<u32> {
         self.video_available_kbps
+    }
+
+    /// For tests: drops `percent` of the datagrams this call sends, spread evenly, as a lossy link does. 0 stops it.
+    pub fn set_drop_percent(&mut self, percent: u32) {
+        self.drop_percent = percent.min(100);
+    }
+
+    /// For tests: starts this link's bandwidth estimate again from `kbps`, as a delay spike leaves it. Nothing on a
+    /// forwarder's downlink probes, so the estimate stays near there unless more is sent.
+    pub fn reset_estimate(&mut self, kbps: u32) {
+        self.rtc.bwe().reset(Bitrate::kbps(u64::from(kbps)));
+        self.video_available_kbps = Some(kbps);
     }
 
     /// Registers the callback that hears each new bandwidth estimate, in kbps. The video budget
@@ -1001,6 +1019,12 @@ impl<T: PacketTransport> Call<T> {
                     return Ok(());
                 }
                 Output::Transmit(transmit) => {
+                    self.sent_seq += 1;
+                    // Evenly spread: the datagrams where the running share of drops ticks over.
+                    let percent = u64::from(self.drop_percent);
+                    if percent > 0 && self.sent_seq * percent / 100 != (self.sent_seq - 1) * percent / 100 {
+                        continue;
+                    }
                     self.stats.packets_sent += 1;
                     self.transport
                         .send(transmit.destination, &transmit.contents)

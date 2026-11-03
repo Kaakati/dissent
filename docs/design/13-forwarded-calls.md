@@ -217,7 +217,13 @@ Built in phase 2, except where it says otherwise.
   doesn't draw, and any stream of a sender who is not speaking, gets the base layer. The budget is the smaller of `Sfu::set_listener_budget` and the downlink's
   own bandwidth estimate less three speakers' audio. The estimate counts only once it falls below
   the 1000 kbps it starts at: nothing probes a link for headroom, so above that it means nothing
-  (phase 1, "Capacity units"). "Pinned" and "thumbnail" preferences are not sent; the tile width
+  (phase 1, "Capacity units"). A fallen estimate does rise again on base-layer traffic alone: reset
+  to 250 kbps on a clean loopback link, it was back over 1000 kbps, and the viewer on the top layer,
+  in about 4 s (`a_viewer_whose_downlink_estimate_dipped_climbs_back_unless_the_link_loses_packets`).
+  A link that loses a tenth of its packets keeps the viewer on the base. Under a busy CPU the downlink estimate
+  did not fall at all; a viewer's layer fell because the sender's own CPU governor dropped its top
+  layer, which came back about 20 s after the load ended
+  (`measure_a_viewers_layer_through_a_forwarder_after_a_cpu_hog`). "Pinned" and "thumbnail" preferences are not sent; the tile width
   covers both.
 - **A tight budget (decided).** When a viewer's budget can't carry every stream at the layer its tile
   wants, the forwarder lowers the other streams first, one layer at a time, the step that saves most
