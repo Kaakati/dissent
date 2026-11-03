@@ -233,6 +233,8 @@ pub fn run() {
             contacts_cmds::peer_contact_link,
             contacts_cmds::dm_policy,
             contacts_cmds::set_dm_policy,
+            contacts_cmds::call_policy,
+            contacts_cmds::set_call_policy,
             contacts_cmds::create_group,
             contacts_cmds::group_messages,
             contacts_cmds::send_group_message,

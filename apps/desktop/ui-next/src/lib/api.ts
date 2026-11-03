@@ -3,6 +3,7 @@ import type { RecentDecoration } from './decorations';
 import { pictureUrls } from './pictures';
 import type { FileInspection,
   AudioDevices,
+  CallPolicy,
   Bookmark,
   Capabilities,
   CallState,
@@ -291,6 +292,9 @@ export const api = {
   addressDiscovery: () => call<boolean>('address_discovery'),
   setAddressDiscovery: (on: boolean) => call<void>('set_address_discovery', { on }),
   friendsShared: () => call<boolean>('friends_shared'),
+  // Who can call this device: everyone, friends (contacts) or no_one. Voice channels are not covered.
+  callPolicy: () => call<CallPolicy>('call_policy'),
+  setCallPolicy: (policy: CallPolicy) => call<void>('set_call_policy', { policy }),
   setFriendsShared: (on: boolean) => call<boolean>('set_friends_shared', { on }),
   acceptContact: (rootId: Id) => call<void>('accept_contact', { rootId }),
   declineContact: (rootId: Id) => call<void>('decline_contact', { rootId }),

@@ -891,7 +891,7 @@ async fn a_forwarder_that_slows_down_is_replaced_by_a_clearly_better_device() {
 }
 
 /// The id of the group named `name`, as this engine sees it once it has joined.
-fn group_id_named(p: &Peer, name: &str) -> Option<dissent_core::ConvId> {
+pub(crate) fn group_id_named(p: &Peer, name: &str) -> Option<dissent_core::ConvId> {
     p.engine
         .conversations()
         .into_iter()

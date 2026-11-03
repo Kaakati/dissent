@@ -20,6 +20,7 @@ mod at_rest;
 mod attachments;
 pub mod scrub;
 mod call_layers;
+mod call_privacy;
 mod call_screen_audio;
 mod call_video;
 mod calls;
@@ -93,6 +94,7 @@ pub use dissent_discovery::DhtStats;
 pub use dissent_events::{ChannelId, EventId};
 pub use dissent_identity::{CommunityId, DeviceId, Identity, RootId};
 pub use dissent_net::{merge_relays, NodeConfig, RelayChoice, RelayEntry, RelayReport, RelaySource, MAX_RELAY_LIST};
+pub use call_privacy::CallPolicy;
 pub use contacts::{ContactEntry, ContactRequestView, ContactsView, DmPolicy, MAX_NOTE_CHARS};
 pub use calls::{
     CallQuality, CallRoute, CallScope, CallView, LiveCallView, LiveMember, LiveParticipant, LiveRoute,

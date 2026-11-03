@@ -50,6 +50,7 @@ if (!window.__TAURI__) {
   // "Let people add me by address" (on by default). Off makes our own address not found.
   let addressDiscoveryOn = true;
   let friendsSharedOn = true;
+  let callPolicy = 'everyone'; // call_policy / set_call_policy: everyone, friends or no_one
   // Adding by address: a known person adds at once; a bad or wrong-kind address is refused as the backend does.
   const byAddress = (text) => {
     const found = parseAddressInput(text);
@@ -284,6 +285,8 @@ if (!window.__TAURI__) {
       })] },
     ],
     [LINUS]: [
+      // A call the call setting turned away: a quiet entry the engine writes itself (call_privacy).
+      { id: id(`d${++seq}`), from: LINUS, text: '', notice: 'Missed call from Jonas: not in your friends', ms: at(2, 125), pending: false },
       { id: id(`d${++seq}`), from: LINUS, text: 'Have a look at the relay code: https://github.com/Kaakati/dissent/tree/main/apps/relay', ms: at(2, 120), pending: false, embeds: [{ url: 'https://github.com/Kaakati/dissent/tree/main/apps/relay', site: 'GitHub', title: 'dissent/apps/relay: run a relay for your community', description: 'A helper that passes sealed traffic between people who can’t connect directly. Running one near your community makes relayed connections faster.', image: mockImage(432, 168, 200, 'dissent-relay'), image_w: 432, image_h: 168, theme: '#2b6cb0' }] },
     ],
   };
@@ -499,7 +502,7 @@ if (!window.__TAURI__) {
   }));
   const dmItem = (m, list = []) => ({
     id: m.id, from: m.from, text: m.deleted ? '' : m.text, ms: m.ms, pending: m.pending, embeds: m.embeds ?? [], queued: Boolean(m.queued),
-    edited: Boolean(m.edited), deleted: Boolean(m.deleted), system: m.system === true,
+    edited: Boolean(m.edited), deleted: Boolean(m.deleted), system: m.system === true, notice: m.notice ?? null,
     mentions_me: mentionsMe(m), mentions: m.deleted ? [] : (m.mentions ?? []).map((u) => ({ id: u, display_name: people[u] })),
     ...(window.__mockNoReactions ? {} : { reply_to: m.replyTo ? dmReplyRef(list, m.replyTo) : null, reactions: dmReactions(m) }),
     ...(window.__mockNoFiles ? {} : { attachments: (m.attachments ?? []).map((a) => ({ ...a })) }),
@@ -1353,6 +1356,8 @@ if (!window.__TAURI__) {
     address_discovery: () => addressDiscoveryOn,
     set_address_discovery: ({ on }) => { addressDiscoveryOn = on; return on; },
     friends_shared: () => friendsSharedOn,
+    call_policy: () => callPolicy,
+    set_call_policy: ({ policy }) => { need(['everyone', 'friends', 'no_one'].includes(policy), `unknown call policy ${policy}`); callPolicy = policy; },
     set_friends_shared: ({ on }) => { friendsSharedOn = on; return on; },
     add_contact: ({ link }) => {
       const known = byAddress(link);

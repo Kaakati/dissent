@@ -39,6 +39,7 @@ export interface ViewItem {
   failReason: string | null;
   retryable: boolean; // a refused message can still be sent again
   system: boolean; // a membership line in a group
+  notice: string | null; // an entry this device wrote itself, e.g. a call the call setting turned away
   replyTo: ReplyRef | null;
   mentions: MentionRef[];
   mentionsMe: boolean; // the message is highlighted for the viewer
@@ -96,6 +97,7 @@ export function channelItems(messages: ChannelMessage[], meId: Id | null): ViewI
     failReason: null,
     retryable: false,
     system: false,
+    notice: null,
     replyTo: m.reply_to ?? null,
     reactions: Array.isArray(m.reactions) ? m.reactions : null,
     attachments: Array.isArray(m.attachments) ? m.attachments : null,
@@ -131,6 +133,7 @@ export function conversationItems(
       failReason: m.reason ?? null,
       retryable: m.retryable === true,
       system: m.system === true, // a membership line in a group, e.g. "added Omar and Rana."
+      notice: typeof m.notice === 'string' && m.notice ? m.notice : null,
       replyTo: m.reply_to ?? null,
       reactions: Array.isArray(m.reactions) ? m.reactions : null,
       attachments: Array.isArray(m.attachments) ? m.attachments : null,

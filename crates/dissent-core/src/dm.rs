@@ -186,6 +186,7 @@ pub(crate) fn legacy_item(w: &World, sd: &SignedDm) -> DmItem {
         deleted: false,
         mentions_me: false,
         mentions: Vec::new(),
+        notice: None,
     }
 }
 

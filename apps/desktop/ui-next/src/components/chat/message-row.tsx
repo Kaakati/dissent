@@ -45,6 +45,21 @@ export function SystemRow({ item }: { item: ViewItem }) {
   );
 }
 
+// An entry this device wrote itself, not a message: "Missed call from Omar: not in your friends". Quiet, like a system line.
+export function NoticeRow({ item }: { item: ViewItem }) {
+  return (
+    <article className="msg system" data-id={item.id} data-notice>
+      <div className="gutter" />
+      <div className="msg-content">
+        <p className="body">
+          {`${item.notice} `}
+          <time>{clockLabel(item.ms)}</time>
+        </p>
+      </div>
+    </article>
+  );
+}
+
 // The line above a reply: a connector from the avatar column, the original's author and a one-line snippet.
 function ReplyRefLine({ reply }: { reply: ReplyRef }) {
   const missing = reply.text === null || reply.text === undefined;

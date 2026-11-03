@@ -11,6 +11,7 @@ mod thumbnails;
 mod avatars;
 mod boosts;
 mod calls;
+mod call_privacy;
 mod channel_order;
 mod channel_settings;
 mod contacts;

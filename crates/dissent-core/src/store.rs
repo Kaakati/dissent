@@ -135,6 +135,14 @@ impl Paths {
     pub fn friends_hidden(&self) -> PathBuf {
         self.root.join("friends_hidden.bin")
     }
+    /// "Who can call you". See `call_privacy`.
+    pub fn call_privacy(&self) -> PathBuf {
+        self.root.join("call_privacy.bin")
+    }
+    /// Calls the call setting turned away, shown as missed entries in their conversations.
+    pub fn call_notes(&self) -> PathBuf {
+        self.root.join("call_notes.bin")
+    }
     /// The last history-readiness answer of each community, so a restart starts from it. See `history`.
     pub fn history_ready(&self) -> PathBuf {
         self.root.join("history_ready.bin")

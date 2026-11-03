@@ -10,7 +10,7 @@ import { useShell } from '@/lib/store';
 import { setAtLatest } from '@/lib/viewing';
 import { EmptyNode, SkeletonRows } from './parts';
 import { AgeGate, EmptyPane, KeyChangeBanner, Welcome } from './chat-notices';
-import { MessageRow, SystemRow } from './message-row';
+import { MessageRow, NoticeRow, SystemRow } from './message-row';
 import { openMessageMenu } from './message-menu';
 import type { ChatView, ViewItem } from './use-chat-view';
 
@@ -40,6 +40,12 @@ export function rowsFor(items: ViewItem[], view: ChatView, newFromId: string | n
           <span>{dayLabel(item.ms)}</span>
         </div>,
       );
+    }
+    if (item.notice) {
+      out.push(<NoticeRow key={item.id} item={item} />);
+      afterSystem = true;
+      prev = item;
+      continue;
     }
     if (item.system) {
       out.push(<SystemRow key={item.id} item={item} />);
