@@ -1441,6 +1441,15 @@ pub(crate) async fn only_senders_speak(everyone: &[Peer], senders: &[usize]) {
     }
 }
 
+/// Holds each sender's estimate of its link at a rate that carries every layer. These tests check which layer the
+/// forwarder picks; on a loaded runner the machine's own delay reads as congestion and keeps senders off their top
+/// layers, which is not what they test.
+pub(crate) fn hold_sender_rates(senders: &[&Peer]) {
+    for s in senders {
+        assert!(dissent_core::test_support::force_link_estimate(&s.engine, Some(8_000)), "the sender is in a call");
+    }
+}
+
 /// The layer of the last frame `viewer` received of `sender`'s camera.
 pub(crate) fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
     dissent_core::test_support::received_layer(&viewer.engine, &root(sender), false)
@@ -1454,6 +1463,7 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
     let others: Vec<usize> = (0..everyone.len()).filter(|i| *i != forwarder).collect();
     let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
     only_senders_speak(&everyone, &[others[0]]).await;
+    hold_sender_rates(&[sender]);
     sender.engine.set_camera(true).expect("camera on");
     narrow.engine.set_video_tile(&root(sender), false, 200);
     wide.engine.set_video_tile(&root(sender), false, 1920);
@@ -1609,6 +1619,7 @@ async fn simulcast_keeps_the_speaker_high_for_a_constrained_viewer_and_lowers_th
     let senders = &others[..3];
     let (constrained, free) = (&everyone[others[3]], &everyone[others[4]]);
     only_senders_speak(&everyone, senders).await;
+    hold_sender_rates(&senders.iter().map(|s| &everyone[*s]).collect::<Vec<_>>());
     for s in senders {
         everyone[*s].engine.set_camera(true).expect("camera on");
         for viewer in [constrained, free] {
@@ -1760,6 +1771,7 @@ async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_vi
     let others: Vec<usize> = (0..5).filter(|i| *i != forwarder).collect();
     let (new_sender, wide) = (&everyone[others[0]], &everyone[others[1]]);
     only_senders_speak(&everyone, &[5, others[0]]).await;
+    hold_sender_rates(&[old_sender, new_sender]);
     for s in [old_sender, new_sender] {
         s.engine.set_camera(true).expect("camera on");
         for viewer in [wide, old_viewer] {
