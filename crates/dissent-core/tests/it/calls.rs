@@ -1885,6 +1885,18 @@ async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
 async fn measure_a_shares_estimate_under_a_cpu_hog() {
+    share_under_a_cpu_hog(2560, 1440).await;
+}
+
+/// The same at 720p, which this machine encodes well within its frame time, so whether the frame rate comes back after
+/// the CPU frees up shows the governor rather than the encoder's limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
+async fn measure_a_720p_shares_frame_rate_after_a_cpu_hog() {
+    share_under_a_cpu_hog(1280, 720).await;
+}
+
+async fn share_under_a_cpu_hog(width: u32, height: u32) {
     heavy(8, async {
         let alice = peer("alice").await;
         let bob = peer("bob").await;
@@ -1893,7 +1905,7 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
         alice.engine.call_dm(bob.identity.root_id()).await.expect("call starts");
         crate::common::accept_incoming(&bob.engine, &mut bob_events).await;
         eventually("the call is up", || alice.engine.call_state().filter(|v| v.participants.len() == 1 && v.frames_received > 0)).await;
-        alice.engine.set_test_capture(dissent_core::TestCapture::Document { width: 2560, height: 1440 });
+        alice.engine.set_test_capture(dissent_core::TestCapture::Document { width, height });
         alice.engine.set_screen_bitrate(6_000);
         alice.engine.set_screen_share(true, None).expect("screen share on");
         // (second, phase, estimate, the share's plan as width, height, fps and kbps)
@@ -1903,7 +1915,8 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let e = dissent_core::test_support::link_estimate(&alice.engine);
             let plan = dissent_core::test_support::screen_plan(&alice.engine);
-            println!("EST {second:>3} s {phase:<6} estimate {e:?} kbps, plan {plan:?}");
+            let share = dissent_core::test_support::screen_cpu_share(&alice.engine).map(|s| (s * 100.0).round() / 100.0);
+            println!("EST {second:>3} s {phase:<6} estimate {e:?} kbps, plan {plan:?}, encoder share {share:?}");
             (second, phase, e, plan)
         };
         for s in 0..15 {

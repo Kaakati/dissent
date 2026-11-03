@@ -1243,6 +1243,11 @@ impl Room {
         })
     }
 
+    /// The screen encoder's last share of its frame interval, for tests.
+    pub(crate) fn screen_cpu_share(&self) -> Option<f64> {
+        lock(&self.screen).as_ref().and_then(|sending| sending.last_share)
+    }
+
     /// The bitrate this device's screen may reach now, for tests.
     pub(crate) fn screen_target(&self) -> Option<u32> {
         lock(&self.screen).as_ref().map(|sending| sending.budget.top_kbps())
@@ -3273,6 +3278,11 @@ impl Engine {
         };
         room.forced_estimate.store(kbps.unwrap_or(0), Ordering::Relaxed);
         true
+    }
+
+    /// For tests: the screen encoder's last share of its frame interval.
+    pub(crate) fn screen_cpu_share_now(&self) -> Option<f64> {
+        lock(&self.inner.calls.current).clone()?.screen_cpu_share()
     }
 
     /// For tests: the bitrate this device's screen may reach now.

@@ -252,6 +252,11 @@ pub fn force_link_estimate(engine: &crate::Engine, kbps: Option<u32>) -> bool {
     engine.force_link_estimate_now(kbps)
 }
 
+/// The share of its frame interval `engine`'s screen encoder last reported: above 0.8 it steps down.
+pub fn screen_cpu_share(engine: &crate::Engine) -> Option<f64> {
+    engine.screen_cpu_share_now()
+}
+
 /// What `engine`'s screen share sends now, as (width, height, fps, kbps).
 pub fn screen_plan(engine: &crate::Engine) -> Option<(u32, u32, u32, u32)> {
     engine.screen_plan_now()
