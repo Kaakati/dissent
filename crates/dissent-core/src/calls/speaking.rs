@@ -3,8 +3,11 @@
 //! the voice pipeline sends only voiced frames, so silence sends nothing. A person counts as speaking
 //! for `SPEAKING_HOLD` after their last frame, so the ring does not flicker between words.
 //!
-//! The call loop checks every `SPEAKING_EVERY` ticks, about ten times a second, and emits
-//! `CallSpeaking` only when the set of speakers changed, so the window redraws at most that often.
+//! The call loop checks on every tick, right after it has taken in and sent that tick's frames, and
+//! emits `CallSpeaking` only when the set of speakers changed. Both ends of speaking are measured in
+//! time, not ticks: a frame starts it at once, and `SPEAKING_HOLD` after the last frame ends it. On a
+//! loaded machine whose ticks run late, a check still follows each frame, so a short burst is not
+//! missed, as it was when the check ran every fifth tick before the sends.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -15,8 +18,6 @@ use crate::views::EngineEvent;
 
 /// How long a person counts as speaking after their last frame.
 pub(crate) const SPEAKING_HOLD: Duration = Duration::from_millis(450);
-/// Call-loop ticks (20 ms each) between two checks of who speaks: five ticks, ten checks a second.
-pub(crate) const SPEAKING_EVERY: u32 = 5;
 
 /// This device's own speaking, and the speakers last shown to the window.
 #[derive(Default)]

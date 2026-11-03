@@ -1594,7 +1594,6 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
     let mut tick = tokio::time::interval(Duration::from_millis(FRAME_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut since_check: u32 = 0;
-    let mut since_speaking: u32 = 0;
     loop {
         tick.tick().await;
         let (Some(inner), Some(room)) = (weak.upgrade(), room.upgrade()) else {
@@ -1604,11 +1603,6 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
             break;
         }
         let engine = Engine { inner };
-        since_speaking += 1;
-        if since_speaking >= speaking::SPEAKING_EVERY {
-            since_speaking = 0;
-            engine.check_speaking(&room);
-        }
         let mut mesh = room.mesh.lock().await;
         since_check += 1;
         if since_check >= MEMBERSHIP_EVERY {
@@ -1619,6 +1613,7 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
         if let Some(forwarding) = room.forwarding.as_ref() {
             drop(mesh);
             pump_forwarded(&engine, &room, forwarding).await;
+            engine.check_speaking(&room);
             continue;
         }
         while let Ok(Ok(Some(frame))) =
@@ -1640,6 +1635,7 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
                 }
             }
         }
+        engine.check_speaking(&room);
         pump_video_mesh(&engine, &room, &mut mesh).await;
     }
 }
