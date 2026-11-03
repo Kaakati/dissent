@@ -835,9 +835,6 @@ mod capture {
     }
 }
 
-/// How far above the estimate a share's encoder aims while it probes, in percent.
-const PROBE_PERCENT: u32 = 25;
-
 /// The least a screen's encoder is held to while its rung runs, in kbps. The bottom rung's minimum.
 const MIN_HELD_KBPS: u32 = 150;
 
@@ -893,14 +890,6 @@ impl Budget {
         if self.content != Content::Screen {
             return plan;
         }
-        // A page that sends less than the estimate never lets it rise, so a share whose estimate fell stayed low. Unless
-        // the link pushed back lately, the encoder aims a step above the estimate, and a link that cannot carry it
-        // pushes back, which stops the probing for a hold that grows each time.
-        let estimate = if self.screen_link.probing(Instant::now()) {
-            (u64::from(estimate) * u64::from(100 + PROBE_PERCENT) / 100).min(u64::from(u32::MAX)) as u32
-        } else {
-            estimate
-        };
         let left = estimate.saturating_sub(lower_kbps + dissent_video::adapt::audio_reserve_kbps(audio_kbps));
         Plan { kbps: plan.kbps.min(left.max(MIN_HELD_KBPS)), ..plan }
     }
@@ -1699,22 +1688,6 @@ mod tests {
         assert!(key.keyframe);
         assert!(!push(&mut remote, key));
         assert!(wait_for(Duration::from_secs(5), || *made.lock().unwrap() > before), "the keyframe decodes");
-    }
-
-    #[test]
-    fn a_share_probes_a_step_above_the_estimate_and_stops_when_the_link_pushes_back() {
-        let mut budget = fed_budget((2560, 1440), 6_000);
-        let plan = Plan { kbps: 6_000, codec: Codec::H264, width: 2560, height: 1440, fps: 30 };
-        // In its first seconds a share believes the estimate.
-        budget.trusted_kbps(2_056, 32, 0);
-        assert_eq!(budget.held_to_link(plan, 2_056, 32, 0).kbps, 2_000);
-        // Past them, it aims 25% above: 2570 less the audio's 56.
-        std::thread::sleep(Duration::from_millis(5_100));
-        budget.trusted_kbps(2_056, 32, 0);
-        assert_eq!(budget.held_to_link(plan, 2_056, 32, 0).kbps, 2_514);
-        // The link pushes back: the estimate falls, and the share holds to it.
-        budget.trusted_kbps(1_200, 32, 0);
-        assert_eq!(budget.held_to_link(plan, 1_200, 32, 0).kbps, 1_144);
     }
 }
 
