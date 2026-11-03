@@ -655,6 +655,9 @@ impl MlsClient {
     /// crash is not used again. Call after restoring the client and its marks. The messages created here are
     /// discarded.
     pub fn resume_sends(&mut self) -> Result<()> {
+        // A mark can outlive its group: the community was left or deleted, or its state was not restored. Nothing can
+        // be sent in a group that is not here, so its mark is dropped rather than stopping the whole profile opening.
+        self.reservations.retain(|group, _| self.groups.contains_key(group));
         let mut pending = Vec::new();
         for (group, mark) in self.reservations() {
             let epoch = self.epoch(&group)?;
@@ -1068,6 +1071,24 @@ mod tests {
         client.restore_reservations(disk.marks.clone());
         client.resume_sends().unwrap();
         client
+    }
+
+    #[test]
+    fn a_mark_for_a_group_that_is_gone_does_not_stop_the_restart() {
+        let group = [5u8; 32];
+        let device = DeviceKey::generate();
+        let cert = RootKey::generate().certify(device.id(), 1);
+        let vault = Vault::ephemeral_for_tests();
+        let mut client = MlsClient::new(&device, &cert).unwrap();
+        client.create_group(group).unwrap();
+        let mut disk = Disk { snapshot: client.snapshot_sealed(&vault).unwrap(), marks: Vec::new() };
+        send(&mut client, &group, &mut disk);
+        disk.snapshot = client.snapshot_sealed(&vault).unwrap();
+        // A mark left behind by a group this device no longer holds.
+        disk.marks.push(([9u8; 32], Reservation { epoch: 3, reserved_to: 40 }));
+        let restarted = restart(&device, &cert, &vault, group, &disk);
+        assert!(restarted.has_group(&group));
+        assert!(restarted.reservations().iter().all(|(g, _)| *g != [9u8; 32]), "the stale mark is dropped");
     }
 
     #[test]
