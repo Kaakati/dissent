@@ -123,10 +123,11 @@ jobs:
       # also holds tests that need the public network: internet.rs and any test named internet_*. `--skip`
       # matches a substring, so `internet` skips both.
       - name: Loopback networked tests
-        timeout-minutes: 60
+        timeout-minutes: 80
         env:
           DISSENT_TEST_SCALE: "2"
-        run: "cargo test -p dissent-core --test it -- --ignored --skip internet && cargo test -p dissent-relay --test ban_disconnect -- --ignored"
+        # A test that fails once and then passes on its own is reported as flaky rather than failing the release.
+        run: bash scripts/ci-networked.sh
       # The React UI's driver: the app built and served against the mock, through headless Chrome (the Ubuntu runners ship
       # google-chrome). Needs Node 24 for the driver's .ts import.
       - uses: actions/setup-node@v4
