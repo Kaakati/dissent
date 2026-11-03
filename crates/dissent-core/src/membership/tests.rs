@@ -436,3 +436,26 @@ async fn member_that_missed_a_commit_catches_up_on_a_future_epoch_message() {
     assert_eq!(bob.engine.mls_epoch(id), alice.engine.mls_epoch(id));
     }).await;
 }
+
+/// Leaving a server takes its encryption group and the group's send mark off this device, on disk too. The
+/// mark outliving the group stopped a profile opening ("MLS state could not resume its sends: unknown group").
+#[tokio::test(flavor = "multi_thread")]
+async fn leaving_a_server_leaves_no_group_or_send_mark_behind() {
+    crate::testutil::bounded(async {
+        let (_alice, bob, _carol, id, _invite) = three_members().await;
+        let channel = general(&bob.engine, id);
+        bob.engine.send_message(id, channel, "before leaving".into()).await.expect("bob sends");
+        let marks = |engine: &Engine| {
+            let path = crate::sealed::reserve_path(&engine.inner.mls_path);
+            crate::sealed::read_reservations(&engine.read().paths, &path).expect("marks read")
+        };
+        assert!(marks(&bob.engine).iter().any(|(g, _)| *g == id.0), "the send reserved a mark");
+        bob.engine.leave_community(id).await.expect("bob leaves");
+        assert!(!bob.engine.with_mls_read(|mls| mls.has_group(&id.0)), "the group is gone");
+        assert!(marks(&bob.engine).iter().all(|(g, _)| *g != id.0), "its mark is gone from disk");
+        let (identity, dir, port) = bob.stop().await;
+        let bob = Node::boot(identity, dir, port).await;
+        assert!(bob.engine.with_mls_read(|mls| mls.reservations()).iter().all(|(g, _)| *g != id.0));
+    })
+    .await;
+}

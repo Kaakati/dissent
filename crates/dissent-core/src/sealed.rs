@@ -60,6 +60,20 @@ impl Engine {
         })
     }
 
+    /// Drops `group` from the MLS state, with its send mark, and rewrites the marks file without it, so no
+    /// mark outlives its group on disk either. A group that is not held does nothing.
+    pub(crate) fn forget_group(&self, group: &[u8; 32]) -> dissent_mls::Result<()> {
+        let marks = self.with_mls(|mls| {
+            mls.drop_group(group)?;
+            Ok(mls.reservations())
+        })?;
+        let map: std::collections::BTreeMap<[u8; 32], Reservation> = marks.into_iter().collect();
+        self.inner
+            .store
+            .write_bin(&reserve_path(&self.inner.mls_path), &map)
+            .map_err(|_| MlsError::Rejected("could not persist the sender reservations"))
+    }
+
     /// Runs an MLS operation that changes group membership, an epoch, or the key package pool.
     /// The state is written at once. Never call this while holding the world lock.
     pub(crate) fn with_mls<T>(

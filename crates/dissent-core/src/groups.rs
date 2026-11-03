@@ -1250,7 +1250,7 @@ impl Engine {
     /// Forgets a 1:1 group whose welcome the other side refused. It was never joined there, so it
     /// must not stand in the way of a new group. Nothing is re-sent.
     fn abandon_dm_group(&self, conv: ConvId, reason: String) {
-        if let Err(e) = self.with_mls(|mls| mls.drop_group(&conv.0)) {
+        if let Err(e) = self.forget_group(&conv.0) {
             warn!(error = %e, "could not drop an unjoined group");
         }
         let mut guard = self.write();
@@ -1282,7 +1282,7 @@ impl Engine {
     /// Gives up our own group for `conv` after losing a tie-break. Our own messages go back to the
     /// unsent list, to be sealed in the winning group. Packets already queued for it are dropped.
     fn drop_own_group(&self, conv: ConvId) -> Result<()> {
-        self.with_mls(|mls| mls.drop_group(&conv.0)).map_err(mls_err)?;
+        self.forget_group(&conv.0).map_err(mls_err)?;
         let me = self.inner.me;
         let mut guard = self.write();
         let w = &mut *guard;

@@ -347,9 +347,11 @@ impl MlsClient {
         Ok(self.pool.drain(..take).collect())
     }
 
-    /// Removes every trace of `group` from this client: its memory and its stored MLS state. A
-    /// group that is not held does nothing and returns `Ok`, so this is safe to repeat.
+    /// Removes every trace of `group` from this client: its memory, its stored MLS state, its send
+    /// count and its reserved mark. A group that is not held does nothing and returns `Ok`, so this
+    /// is safe to repeat.
     pub fn drop_group(&mut self, group: &[u8; 32]) -> Result<()> {
+        self.forget_sends(group)?;
         let mut dropped = match self.groups.remove(group) {
             Some(held) => held,
             None => match MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group))
@@ -581,6 +583,7 @@ impl MlsClient {
             if let Some(mut dropped) = self.groups.remove(group) {
                 dropped.delete(self.provider.storage()).map_err(om)?;
             }
+            self.forget_sends(group)?;
         }
         Ok(processed)
     }
@@ -657,7 +660,9 @@ impl MlsClient {
     pub fn resume_sends(&mut self) -> Result<()> {
         // A mark can outlive its group: the community was left or deleted, or its state was not restored. Nothing can
         // be sent in a group that is not here, so its mark is dropped rather than stopping the whole profile opening.
-        self.reservations.retain(|group, _| self.groups.contains_key(group));
+        // A group this device was evicted from cannot send either.
+        self.reservations
+            .retain(|group, _| self.groups.get(group).is_some_and(|g| g.is_active()));
         let mut pending = Vec::new();
         for (group, mark) in self.reservations() {
             let epoch = self.epoch(&group)?;
@@ -686,6 +691,20 @@ impl MlsClient {
         };
         let count: SendsCount = postcard::from_bytes(bytes).map_err(encoding)?;
         Ok(if count.epoch == epoch { count.next } else { 0 })
+    }
+
+    /// Drops `group`'s reserved mark and send count, for a group this client no longer holds. Without it
+    /// the mark would outlive the group, be persisted with the others, and name a group a restart does not
+    /// restore.
+    fn forget_sends(&mut self, group: &[u8; 32]) -> Result<()> {
+        self.reservations.remove(group);
+        self.provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| MlsError::Rejected("storage lock poisoned"))?
+            .remove(&sends_key(group));
+        Ok(())
     }
 
     fn store_sends(&self, group: &[u8; 32], epoch: u64, next: u32) -> Result<()> {
@@ -1071,6 +1090,44 @@ mod tests {
         client.restore_reservations(disk.marks.clone());
         client.resume_sends().unwrap();
         client
+    }
+
+    /// A dropped group takes its mark with it, so the marks persisted after it name only groups this client holds.
+    #[test]
+    fn dropping_a_group_drops_its_mark() {
+        let (group, other) = ([5u8; 32], [6u8; 32]);
+        let device = DeviceKey::generate();
+        let cert = RootKey::generate().certify(device.id(), 1);
+        let mut client = MlsClient::new(&device, &cert).unwrap();
+        client.create_group(group).unwrap();
+        client.create_group(other).unwrap();
+        let mut disk = Disk { snapshot: Vec::new(), marks: Vec::new() };
+        send(&mut client, &group, &mut disk);
+        send(&mut client, &other, &mut disk);
+        client.drop_group(&group).unwrap();
+        let marks: Vec<[u8; 32]> = client.reservations().into_iter().map(|(g, _)| g).collect();
+        assert_eq!(marks, vec![other], "only the held group keeps its mark");
+        assert_eq!(client.next_generation(&other).unwrap().1, 1, "the other group's count is untouched");
+    }
+
+    /// A device removed from a group loses the group and its mark, as on a ban.
+    #[test]
+    fn an_evicted_device_keeps_no_mark_for_the_group() {
+        let group = [5u8; 32];
+        let (alice_key, bob_key) = (DeviceKey::generate(), DeviceKey::generate());
+        let mut alice = MlsClient::new(&alice_key, &RootKey::generate().certify(alice_key.id(), 1)).unwrap();
+        let mut bob = MlsClient::new(&bob_key, &RootKey::generate().certify(bob_key.id(), 1)).unwrap();
+        alice.create_group(group).unwrap();
+        let package = bob.take_key_packages(1).unwrap().remove(0);
+        let added = alice.add_members(&group, &[package]).unwrap();
+        bob.join_from_welcome_with_policy(&added.welcome, |_| true).unwrap();
+        let mut disk = Disk { snapshot: Vec::new(), marks: Vec::new() };
+        send(&mut bob, &group, &mut disk);
+        assert_eq!(bob.reservations().len(), 1);
+        let removal = alice.remove_members(&group, &[bob_key.id()]).unwrap();
+        bob.process_commit_with_policy(&group, &removal, |_| true).unwrap();
+        assert!(!bob.has_group(&group), "evicted");
+        assert!(bob.reservations().is_empty(), "and the mark went with the group");
     }
 
     #[test]

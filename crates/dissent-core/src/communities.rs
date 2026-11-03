@@ -468,6 +468,11 @@ impl Engine {
             Err(e) => return Err(e),
         }
         let blobs = self.read().blobs_of_community(community);
+        // The group's keys go too. Kept, they would sit in the MLS state with a send mark for a community a
+        // restart no longer loads.
+        if let Err(e) = self.forget_group(&community.0) {
+            tracing::warn!(community = %community, error = %e, "could not drop the left community's encryption group");
+        }
         let removed = self.write().communities.remove(&community);
         if let Some(c) = removed {
             self.stop_topic(c).await;
