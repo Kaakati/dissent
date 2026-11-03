@@ -814,6 +814,7 @@ impl<T: PacketTransport> Sfu<T> {
 
     /// For tests: starts `downlink`'s bandwidth estimate again from `kbps`, as a delay spike leaves it. False when
     /// there is no such downlink.
+    #[cfg(feature = "test-hooks")]
     pub fn reset_downlink_estimate(&mut self, downlink: PeerId, kbps: u32) -> bool {
         let Some(call) = self.links.get_mut(&downlink) else {
             return false;
@@ -823,6 +824,7 @@ impl<T: PacketTransport> Sfu<T> {
     }
 
     /// For tests: `downlink`'s bandwidth estimate and the cap it sets on its video, in kbps (`None` for no cap).
+    #[cfg(feature = "test-hooks")]
     pub fn downlink_estimate(&self, downlink: PeerId) -> Option<(u32, Option<u32>)> {
         let estimate = self.links.get(&downlink)?.video_available_kbps()?;
         Some((estimate, self.estimated.get(&downlink).copied()))
@@ -830,6 +832,7 @@ impl<T: PacketTransport> Sfu<T> {
 
     /// For tests: drops `percent` of the packets on their way to `downlink`, as a lossy link does. 0 stops it. False
     /// when there is no such downlink.
+    #[cfg(feature = "test-hooks")]
     pub fn set_downlink_drop(&mut self, downlink: PeerId, percent: u32) -> bool {
         let Some(call) = self.links.get_mut(&downlink) else {
             return false;

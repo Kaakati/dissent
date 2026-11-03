@@ -8,7 +8,7 @@ license.workspace = true
 # AV1 encoding through SVT-AV1, see dissent-video.
 svt-av1 = ["dissent-video/svt-av1"]
 # Lets the integration tests map link preview hosts to loopback servers, and allow http for them.
-test-hooks = []
+test-hooks = ["dissent-media/test-hooks"]
 
 [dependencies]
 base64.workspace = true

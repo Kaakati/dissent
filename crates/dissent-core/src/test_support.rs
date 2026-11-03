@@ -291,12 +291,14 @@ pub async fn set_viewer_budget(engine: &crate::Engine, viewer_root: &str, kbps: 
 
 /// On the forwarder `engine`: starts the estimate of `viewer_root`'s downlink again from `kbps`, as a delay spike
 /// leaves it. Returns false when `engine` does not forward its call.
+#[cfg(feature = "test-hooks")]
 pub async fn dip_viewer_estimate(engine: &crate::Engine, viewer_root: &str, kbps: u32) -> bool {
     engine.with_viewer_downlink(viewer_root, |sfu, viewer| sfu.reset_downlink_estimate(viewer, kbps)).await
 }
 
 /// On the forwarder `engine`: the estimate of `viewer_root`'s downlink, and the video cap it sets (`None` for none),
 /// in kbps, as text for a test's log.
+#[cfg(feature = "test-hooks")]
 pub async fn viewer_estimate(engine: &crate::Engine, viewer_root: &str) -> String {
     let mut out = String::from("none");
     engine
@@ -310,6 +312,7 @@ pub async fn viewer_estimate(engine: &crate::Engine, viewer_root: &str) -> Strin
 
 /// On the forwarder `engine`: drops `percent` of the datagrams to `viewer_root`, as a lossy link does. 0 stops it.
 /// Returns false when `engine` does not forward its call.
+#[cfg(feature = "test-hooks")]
 pub async fn drop_to_viewer(engine: &crate::Engine, viewer_root: &str, percent: u32) -> bool {
     engine.with_viewer_downlink(viewer_root, |sfu, viewer| sfu.set_downlink_drop(viewer, percent)).await
 }

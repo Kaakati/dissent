@@ -414,6 +414,7 @@ impl Engine {
 
     /// For tests: runs `f` on this device's forwarder with `viewer_root`'s sender id. False when this device does not
     /// forward the call, or `f` says so.
+    #[cfg(feature = "test-hooks")]
     pub(crate) async fn with_viewer_downlink(
         &self,
         viewer_root: &str,
