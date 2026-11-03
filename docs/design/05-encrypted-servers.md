@@ -50,11 +50,11 @@ Options, in rising cost:
 
 Suggested order: 1 first, since it is small and makes every fork visible in tests and in the field. Then 3, recovery by deterministic winner and external rejoin, which bounds the damage. Option 2 reduces how often recovery runs, but it changes who may commit and needs its own design.
 
-### Fork detection: build plan (proposal, not built)
+### Fork detection (v0.1.26)
 
-Detection only: nothing changes keys, refuses commits or rejoins. Two signals, the first needs no wire change.
+Detection only: nothing changes keys, refuses commits or rejoins. Two signals, the first needs no wire change. Code: `crates/dissent-core/src/forks.rs`.
 
-**Signal A: a commit announcement for the epoch we are at.** `receive_commit` drops a `SignedCommit` whose `epoch <= ours`. For `epoch == ours`, it would instead compare `announce.hash` with blake3 of `commit_at(community, ours)` from `mls_commits.log`. A different hash means the announcer's group entered our epoch through another commit: a fork, with the announcer on the other branch. No log entry for that epoch (this device joined by welcome at it, or the log was cleared) means no verdict. The cost is one log read per such announcement, which today are rare: they come from the other side of a near-collision. The announcement is already signed by the committer, so the verdict needs no new trust.
+**Signal A: a commit announcement for the epoch we are at.** `receive_commit` drops a `SignedCommit` whose `epoch < ours`. For `epoch == ours`, it compares `announce.hash` with blake3 of `commit_at(community, ours)` from `mls_commits.log`. A different hash means the announcer's group entered our epoch through another commit: a fork, with the announcer on the other branch. No log entry for that epoch (this device joined by welcome at it, or the log was cleared) means no verdict. The cost is one log read per such announcement, which today are rare: they come from the other side of a near-collision. The announcement is already signed by the committer, so the verdict needs no new trust.
 
 Signal A sees only the fork's first epoch, and only at the moment both commits are announced. A device that was offline, or a branch that moved on, needs signal B.
 
@@ -76,9 +76,9 @@ pub(crate) struct SignedEpochCheck {
 }
 ```
 
-- **Sent:** after this device applies or makes a commit, beside the `SignedCommit`, and on the maintenance pass when the epoch has not changed for 5 minutes. A device sends at most one every 30 s per community. That is 16 bytes of check and a signature, well inside the gossip frame.
+- **Sent:** after this device applies or makes a commit, beside the `SignedCommit`; when a device appears as a neighbour on the topic, so one that was away hears it; in answer to a check that disagrees, so its sender learns of the fork too; and on the maintenance pass when none went out for `Timings::epoch_check_every` (5 minutes). A device sends at most one per `Timings::epoch_check_gap` (30 s) per community. One asked for sooner goes out when the gap ends, with the epoch then current. That is 16 bytes of check and a signature, well inside the gossip frame.
 - **Received:** verify the signature, then check the device is in our group (`indexed_members`), since a removed device's check says nothing. Keep the newest check per device in memory, in a `ForkWatch` per community capped at the group's size. If its epoch equals ours and its check differs from ours, the group forked. If it is ahead, it is kept and compared when we reach that epoch. If it is behind, it is ignored, because that device is catching up.
-- **Old clients:** they fail to decode the new variant and drop it with the existing debug log ("undecodable gossip message"), as they did when `Typing` was added. Adding the variant last keeps every earlier variant's postcard index. A field on `SignedCommit` or `SignedPresence` would instead break their signatures and decoding for old clients, so neither changes.
+- **Old clients:** they fail to decode the new variant and drop it with the existing debug log ("undecodable gossip message"), as they did when `Typing` was added, and handle the rest of the topic as before. Adding the variant last keeps every earlier variant's postcard index. `wire::released` keeps the v0.1.25 enum, and a test engine decodes with it after `test_support::act_as_released_gossip`. A field on `SignedCommit` or `SignedPresence` would instead break their signatures and decoding for old clients, so neither changes.
 
 **State and reporting.** `ForkWatch` is not persisted. Checks arrive again within minutes after a restart. On the first verdict for an epoch, this device:
 
@@ -86,19 +86,21 @@ pub(crate) struct SignedEpochCheck {
 - sets `fork: Option<Fork { epoch, other_side: BTreeSet<DeviceId>, since_ms }>`
 - emits `CommunityUpdated`
 
-`CommunityView` gains `mls_fork: Option<{ epoch, devices: [root ids] }>` across the Tauri boundary. The UI can show "Some members can't read your messages" later; it is not part of this step. The flag clears when every check heard since is from our side, for example after a recovery or after the other side's devices are removed.
+`CommunityView` gains `mls_fork: Option<{ epoch, roots: [root ids] }>` across the Tauri boundary. The UI can show "Some members can't read your messages" later; it is not part of this step. The flag clears once every device named on the other side has sent a check that agrees with ours, for example after a recovery.
 
 **What a lying member can do.** A member can sign a false check and raise a false fork notice, nothing more, since detection takes no action. Its device is named in the log and in `other_side`. A non-member's check is dropped on the membership check.
 
-**Tests**, beside the code unless they need networking:
+**Exporter label.** `dissent/epoch-check/v1`, 16 bytes. MLS exporter outputs under different labels are independent (RFC 9420, section 8.5), so a check reveals nothing about the call (`SFrame 1.0 Base Key`), history (`dissent/history/v1`) or control (`dissent/control/v1`) secrets. `forks::tests::exporter_labels_are_distinct` lists every label in use, and `every_export_secret_call_uses_a_listed_label` reads the crate's sources so a new exporter call cannot pick a label silently.
+
+**Tests** (`wire::epoch_check_tests`, `forks::tests`, `forks::net_tests`), on loopback:
 
 1. `wire.rs`: sign and verify `SignedEpochCheck`. A changed epoch, check, device or timestamp fails. The domain prefix is pinned. The variant's postcard index is pinned, so a later variant cannot shift it.
-2. `wire.rs`: a released `GossipMsg` (the enum as of v0.1.25, kept in the test) fails to decode an `EpochCheck`, and decodes every earlier variant from the new encoder unchanged.
-3. `membership` tests, deterministic fork: alice (owner) and carol each build a commit at the same epoch through `with_mls` and publish it. Bob takes alice's. Within `eventually`, all three report `mls_fork` at that epoch: carol from signal A against alice's announcement, bob from carol's announcement, alice from carol's check. Each names the other side's devices.
-4. Late detection: dave is stopped before the fork. He restarts, catches up on one branch, and reports the fork from a check of the other branch, without any commit announcement being replayed.
-5. No false alarms: a run of joins, removals, a ban, a banned add and its follow-up, and a restart in the middle never sets `mls_fork` on any device. The two banned-add tests that model collisions are excluded, since those are real forks.
+2. `wire.rs`: the released `GossipMsg` fails to decode an `EpochCheck`, and decodes earlier variants from the new encoder unchanged. On the network, a device acting as a released client drops a check that would report a fork, and reads the message sent right after it, while a device on this build reports the fork.
+3. Deterministic fork: bob adds dave, banned, once more; alice and carol take the add and each remove him at the same epoch, then publish. All three report the fork at that epoch, alice and carol each naming the other, and alice's community view shows it.
+4. Late detection: erin is stopped before the fork. She restarts, catches up on one branch, and reports the fork from a check of the other branch. No commit announcement reaches her.
+5. No false alarms: joins, a ban and its removal, a banned add with its follow-up removal, a restart and a quiet spell set `mls_fork` on no device, while every device sends checks.
 6. A check from a removed device, and a forged check, set nothing.
-7. Rate: a device sends at most one check per 30 s per community over a run of ten commits in a few seconds.
+7. Rate: ten checks asked for at once send one, and one more when the gap ends.
 
 With detection in place, `an_add_nobody_followed_is_undone_by_reconcile` can assert the fork is reported when it happens, until recovery (option 3) lets it assert one group again.
 

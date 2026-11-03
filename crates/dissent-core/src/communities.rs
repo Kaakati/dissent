@@ -502,6 +502,7 @@ impl Engine {
             w.community_view(c)
         };
         view.voice_channels = self.voice_channel_views(community);
+        view.mls_fork = self.fork_view(community);
         Ok(view)
     }
 

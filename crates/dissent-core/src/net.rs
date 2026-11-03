@@ -310,6 +310,13 @@ impl Engine {
         neighbour: DeviceId,
         bytes: &[u8],
     ) {
+        // A test models a released client, which cannot decode an epoch check and drops it.
+        if self.inner.legacy_gossip.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(e) = crate::wire::released::decode(bytes) {
+                debug!(error = %e, "undecodable gossip message");
+                return;
+            }
+        }
         match decode_gossip(bytes) {
             Ok(GossipMsg::Event(se)) => match self.ingest(community, vec![*se]) {
                 Ok(true) => {
@@ -338,6 +345,11 @@ impl Engine {
             Ok(GossipMsg::Typing(st)) => {
                 if let Err(e) = self.accept_typing(Some(community), *st) {
                     debug!(community = %community, error = %e, "rejected typing signal");
+                }
+            }
+            Ok(GossipMsg::EpochCheck(check)) => {
+                if let Err(e) = self.accept_epoch_check(community, *check).await {
+                    debug!(community = %community, error = %e, "rejected epoch check");
                 }
             }
             Err(e) => debug!(error = %e, "undecodable gossip message"),
@@ -783,6 +795,8 @@ pub(crate) async fn receive_loop(
                 let engine = Engine { inner };
                 engine.broadcast_own_addr(community).await;
                 engine.broadcast_presence(community).await;
+                // A device that was away hears our epoch check, so it notices a fork it missed.
+                engine.send_epoch_check(community).await;
                 // Gossip sent just before a neighbour joined does not reach it. Sync with it now.
                 for device in fresh {
                     let task = engine.clone();

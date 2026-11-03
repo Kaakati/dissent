@@ -20,15 +20,21 @@ pub(crate) struct Node {
 
 impl Node {
     pub(crate) async fn boot(identity: Identity, dir: PathBuf, port: u16) -> Node {
+        Node::boot_with(identity, dir, port, crate::Timings::default()).await
+    }
+
+    /// Like `boot`, on `timings` instead of the production intervals.
+    pub(crate) async fn boot_with(identity: Identity, dir: PathBuf, port: u16, timings: crate::Timings) -> Node {
         let net = NodeConfig {
             relay: RelayChoice::Disabled,
             loopback_only: true,
             bind_port: port,
             ..NodeConfig::default()
         };
-        let (engine, events) = Engine::start(identity.clone(), dir.clone(), net, crate::test_support::vault_for(&dir))
-            .await
-            .expect("engine starts");
+        let (engine, events) =
+            Engine::start_with_timings(identity.clone(), dir.clone(), net, crate::test_support::vault_for(&dir), timings)
+                .await
+                .expect("engine starts");
         Node {
             engine,
             identity,
@@ -39,7 +45,12 @@ impl Node {
     }
 
     pub(crate) async fn named(name: &str) -> Node {
-        let node = Node::boot(Identity::create(now()), scratch(name), free_port()).await;
+        Node::named_with(name, crate::Timings::default()).await
+    }
+
+    /// Like `named`, on `timings`.
+    pub(crate) async fn named_with(name: &str, timings: crate::Timings) -> Node {
+        let node = Node::boot_with(Identity::create(now()), scratch(name), free_port(), timings).await;
         node.engine
             .set_display_name(name.into())
             .await

@@ -67,6 +67,8 @@ pub(crate) struct Inner {
     /// MLS commits that were refused for now, most often because the ban behind them has not
     /// reached this device yet. Retried whenever new events arrive.
     pub deferred_commits: Mutex<BTreeMap<CommunityId, Vec<Vec<u8>>>>,
+    /// Epoch checks heard and any fork noticed, per community. See `forks`.
+    pub forks: Mutex<BTreeMap<CommunityId, crate::forks::ForkWatch>>,
     /// When each community was last warmed, to rate-limit `Engine::warm`.
     pub warmed: Mutex<BTreeMap<CommunityId, std::time::Instant>>,
     pub clock: Mutex<HlcClock>,
@@ -147,6 +149,9 @@ pub(crate) struct Inner {
     /// Set only in tests, to model a released device from before `CallMsg::Features`: it sends none,
     /// and cannot decode one, so it answers it as a bad request.
     pub legacy_calls: AtomicBool,
+    /// Set by a test that models a client released before `GossipMsg::EpochCheck`: gossip is decoded as such a
+    /// client decodes it. See `test_support::act_as_released_gossip`.
+    pub legacy_gossip: AtomicBool,
     /// Test hook: the call features this device sends instead of its own. Zero sends its own.
     pub call_features_override: std::sync::atomic::AtomicU64,
     /// Seeders that asked this device for a storage grant. See `storage_grants`.
@@ -272,6 +277,7 @@ impl Engine {
             mls_catching_up: Mutex::new(std::collections::BTreeSet::new()),
             private_fetching: Mutex::new(std::collections::BTreeSet::new()),
             deferred_commits: Mutex::new(BTreeMap::new()),
+            forks: Mutex::new(BTreeMap::new()),
             warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),
             publish_lock: tokio::sync::Mutex::new(()),
@@ -303,6 +309,7 @@ impl Engine {
             legacy_profiles: AtomicBool::new(false),
             pretend_in_call: AtomicBool::new(false),
             legacy_calls: AtomicBool::new(false),
+            legacy_gossip: AtomicBool::new(false),
             call_features_override: std::sync::atomic::AtomicU64::new(0),
             storage_asks: crate::storage_grants::StorageAsks::default(),
             key_package_asks: crate::request_gates::KeyPackageAsks::default(),
