@@ -647,6 +647,12 @@ impl<T: PacketTransport> Call<T> {
         self.video_available_kbps
     }
 
+    /// For tests: starts this link's bandwidth estimate again from `kbps`, as a delay spike leaves it.
+    pub fn reset_estimate(&mut self, kbps: u32) {
+        self.rtc.bwe().reset(Bitrate::kbps(u64::from(kbps)));
+        self.video_available_kbps = Some(kbps);
+    }
+
     /// Registers the callback that hears each new bandwidth estimate, in kbps. The video budget
     /// is the estimate minus the audio reservation, see `VideoAdapter::update`.
     pub fn on_video_available(&mut self, callback: impl FnMut(u32) + Send + 'static) {

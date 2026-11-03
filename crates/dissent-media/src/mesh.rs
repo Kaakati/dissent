@@ -379,6 +379,13 @@ impl<T: PacketTransport> Mesh<T> {
         !self.calls.is_empty() && self.calls.values().all(Call::peer_has_av1)
     }
 
+    /// For tests: starts every link's bandwidth estimate again from `kbps`, as a delay spike leaves it.
+    pub fn reset_estimates(&mut self, kbps: u32) {
+        for call in self.calls.values_mut() {
+            call.reset_estimate(kbps);
+        }
+    }
+
     pub fn video_available_kbps(&self) -> Option<u32> {
         self.calls.values().filter_map(Call::video_available_kbps).min()
     }
