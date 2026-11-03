@@ -22,6 +22,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Dissent",
         "width": 1100,
         "height": 720,

@@ -1012,6 +1012,16 @@ if (!window.__TAURI__) {
     },
     // The picks the mock's OS picker gives. `window.__mockPickFiles` replaces them; `window.__mockCheckMs` is how long each
     // file's fingerprint takes. `window.__mockChecks` records what each check job did, for the driver.
+    // The default browser, as the mock has one: what it was asked to open. Refuses as the backend does.
+    open_external: ({ url }) => {
+      need(typeof url === 'string' && url.trim() === url && ![...url].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127), 'This link has hidden characters in it, so it was not opened.');
+      const parsed = new URL(url);
+      need(['http:', 'https:', 'mailto:'].includes(parsed.protocol), `Links starting with ${parsed.protocol.replace(':', '')}: are not opened outside the app.`);
+      const after = url.slice(url.indexOf(':') + 1);
+      need(parsed.protocol === 'mailto:' || (after.startsWith('//') && after[2] !== undefined && !'/\\'.includes(after[2])), 'This link is not written the usual way, so it was not opened.');
+      (window.__mockOpened ??= []).push(url);
+      return null;
+    },
     pick_listing_files: () => mockPicks().map(({ path, name, ext, kind, size }) => ({ path, name, ext, kind, size, is_dir: false })),
     scan_category_folder: ({ communityId, categoryId }) => {
       const f = servers[communityId].files;
@@ -2523,6 +2533,8 @@ if (!window.__TAURI__) {
     f.listings.splice(f.listings.length - count, count);
     emit({ kind: 'community_updated', community_id: communityId });
   };
+  // Sends any backend event, as the desktop backend would.
+  window.__mockEmitTo = (name, payload) => emitTo(name, payload);
   window.__mockDragOver = () => emitTo('dissent://drag-over', null);
   window.__mockDragLeave = () => emitTo('dissent://drag-leave', null);
   // A new probe reading, as the engine emits after each DHT probe: `window.__mockNetLatency(212, 48)`.

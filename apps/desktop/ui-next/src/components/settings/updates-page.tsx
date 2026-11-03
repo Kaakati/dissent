@@ -10,7 +10,7 @@ import { useShell } from '@/lib/store';
 import type { UpdateInfo } from '@/lib/types';
 
 const Link = ({ href, children }: { href: string; children: string }) => (
-  <a href={href} target="_blank" rel="noopener noreferrer">
+  <a href={href} rel="noopener noreferrer">
     {children}
   </a>
 );

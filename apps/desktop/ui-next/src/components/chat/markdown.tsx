@@ -1,10 +1,9 @@
 // A message's markdown as React elements. The tree comes from lib/markdown.ts; nothing here builds HTML from the text. Text
 // runs go through the caller's renderer, so mention pills and search matches still show inside formatted text. A masked
-// link shows its address on hover, and asks before it opens when its label names another site.
-import { Fragment, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
-import { confirm } from '@/lib/dialog';
+// link shows its address on hover. Every link asks before it opens (dialogs/external-link.tsx), more firmly when its label names another site.
+import { Fragment, useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { type CodeNode, highlightCode } from '@/lib/code-highlight';
-import { inlinePlain, mismatchedHost, parseMarkdown, safeHref, type Block, type Inline } from '@/lib/markdown';
+import { inlinePlain, parseMarkdown, safeHref, type Block, type Inline } from '@/lib/markdown';
 import { cn } from '@/lib/utils';
 
 // Renders one run of plain text: mentions and search matches.
@@ -24,26 +23,10 @@ function Run({ text, render }: { text: string; render: TextRender }) {
   );
 }
 
-// A link that says one site and goes to another asks first. Otherwise it opens as links in messages do.
-function openLink(href: string): void {
-  const a = document.createElement('a');
-  a.href = href;
-  a.target = '_blank';
-  a.rel = 'noopener noreferrer';
-  a.click();
-}
-
 function MaskedLink({ href, label, render, path }: { href: string; label: Inline[]; render: TextRender; path: string }) {
-  const text = inlinePlain(label);
-  const mismatch = mismatchedHost(text, href);
-  const onClick = async (e: MouseEvent<HTMLAnchorElement>) => {
-    if (!mismatch) return;
-    e.preventDefault();
-    const target = new URL(href).host;
-    if (await confirm({ message: `This link says ${text} but goes to ${target}. Open it?`, okLabel: 'Open' })) openLink(href);
-  };
+  // The app-wide link guard asks before it opens, with the stronger warning when the label names another site.
   return (
-    <a className="md-link" href={href} target="_blank" rel="noopener noreferrer" title={href} onClick={(e) => void onClick(e)}>
+    <a className="md-link" href={href} rel="noopener noreferrer" title={href} data-link-label={inlinePlain(label)}>
       <InlineNodes nodes={label} render={render} path={`${path}.l`} />
     </a>
   );
@@ -82,7 +65,7 @@ function InlineNode({ node, render, path }: { node: Inline; render: TextRender; 
       return <Run text={node.text} render={render} />;
     case 'url':
       return (
-        <a className="md-link" href={node.href} target="_blank" rel="noopener noreferrer" title={node.href}>
+        <a className="md-link" href={node.href} rel="noopener noreferrer" title={node.href}>
           <Run text={node.href} render={render} />
         </a>
       );

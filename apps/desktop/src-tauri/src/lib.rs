@@ -1,4 +1,5 @@
 mod commands;
+mod links;
 mod badge;
 mod pictures;
 mod disclaimer;
@@ -360,6 +361,7 @@ pub fn run() {
             profile::finish_portable_link,
             profile::choose_profile,
             attachments::pick_files,
+            links::open_external,
             attachments::stage_pasted_file,
             attachments::reveal_attachment,
             attachments::open_attachment,
@@ -458,6 +460,8 @@ pub fn run() {
 /// Starts the app's state: the profile, the engine and the windows. Any error returned here is shown to
 /// the user by [`profile::fatal`].
 fn setup(app: &mut tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Every screen below needs the main window, made here with its link guards.
+    links::build_main_window(app.handle())?;
     // Managed before any branch, so the link screens can use it before a profile is open.
     app.manage(part6::PendingLink::default());
     let mode = profile::mode();

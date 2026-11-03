@@ -2755,7 +2755,7 @@ check('raw HTML in a message is text, never an element', (await ev(`(() => { con
 check('a link whose label names another site shows its real address on hover', (await attrs('a.md-link', 'title')).includes('https://evil.example.org/phish'));
 await ev(`${row}.querySelector('a[title="https://evil.example.org/phish"]').click()`);
 await sleep(400);
-check('clicking it asks before it opens', (await ev(`document.body.textContent.includes('This link says github.com but goes to evil.example.org. Open it?')`)) === true);
+check('clicking it asks before it opens', (await ev(`document.body.textContent.includes('This link says github.com but goes to evil.example.org')`)) === true);
 await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
 await sleep(300);
@@ -5893,6 +5893,125 @@ check('FC7 a member sees no New category and no Edit', (await ev(`!document.quer
 check('FC7 nor the first-category offer, but the usual empty text', (await ev(`!document.querySelector('[data-first-category]') && document.querySelector('[data-files]').textContent.includes('No files listed yet')`)) === true);
 }
 
+// External links: every link asks before it opens in the default browser, through the backend, with the exact address.
+async function section_externallinks() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9838, profile: `${SCRATCH}/externallinks-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+await until(async () => (await ev(`!!document.querySelector('button[aria-label="Direct messages"]')`)) === true, 10000);
+const LONG = 'https://docs.example.com/a/very/long/path/that/keeps/going/and/going/and/going/until/it/must/be/cut/somewhere/in/the/middle/end.html?x=1#part';
+await ev(`window.__mockPostDm('Maya', ${JSON.stringify(`bare ${LONG} and [the guide](https://guide.example.com/start) and [github.com](https://evil.example.org/phish) and mail mailto:someone@example.com and [idn](https://xn--80ak6aa92e.com/) and dissent://invite/abc123`)})`);
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya'))?.click()`);
+await until(async () => (await ev(`!!document.querySelector('a.md-link[title="https://guide.example.com/start"]')`)) === true, 5000);
+const dialog = () => ev(`document.querySelector('[data-external-link]')?.closest('[role="dialog"]')?.textContent ?? ''`);
+const opened = () => ev(`JSON.stringify(window.__mockOpened ?? [])`);
+const press = (label) => ev(`[...document.querySelectorAll('[data-external-link] button')].find((n) => n.textContent.trim() === ${JSON.stringify(label)}).click()`);
+const linkSel = (href) => `document.querySelector(${JSON.stringify(`a[href="${href}"]`)})`;
+const close = async () => { if ((await dialog()) === '') return; await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(250); };
+
+// A click opens the dialog and nothing else.
+await ev(`${linkSel('https://guide.example.com/start')}.click()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL1 a click on a link opens the dialog first', (await dialog()).includes('You’re about to open an external link'));
+check('XL1 the host is shown, and stands out', (await ev(`document.querySelector('[data-link-host]').textContent`)) === 'guide.example.com' && (await ev(`document.querySelector('[data-link-host]').tagName`)) === 'STRONG');
+check('XL1 nothing opened yet and the page did not move', (await opened()) === '[]' && (await ev('location.pathname')) === '/');
+await press('Cancel');
+await sleep(250);
+check('XL2 Cancel opens nothing', (await opened()) === '[]' && (await dialog()) === '');
+await ev(`${linkSel('https://guide.example.com/start')}.click()`);
+await until(async () => (await dialog()) !== '', 2000);
+await press('Open');
+await until(async () => (await opened()) !== '[]', 2000);
+check('XL3 Open hands the exact address to open_external', (await opened()) === JSON.stringify(['https://guide.example.com/start']), await opened());
+await ev(`window.__mockOpened = []`);
+// A long address is cut in the middle; its full form stays in the tooltip.
+await ev(`${linkSel(LONG)}.click()`);
+await until(async () => (await dialog()) !== '', 2000);
+const shown = await ev(`document.querySelector('[data-link-url]').textContent`);
+check('XL4 a long path is cut in the middle, the start and end kept', shown.includes('…') && shown.startsWith('https://docs.example.com/a/very/long') && shown.endsWith('end.html?x=1#part') && (await ev(`document.querySelector('[data-link-url]').title`)) === LONG, shown);
+await ev(`navigator.clipboard.writeText = (t) => { window.__copied = t; return Promise.resolve(); }`);
+await press('Copy link');
+await sleep(200);
+check('XL5 Copy link copies the full address', (await ev('window.__copied')) === LONG);
+await press('Open');
+await until(async () => (await opened()) !== '[]', 2000);
+check('XL5 the full long address is what opens', (await opened()) === JSON.stringify([LONG]));
+await ev(`window.__mockOpened = []`);
+// A label naming another site gets the stronger warning.
+await ev(`${linkSel('https://evil.example.org/phish')}.click()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL6 a mismatched label gets the stronger warning', (await dialog()).includes('This link says github.com but goes to evil.example.org') && (await ev(`!!document.querySelector('[data-link-mismatch]')`)) === true);
+await close();
+// Punycode stays punycode, so a look-alike name shows as what it is.
+await ev(`${linkSel('https://xn--80ak6aa92e.com/')}.click()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL7 an IDN host shows as punycode', (await ev(`document.querySelector('[data-link-host]').textContent`)) === 'xn--80ak6aa92e.com');
+await close();
+// mailto asks too. Messages do not make links of mail addresses, so this one is placed on the page.
+await ev(`(() => { const a = document.createElement('a'); a.href = 'mailto:someone@example.com'; a.textContent = 'mail'; a.id = 'mail-test'; document.body.append(a); a.click(); })()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL8 a mail link asks too', (await dialog()).includes('You’re about to open an external link') && (await ev(`document.querySelector('[data-link-host]').textContent`)) === 'someone@example.com');
+await press('Open');
+await until(async () => (await opened()) !== '[]', 2000);
+check('XL8 and opens its exact address', (await opened()) === JSON.stringify(['mailto:someone@example.com']));
+await ev(`window.__mockOpened = []; document.getElementById('mail-test').remove()`);
+// Middle click and Enter go through the same dialog.
+await ev(`${linkSel('https://guide.example.com/start')}.dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true, cancelable: true }))`);
+await sleep(250);
+check('XL9 a middle click asks first', (await dialog()).includes('external link') && (await opened()) === '[]');
+await close();
+await ev(`${linkSel('https://guide.example.com/start')}.focus()`);
+await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+await sleep(300);
+check('XL10 Enter on a link asks first', (await dialog()).includes('external link') && (await opened()) === '[]');
+await close();
+// A link preview's title and picture.
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya'))?.click()`);
+await sleep(300);
+const embed = await ev(`document.querySelector('article.embed .embed-title')?.getAttribute('href') ?? ''`);
+await ev(`document.querySelector('article.embed .embed-title').click()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL11 a link preview’s title asks first', (await dialog()).includes('external link') && embed.startsWith('https://'));
+await press('Open');
+await until(async () => (await opened()) !== '[]', 2000);
+check('XL11 and opens its exact address', (await opened()) === JSON.stringify([embed]), await opened());
+await ev(`window.__mockOpened = []`);
+const picture = await ev(`document.querySelector('article.embed .embed-picture')?.getAttribute('href') ?? null`);
+if (picture) {
+  await ev(`document.querySelector('article.embed .embed-picture').click()`);
+  await until(async () => (await dialog()) !== '', 2000);
+  check('XL11 a link preview’s picture asks first', (await dialog()).includes('external link'));
+  await close();
+}
+// A dissent:// link stays in the app with no external dialog.
+await ev(`${linkSel('dissent://invite/abc123')}?.click()`);
+await sleep(400);
+check('XL12 a dissent:// link is handled in the app, not as an external link', (await ev(`!document.querySelector('[data-external-link]')`)) === true && (await opened()) === '[]');
+await close();
+// A link in Settings, and one a page tries to open with a scheme that is not allowed.
+await ev(`document.querySelector('button[aria-label="Settings"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('[aria-label="Settings"] nav button')].find((n) => n.textContent.trim() === 'Updates').click()`);
+await sleep(300);
+await ev(`[...document.querySelectorAll('[aria-label="Settings"] a[href^="https://"]')][0].click()`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL13 a link in Settings asks first', (await dialog()).includes('external link'));
+await close();
+await ev(`(() => { const a = document.createElement('a'); a.href = 'javascript:window.__ran = 1'; a.textContent = 'x'; document.body.append(a); a.click(); a.remove(); })()`);
+await sleep(200);
+check('XL14 a javascript: link never runs or opens', (await ev('window.__ran ?? 0')) === 0 && (await ev(`!document.querySelector('[data-external-link]')`)) === true);
+check('XL15 the backend refuses what the dialog would never send', (await ev(`window.__TAURI__.core.invoke('open_external', { url: 'JavaScript:alert(1)' }).then(() => 'opened', (e) => String(e))`)).includes('not opened'));
+check('XL15 and one with an empty site, as http:///path', (await ev(`window.__TAURI__.core.invoke('open_external', { url: 'http:///path' }).then(() => 'opened', (e) => String(e))`)).includes('not written the usual way'));
+// A link the webview tried to open by itself comes back from the backend and asks too.
+await ev(`window.__mockEmitTo('dissent://external-link', 'https://popup.example.com/')`);
+await until(async () => (await dialog()) !== '', 2000);
+check('XL16 a link the window tried to open by itself asks first', (await ev(`document.querySelector('[data-link-host]').textContent`)) === 'popup.example.com');
+await close();
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -6478,6 +6597,7 @@ const SECTIONS = [
   ['downloadfolder', section_downloadfolder],
   ['folderlisting', section_folderlisting],
   ['filecategories', section_filecategories],
+  ['externallinks', section_externallinks],
   ['shortsidebar', section_shortsidebar],
   ['videothumbs', section_videothumbs],
   ['safefiles', section_safefiles],
