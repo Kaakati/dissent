@@ -457,7 +457,8 @@ async fn a_received_1440p_screen_does_not_hold_up_the_call_loop() {
         let sharing = measure("receiving a 1440p share as previews");
         assert!(quiet.3 >= 400, "audio flows without a share: {quiet:?}");
         assert!(sharing.3 >= quiet.3 * 9 / 10, "the share does not cost Bob his audio: {sharing:?} against {quiet:?}");
-        assert!(sharing.2 < 100.0, "the call loop is never held up for long: {sharing:?}");
+        // Decoding in the loop held it up about 380 ms at a time; 100 ms (doubled on a slower runner) still catches that.
+        assert!(sharing.2 < 100.0 * scale(), "the call loop is never held up for long: {sharing:?}");
 
         alice.engine.set_screen_share(false, None).expect("screen share off");
         finish(vec![alice, bob]).await;
