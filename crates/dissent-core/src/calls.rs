@@ -1478,8 +1478,19 @@ fn show_video(engine: &Engine, room: &Room, frame: &dissent_media::VideoFrame) {
         (tiles.get(&tile).copied().unwrap_or(crate::call_video::PREVIEW_WIDTH), largest)
     };
     let interval = if largest.as_ref() == Some(&tile) { LARGE_PREVIEW_INTERVAL } else { PREVIEW_INTERVAL };
-    if let Some(preview) = lock(&room.remote_video).show(frame, width, interval) {
-        emit_preview(engine, preview.sender, &root_id, preview.screen, &preview);
+    // Decoded on the stream's own thread: this runs in the call loop, which also carries the audio.
+    let job = crate::call_video::DecodeJob { frame: frame.clone(), width, interval };
+    let sink = || -> crate::call_video::PreviewSink {
+        // Weak, so a decoder thread never keeps an engine that shut down alive.
+        let weak = std::sync::Arc::downgrade(&engine.inner);
+        std::sync::Arc::new(move |preview: Preview| {
+            if let Some(inner) = weak.upgrade() {
+                emit_preview(&Engine { inner }, preview.sender, &root_id, preview.screen, &preview);
+            }
+        })
+    };
+    if lock(&room.remote_video).push(job, sink) {
+        room.keyframe_wanted.store(true, Ordering::Relaxed);
     }
 }
 

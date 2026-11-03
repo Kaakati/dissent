@@ -1008,25 +1008,105 @@ pub(crate) fn clamp_screen_kbps(kbps: u32) -> u32 {
     kbps.clamp(SCREEN_MIN_KBPS, SCREEN_MAX_KBPS)
 }
 
-/// The decoders of the peers' cameras and screens, one per sender and kind.
+/// Frames one stream's decoder may have waiting. More means the decoder is behind, and the frames are dropped.
+const DECODE_QUEUE: usize = 3;
+/// The least time between two keyframe requests one stream makes after dropping frames.
+const DECODE_ASK_EVERY: Duration = Duration::from_millis(500);
+
+/// One received frame to make a preview of, at the width and rate its tile wants.
+pub(crate) struct DecodeJob {
+    pub frame: VideoFrame,
+    pub width: u32,
+    pub interval: Duration,
+}
+
+/// Where a stream's decoder thread sends its previews.
+pub(crate) type PreviewSink = std::sync::Arc<dyn Fn(Preview) + Send + Sync>;
+
+/// One peer's camera or screen, decoded on a thread of its own.
+struct DecodeStream {
+    tx: std::sync::mpsc::SyncSender<DecodeJob>,
+    /// Frames were dropped, so deltas are useless until a keyframe starts the decoder again.
+    waiting_key: bool,
+    asked: Option<Instant>,
+}
+
+/// The peers' cameras and screens as previews. Decoding a large picture and encoding its JPEG take tens of
+/// milliseconds, which must not happen in the call loop: that loop also carries the call's audio. Each stream has a
+/// thread that decodes in order. One that falls behind drops frames rather than queueing them, and the stream then
+/// waits for a keyframe.
 #[derive(Default)]
 pub(crate) struct RemoteVideo {
-    decoders: HashMap<(u64, bool, bool), Box<dyn dissent_video::VideoDecoder>>,
-    /// When each peer's picture was last made into a preview, so previews stay within the rate.
-    shown: HashMap<(u64, bool), Instant>,
+    streams: HashMap<(u64, bool), DecodeStream>,
 }
 
 impl RemoteVideo {
-    /// Drops the decoders of a peer who left, so their pictures stop and memory is freed.
+    /// Hands one frame to its stream's decoder. Returns true when the stream dropped frames and should ask the
+    /// sender for a keyframe now.
+    pub(crate) fn push(&mut self, job: DecodeJob, sink: impl FnOnce() -> PreviewSink) -> bool {
+        let key = (job.frame.sender, job.frame.screen);
+        let stream = match self.streams.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel::<DecodeJob>(DECODE_QUEUE);
+                let sink = sink();
+                let spawned = std::thread::Builder::new().name("dissent-decode".into()).spawn(move || {
+                    let mut decoders = Decoders::default();
+                    for job in rx {
+                        if let Some(preview) = decoders.show(&job.frame, job.width, job.interval) {
+                            sink(preview);
+                        }
+                    }
+                });
+                if spawned.is_err() {
+                    return false;
+                }
+                entry.insert(DecodeStream { tx, waiting_key: false, asked: None })
+            }
+        };
+        if stream.waiting_key && !job.frame.keyframe {
+            return stream.ask();
+        }
+        match stream.tx.try_send(job) {
+            Ok(()) => {
+                stream.waiting_key = false;
+                false
+            }
+            Err(_) => {
+                stream.waiting_key = true;
+                stream.ask()
+            }
+        }
+    }
+
+    /// Stops the decoders of a peer who left, so their pictures stop and memory is freed.
     pub(crate) fn forget(&mut self, sender: u64) {
-        self.decoders.retain(|(peer, _, _), _| *peer != sender);
-        self.shown.retain(|(peer, _), _| *peer != sender);
+        self.streams.retain(|(peer, _), _| *peer != sender);
     }
 
     /// Whether any peer's camera or screen is arriving.
     pub(crate) fn receiving(&self) -> bool {
-        !self.decoders.is_empty()
+        !self.streams.is_empty()
     }
+}
+
+impl DecodeStream {
+    /// Whether to ask for a keyframe now, at most once per `DECODE_ASK_EVERY`.
+    fn ask(&mut self) -> bool {
+        let due = self.asked.is_none_or(|at| at.elapsed() >= DECODE_ASK_EVERY);
+        if due {
+            self.asked = Some(Instant::now());
+        }
+        due
+    }
+}
+
+/// The decoders of one stream's codecs, and when it last made a preview. Runs on the stream's own thread.
+#[derive(Default)]
+pub(crate) struct Decoders {
+    decoders: HashMap<(u64, bool, bool), Box<dyn dissent_video::VideoDecoder>>,
+    /// When each peer's picture was last made into a preview, so previews stay within the rate.
+    shown: HashMap<(u64, bool), Instant>,
 }
 
 /// A decoded picture of one peer's video, ready for the window.
@@ -1043,7 +1123,7 @@ pub(crate) struct Preview {
     pub jpeg: Vec<u8>,
 }
 
-impl RemoteVideo {
+impl Decoders {
     /// Decodes one received frame and returns its preview at `max_width`, or `None` when the frame
     /// does not decode yet, such as a delta before its keyframe, or when the last preview is less
     /// than `interval` old.
@@ -1332,7 +1412,7 @@ mod tests {
             chunks.extend(enc.encode(&frame).unwrap());
         }
         for (tile, interval) in [(320u32, PREVIEW_INTERVAL), (1280, PREVIEW_INTERVAL), (1280, LARGE_PREVIEW_INTERVAL)] {
-            let mut remote = RemoteVideo::default();
+            let mut remote = Decoders::default();
             let mut work = Duration::ZERO;
             let mut previews = 0;
             let started = Instant::now();
@@ -1394,12 +1474,12 @@ mod tests {
         // The limiter reads the wall clock, so a slow machine could let a 66 ms interval pass between
         // two calls. A long interval tests the same rule without depending on the machine's speed.
         let long = std::time::Duration::from_secs(3600);
-        let mut small = RemoteVideo::default();
+        let mut small = Decoders::default();
         let first = small.show(&frame(0), 160, long).expect("the keyframe shows");
         assert_eq!(first.width, 160, "a 160 px tile gets a 160 px preview");
         assert!(small.show(&frame(1), 160, long).is_none(), "a second frame inside the interval makes no preview");
 
-        let mut large = RemoteVideo::default();
+        let mut large = Decoders::default();
         let wide = large.show(&frame(0), 1_280, PREVIEW_INTERVAL).expect("the keyframe shows");
         assert_eq!(wide.width, w, "a tile wider than the frame gets the frame's own width");
     }
@@ -1514,4 +1594,79 @@ mod tests {
         let camera = Budget::new(capture::CaptureKind::Camera);
         assert_eq!(camera.held_to_link(plan, 2_056, 32, 0), plan, "a camera's plan already follows the estimate");
     }
+
+    /// H.264 frames of a 640x360 test picture, the first a keyframe.
+    fn h264_frames(count: usize) -> Vec<VideoFrame> {
+        use dissent_video::encode::{self, EncoderConfig};
+        let format = CaptureFormat { width: 640, height: 360, fps: 30 };
+        let mut src = PatternSource::new(format, 7);
+        let config = EncoderConfig { width: 640, height: 360, fps: 30, bitrate_kbps: 800, keyframe_interval: 100_000, screen: false };
+        let mut enc = encode::open(Codec::H264, config).unwrap();
+        let mut out = Vec::new();
+        while out.len() < count {
+            for chunk in enc.encode(&src.next_frame().unwrap()).unwrap() {
+                out.push(VideoFrame { sender: 1, frame_id: out.len() as u32, keyframe: chunk.keyframe, codec: VideoCodec::H264, screen: true, layer: 0, payload: chunk.data });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn previews_are_made_off_the_callers_thread_in_order() {
+        let frames = h264_frames(10);
+        let made = Arc::new(Mutex::new(Vec::new()));
+        let mut remote = RemoteVideo::default();
+        let caller = std::thread::current().id();
+        for frame in frames {
+            let made = made.clone();
+            let job = DecodeJob { frame, width: 320, interval: Duration::ZERO };
+            assert!(!remote.push(job, move || Arc::new(move |p: Preview| made.lock().unwrap().push((std::thread::current().id(), p.width)))));
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert!(wait_for(Duration::from_secs(10), || made.lock().unwrap().len() >= 9), "previews come");
+        assert!(made.lock().unwrap().iter().all(|(thread, width)| *thread != caller && *width == 320));
+        assert!(remote.receiving());
+        remote.forget(1);
+        assert!(!remote.receiving());
+    }
+
+    #[test]
+    fn a_decoder_that_falls_behind_drops_frames_and_waits_for_a_keyframe() {
+        let mut frames = h264_frames(40);
+        // A slow sink holds the decoder thread, so the queue fills.
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let made = Arc::new(Mutex::new(0usize));
+        let mut remote = RemoteVideo::default();
+        let mut asked = 0;
+        let push = |remote: &mut RemoteVideo, frame: VideoFrame| {
+            let (made, gate) = (made.clone(), gate.clone());
+            remote.push(DecodeJob { frame, width: 320, interval: Duration::ZERO }, move || {
+                Arc::new(move |_p: Preview| {
+                    let _wait = gate.lock().unwrap();
+                    *made.lock().unwrap() += 1;
+                })
+            })
+        };
+        for frame in frames.drain(..20) {
+            asked += usize::from(push(&mut remote, frame));
+        }
+        assert_eq!(asked, 1, "one keyframe request, however many frames were dropped inside the interval");
+        // Deltas are dropped while the stream waits, even with room in the queue again.
+        drop(held);
+        assert!(wait_for(Duration::from_secs(5), || *made.lock().unwrap() >= 1));
+        let before = *made.lock().unwrap();
+        for frame in frames.drain(..5) {
+            push(&mut remote, frame);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(*made.lock().unwrap(), before, "deltas after a drop are not decoded");
+        // A keyframe starts it again.
+        let mut key = h264_frames(1).remove(0);
+        key.frame_id = 100;
+        assert!(key.keyframe);
+        assert!(!push(&mut remote, key));
+        assert!(wait_for(Duration::from_secs(5), || *made.lock().unwrap() > before), "the keyframe decodes");
+    }
 }
+
