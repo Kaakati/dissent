@@ -284,6 +284,13 @@ impl Default for ScreenLink {
 }
 
 impl ScreenLink {
+    /// Whether the share may send a step above the estimate now, to find out whether the link carries more. Not in its
+    /// first seconds, and not while it believes the estimate after a push back, so a thin link is probed at most once
+    /// per hold, and the holds grow from 10 s to two minutes.
+    pub fn probing(&self, now: Instant) -> bool {
+        self.last_estimate > 0 && self.believe_until.is_none_or(|until| now >= until)
+    }
+
     /// What to plan for, in kbps, from the estimate now and what the share wants to send.
     pub fn available(&mut self, now: Instant, estimate: u32, wanted: u32) -> u32 {
         if self.last_estimate == 0 {
