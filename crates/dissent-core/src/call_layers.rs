@@ -412,6 +412,27 @@ impl Engine {
         true
     }
 
+    /// For tests: runs `f` on this device's forwarder with `viewer_root`'s sender id. False when this device does not
+    /// forward the call, or `f` says so.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn with_viewer_downlink(
+        &self,
+        viewer_root: &str,
+        f: impl FnOnce(&mut dissent_media::Sfu<crate::calls::CallLink>, u64) -> bool,
+    ) -> bool {
+        let Some(room) = crate::calls::lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        let Some(viewer) = room.sid_of_root(viewer_root) else {
+            return false;
+        };
+        let Some(forwarding) = room.forwarding() else {
+            return false;
+        };
+        let mut sfu = forwarding.sfu().lock().await;
+        sfu.as_mut().is_some_and(|sfu| f(sfu, viewer))
+    }
+
     /// For tests: whether downlink bandwidth estimates cap budgets on this device's relays: the one of
     /// its call, and those of calls it forwards as a volunteer. Returns false when it forwards none.
     pub(crate) async fn use_link_estimates_now(&self, on: bool) -> bool {

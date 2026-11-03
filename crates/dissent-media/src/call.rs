@@ -189,6 +189,12 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     /// The latest bandwidth estimate from str0m, in kbps, and the callback that hears it.
     _fine_timer: FineTimer,
     video_available_kbps: Option<u32>,
+    /// For tests: the share of outgoing datagrams dropped, in percent, as a lossy link does.
+    #[cfg(feature = "test-hooks")]
+    drop_percent: u32,
+    /// Counts outgoing datagrams for `drop_percent`.
+    #[cfg(feature = "test-hooks")]
+    sent_seq: u64,
     video_available_cb: Option<Box<dyn FnMut(u32) + Send>>,
     started: Instant,
     timeout: Instant,
@@ -448,6 +454,10 @@ impl<T: PacketTransport> Call<T> {
             video_replay: VideoReplay::default(),
             _fine_timer: FineTimer::new(),
             video_available_kbps: None,
+            #[cfg(feature = "test-hooks")]
+            drop_percent: 0,
+            #[cfg(feature = "test-hooks")]
+            sent_seq: 0,
             video_available_cb: None,
             started: now,
             timeout: now,
@@ -647,7 +657,14 @@ impl<T: PacketTransport> Call<T> {
         self.video_available_kbps
     }
 
-    /// For tests: starts this link's bandwidth estimate again from `kbps`, as a delay spike leaves it.
+    /// For tests: drops `percent` of the datagrams this call sends, spread evenly, as a lossy link does. 0 stops it.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_drop_percent(&mut self, percent: u32) {
+        self.drop_percent = percent.min(100);
+    }
+
+    /// For tests: starts this link's bandwidth estimate again from `kbps`, as a delay spike leaves it. Nothing on a
+    /// forwarder's downlink probes, so the estimate stays near there unless more is sent.
     #[cfg(feature = "test-hooks")]
     pub fn reset_estimate(&mut self, kbps: u32) {
         self.rtc.bwe().reset(Bitrate::kbps(u64::from(kbps)));
@@ -1008,6 +1025,15 @@ impl<T: PacketTransport> Call<T> {
                     return Ok(());
                 }
                 Output::Transmit(transmit) => {
+                    #[cfg(feature = "test-hooks")]
+                    {
+                        self.sent_seq += 1;
+                        // Evenly spread: the datagrams where the running share of drops ticks over.
+                        let percent = u64::from(self.drop_percent);
+                        if percent > 0 && self.sent_seq * percent / 100 != (self.sent_seq - 1) * percent / 100 {
+                            continue;
+                        }
+                    }
                     self.stats.packets_sent += 1;
                     self.transport
                         .send(transmit.destination, &transmit.contents)

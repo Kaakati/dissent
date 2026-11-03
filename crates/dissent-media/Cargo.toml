@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Hooks the integration tests use to dip a link's estimate.
+# Hooks the integration tests use to dip a link's estimate and drop its packets.
 test-hooks = []
 
 [dependencies]

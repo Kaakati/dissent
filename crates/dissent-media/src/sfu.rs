@@ -795,7 +795,8 @@ impl<T: PacketTransport> Sfu<T> {
     /// Takes each downlink's bandwidth estimate as its video budget, less the top speakers' audio.
     /// Nothing probes a link for headroom, so an estimate never climbs past where it starts
     /// (`BWE_INITIAL_KBPS`). Only an estimate that fell below it is a measured limit; at or above
-    /// it the link counts as unlimited, as before layers. See `docs/design/13-forwarded-calls.md`.
+    /// it the link counts as unlimited, as before layers. A fallen estimate rises again on what is
+    /// sent. See `docs/design/13-forwarded-calls.md`.
     fn refresh_estimates(&mut self) {
         if !self.use_estimates {
             return;
@@ -809,6 +810,35 @@ impl<T: PacketTransport> Sfu<T> {
                 (u64::from(kbps) < crate::call::BWE_INITIAL_KBPS).then(|| (*peer, kbps.saturating_sub(audio)))
             })
             .collect();
+    }
+
+    /// For tests: starts `downlink`'s bandwidth estimate again from `kbps`, as a delay spike leaves it. False when
+    /// there is no such downlink.
+    #[cfg(feature = "test-hooks")]
+    pub fn reset_downlink_estimate(&mut self, downlink: PeerId, kbps: u32) -> bool {
+        let Some(call) = self.links.get_mut(&downlink) else {
+            return false;
+        };
+        call.reset_estimate(kbps);
+        true
+    }
+
+    /// For tests: `downlink`'s bandwidth estimate and the cap it sets on its video, in kbps (`None` for no cap).
+    #[cfg(feature = "test-hooks")]
+    pub fn downlink_estimate(&self, downlink: PeerId) -> Option<(u32, Option<u32>)> {
+        let estimate = self.links.get(&downlink)?.video_available_kbps()?;
+        Some((estimate, self.estimated.get(&downlink).copied()))
+    }
+
+    /// For tests: drops `percent` of the packets on their way to `downlink`, as a lossy link does. 0 stops it. False
+    /// when there is no such downlink.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_downlink_drop(&mut self, downlink: PeerId, percent: u32) -> bool {
+        let Some(call) = self.links.get_mut(&downlink) else {
+            return false;
+        };
+        call.set_drop_percent(percent);
+        true
     }
 
     /// A downlink that asks for a keyframe has lost video it cannot decode. Its stream restarts
