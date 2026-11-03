@@ -764,10 +764,10 @@ impl<T: PacketTransport> Sfu<T> {
             .filter_map(|l| self.video_wanted.get(&(target, layer_key(stream, l))).map(|at| format!("layer {l} asked {} ms ago", at.elapsed().as_millis())))
             .collect();
         format!(
-            "planned {:?}, sending {:?}, started {started:?}, waiting {waiting:?}, layers {:?}, keyframes asked in all {}",
+            "planned {:?}, sending {:?}, started {started:?}, waiting {waiting:?}, layers as (width, kbps) {:?}, keyframes asked in all {}",
             self.plan_for(viewer).get(&stream),
             self.sending_layer.get(&(target, stream)),
-            self.sender_layers(sender, screen).iter().map(|l| l.width).collect::<Vec<_>>(),
+            self.sender_layers(sender, screen).iter().map(|l| (l.width, l.kbps)).collect::<Vec<_>>(),
             self.stats.keyframes_requested,
         )
     }

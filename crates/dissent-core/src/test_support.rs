@@ -236,7 +236,12 @@ pub async fn active_speaker(engine: &crate::Engine) -> Option<String> {
 /// On the forwarder `engine`: the layers `sender_root`'s camera announced, as (width, kbps),
 /// smallest first.
 pub async fn sender_layers(engine: &crate::Engine, sender_root: &str) -> Vec<(u32, u32)> {
-    engine.sender_layers_now(sender_root).await
+    engine.sender_layers_now(sender_root, false).await
+}
+
+/// On the forwarder `engine`: the layers `sender_root`'s screen announced, as (width, kbps), smallest first.
+pub async fn sender_screen_layers(engine: &crate::Engine, sender_root: &str) -> Vec<(u32, u32)> {
+    engine.sender_layers_now(sender_root, true).await
 }
 
 /// On the forwarder `engine`: holds `viewer_root`'s downlink to `kbps` of video, as a measured

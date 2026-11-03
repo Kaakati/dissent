@@ -1558,7 +1558,22 @@ async fn a_forwarded_1440p_screen_gives_each_viewer_a_layer_it_can_carry() {
     // A level 0 server: no boost ceiling applies to a screen.
     let plan = dissent_core::test_support::screen_plan(&sender.engine).expect("a share runs");
     assert_eq!((plan.0, plan.1), (2560, 1440), "the top layer is the screen's own size");
-    assert!(dissent_core::test_support::set_viewer_budget(&everyone[forwarder].engine, &root(wide), 1_200).await);
+    // The layers' rates are what the sender sends now, and a sender's top layer only climbs to its chosen rate as fast as
+    // its link allows. A fixed budget could sit above a top layer that has not climbed yet, so the plan would keep the
+    // top. The budget goes between the middle and the top once the top has climbed clear of the middle.
+    let fwd = &everyone[forwarder].engine;
+    let mut table = Vec::new();
+    let climbed = tokio::time::Instant::now() + scaled(Duration::from_secs(60));
+    while tokio::time::Instant::now() < climbed {
+        table = dissent_core::test_support::sender_screen_layers(fwd, &root(sender)).await;
+        if table.len() == 3 && table[2].1 >= table[1].1 + 400 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(table.len() == 3 && table[2].1 >= table[1].1 + 400, "the screen's top layer climbs clear of the middle: {table:?}");
+    let budget = table[1].1 + (table[2].1 - table[1].1) / 2;
+    assert!(dissent_core::test_support::set_viewer_budget(fwd, &root(wide), budget).await);
     // A failure says what the viewer last got and what the forwarder and the sender were doing.
     let deadline = tokio::time::Instant::now() + scaled(Duration::from_secs(60));
     while received(wide) != Some(1) {
