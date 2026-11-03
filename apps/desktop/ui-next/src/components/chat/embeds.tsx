@@ -20,12 +20,12 @@ function LinkCard({ e }: { e: Embed }) {
   return (
     <article className="embed" style={accent ? ({ '--embed-accent': accent } as CSSProperties) : undefined}>
       <div className="embed-site">{e.site ?? ''}</div>
-      <a className="embed-title" href={e.url} target="_blank" rel="noopener noreferrer">
+      <a className="embed-title" href={e.url} rel="noopener noreferrer">
         {e.title || e.url}
       </a>
       {e.description ? <p className="embed-desc">{e.description}</p> : null}
       {src ? (
-        <a className="embed-picture" href={e.url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${e.title || e.url}`}>
+        <a className="embed-picture" href={e.url} rel="noopener noreferrer" aria-label={`Open ${e.title || e.url}`}>
           <img className="embed-img" src={src} alt="" style={ratio ? { aspectRatio: ratio } : undefined} />
         </a>
       ) : null}

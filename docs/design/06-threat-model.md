@@ -869,6 +869,22 @@ What remains:
 - **The community secret is separate.** A banned device holds it until the rotation, as before, so control events sealed
   under it outside member-only control are not covered by this guard.
 
+## External links: what a link in a message can open
+
+The webview cannot open anything outside the app by itself. Its opener permissions stay off; it may not navigate away
+from the app's own pages, nor open windows (`links::build_main_window`, and the same guards on the screen-share window).
+A navigation or window request it tries anyway is sent to the UI as a link to confirm.
+
+- **One path out.** Every link, in messages, masked links, link previews, profiles and settings, is caught by one handler in
+  the UI (`dialogs/external-link.tsx`): a click, a middle click or Enter. It asks first, showing the address with its host
+  emphasised (punycode stays punycode, so a look-alike name shows as what it is) and a long path cut in the middle, with Open,
+  Cancel and Copy link. A label that names another site than the link goes to gets a stronger warning. `dissent://` links
+  stay in the app.
+- **The backend decides.** `open_external` parses the address with `url::Url` and opens only `http`, `https` and `mailto`,
+  refusing any other scheme (`file:`, `javascript:` in any case, `data:`, custom schemes) and any address with surrounding
+  whitespace or a control character in it, so no trick a parser would strip gets through.
+- **What remains.** The person can still open a link they chose to; the dialog is the warning, not a filter of sites.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a

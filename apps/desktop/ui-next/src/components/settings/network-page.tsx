@@ -72,7 +72,7 @@ function HostRelayBlock() {
     <Block title="Host a relay for your servers">
       <Hint>
         A relay you run carries encrypted traffic for the members of a server you belong to. Run it with the relay service on a
-        machine with a domain name and a valid certificate. The <a className="underline" href={HOSTING_GUIDE} target="_blank" rel="noreferrer">guide</a> covers the setup.
+        machine with a domain name and a valid certificate. The <a className="underline" href={HOSTING_GUIDE} rel="noreferrer">guide</a> covers the setup.
       </Hint>
       {communities.length === 0 ? (
         <Hint>Join a server to host a relay for it.</Hint>

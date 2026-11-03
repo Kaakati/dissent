@@ -421,6 +421,9 @@ pub async fn open_stream_window(app: tauri::AppHandle, root_id: String, name: St
         .inner_size(1280.0, 720.0)
         .min_inner_size(320.0, 180.0)
         .resizable(true)
+        // As the main window: it stays on the app's page and opens nothing by itself.
+        .on_navigation(crate::links::is_app_url)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .build()
         .map_err(err)?;
     let handle = app.clone();
