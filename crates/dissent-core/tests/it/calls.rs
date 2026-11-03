@@ -1880,7 +1880,7 @@ async fn someone_who_rejoins_in_one_epoch_is_heard_by_whoever_stayed() {
 }
 
 /// Measures how a sharer's estimate of its link responds to a busy CPU on loopback: a 1440p share, 15 s as is, 20 s
-/// with every core busy, then 30 s after. Prints the estimate every second. Loopback has no congestion, so any fall is
+/// with three busy threads per core, then 90 s after. Prints the estimate every second. Loopback has no congestion, so any fall is
 /// the machine's own delay read as the network's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked measurement: run with scripts/fwtest.sh and --nocapture"]
@@ -1911,7 +1911,9 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
         }
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let hogs: Vec<_> = (0..cores)
+        // Three busy threads a core, so the call's own threads get a small share, as on a laptop under load.
+        let hogs_count = cores * 3;
+        let hogs: Vec<_> = (0..hogs_count)
             .map(|_| {
                 let stop = stop.clone();
                 std::thread::spawn(move || {
@@ -1930,7 +1932,7 @@ async fn measure_a_shares_estimate_under_a_cpu_hog() {
         for hog in hogs {
             let _ = hog.join();
         }
-        for s in 35..65 {
+        for s in 35..125 {
             trace.push(sample(s, "after").await);
         }
         let of = |phase: &str| trace.iter().filter(|t| t.1 == phase).filter_map(|t| t.2).collect::<Vec<u32>>();
