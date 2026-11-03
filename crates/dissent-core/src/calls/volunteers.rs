@@ -862,6 +862,7 @@ impl Engine {
 
     /// For tests: whether downlink bandwidth estimates cap budgets on the relays of calls this device
     /// forwards as a volunteer. False when it forwards none.
+    #[cfg(feature = "test-hooks")]
     pub(crate) async fn relays_use_estimates_now(&self, on: bool) -> bool {
         let relays: Vec<Arc<Room>> = lock(&self.inner.calls.volunteering.relays).clone();
         let mut any = false;

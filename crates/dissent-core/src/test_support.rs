@@ -267,6 +267,13 @@ pub fn link_estimate(engine: &crate::Engine) -> Option<u32> {
     engine.link_estimate_now()
 }
 
+/// While `on`, `engine`'s camera and screen are not stepped down for a busy CPU, so a test of layers or sizes is not at
+/// the mercy of the runner's load. False when `engine` is not in a call.
+#[cfg(feature = "test-hooks")]
+pub fn hold_cpu_governor(engine: &crate::Engine, on: bool) -> bool {
+    engine.hold_cpu_governor_now(on)
+}
+
 /// Holds `engine`'s estimate of its link at `kbps` when it sizes its video, so a test checks what follows from a rate
 /// rather than the machine's load. `None` lets it go. False when `engine` is not in a call.
 pub fn force_link_estimate(engine: &crate::Engine, kbps: Option<u32>) -> bool {
