@@ -782,7 +782,9 @@ mod red_tests {
         let now = Instant::now();
         let mut rx = SframeReceiver::new(key(5), 0);
         rx.rotate(key(6), 6, now, Duration::from_secs(2)).unwrap();
-        let (under_zero, under_one) = (frame(&key(6), 1, 0), frame(&key(6), 1, 1));
+        // One context for both: two senders' random contexts can differ in length, and then so do the frames.
+        let framed = |epoch| SframeSender::in_context(&key(6), 1, epoch, 1234).unwrap().encrypt(b"hello", None, DEFAULT_LEVEL).unwrap();
+        let (under_zero, under_one) = (framed(0), framed(1));
         assert_eq!(under_zero.len(), under_one.len());
         // Where the two differ first after the level byte is the id in the header. Everything else stays as captured.
         let at = (1..under_zero.len()).find(|i| under_zero[*i] != under_one[*i]).unwrap();
