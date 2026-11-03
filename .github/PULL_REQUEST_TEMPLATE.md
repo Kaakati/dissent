@@ -8,6 +8,7 @@
 
 ## Checklist
 
+- [ ] Every commit is signed off (`git commit -s`) under the Developer Certificate of Origin, and I agree my contribution is licensed under MIT OR Apache-2.0.
 - [ ] Commit subjects are imperative and start with a verb such as Add, Fix or Harden; body lines meant for the release notes start with `- `.
 - [ ] `cargo test -p <crate>` passes for every crate I touched.
 - [ ] `cargo clippy -p <crate> --all-targets -- -D warnings` passes for every crate I touched, including on Linux for platform-gated code.

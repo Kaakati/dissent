@@ -178,3 +178,13 @@ Issues suitable for newcomers are labelled `good first issue` when available.
 ## Licensing of contributions
 
 Dissent is dual-licensed under the [MIT License](LICENSE-MIT) and the [Apache License 2.0](LICENSE-APACHE). Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in Dissent is dual-licensed as above, without any additional terms or conditions.
+
+### Developer Certificate of Origin
+
+Every commit must be signed off to certify that you wrote it or otherwise have the right to submit it under the project's licenses, as set out in the [Developer Certificate of Origin 1.1](https://developercertificate.org/). Sign off with `git commit -s`, which adds a line like:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Use your real name or a name you are known by. Pull requests with unsigned commits can't be merged until they are signed off; `git rebase --signoff main` signs off an existing branch.
