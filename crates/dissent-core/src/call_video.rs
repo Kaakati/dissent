@@ -1655,7 +1655,18 @@ mod tests {
         // Deltas are dropped while the stream waits, even with room in the queue again.
         drop(held);
         assert!(wait_for(Duration::from_secs(5), || *made.lock().unwrap() >= 1));
-        let before = *made.lock().unwrap();
+        // Frames queued before the drop still decode, and a slow machine finishes them late, so wait until the count
+        // has settled before taking it.
+        let mut before = *made.lock().unwrap();
+        let settle = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let now = *made.lock().unwrap();
+            if now == before || settle.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+            before = now;
+        }
         for frame in frames.drain(..5) {
             push(&mut remote, frame);
         }
