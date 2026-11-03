@@ -860,6 +860,22 @@ impl Engine {
         }
     }
 
+    /// For tests: whether downlink bandwidth estimates cap budgets on the relays of calls this device
+    /// forwards as a volunteer. False when it forwards none.
+    pub(crate) async fn relays_use_estimates_now(&self, on: bool) -> bool {
+        let relays: Vec<Arc<Room>> = lock(&self.inner.calls.volunteering.relays).clone();
+        let mut any = false;
+        for room in relays {
+            if let Some(sfu) = room.forwarding.as_ref() {
+                if let Some(sfu) = sfu.sfu.lock().await.as_mut() {
+                    sfu.set_use_estimates(on);
+                    any = true;
+                }
+            }
+        }
+        any
+    }
+
     /// A leaf of a volunteer forwarder: tells the volunteer this device's sender id in `room`, and
     /// waits for its answer, before it offers its link.
     pub(super) async fn tell_relay_leaf(&self, room: &Room, volunteer: DeviceId) -> Result<()> {

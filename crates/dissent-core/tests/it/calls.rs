@@ -1450,6 +1450,12 @@ pub(crate) fn hold_sender_rates(senders: &[&Peer]) {
     }
 }
 
+/// Makes `forwarder` pick layers from tile widths and set budgets only. The same load reads as congestion on its
+/// downlinks too, and a downlink estimate that fell is never probed back up, so it would keep a viewer on the base.
+pub(crate) async fn ignore_downlink_estimates(forwarder: &Peer) {
+    assert!(dissent_core::test_support::use_link_estimates(&forwarder.engine, false).await, "the forwarder ignores estimates");
+}
+
 /// The layer of the last frame `viewer` received of `sender`'s camera.
 pub(crate) fn layer_of(viewer: &Peer, sender: &Peer) -> Option<u8> {
     dissent_core::test_support::received_layer(&viewer.engine, &root(sender), false)
@@ -1464,6 +1470,7 @@ async fn simulcast_sends_a_narrow_tile_the_low_layer_and_a_wide_tile_a_high_one(
     let (sender, narrow, wide) = (&everyone[others[0]], &everyone[others[1]], &everyone[others[2]]);
     only_senders_speak(&everyone, &[others[0]]).await;
     hold_sender_rates(&[sender]);
+    ignore_downlink_estimates(&everyone[forwarder]).await;
     sender.engine.set_camera(true).expect("camera on");
     narrow.engine.set_video_tile(&root(sender), false, 200);
     wide.engine.set_video_tile(&root(sender), false, 1920);
@@ -1772,6 +1779,7 @@ async fn simulcast_carries_a_released_sender_to_everyone_and_gives_a_released_vi
     let (new_sender, wide) = (&everyone[others[0]], &everyone[others[1]]);
     only_senders_speak(&everyone, &[5, others[0]]).await;
     hold_sender_rates(&[old_sender, new_sender]);
+    ignore_downlink_estimates(&everyone[forwarder]).await;
     for s in [old_sender, new_sender] {
         s.engine.set_camera(true).expect("camera on");
         for viewer in [wide, old_viewer] {
