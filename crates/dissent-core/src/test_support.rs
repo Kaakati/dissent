@@ -411,6 +411,20 @@ pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::Devi
         .sum()
 }
 
+/// An engine held without keeping it alive, for a watchdog: a stopped engine is gone, and its sockets with it.
+pub struct WeakEngine(std::sync::Weak<crate::engine::Inner>);
+
+impl WeakEngine {
+    pub fn of(engine: &crate::Engine) -> Self {
+        WeakEngine(std::sync::Arc::downgrade(&engine.inner))
+    }
+
+    /// The engine, while anything else still holds it.
+    pub fn upgrade(&self) -> Option<crate::Engine> {
+        self.0.upgrade().map(|inner| crate::Engine { inner })
+    }
+}
+
 /// The call loop's step, its age and the mesh lock's state, without blocking. For a watchdog.
 pub fn call_breadcrumbs(engine: &crate::Engine) -> String {
     engine.call_breadcrumbs()

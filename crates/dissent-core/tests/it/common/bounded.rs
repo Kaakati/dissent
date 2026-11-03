@@ -77,8 +77,9 @@ pub async fn heavy(engines: usize, body: impl Future<Output = ()>) {
         .await;
 }
 
-/// The engines each running test started, by test name, for the watchdog. Kept until the test ends.
-type Watched = Vec<(String, String, dissent_core::Engine)>;
+/// The engines each running test started, by test name, for the watchdog. Held weakly, so a test that stops an
+/// engine and starts it again on the same port finds the port free. Listed until the test ends.
+type Watched = Vec<(String, String, dissent_core::test_support::WeakEngine)>;
 
 fn engines() -> &'static std::sync::Mutex<Watched> {
     static ENGINES: std::sync::OnceLock<std::sync::Mutex<Watched>> = std::sync::OnceLock::new();
@@ -91,7 +92,11 @@ fn test_name() -> String {
 
 /// Lists an engine under the running test, for the watchdog.
 pub fn watch_engine(name: &str, engine: &dissent_core::Engine) {
-    engines().lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((test_name(), name.to_string(), engine.clone()));
+    engines().lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((
+        test_name(),
+        name.to_string(),
+        dissent_core::test_support::WeakEngine::of(engine),
+    ));
 }
 
 fn now_ms() -> u64 {
@@ -147,7 +152,7 @@ impl Watchdog {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .iter()
                     .filter(|(t, _, _)| *t == watch_test)
-                    .map(|(_, n, e)| (n.clone(), e.clone()))
+                    .filter_map(|(_, n, e)| Some((n.clone(), e.upgrade()?)))
                     .collect();
                 let crumbs: Vec<(String, String)> =
                     ours.iter().map(|(n, e)| (n.clone(), dissent_core::test_support::call_breadcrumbs(e))).collect();
