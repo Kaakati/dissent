@@ -1,7 +1,7 @@
 //! Forwarders outside the call: a seeder the owner allows forwards a voice channel call it is not in, and a member
 //! never does. See `docs/design/13-forwarded-calls.md`, "Who forwards". Every engine runs on loopback with relays off.
 
-use crate::calls::{all_see, boosted_call, forwarder_root, layer_of, only_senders_speak, root};
+use crate::calls::{all_see, boosted_call, forwarder_root, hold_sender_rates, layer_of, only_senders_speak, root};
 use crate::common::*;
 use dissent_core::test_support::{act_as_released_calls, forward_offers, offer_to_forward, relay_downlinks};
 use dissent_core::{ChannelId, CommunityId, ModAction, Topology};
@@ -88,6 +88,7 @@ async fn a_seeder_outside_the_call_is_elected_and_carries_its_media() {
     // Video goes through it too, at the layer each viewer's tile needs.
     let (sender, viewer) = (&everyone[1], &everyone[2]);
     only_senders_speak(&everyone, &[1]).await;
+    hold_sender_rates(&[sender]);
     sender.engine.set_camera(true).expect("camera on");
     viewer.engine.set_video_tile(&root(sender), false, 1920);
     everyone[3].engine.set_video_tile(&root(sender), false, 200);
@@ -334,6 +335,7 @@ async fn a_seeder_forwards_calls_only_while_the_owner_allows_it() {
     all_still_hear(&everyone, "audio through the seeder").await;
     // Video goes through it as well, at each viewer's layer.
     only_senders_speak(&everyone, &[1]).await;
+    hold_sender_rates(&[&everyone[1]]);
     everyone[1].engine.set_camera(true).expect("camera on");
     everyone[2].engine.set_video_tile(&root(&everyone[1]), false, 1920);
     eventually_within(Duration::from_secs(60), "video through the seeder", || {
