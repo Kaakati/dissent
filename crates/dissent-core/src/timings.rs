@@ -42,6 +42,9 @@ pub struct Timings {
     pub tier_return_backoff: Duration,
     /// The longest a forwarded call waits to return to a mesh at its limit.
     pub tier_return_backoff_cap: Duration,
+    /// How long a send waits for the commit that adds a member this device already lists, so the new member can read
+    /// it. After this it goes out at the current epoch. See `membership::join::wait_for_pending_adds`.
+    pub pending_add_wait: Duration,
     /// How often a device sends its epoch check while its epoch stays the same. See `forks`.
     pub epoch_check_every: Duration,
     /// The shortest gap between two epoch checks for one community.
@@ -67,6 +70,7 @@ impl Default for Timings {
             unheard_grace: Duration::from_secs(30),
             tier_return_backoff: Duration::from_secs(30),
             tier_return_backoff_cap: Duration::from_secs(300),
+            pending_add_wait: Duration::from_secs(2),
             epoch_check_every: Duration::from_secs(300),
             epoch_check_gap: Duration::from_secs(30),
         }
@@ -102,6 +106,7 @@ mod tests {
         assert_eq!(t.unheard_grace, Duration::from_secs(30));
         assert_eq!(t.tier_return_backoff, Duration::from_secs(30));
         assert_eq!(t.tier_return_backoff_cap, Duration::from_secs(300));
+        assert_eq!(t.pending_add_wait, Duration::from_secs(2));
         assert_eq!(t.epoch_check_every, Duration::from_secs(300));
         assert_eq!(t.epoch_check_gap, Duration::from_secs(30));
     }

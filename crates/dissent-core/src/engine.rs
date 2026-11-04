@@ -70,6 +70,14 @@ pub(crate) struct Inner {
     /// When this device last took a commit that added someone since banned, per community. See
     /// `Engine::mls_reconcile`.
     pub banned_adds: Mutex<BTreeMap<CommunityId, std::time::Instant>>,
+    /// Member devices a send already waited for, per community, so a member whose add never comes holds one send, not
+    /// every send. See `wait_for_pending_adds`.
+    pub(crate) pending_adds_waited: Mutex<BTreeMap<CommunityId, BTreeSet<DeviceId>>>,
+    /// The devices in each community's MLS group, at the epoch they were read, so a send reads the group once per epoch.
+    pub(crate) mls_devices: Mutex<BTreeMap<CommunityId, (u64, BTreeSet<DeviceId>)>>,
+    /// Set only in tests: commits are not applied, as when they have not arrived yet.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) hold_commits: AtomicBool,
     /// Epoch checks heard and any fork noticed, per community. See `forks`.
     pub forks: Mutex<BTreeMap<CommunityId, crate::forks::ForkWatch>>,
     /// When each community was last warmed, to rate-limit `Engine::warm`.
@@ -287,6 +295,10 @@ impl Engine {
             private_fetching: Mutex::new(std::collections::BTreeSet::new()),
             deferred_commits: Mutex::new(BTreeMap::new()),
             banned_adds: Mutex::new(BTreeMap::new()),
+            pending_adds_waited: Mutex::new(BTreeMap::new()),
+            mls_devices: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "test-hooks")]
+            hold_commits: AtomicBool::new(false),
             forks: Mutex::new(BTreeMap::new()),
             warmed: Mutex::new(BTreeMap::new()),
             records_current: AtomicBool::new(false),

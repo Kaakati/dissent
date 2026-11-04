@@ -62,6 +62,7 @@ pub fn fast_timings() -> crate::Timings {
         unheard_grace: Duration::from_secs(10),
         tier_return_backoff: Duration::from_secs(3),
         tier_return_backoff_cap: Duration::from_secs(12),
+        pending_add_wait: Duration::from_secs(2),
         epoch_check_every: Duration::from_secs(3),
         epoch_check_gap: Duration::from_secs(1),
     }
@@ -177,6 +178,27 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
 #[cfg(feature = "test-hooks")]
 pub fn drop_mesh_media(engine: &crate::Engine, percent: u32) {
     engine.inner.mesh_drop_percent.store(percent.min(100), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where the event `id` stands on `engine`, with its MLS epoch for `community`, as text for a failing test to print.
+#[cfg(feature = "test-hooks")]
+pub fn event_debug(engine: &crate::Engine, community: dissent_identity::CommunityId, id: &str) -> String {
+    let epoch = engine.mls_epoch(community);
+    let Ok(id) = id.parse::<dissent_events::EventId>() else {
+        return format!("bad id {id}");
+    };
+    let w = engine.read();
+    let Some(c) = w.communities.get(&community) else {
+        return "no such community".into();
+    };
+    format!("mls epoch {epoch:?}; {}", c.event_debug(&id))
+}
+
+/// While `on`, `engine` applies no MLS commit, as when they have not reached it yet. Off, the next commit check or
+/// announcement applies them.
+#[cfg(feature = "test-hooks")]
+pub fn hold_mls_commits(engine: &crate::Engine, on: bool) {
+    engine.inner.hold_commits.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.

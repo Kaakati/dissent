@@ -348,6 +348,10 @@ impl Engine {
         community: CommunityId,
         bytes: &[u8],
     ) -> std::result::Result<bool, MlsError> {
+        #[cfg(feature = "test-hooks")]
+        if self.inner.hold_commits.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(false);
+        }
         let group = community.0;
         let rules = self.commit_rules(community);
         let mut added = Vec::new();

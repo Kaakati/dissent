@@ -227,6 +227,31 @@ impl Community {
         self.state().rejected.iter().any(|(rejected, _)| rejected == id)
     }
 
+    /// For tests: where one event stands on this device, as text: stored, waiting for parents (and which are missing),
+    /// rejected, opened, and the payload's kind.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn event_debug(&self, id: &EventId) -> String {
+        let stored = self.signed.get(id);
+        let waiting = self.waiting.get(id);
+        let missing: Vec<String> = waiting
+            .map(|se| se.event.body.parents.iter().filter(|p| !self.signed.contains_key(p)).map(|p| p.to_string()[..8].to_string()).collect())
+            .unwrap_or_default();
+        let rejected = self.state().rejected.iter().find(|(r, _)| r == id).map(|(_, why)| format!("{why:?}"));
+        let kind = stored.or(waiting).map(|se| {
+            let k = format!("{:?}", se.event.body.payload);
+            k.chars().take(60).collect::<String>()
+        });
+        format!(
+            "stored {}, waiting {} (missing parents {missing:?}), rejected {rejected:?}, opened {}, handled {}, kind {kind:?}, waiting total {}, heads {}",
+            stored.is_some(),
+            waiting.is_some(),
+            self.content.contains_key(id),
+            self.handled.contains(id),
+            self.waiting.len(),
+            self.heads.len(),
+        )
+    }
+
     /// Hashes of the stored events no other stored event cites, sorted.
     pub fn heads(&self) -> Vec<EventId> {
         self.heads.iter().copied().collect()

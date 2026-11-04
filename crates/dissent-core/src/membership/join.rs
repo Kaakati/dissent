@@ -2,6 +2,8 @@
 //! Any member may do either, within the rules in the parent module. A device waits its turn first,
 //! so the highest-ranked online member usually acts, and a second attempt finds nothing left to do.
 
+use std::collections::BTreeSet;
+
 use dissent_identity::{CommunityId, DeviceId};
 use dissent_net::PeerAddr;
 
@@ -218,6 +220,7 @@ impl Engine {
     /// message sent right after a ban goes out under the next epoch. If it is still there after that, `seal` refuses, the
     /// send fails with that reason, and the composer gets its text back.
     pub(crate) async fn wait_until_sealable(&self, community: CommunityId) {
+        self.wait_for_pending_adds(community).await;
         if !self.banned_device_in_group(community) {
             return;
         }
@@ -229,6 +232,100 @@ impl Engine {
             }
             tokio::time::sleep(SEALABLE_POLL).await;
         }
+    }
+
+    /// Devices of current members that this device lists but its MLS group does not hold yet: their add commit has not
+    /// reached it. Banned, departed, revoked and storage members are left out, and so is a device a send already waited
+    /// for. The group's devices are read once per epoch.
+    pub(crate) fn pending_adds(&self, community: CommunityId) -> BTreeSet<DeviceId> {
+        let Some(epoch) = self.mls_epoch(community) else {
+            return BTreeSet::new();
+        };
+        let in_group = {
+            let mut cache = self.inner.mls_devices.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match cache.get(&community) {
+                Some((at, devices)) if *at == epoch => devices.clone(),
+                _ => {
+                    let devices: BTreeSet<DeviceId> = self
+                        .with_mls_read(|mls| mls.members(&community.0).ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|cert| cert.device)
+                        .collect();
+                    cache.insert(community, (epoch, devices.clone()));
+                    devices
+                }
+            }
+        };
+        let waited = self
+            .inner
+            .pending_adds_waited
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&community)
+            .cloned()
+            .unwrap_or_default();
+        let w = self.read();
+        let Some(c) = w.communities.get(&community) else {
+            return BTreeSet::new();
+        };
+        let st = c.state();
+        st.members
+            .iter()
+            .filter(|(root, m)| !m.left && !m.storage && !st.banned.contains(root))
+            .flat_map(|(root, _)| w.directory.devices_of(root))
+            .filter(|d| *d != w.device && !st.revoked_devices.contains_key(d) && !in_group.contains(d) && !waited.contains(d))
+            .collect()
+    }
+
+    /// Holds a send while a member this device already lists is not in its MLS group yet, for at most
+    /// `Timings::pending_add_wait`, and asks neighbours for the commits meanwhile. Sealed before the add, the message
+    /// would be under an epoch the new member never had, and it could never read it. Each device holds one send at most:
+    /// one whose add never comes (it has not asked to join yet, or nobody added it) does not slow every send.
+    pub(crate) async fn wait_for_pending_adds(&self, community: CommunityId) {
+        let pending = self.pending_adds(community);
+        if pending.is_empty() {
+            return;
+        }
+        self.inner
+            .pending_adds_waited
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(community)
+            .or_default()
+            .extend(pending.iter().copied());
+        let deadline = std::time::Instant::now() + self.inner.timings.pending_add_wait;
+        let neighbours: Vec<DeviceId> = self
+            .inner
+            .neighbours
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&community)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        loop {
+            for peer in &neighbours {
+                self.mls_commit_check(community, *peer).await;
+                if self.pending_in_group(community, &pending) {
+                    return;
+                }
+            }
+            if self.pending_in_group(community, &pending) || std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(SEALABLE_POLL).await;
+        }
+    }
+
+    /// Whether every device of `pending` is in the community's MLS group now.
+    fn pending_in_group(&self, community: CommunityId, pending: &BTreeSet<DeviceId>) -> bool {
+        let devices: BTreeSet<DeviceId> = self
+            .with_mls_read(|mls| mls.members(&community.0).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|cert| cert.device)
+            .collect();
+        pending.iter().all(|d| devices.contains(d))
     }
 
     /// After taking a commit that added someone since banned: the group has usually moved on, so this device asks for

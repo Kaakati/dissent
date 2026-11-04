@@ -649,3 +649,44 @@ async fn only_the_owner_flips_member_only_and_the_status_follows() {
     })
     .await;
 }
+
+/// A member who sends right after someone joins, before its own group has taken the commit that added them, holds the
+/// send until the commit arrives. Sealed under the epoch before the add, the message could never be opened by the joiner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn a_message_sent_before_the_add_commit_arrives_still_reaches_the_joiner() {
+    bounded(async {
+        let alice = peer("alice").await;
+        let bob = peer("bob").await;
+        let carol = peer("carol").await;
+        let id = rustaceans(&alice, &bob).await;
+        let channel = channel_id(&alice.engine, id, "general").expect("general");
+        // Bob's device takes no commit until released, so the one that adds carol has not reached it.
+        dissent_core::test_support::hold_mls_commits(&bob.engine, true);
+        let invite = alice.engine.create_invite(id).await.expect("invite");
+        join_ready(&alice, &carol, &invite).await;
+        let carol_root = carol.identity.root_id().to_string();
+        until_event(&bob.engine, Duration::from_secs(60), "bob lists carol", || {
+            bob.engine.community_view(id).ok().filter(|v| v.members.iter().any(|m| m.root_id == carol_root)).map(|_| ())
+        })
+        .await;
+        eventually("carol is in the group", || carol.engine.mls_epoch(id)).await;
+        assert!(bob.engine.mls_epoch(id) < carol.engine.mls_epoch(id), "bob is still on the epoch before carol's add");
+        // The commit reaches bob a moment after he sends.
+        let release = {
+            let engine = bob.engine.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                dissent_core::test_support::hold_mls_commits(&engine, false);
+            })
+        };
+        bob.engine.send_message(id, channel, "welcome carol".into()).await.expect("bob sends");
+        release.await.expect("release");
+        until_event(&carol.engine, Duration::from_secs(60), "carol reads bob's message", || {
+            has_message(&carol.engine, id, channel, "welcome carol").then_some(())
+        })
+        .await;
+        finish(vec![alice, bob, carol]).await;
+    })
+    .await;
+}
