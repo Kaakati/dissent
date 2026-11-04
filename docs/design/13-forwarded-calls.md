@@ -217,10 +217,17 @@ Built in phase 2, except where it says otherwise.
   doesn't draw, and any stream of a sender who is not speaking, gets the base layer. The budget is the smaller of `Sfu::set_listener_budget` and the downlink's
   own bandwidth estimate less three speakers' audio. The estimate counts only once it falls below
   the 1000 kbps it starts at: nothing probes a link for headroom, so above that it means nothing
-  (phase 1, "Capacity units"). A fallen estimate does rise again on base-layer traffic alone: reset
-  to 250 kbps on a clean loopback link, it was back over 1000 kbps, and the viewer on the top layer,
-  in about 4 s (`a_viewer_whose_downlink_estimate_dipped_climbs_back_unless_the_link_loses_packets`).
-  A link that loses a tenth of its packets keeps the viewer on the base. Under a busy CPU the downlink estimate
+  (phase 1, "Capacity units"). A fallen estimate rises only on what is sent. Reset to 250 kbps on a
+  clean loopback link with the viewer on the base layer, it was back over 1000 kbps in about 4 s in
+  two runs of three, and in the third it settled near twice the base layer's rate, about 480 kbps,
+  and stayed there, below the next layer, for good. So the cap climbs back by itself
+  (`DownlinkRecovery`): while the link reports no loss and its estimate does not fall again, it rises
+  30% above the estimate every 4 s until it reaches 1000 kbps and goes. Each step lets a higher layer
+  through, and that layer is the probe. Renewed delay (the estimate falling below 85% of where the
+  last step left it) or loss above 2% drops the cap back to the estimate and doubles the wait before
+  the next step, up to a minute
+  (`a_viewer_whose_downlink_estimate_dipped_climbs_back_unless_the_link_loses_packets`). A link that
+  loses a tenth of its packets keeps the viewer on the base. Under a busy CPU the downlink estimate
   did not fall at all; a viewer's layer fell because the sender's own CPU governor dropped its top
   layer, which came back about 20 s after the load ended
   (`measure_a_viewers_layer_through_a_forwarder_after_a_cpu_hog`). "Pinned" and "thumbnail" preferences are not sent; the tile width

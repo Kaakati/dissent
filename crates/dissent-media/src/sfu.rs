@@ -26,6 +26,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::auth::{digest_sender, is_digest};
+use crate::bwe::DownlinkRecovery;
 use crate::call::{Call, CallStats};
 use crate::e2ee::{audio_level, peek_sender};
 use crate::election::{Mode, PeerId, AUDIO_STREAM_KBPS, AUDIO_TOP_SPEAKERS};
@@ -113,6 +114,8 @@ pub struct Sfu<T: PacketTransport> {
     estimated: BTreeMap<PeerId, u32>,
     /// Whether downlink estimates cap budgets. Tests turn it off so a set budget is the only limit.
     use_estimates: bool,
+    /// How each downlink's cap climbs back after its estimate fell. See `DownlinkRecovery`.
+    recovery: BTreeMap<PeerId, DownlinkRecovery>,
     /// Each (downlink, sender) pair that has received a keyframe, so its deltas may follow.
     video_started: HashSet<(Link, u64)>,
     /// Each (downlink, stream or layer) waiting for a keyframe, with when its source was last asked for one.
@@ -149,6 +152,7 @@ impl<T: PacketTransport> Sfu<T> {
             budgets: BTreeMap::new(),
             estimated: BTreeMap::new(),
             use_estimates: true,
+            recovery: BTreeMap::new(),
             video_started: HashSet::new(),
             video_wanted: BTreeMap::new(),
             asked_source: BTreeMap::new(),
@@ -223,6 +227,7 @@ impl<T: PacketTransport> Sfu<T> {
         self.tiles.retain(|(viewer, _), _| *viewer != downlink);
         self.layer_aware.remove(&downlink);
         self.budgets.remove(&downlink);
+        self.recovery.remove(&downlink);
         self.links.remove(&downlink).is_some()
     }
 
@@ -522,6 +527,7 @@ impl<T: PacketTransport> Sfu<T> {
         match link {
             Link::Down(peer) => {
                 self.links.remove(&peer);
+                self.recovery.remove(&peer);
                 self.stats.links_lost += 1;
             }
             Link::Up(peer) => {
@@ -795,19 +801,27 @@ impl<T: PacketTransport> Sfu<T> {
     /// Takes each downlink's bandwidth estimate as its video budget, less the top speakers' audio.
     /// Nothing probes a link for headroom, so an estimate never climbs past where it starts
     /// (`BWE_INITIAL_KBPS`). Only an estimate that fell below it is a measured limit; at or above
-    /// it the link counts as unlimited, as before layers. A fallen estimate rises again on what is
-    /// sent. See `docs/design/13-forwarded-calls.md`.
+    /// it the link counts as unlimited, as before layers. A fallen estimate rises only on what is
+    /// sent, and a viewer held on the base sends little, so it can settle below where the next layer
+    /// fits for good. The cap climbs back in steps while the link stays clean (`DownlinkRecovery`).
+    /// See `docs/design/13-forwarded-calls.md`.
     fn refresh_estimates(&mut self) {
         if !self.use_estimates {
             return;
         }
         let audio = AUDIO_TOP_SPEAKERS * AUDIO_STREAM_KBPS;
+        let now = Instant::now();
+        let recovery = &mut self.recovery;
         self.estimated = self
             .links
             .iter()
             .filter_map(|(peer, call)| {
                 let kbps = call.video_available_kbps()?;
-                (u64::from(kbps) < crate::call::BWE_INITIAL_KBPS).then(|| (*peer, kbps.saturating_sub(audio)))
+                let cap = recovery
+                    .entry(*peer)
+                    .or_insert_with(|| DownlinkRecovery::new(crate::call::BWE_INITIAL_KBPS as u32))
+                    .observe(now, kbps, f64::from(call.loss_fraction()))?;
+                Some((*peer, cap.saturating_sub(audio)))
             })
             .collect();
     }

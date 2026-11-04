@@ -31,7 +31,7 @@ mod transport;
 mod video;
 
 pub use auth::Auth;
-pub use bwe::{pick_layer, BandwidthEstimator, MAX_KBPS, MIN_KBPS};
+pub use bwe::{pick_layer, BandwidthEstimator, DownlinkRecovery, MAX_KBPS, MIN_KBPS};
 pub use call::{Call, CallStats};
 pub use cascade::{assign_forwarders, load, plan, Cascade};
 pub use e2ee::MAX_SENDER_ID;

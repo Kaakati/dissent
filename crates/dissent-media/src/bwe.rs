@@ -9,6 +9,10 @@
 //!   rise.
 //!
 //! The target is clamped to the range Opus can use for speech, 16 to 64 kbps.
+//!
+//! `DownlinkRecovery` is the forwarder's side: it lets a downlink's video cap climb back after the link's estimate fell.
+
+use std::time::{Duration, Instant};
 
 /// The lowest audio bitrate the estimator returns, in kbps.
 pub const MIN_KBPS: u32 = 16;
@@ -101,9 +105,136 @@ pub fn pick_layer(budget_kbps: u32, layers_kbps: &[u32]) -> Option<usize> {
     Some(fitting.unwrap_or(0))
 }
 
+/// The fall below its last level that counts as renewed delay on a recovering downlink, in percent.
+const RECOVERY_FALL_PERCENT: u32 = 85;
+/// How much a recovering downlink's cap rises at each step, in percent.
+const RECOVERY_STEP_PERCENT: u32 = 30;
+/// How often a recovering downlink's cap rises while the link stays clean.
+const RECOVERY_STEP_EVERY: Duration = Duration::from_secs(4);
+/// The wait before a downlink's first step up, after a fall. Each renewed fall doubles it, up to `RECOVERY_MAX_HOLD`.
+const RECOVERY_HOLD: Duration = Duration::from_secs(4);
+const RECOVERY_MAX_HOLD: Duration = Duration::from_secs(60);
+
+/// What a forwarder lets through to one downlink after that link's estimate fell.
+///
+/// A forwarder does not probe its downlinks, and an estimate rises only on what is sent, so a downlink whose estimate
+/// fell once, to a delay spike, stayed held below its higher layers for the rest of the call. While the link shows no
+/// loss and its estimate does not fall again, the cap rises a step above the estimate every few seconds. Each step lets
+/// a higher layer through, which sends more, and that is the probe: a link that carries it raises its estimate, and one
+/// that cannot shows delay or loss, which drops the cap back to the estimate and doubles the wait before the next try.
+/// At the ceiling, where an estimate starts, the link counts as unlimited again.
+#[derive(Debug, Clone)]
+pub struct DownlinkRecovery {
+    ceiling_kbps: u32,
+    /// The cap now, or `None` while the estimate is at the ceiling.
+    cap: Option<u32>,
+    /// The estimate when the cap last moved. A fall below it is renewed delay.
+    level: u32,
+    hold: Duration,
+    next_step: Option<Instant>,
+}
+
+impl DownlinkRecovery {
+    /// A downlink whose estimate starts at `ceiling_kbps`, where the forwarder sets no cap.
+    pub fn new(ceiling_kbps: u32) -> Self {
+        Self { ceiling_kbps, cap: None, level: 0, hold: RECOVERY_HOLD, next_step: None }
+    }
+
+    /// Takes the link's estimate and the loss its peer reports (a fraction from 0 to 1) at `now`. Returns the video cap
+    /// in kbps, or `None` for none.
+    pub fn observe(&mut self, now: Instant, estimate_kbps: u32, loss: f64) -> Option<u32> {
+        let Some(cap) = self.cap else {
+            if estimate_kbps >= self.ceiling_kbps {
+                return None;
+            }
+            self.hold_at(now, estimate_kbps, self.hold);
+            return self.cap;
+        };
+        if estimate_kbps >= self.ceiling_kbps {
+            *self = Self::new(self.ceiling_kbps);
+            return None;
+        }
+        let fell = u64::from(estimate_kbps) * 100 < u64::from(self.level) * u64::from(RECOVERY_FALL_PERCENT);
+        if fell || loss > LOSS_LOW {
+            self.hold = (self.hold * 2).min(RECOVERY_MAX_HOLD);
+            self.hold_at(now, estimate_kbps, self.hold);
+        } else if estimate_kbps > cap {
+            self.cap = Some(estimate_kbps);
+            self.level = estimate_kbps;
+        } else if self.next_step.is_some_and(|at| now >= at) {
+            let up = u64::from(cap) * u64::from(100 + RECOVERY_STEP_PERCENT) / 100;
+            if up >= u64::from(self.ceiling_kbps) {
+                *self = Self::new(self.ceiling_kbps);
+                return None;
+            }
+            self.cap = Some(up as u32);
+            self.level = estimate_kbps;
+            self.next_step = Some(now + RECOVERY_STEP_EVERY);
+        }
+        self.cap
+    }
+
+    /// Caps the link at its estimate and waits `hold` before the next step up.
+    fn hold_at(&mut self, now: Instant, estimate_kbps: u32, hold: Duration) {
+        self.cap = Some(estimate_kbps);
+        self.level = estimate_kbps;
+        self.next_step = Some(now + hold);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CEILING: u32 = 1_000;
+
+    /// Feeds `recovery` one estimate a second, at seconds `from..from + seconds` after `t0`. Returns the cap at each.
+    fn run(recovery: &mut DownlinkRecovery, t0: Instant, from: u64, seconds: u64, estimate: u32, loss: f64) -> Vec<Option<u32>> {
+        (from..from + seconds).map(|s| recovery.observe(t0 + Duration::from_secs(s), estimate, loss)).collect()
+    }
+
+    #[test]
+    fn a_downlink_whose_estimate_fell_once_climbs_back_to_no_cap_within_half_a_minute() {
+        let t0 = Instant::now();
+        let mut recovery = DownlinkRecovery::new(CEILING);
+        assert_eq!(recovery.observe(t0, CEILING, 0.0), None, "no cap at the start");
+        // A delay spike leaves the estimate at 300, and nothing raises it again.
+        let caps = run(&mut recovery, t0, 1, 30, 300, 0.0);
+        assert_eq!(caps[0], Some(300), "the cap follows the fall at once");
+        let free = caps.iter().position(Option::is_none).expect("the cap goes within 30 s");
+        assert!(free <= 25, "the cap goes after {free} s: {caps:?}");
+        assert!(caps[..free].windows(2).all(|w| w[1] >= w[0]), "it only rises: {caps:?}");
+    }
+
+    #[test]
+    fn a_lossy_downlink_stays_at_its_estimate() {
+        let t0 = Instant::now();
+        let mut recovery = DownlinkRecovery::new(CEILING);
+        let caps = run(&mut recovery, t0, 0, 120, 300, 0.08);
+        assert!(caps.iter().all(|c| *c == Some(300)), "the cap never rises over a lossy link: {caps:?}");
+    }
+
+    #[test]
+    fn a_step_that_brings_delay_drops_back_and_waits_longer_for_the_next() {
+        let t0 = Instant::now();
+        let mut recovery = DownlinkRecovery::new(CEILING);
+        run(&mut recovery, t0, 0, 4, 300, 0.0);
+        assert_eq!(recovery.observe(t0 + Duration::from_secs(4), 300, 0.0), Some(390), "the first step up");
+        // The higher layer brings delay: the estimate falls below where the step left it.
+        assert_eq!(recovery.observe(t0 + Duration::from_secs(5), 240, 0.0), Some(240), "back to the estimate");
+        let caps = run(&mut recovery, t0, 6, 7, 240, 0.0);
+        assert!(caps.iter().all(|c| *c == Some(240)), "the next step waits 8 s, double the first: {caps:?}");
+        assert_eq!(recovery.observe(t0 + Duration::from_secs(13), 240, 0.0), Some(312));
+    }
+
+    #[test]
+    fn an_estimate_that_rises_on_its_own_lifts_the_cap_and_one_at_the_ceiling_clears_it() {
+        let t0 = Instant::now();
+        let mut recovery = DownlinkRecovery::new(CEILING);
+        assert_eq!(recovery.observe(t0, 300, 0.0), Some(300));
+        assert_eq!(recovery.observe(t0 + Duration::from_secs(1), 600, 0.0), Some(600));
+        assert_eq!(recovery.observe(t0 + Duration::from_secs(2), CEILING, 0.0), None);
+    }
 
     #[test]
     fn a_clean_path_raises_the_target_to_the_top() {
