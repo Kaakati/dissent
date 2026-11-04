@@ -7,7 +7,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 log=$(mktemp)
-cargo test -p dissent-core --test it -- --ignored --skip internet 2>&1 | tee "$log"
+# `measure_*` tests print numbers for a person to read, under a CPU hog or a forced dip, and take about 8 minutes on CI's
+# runner. They are run by hand (see their #[ignore] reasons), not on every release.
+cargo test -p dissent-core --test it -- --ignored --skip internet --skip measure_ 2>&1 | tee "$log"
 first=${PIPESTATUS[0]}
 
 if [[ $first -ne 0 ]]; then

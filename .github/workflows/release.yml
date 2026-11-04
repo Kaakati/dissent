@@ -121,9 +121,10 @@ jobs:
       # Loopback-only tests that are #[ignore]d locally so Windows Firewall doesn't prompt for every
       # rebuilt test exe (they run through scripts/fwtest.sh there). CI has no prompt. The `it` binary
       # also holds tests that need the public network: internet.rs and any test named internet_*. `--skip`
-      # matches a substring, so `internet` skips both.
+      # matches a substring, so `internet` skips both. ci-networked.sh also skips the measure_* tests.
+      # The first pass takes about 40 minutes, and each retry of a flaky call test up to 10 more.
       - name: Loopback networked tests
-        timeout-minutes: 80
+        timeout-minutes: 100
         env:
           DISSENT_TEST_SCALE: "2"
         # A test that fails once and then passes on its own is reported as flaky rather than failing the release.
