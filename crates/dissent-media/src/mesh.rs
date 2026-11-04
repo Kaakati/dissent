@@ -205,11 +205,14 @@ impl<T: PacketTransport> Mesh<T> {
         .await
     }
 
-    /// Encrypts one frame once and sends it to every peer.
+    /// Encrypts one frame once and sends it to every connected peer.
     ///
-    /// Fails with [`MediaError::NotConnected`] while any peer is still connecting, so no peer
-    /// misses the start of the stream. Does nothing when the mesh has no peers. A peer whose
-    /// link fails is dropped from the mesh, and the frame still goes to the others.
+    /// A peer still connecting, or whose link stalled, is skipped, so one such link does not
+    /// silence this device toward the others. Each frame has its own SFrame counter, so a peer
+    /// that missed some sees a gap, which its replay window accepts. Fails with
+    /// [`MediaError::NotConnected`] only when no peer is connected. Does nothing when the mesh
+    /// has no peers. A peer whose link fails is dropped from the mesh, and the frame still goes
+    /// to the others.
     pub async fn send_audio_frame(&mut self, frame: &[u8]) -> Result<()> {
         self.send_frame(frame, None).await
     }
@@ -224,18 +227,19 @@ impl<T: PacketTransport> Mesh<T> {
         if self.calls.is_empty() {
             return Ok(());
         }
-        if !self.calls.values().all(Call::is_connected) {
+        if !self.calls.values().any(Call::is_connected) {
             return Err(MediaError::NotConnected);
         }
         let loss = self
             .calls
             .values()
+            .filter(|call| call.is_connected())
             .map(Call::loss_fraction)
             .fold(0.0_f32, f32::max);
         self.tx.set_red(redundancy_for(loss, self.tx.red()));
         let encrypted = self.tx.encrypt(frame, timestamp, DEFAULT_LEVEL)?;
         let mut failed = Vec::new();
-        for (peer, call) in self.calls.iter_mut() {
+        for (peer, call) in self.calls.iter_mut().filter(|(_, call)| call.is_connected()) {
             if let Err(e) = call.send_encrypted(&encrypted).await {
                 tracing::debug!(peer, error = %e, "dropping peer after a send failure");
                 failed.push(*peer);
@@ -384,6 +388,15 @@ impl<T: PacketTransport> Mesh<T> {
     pub fn reset_estimates(&mut self, kbps: u32) {
         for call in self.calls.values_mut() {
             call.reset_estimate(kbps);
+        }
+    }
+
+    /// For tests: drops `percent` of the datagrams every call of this mesh sends, as a lossy or
+    /// dead link does. 100 keeps a call from ever connecting.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_drop_percent(&mut self, percent: u32) {
+        for call in self.calls.values_mut() {
+            call.set_drop_percent(percent);
         }
     }
 

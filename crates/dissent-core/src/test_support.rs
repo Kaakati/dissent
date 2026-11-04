@@ -172,6 +172,13 @@ pub fn set_dm_devices_support(engine: &crate::Engine, on: bool) {
         .store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Makes `engine`'s mesh calls drop `percent` of the datagrams they send, from the next step of its call on, calls it
+/// opens later included. 100 holds its links down: a call it is offered never connects. 0 stops it.
+#[cfg(feature = "test-hooks")]
+pub fn drop_mesh_media(engine: &crate::Engine, percent: u32) {
+    engine.inner.mesh_drop_percent.store(percent.min(100), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.
 #[cfg(feature = "test-hooks")]
 pub fn fail_folder_after(engine: &crate::Engine, files: u64) {

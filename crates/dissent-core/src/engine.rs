@@ -137,6 +137,9 @@ pub(crate) struct Inner {
     /// Set only in tests: `list_folder` fails after linking this many files. See `test_support`.
     #[cfg(feature = "test-hooks")]
     pub(crate) fail_folder_after: std::sync::atomic::AtomicU64,
+    /// Set only in tests: the share of datagrams, in percent, this device's mesh calls drop. 100 holds its links down.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) mesh_drop_percent: std::sync::atomic::AtomicU32,
     pub(crate) feature_answers: Mutex<BTreeMap<DeviceId, (u64, std::time::Instant)>>,
     /// The file tracker's keys and local book, per community. See `tracker`.
     pub(crate) tracker: Mutex<crate::tracker::TrackerState>,
@@ -308,6 +311,8 @@ impl Engine {
             rotation_support: AtomicBool::new(true),
             #[cfg(feature = "test-hooks")]
             fail_folder_after: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "test-hooks")]
+            mesh_drop_percent: std::sync::atomic::AtomicU32::new(0),
             features: std::sync::atomic::AtomicU64::new(crate::custom_roles::FEATURES),
             feature_answers: Default::default(),
             tracker: Default::default(),

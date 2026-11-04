@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{assert_from_each, memory_pair, run_mesh_peer, MemoryTransport, FRAMES};
+use common::{assert_from_each, frame, memory_pair, run_mesh_peer, seq_of, MemoryTransport, FRAMES};
 use dissent_media::{MediaKey, Mesh};
 use tokio::time::timeout;
 
@@ -173,4 +173,52 @@ async fn spy(mut mesh: Peer, window: Duration) -> (Peer, Vec<(u64, Vec<u8>)>) {
     })
     .await;
     (mesh, delivered)
+}
+
+#[tokio::test]
+async fn a_peer_still_connecting_does_not_silence_the_mesh_toward_the_others() {
+    let mut a: Peer = Mesh::new(key(1), 1).unwrap();
+    let mut b: Peer = Mesh::new(key(1), 2).unwrap();
+    let (a_end, b_end) = memory_pair();
+    let offer = a.offer(2, a_end).await.unwrap();
+    let answer = b.accept(1, b_end, offer).await.unwrap();
+    a.apply(2, answer).unwrap();
+    // Peer 3 is offered a call it never answers, so that call stays unconnected.
+    let (to_3, _never_answered) = memory_pair();
+    a.offer(3, to_3).await.unwrap();
+
+    let received = timeout(Duration::from_secs(30), async {
+        let sender = async {
+            let mut sent = 0u64;
+            let mut ticker = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        // Before the call to 2 connects there is no one to send to; after, 3 is skipped.
+                        if a.send_audio_frame(&frame(sent)).await.is_ok() {
+                            sent += 1;
+                        }
+                    }
+                    next = a.next_frame() => { next.unwrap(); }
+                }
+            }
+        };
+        let receiver = async {
+            let mut got = Vec::new();
+            while got.len() < FRAMES as usize {
+                let (from, payload) = b.next_frame().await.unwrap().expect("the mesh emptied");
+                assert_eq!(from, 1);
+                got.push(seq_of(&payload));
+            }
+            got
+        };
+        tokio::select! {
+            _ = sender => unreachable!("the sender runs until the receiver is done"),
+            got = receiver => got,
+        }
+    })
+    .await
+    .expect("peer 2 heard nothing while the call to 3 was still connecting");
+    assert_eq!(received, (0..FRAMES).collect::<Vec<_>>(), "every frame sent reached 2, in order");
+    assert!(a.stats().contains_key(&3), "the unconnected call stays in the mesh");
 }

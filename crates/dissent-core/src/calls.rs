@@ -1727,6 +1727,8 @@ async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
         room.at_step(step::MESH_LOCK);
         let mut mesh = room.mesh.lock().await;
         room.mesh_by.store(mesh_site::DRIVE, Ordering::Relaxed);
+        #[cfg(feature = "test-hooks")]
+        mesh.set_drop_percent(engine.inner.mesh_drop_percent.load(Ordering::Relaxed));
         since_check += 1;
         if since_check >= MEMBERSHIP_EVERY {
             since_check = 0;

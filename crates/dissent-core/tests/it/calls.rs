@@ -2234,3 +2234,38 @@ async fn joining_a_voice_channel_does_not_wait_for_members_who_are_offline() {
     .await;
 }
 
+
+/// A member whose links never come up (they drop every datagram) joins a mesh call. Before, a mesh sent to nobody while
+/// any of its calls was unconnected, so the two who were talking went silent toward each other until the dead link was
+/// dropped. They now keep hearing each other the whole time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_joiner_whose_links_never_connect_does_not_silence_the_mesh() {
+    heavy(3, async {
+        let owner = peer("owner").await;
+        let a = peer("member a").await;
+        let stranded = peer("member c").await;
+        let (community, channel) = voice_community(&owner, &[&a, &stranded]).await;
+        owner.engine.join_call(community, channel).await.expect("owner joins");
+        a.engine.join_call(community, channel).await.expect("a joins");
+        let heard = |p: &Peer| p.engine.call_state().map_or(0, |v| v.frames_received);
+        eventually("the two hear each other", || (heard(&owner) > 50 && heard(&a) > 50).then_some(())).await;
+        dissent_core::test_support::drop_mesh_media(&stranded.engine, 100);
+        stranded.engine.join_call(community, channel).await.expect("the stranded member joins");
+        eventually("the others take the stranded member into the call", || {
+            [&owner, &a].iter().all(|p| p.engine.call_state().is_some_and(|v| v.participants.len() == 2)).then_some(())
+        })
+        .await;
+        // Over the next 10 s, each of the two keeps hearing the other: no half second goes by without new frames.
+        let mut last = (heard(&owner), heard(&a));
+        for step in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let now = (heard(&owner), heard(&a));
+            assert!(now.0 > last.0 && now.1 > last.1, "silence {} ms after the stranded member joined: {last:?} then {now:?}", (step + 1) * 500);
+            last = now;
+        }
+        assert_eq!(heard(&stranded), 0, "the stranded member's links never came up");
+        finish(vec![owner, a, stranded]).await;
+    })
+    .await;
+}
