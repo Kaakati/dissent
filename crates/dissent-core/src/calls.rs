@@ -662,6 +662,8 @@ pub(crate) struct Room {
     forwarder_since: Mutex<Option<Instant>>,
     /// The `Features` bits other devices sent, by sender id, with when each arrived.
     features: Mutex<BTreeMap<u64, (u64, Instant)>>,
+    /// When each live sender id was first seen live, for `Timings::unheard_grace`.
+    seen_live: Mutex<BTreeMap<u64, Instant>>,
     /// Devices this room has sent its own `Features` to, by sender id.
     told: Mutex<std::collections::BTreeSet<u64>>,
     /// Offers to forward this call from members who are not in it, by sender id. See `volunteers`.
@@ -807,6 +809,13 @@ pub(crate) struct CallHub {
     cascade_at: AtomicUsize,
     /// Test override of this device's measured capacity in kbps. Zero means measure.
     capacity_override: AtomicU32,
+    /// The last tier moves this device made or followed, and why, newest last, for a test that timed out.
+    tier_log: Mutex<VecDeque<String>>,
+    /// What the current call's tier moves left behind, for the way back from forwarded. See `TierMemory`.
+    tier_memory: Mutex<Option<(RoomId, TierMemory)>>,
+    /// Test hook: no `Features` leave this device before then, as when its first one is slow to arrive.
+    #[cfg(feature = "test-hooks")]
+    features_held_until: Mutex<Option<Instant>>,
     incoming: Mutex<BTreeMap<DeviceId, MediaLink>>,
     arrived: Notify,
     pub(crate) ringing: Mutex<Option<Ringing>>,
@@ -838,6 +847,10 @@ impl CallHub {
             staged: Mutex::new(None),
             cascade_at: AtomicUsize::new(CASCADE_AT),
             capacity_override: AtomicU32::new(0),
+            tier_log: Mutex::new(VecDeque::new()),
+            tier_memory: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            features_held_until: Mutex::new(None),
             incoming: Mutex::new(BTreeMap::new()),
             arrived: Notify::new(),
             ringing: Mutex::new(None),
@@ -1139,6 +1152,7 @@ impl Room {
             capacity_clock: AtomicU64::new(0),
             forwarder_since: Mutex::new(None),
             features: Mutex::new(BTreeMap::new()),
+            seen_live: Mutex::new(BTreeMap::new()),
             told: Mutex::new(std::collections::BTreeSet::new()),
             offers: Mutex::new(BTreeMap::new()),
             stall: Mutex::new(volunteers::StallWatch::new()),
@@ -4064,24 +4078,117 @@ fn gen_id(base: &RoomId, tier: Tier, roster: &[u8; 32], forwarder: u64) -> RoomI
     *hasher.finalize().as_bytes()
 }
 
+/// What a call's moves into and out of forwarded leave behind, on each device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TierMemory {
+    /// The mesh limit in force when this device moved the call to forwarded, or followed that move.
+    pub entered_under: Option<usize>,
+    /// When this device last moved the call back to a mesh at its limit.
+    pub returned_at: Option<Instant>,
+    /// How long the way back must hold this time. `None` is the tier sustain.
+    pub wait: Option<Duration>,
+}
+
+impl TierMemory {
+    /// A forwarded call of `live` at limit `mesh_limit` may go back to a mesh at the limit only when it moved to
+    /// forwarded under a lower limit: the limit fell, the call did not grow. A call that grew past the limit keeps
+    /// the hysteresis and returns only below it.
+    pub(crate) fn may_return(&self, live: usize, mesh_limit: usize) -> bool {
+        live == mesh_limit && self.entered_under.is_some_and(|under| under < mesh_limit)
+    }
+
+    /// Records a move to forwarded under `mesh_limit`. One soon after a return backs the next return off: twice
+    /// the last wait, from twice `base`, at most `cap`.
+    pub(crate) fn entered(&mut self, mesh_limit: usize, now: Instant, base: Duration, cap: Duration) {
+        self.entered_under = Some(mesh_limit);
+        if self.returned_at.is_some_and(|at| now.duration_since(at) < base) {
+            self.wait = Some(self.wait.map_or(base * 2, |w| w * 2).min(cap));
+        }
+    }
+}
+
 impl Engine {
+    /// The tier memory of call `id`, new when the device moved to another call.
+    fn tier_memory(&self, id: &RoomId) -> TierMemory {
+        match *lock(&self.inner.calls.tier_memory) {
+            Some((call, memory)) if call == *id => memory,
+            _ => TierMemory::default(),
+        }
+    }
+
+    fn set_tier_memory(&self, id: RoomId, memory: TierMemory) {
+        *lock(&self.inner.calls.tier_memory) = Some((id, memory));
+    }
+
     /// Runs on each driver tick. A channel call migrates once its live roster has wanted another
-    /// media tier for `TIER_SUSTAIN`.
+    /// media tier for `TIER_SUSTAIN`. A forwarded call whose limit has risen back to its size returns to a mesh,
+    /// once it has held for its wait (`TierMemory`).
     fn tier_check(&self, room: &Arc<Room>) {
         let live = lock(&room.live).len();
+        // A device not heard from yet may be about to say it takes a boosted mesh, so the call holds its tier.
+        let Some(mesh_limit) = self.mesh_limit(room) else {
+            *lock(&room.tier_since) = None;
+            return;
+        };
         let policy = TierPolicy {
             cascade_at: self.inner.calls.cascade_at.load(Ordering::SeqCst),
-            mesh_limit: self.mesh_limit(room),
+            mesh_limit,
         };
-        let want = media_tier(policy.tier_for(live, room.tier));
+        let mut want = media_tier(policy.tier_for(live, room.tier));
+        let mut memory = self.tier_memory(&room.id);
+        let mut sustain = self.inner.timings.tier_sustain;
+        let returning = room.tier == Tier::Forwarded && want == Tier::Forwarded && memory.may_return(live, mesh_limit);
+        if returning {
+            want = Tier::Mesh;
+            sustain = memory.wait.unwrap_or(sustain);
+        }
         if want == room.tier {
             *lock(&room.tier_since) = None;
             return;
         }
         let since = *lock(&room.tier_since).get_or_insert_with(Instant::now);
-        if since.elapsed() >= self.inner.timings.tier_sustain && !room.migrating.swap(true, Ordering::SeqCst) {
+        if since.elapsed() >= sustain && !room.migrating.swap(true, Ordering::SeqCst) {
+            let now = Instant::now();
+            if returning {
+                memory.returned_at = Some(now);
+                memory.entered_under = None;
+            } else if want == Tier::Forwarded {
+                let t = &self.inner.timings;
+                memory.entered(mesh_limit, now, t.tier_return_backoff, t.tier_return_backoff_cap);
+            }
+            self.set_tier_memory(room.id, memory);
+            let heard: Vec<String> = {
+                let now = Instant::now();
+                let features = lock(&room.features);
+                let seen = lock(&room.seen_live);
+                lock(&room.live)
+                    .keys()
+                    .map(|sid| {
+                        let f = features
+                            .get(sid)
+                            .map(|(bits, at)| format!("bits={bits:#x}/{}ms", now.duration_since(*at).as_millis()))
+                            .unwrap_or_else(|| "none".into());
+                        let first = seen.get(sid).map(|t| now.duration_since(*t).as_millis());
+                        format!("{sid}:{f},seen={first:?}ms")
+                    })
+                    .collect()
+            };
+            self.note_tier(format!(
+                "moves {:?}->{want:?}: live={live} mesh_limit={mesh_limit} heard=[{}]",
+                room.tier,
+                heard.join(" ")
+            ));
             self.spawn_migration(room.clone(), want, None);
         }
+    }
+
+    /// Keeps a line on a tier move for `call_debug`, the newest eight.
+    fn note_tier(&self, line: String) {
+        let mut log = lock(&self.inner.calls.tier_log);
+        if log.len() == 8 {
+            log.pop_front();
+        }
+        log.push_back(line);
     }
 
     fn spawn_migration(&self, old: Arc<Room>, to: Tier, forced: Option<u64>) {
@@ -4246,6 +4353,15 @@ impl Engine {
                     }
                 }
                 if !room.migrating.swap(true, Ordering::SeqCst) {
+                    self.note_tier(format!("follows {from}'s move {:?}->{to:?}", room.tier));
+                    if to == Tier::Forwarded && room.tier != Tier::Forwarded {
+                        // The limit this device sees now. A device not heard from yet leaves it at level 0's.
+                        let limit = self.mesh_limit(&room).unwrap_or(LEVEL0_MESH_LIMIT);
+                        let mut memory = self.tier_memory(&room.id);
+                        let t = &self.inner.timings;
+                        memory.entered(limit, Instant::now(), t.tier_return_backoff, t.tier_return_backoff_cap);
+                        self.set_tier_memory(room.id, memory);
+                    }
                     self.spawn_migration(room, to, msg_forwarder);
                 }
                 CallReply::Ack
@@ -4488,6 +4604,12 @@ impl Engine {
         }
     }
 
+    /// Test hook: holds back this device's `Features` for `hold`, as a joiner whose first one is slow to arrive.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn hold_call_features_now(&self, hold: Duration) {
+        *lock(&self.inner.calls.features_held_until) = Some(Instant::now() + hold);
+    }
+
     /// Test hook: overrides this device's measured capacity, in kbps. `None` measures again.
     pub fn set_capacity_override(&self, kbps: Option<u32>) {
         self.inner
@@ -4635,8 +4757,9 @@ impl Engine {
         // Copied out under one guard. A `lock` in each format argument would hold the first guard while taking the
         // next, and deadlock.
         let sends = lock(&room.sends).clone();
+        let tiers: Vec<String> = lock(&self.inner.calls.tier_log).iter().cloned().collect();
         format!(
-            "send_ok={} send_err={:?} empty_ticks={} ticks={} forwarded={} sending={} muted={} speaking_checks={checks} speaking_emits={emits} shown={shown} last_sent_ago_ms={sent_ago:?} peers=[{}] links=[{links}] receivers={}",
+            "send_ok={} send_err={:?} empty_ticks={} ticks={} forwarded={} sending={} muted={} speaking_checks={checks} speaking_emits={emits} shown={shown} last_sent_ago_ms={sent_ago:?} peers=[{}] links=[{links}] receivers={} tiers=[{}]",
             sends.sent,
             sends.failed,
             sends.empty,
@@ -4646,6 +4769,7 @@ impl Engine {
             room.is_muted(),
             peers.join(", "),
             self.inner.events.receiver_count(),
+            tiers.join(" | "),
         )
     }
 
@@ -4968,23 +5092,40 @@ fn upload_kbps(links: &[Option<u32>]) -> Option<u32> {
 /// to a mesh at 5.
 const LEVEL0_MESH_LIMIT: usize = 6;
 
+/// What a live device has said about boosted tiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoostHeard {
+    /// A fresh `Features` with `FEATURE_BOOST_TIERS`.
+    Supports,
+    /// `Features` without it, gone stale, or none within `Timings::unheard_grace`: a released client.
+    Released,
+    /// Nothing yet, and within the grace since it was first seen live.
+    NotYet,
+}
+
 /// The mesh limit a call uses. A boosted limit above level 0's holds only while every live device
 /// has said it supports one (`FEATURE_BOOST_TIERS`), and every live device's announced upload covers
 /// a copy of its stream for each other device, `copy_kbps` each. Otherwise it is level 0's, which
 /// released devices use, so they never see a mesh larger than they expect. A device with no fresh
-/// capacity counts as the election's default.
+/// capacity counts as the election's default. `None` while a device has not been heard from yet: a
+/// joiner's first `Features` can take seconds on a loaded machine, and counting it released meanwhile
+/// would move a boosted mesh to forwarded, where it then stays at the limit.
 fn effective_mesh_limit(
     boosted: usize,
     live: &[u64],
-    supports: impl Fn(u64) -> bool,
+    heard: impl Fn(u64) -> BoostHeard,
     capacities: &BTreeMap<u64, u32>,
     copy_kbps: u32,
-) -> usize {
+) -> Option<usize> {
     if boosted <= LEVEL0_MESH_LIMIT {
-        return boosted;
+        return Some(boosted);
     }
-    if !live.iter().all(|sid| supports(*sid)) {
-        return LEVEL0_MESH_LIMIT;
+    let heard: Vec<BoostHeard> = live.iter().map(|sid| heard(*sid)).collect();
+    if heard.contains(&BoostHeard::NotYet) {
+        return None;
+    }
+    if heard.contains(&BoostHeard::Released) {
+        return Some(LEVEL0_MESH_LIMIT);
     }
     let copies = u32::try_from(live.len().saturating_sub(1)).unwrap_or(u32::MAX);
     let need = copies.saturating_mul(copy_kbps);
@@ -4992,17 +5133,17 @@ fn effective_mesh_limit(
         .iter()
         .any(|sid| capacities.get(sid).copied().unwrap_or(DEFAULT_KBPS) < need)
     {
-        return LEVEL0_MESH_LIMIT;
+        return Some(LEVEL0_MESH_LIMIT);
     }
-    boosted
+    Some(boosted)
 }
 
 impl Engine {
-    /// The mesh limit for `room` now: its server's boosted one when every device can take it. See
-    /// `effective_mesh_limit`.
-    fn mesh_limit(&self, room: &Room) -> usize {
+    /// The mesh limit for `room` now: its server's boosted one when every device can take it. `None` while
+    /// a live device has not been heard from yet. See `effective_mesh_limit`.
+    fn mesh_limit(&self, room: &Room) -> Option<usize> {
         if self.inner.legacy_calls.load(Ordering::Relaxed) {
-            return LEVEL0_MESH_LIMIT;
+            return Some(LEVEL0_MESH_LIMIT);
         }
         let boosted = self.room_ceilings(room).mesh_limit;
         // Each copy carries audio, and a camera or screen when anyone in the call shows one.
@@ -5014,13 +5155,25 @@ impl Engine {
         let capacities = self.fresh_capacities(room);
         let now = Instant::now();
         let features = lock(&room.features).clone();
-        let supports = |sid: u64| {
-            sid == room.my_sid
-                || features.get(&sid).is_some_and(|(bits, at)| {
-                    bits & FEATURE_BOOST_TIERS != 0 && now.duration_since(*at) < CAPACITY_FRESH
-                })
+        let seen = {
+            let mut seen = lock(&room.seen_live);
+            seen.retain(|sid, _| live.contains(sid));
+            for sid in &live {
+                seen.entry(*sid).or_insert(now);
+            }
+            seen.clone()
         };
-        effective_mesh_limit(boosted, &live, supports, &capacities, copy_kbps)
+        let grace = self.inner.timings.unheard_grace;
+        let heard = |sid: u64| match features.get(&sid) {
+            _ if sid == room.my_sid => BoostHeard::Supports,
+            Some((bits, at)) if bits & FEATURE_BOOST_TIERS != 0 && now.duration_since(*at) < CAPACITY_FRESH => {
+                BoostHeard::Supports
+            }
+            Some(_) => BoostHeard::Released,
+            None if seen.get(&sid).is_some_and(|first| now.duration_since(*first) < grace) => BoostHeard::NotYet,
+            None => BoostHeard::Released,
+        };
+        effective_mesh_limit(boosted, &live, heard, &capacities, copy_kbps)
     }
 
     /// Sends this device's `Features` to the live devices it has not told yet, or to all of them
@@ -5029,6 +5182,10 @@ impl Engine {
     /// the next `again`.
     fn tell_features(&self, room: &Arc<Room>, again: bool) {
         if self.inner.legacy_calls.load(Ordering::Relaxed) {
+            return;
+        }
+        #[cfg(feature = "test-hooks")]
+        if lock(&self.inner.calls.features_held_until).is_some_and(|until| Instant::now() < until) {
             return;
         }
         let me = self.inner.identity.device_id();
@@ -5085,6 +5242,51 @@ impl Engine {
 }
 
 #[cfg(test)]
+mod tier_return_tests {
+    use super::*;
+
+    const BASE: Duration = Duration::from_secs(30);
+    const CAP: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn a_call_moved_under_a_lower_limit_may_return_at_the_limit() {
+        let mut m = TierMemory::default();
+        m.entered(6, Instant::now(), BASE, CAP);
+        assert!(m.may_return(8, 8), "the limit rose back to 8 with 8 in the call");
+        assert!(!m.may_return(8, 6), "not while the limit is still 6");
+        assert!(!m.may_return(9, 8), "not above the limit");
+        assert!(!m.may_return(7, 8), "below the limit the usual way back applies");
+    }
+
+    #[test]
+    fn a_call_that_grew_past_the_limit_keeps_the_hysteresis() {
+        let mut m = TierMemory::default();
+        m.entered(8, Instant::now(), BASE, CAP);
+        assert!(!m.may_return(8, 8), "it moved because it grew, so 8 of 8 stays forwarded");
+        assert!(!TierMemory::default().may_return(8, 8), "nor without a recorded move");
+    }
+
+    #[test]
+    fn falling_back_soon_after_a_return_doubles_the_wait_up_to_the_cap() {
+        let now = Instant::now();
+        let mut m = TierMemory::default();
+        m.entered(6, now, BASE, CAP);
+        assert_eq!(m.wait, None, "the first return waits the tier sustain");
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            m.returned_at = Some(now);
+            m.entered(6, now + Duration::from_secs(1), BASE, CAP);
+            waits.push(m.wait.unwrap().as_secs());
+        }
+        assert_eq!(waits, vec![60, 120, 240, 300, 300]);
+        // A fall long after the last return does not back off further.
+        m.returned_at = Some(now);
+        m.entered(6, now + BASE * 2, BASE, CAP);
+        assert_eq!(m.wait, Some(CAP));
+    }
+}
+
+#[cfg(test)]
 mod mesh_limit_tests {
     use super::*;
 
@@ -5092,22 +5294,28 @@ mod mesh_limit_tests {
         entries.iter().copied().collect()
     }
 
+    fn all(_: u64) -> BoostHeard {
+        BoostHeard::Supports
+    }
+
     #[test]
     fn level_zero_limits_need_nothing() {
         let live = [1, 2, 3, 4, 5, 6, 7];
-        assert_eq!(effective_mesh_limit(6, &live, |_| false, &caps(&[(1, 1)]), 32), 6);
+        assert_eq!(effective_mesh_limit(6, &live, |_| BoostHeard::Released, &caps(&[(1, 1)]), 32), Some(6));
+        assert_eq!(effective_mesh_limit(6, &live, |_| BoostHeard::NotYet, &caps(&[(1, 1)]), 32), Some(6));
     }
 
     #[test]
     fn a_boosted_limit_holds_when_every_device_supports_it() {
         let live = [1, 2, 3, 4, 5, 6, 7, 8];
-        assert_eq!(effective_mesh_limit(8, &live, |_| true, &BTreeMap::new(), 32), 8);
+        assert_eq!(effective_mesh_limit(8, &live, all, &BTreeMap::new(), 32), Some(8));
     }
 
     #[test]
     fn one_released_device_brings_back_level_zero() {
         let live = [1, 2, 3, 4, 5, 6, 7];
-        assert_eq!(effective_mesh_limit(10, &live, |sid| sid != 4, &BTreeMap::new(), 32), 6);
+        let heard = |sid| if sid == 4 { BoostHeard::Released } else { BoostHeard::Supports };
+        assert_eq!(effective_mesh_limit(10, &live, heard, &BTreeMap::new(), 32), Some(6));
     }
 
     #[test]
@@ -5116,9 +5324,45 @@ mod mesh_limit_tests {
         // Six copies of a 720p camera need over 9 Mbps. Device 3 has 5.
         let low = caps(&[(3, 5_000)]);
         let copy = AUDIO_STREAM_KBPS + VIDEO_720P_KBPS;
-        assert_eq!(effective_mesh_limit(8, &live, |_| true, &low, copy), 6);
+        assert_eq!(effective_mesh_limit(8, &live, all, &low, copy), Some(6));
         // The same upload covers six copies of audio.
-        assert_eq!(effective_mesh_limit(8, &live, |_| true, &low, AUDIO_STREAM_KBPS), 8);
+        assert_eq!(effective_mesh_limit(8, &live, all, &low, AUDIO_STREAM_KBPS), Some(8));
+    }
+
+    /// A device not heard from yet is neither for nor against the boosted limit: there is no limit to decide by,
+    /// and the call keeps its tier. A released device among them still decides nothing until the rest are heard.
+    #[test]
+    fn a_device_not_heard_from_yet_leaves_the_limit_undecided() {
+        let live = [1, 2, 3, 4, 5, 6, 7, 8];
+        let heard = |sid| if sid == 8 { BoostHeard::NotYet } else { BoostHeard::Supports };
+        assert_eq!(effective_mesh_limit(8, &live, heard, &BTreeMap::new(), 32), None);
+        let mixed = |sid| match sid {
+            8 => BoostHeard::NotYet,
+            4 => BoostHeard::Released,
+            _ => BoostHeard::Supports,
+        };
+        assert_eq!(effective_mesh_limit(8, &live, mixed, &BTreeMap::new(), 32), None);
+    }
+
+    /// The tier a boosted call of seven and of eight wants: a mesh while the eighth device is not heard from yet,
+    /// since the call holds its tier; forwarded once the grace is over and it counts as released.
+    #[test]
+    fn a_boosted_mesh_holds_while_a_joiner_is_unheard_and_forwards_once_it_counts_released() {
+        for n in [7usize, 8] {
+            let live: Vec<u64> = (1..=n as u64).collect();
+            let unheard = |sid| if sid == n as u64 { BoostHeard::NotYet } else { BoostHeard::Supports };
+            let released = |sid| if sid == n as u64 { BoostHeard::Released } else { BoostHeard::Supports };
+            let tier = |limit: Option<usize>| match limit {
+                None => Tier::Mesh,
+                Some(mesh_limit) => TierPolicy { cascade_at: 50, mesh_limit }.tier_for(n, Tier::Mesh),
+            };
+            assert_eq!(tier(effective_mesh_limit(8, &live, unheard, &BTreeMap::new(), 32)), Tier::Mesh, "{n} unheard");
+            assert_eq!(
+                tier(effective_mesh_limit(8, &live, released, &BTreeMap::new(), 32)),
+                Tier::Forwarded,
+                "{n} with one released"
+            );
+        }
     }
 }
 

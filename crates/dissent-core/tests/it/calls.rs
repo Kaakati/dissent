@@ -1265,6 +1265,54 @@ pub(crate) fn call_summary(p: &Peer) -> String {
     )
 }
 
+/// The eighth device stays silent past the grace, so the others count it released, the limit falls to level 0's
+/// and the call moves to forwarded. Once it is heard, the limit is back at eight with eight in the call, and the
+/// call returns to a mesh: it moved because the limit fell, not because it grew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_call_forwarded_by_a_fallen_limit_returns_to_a_mesh_once_the_limit_is_back() {
+    heavy(8, async {
+    let (everyone, community, channel) = boosted_call(8, 2, 5_000).await;
+    let grace = dissent_core::test_support::fast_timings().unheard_grace;
+    dissent_core::test_support::hold_call_features(&everyone[7].engine, grace + Duration::from_secs(6));
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    every_device(&everyone, Duration::from_secs(150), "the call moves to forwarded while the eighth is silent", |p| {
+        p.engine.call_state().is_some_and(|v| v.topology == Topology::Forwarded)
+    })
+    .await;
+    all_see(&everyone, Topology::Mesh, "the call back as a mesh of eight").await;
+    finish(everyone).await;
+    }).await;
+}
+
+/// The eighth device's first `Features` arrives late, as on a loaded machine. Until it is heard from, the others
+/// cannot tell it takes a boosted mesh, and they hold the mesh rather than count it released and forward: a call
+/// moved to forwarded at the limit would stay there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_boosted_mesh_holds_while_a_joiner_is_not_heard_from_yet() {
+    heavy(8, async {
+    let (everyone, community, channel) = boosted_call(8, 2, 5_000).await;
+    // Well past the tier sustain, and inside the grace.
+    let hold = Duration::from_secs(6);
+    dissent_core::test_support::hold_call_features(&everyone[7].engine, hold);
+    let held_from = std::time::Instant::now();
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Mesh, "a boosted mesh of eight").await;
+    // Past the hold and another tier sustain: nobody moved the call while the eighth was unheard, nor after.
+    tokio::time::sleep((hold + Duration::from_secs(4)).saturating_sub(held_from.elapsed())).await;
+    every_device(&everyone, Duration::from_secs(5), "the call is still a mesh of eight", |p| {
+        p.engine.call_state().is_some_and(|v| v.topology == Topology::Mesh && v.participants.len() == 7)
+    })
+    .await;
+    finish(everyone).await;
+    }).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
 async fn boosted_mesh_grows_to_the_level_limit_then_forwards() {

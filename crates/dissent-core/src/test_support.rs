@@ -6,6 +6,12 @@ use dissent_identity::Vault;
 #[cfg(feature = "test-hooks")]
 pub use crate::presence::mute_gossip_for_tests;
 
+/// Holds back `engine`'s call `Features` for `hold`, as a joiner whose first one is slow to arrive on a loaded machine.
+#[cfg(feature = "test-hooks")]
+pub fn hold_call_features(engine: &crate::Engine, hold: std::time::Duration) {
+    engine.hold_call_features_now(hold);
+}
+
 /// Maps a link preview host to a loopback server. See `previews::map_preview_host`.
 #[cfg(feature = "test-hooks")]
 pub use crate::previews::map_preview_host;
@@ -53,6 +59,9 @@ pub fn fast_timings() -> crate::Timings {
         typing_every: Duration::from_secs(1),
         dht_probe_every: Duration::from_secs(2),
         forward_offer_every: Duration::from_secs(1),
+        unheard_grace: Duration::from_secs(10),
+        tier_return_backoff: Duration::from_secs(3),
+        tier_return_backoff_cap: Duration::from_secs(12),
         epoch_check_every: Duration::from_secs(3),
         epoch_check_gap: Duration::from_secs(1),
     }

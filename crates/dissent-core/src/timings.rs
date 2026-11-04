@@ -34,6 +34,14 @@ pub struct Timings {
     /// How often a volunteer renews its offer to forward a call. An offer lapses after three of
     /// these unless renewed. See `call_volunteers`.
     pub forward_offer_every: Duration,
+    /// How long a device in a boosted call may go unheard, after it is first seen live, before it counts as a
+    /// released client. Until then the call keeps its tier. See `calls::effective_mesh_limit`.
+    pub unheard_grace: Duration,
+    /// A forwarded call that returned to a mesh at its limit and fell back within this long waits twice as long
+    /// before it returns again. See `calls::tier_check`.
+    pub tier_return_backoff: Duration,
+    /// The longest a forwarded call waits to return to a mesh at its limit.
+    pub tier_return_backoff_cap: Duration,
     /// How often a device sends its epoch check while its epoch stays the same. See `forks`.
     pub epoch_check_every: Duration,
     /// The shortest gap between two epoch checks for one community.
@@ -56,6 +64,9 @@ impl Default for Timings {
             history_first_retry: Duration::from_secs(1),
             dht_probe_every: Duration::from_secs(15),
             forward_offer_every: Duration::from_secs(20),
+            unheard_grace: Duration::from_secs(30),
+            tier_return_backoff: Duration::from_secs(30),
+            tier_return_backoff_cap: Duration::from_secs(300),
             epoch_check_every: Duration::from_secs(300),
             epoch_check_gap: Duration::from_secs(30),
         }
@@ -88,6 +99,9 @@ mod tests {
         assert_eq!(t.typing_every, Duration::from_secs(3));
         assert_eq!(t.dht_probe_every, Duration::from_secs(15));
         assert_eq!(t.forward_offer_every, Duration::from_secs(20));
+        assert_eq!(t.unheard_grace, Duration::from_secs(30));
+        assert_eq!(t.tier_return_backoff, Duration::from_secs(30));
+        assert_eq!(t.tier_return_backoff_cap, Duration::from_secs(300));
         assert_eq!(t.epoch_check_every, Duration::from_secs(300));
         assert_eq!(t.epoch_check_gap, Duration::from_secs(30));
     }
