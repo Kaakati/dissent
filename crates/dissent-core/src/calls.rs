@@ -4206,6 +4206,14 @@ fn media_tier(tier: Tier) -> Tier {
 
 /// The generation id of a room migrated to `tier` with this roster. Two devices with the same
 /// roster name the same generation, so their offers match.
+/// Whether a device stuck short of links in the room its settled peers are in rebuilds that room: only with no working
+/// link left. A peer whose call to it still works refuses the rebuilt room's offer, so a rebuild beside a working link
+/// can never gather the links it needs, and its staged room, on the same generation as the current one, would take
+/// the offers meant for the current room, so a dead link there could never be made again.
+fn rebuild_due(stuck: bool, here: bool, working: usize) -> bool {
+    stuck && here && working == 0
+}
+
 /// Whether a device is lonely in its room now: peers live in the call, yet too few working links to them. A device
 /// alone in the call is not. `None` while a move is under way: that says nothing either way, and the time already
 /// spent lonely is kept, so a move that fails does not restart the wait for the rejoin.
@@ -5109,14 +5117,17 @@ impl Engine {
         }
         let replies: Vec<WhereReply> = asks.join_all().await.into_iter().flatten().collect();
         let sids: Vec<u64> = live.keys().copied().collect();
+        let working = {
+            let mesh_up = room.mesh.lock().await.live_count(STALE_LINK);
+            self.links_up(&room, mesh_up).await.map_or(0, |(up, _)| up)
+        };
         let Some((tier, gen, forwarder)) = rejoin_choice(&replies, &sids, &room.gen).or_else(|| {
-            // The settled peers are in this very room, yet this device has had too few working links here for three
-            // asks. Waiting longer will not bring them: no link is ever made again on its own. It rebuilds the room on
-            // the same generation, which links to each peer afresh.
+            // The settled peers are in this very room, yet this device has had no working link here for three asks.
+            // It rebuilds the room on the same generation, which links to each peer afresh. See `rebuild_due`.
             let since = lock(&room.lonely).0?;
             let stuck = since.elapsed() >= self.inner.timings.rejoin_after * 3;
             let here = replies.iter().any(|r| r.settled && r.gen == room.gen);
-            (stuck && here).then(|| (room.tier, room.gen, room.forwarding.as_ref().map(|f| f.forwarder)))
+            rebuild_due(stuck, here, working).then(|| (room.tier, room.gen, room.forwarding.as_ref().map(|f| f.forwarder)))
         }) else {
             return;
         };
@@ -5945,6 +5956,14 @@ mod lonely_tests {
         assert_eq!(lonely_now(3, false, false), Some(true), "peers live, links short");
         assert_eq!(lonely_now(3, false, true), Some(false), "settled");
         assert_eq!(lonely_now(3, true, false), None, "a move under way leaves the count alone");
+    }
+
+    #[test]
+    fn a_room_is_rebuilt_only_once_no_link_works() {
+        assert!(rebuild_due(true, true, 0), "stuck, peers settled here, nothing works");
+        assert!(!rebuild_due(true, true, 1), "one working link: the rebuild could not swap in");
+        assert!(!rebuild_due(false, true, 0), "not lonely long enough");
+        assert!(!rebuild_due(true, false, 0), "no settled peer here: rejoin_choice decides");
     }
 
     #[test]
