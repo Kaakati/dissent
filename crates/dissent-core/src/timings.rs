@@ -42,9 +42,9 @@ pub struct Timings {
     pub tier_return_backoff: Duration,
     /// The longest a forwarded call waits to return to a mesh at its limit.
     pub tier_return_backoff_cap: Duration,
-    /// How long a room just swapped in counts as settling. Its links are still ramping, so what it measures of this
-    /// device's upload is low: until then that measure is neither announced nor allowed to move the call, and a
-    /// limit lowered by capacity holds the tier. See `calls::settling_holds`.
+    /// How long a room just swapped in, or joined afresh, counts as settling. Its links are still ramping, so what it
+    /// measures of this device's upload is low: until then that measure is neither announced nor allowed to move the
+    /// call, and a limit lowered by capacity holds the tier. See `calls::settling_holds`.
     pub settle_after_swap: Duration,
     /// How long a send waits for the commit that adds a member this device already lists, so the new member can read
     /// it. After this it goes out at the current epoch. See `membership::join::wait_for_pending_adds`.

@@ -685,7 +685,8 @@ pub(crate) struct Room {
     capacities: Mutex<BTreeMap<u64, (u32, Instant)>>,
     /// This device's own measured capacity in kbps. Zero until measured. A migrated room starts from the old one's.
     own_kbps: AtomicU32,
-    /// When this room was swapped in, `None` for a room that never was. See `Timings::settle_after_swap`.
+    /// When this room began carrying the call, joined or swapped in. `None` for a staged room. See
+    /// `Timings::settle_after_swap`.
     swapped_at: Mutex<Option<Instant>>,
     /// Ticks since the last capacity measurement and announcement.
     capacity_clock: AtomicU64,
@@ -2219,6 +2220,9 @@ impl Engine {
                 Err(e) => warn!(error = %e, "voice audio unavailable; this call is silent"),
             }
         }
+        // A room joined afresh settles like one swapped in: its first measure of this device's upload comes from links
+        // still forming, and announced it would lower every peer's limit.
+        *lock(&room.swapped_at) = Some(Instant::now());
         *lock(&self.inner.calls.current) = Some(room.clone());
         spawn_drive(self, &room);
         self.watch_driver(&room);
@@ -5842,6 +5846,11 @@ fn settling_holds(limit: usize, uncapped: usize, live: usize) -> bool {
 
 /// The capacity to announce for this device: what was measured, or while the room is settling after its swap, the
 /// value it carried over from the room before, so peers do not lower their limit on a dip. `None` announces nothing.
+/// Whether a room that began carrying the call at `at` (joined or swapped in, `None` for neither yet) is still settling.
+fn settling_since(at: Option<Instant>, now: Instant, settle: Duration) -> bool {
+    at.is_some_and(|at| now.duration_since(at) < settle)
+}
+
 fn capacity_to_announce(measured: Option<u32>, carried: u32, settling: bool) -> Option<u32> {
     if settling {
         (carried > 0).then_some(carried)
@@ -5887,7 +5896,7 @@ impl Engine {
 
     /// Whether `room` was swapped in less than `Timings::settle_after_swap` ago.
     fn settling(&self, room: &Room) -> bool {
-        lock(&room.swapped_at).is_some_and(|at| at.elapsed() < self.inner.timings.settle_after_swap)
+        settling_since(*lock(&room.swapped_at), Instant::now(), self.inner.timings.settle_after_swap)
     }
 
     /// As `mesh_limit`. Without `capacities`, every device counts as able to carry the mesh, which gives the limit
@@ -6002,6 +6011,18 @@ mod settle_tests {
         assert!(!settling_holds(8, 8, 9), "nine outgrew the limit: real growth moves");
         assert!(!settling_holds(6, 8, 9), "past the uncapped limit it moves whatever the capacities say");
         assert!(!settling_holds(6, 6, 7), "a limit the clients or the boost set is not capacity's doing");
+    }
+
+    /// A room joined afresh starts settling, as `install` stamps it, so a joiner's first low measure is not announced:
+    /// it carries nothing over, so it announces nothing until it has settled.
+    #[test]
+    fn a_fresh_join_settles_and_announces_nothing_until_then() {
+        let now = Instant::now();
+        let settle = Duration::from_secs(10);
+        assert!(settling_since(Some(now), now, settle), "just joined");
+        assert!(!settling_since(Some(now - settle), now, settle), "settled");
+        assert!(!settling_since(None, now, settle), "a staged room not carrying the call yet");
+        assert_eq!(capacity_to_announce(Some(31), 0, settling_since(Some(now), now, settle)), None);
     }
 
     #[test]
