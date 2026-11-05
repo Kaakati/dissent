@@ -1330,6 +1330,30 @@ async fn two_lonely_devices_rejoin_the_settled_mesh_not_each_other() {
     }).await;
 }
 
+/// One device moves to forwarded alone and swaps the new tier in with no links. Alone in a room of its own, its tier
+/// check wants a mesh again, but a move of its own goes to a generation none of its peers is in, so it would never
+/// link. Short of links, it leads no move, asks the others where they are, and rejoins their mesh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_single_stray_rejoins_the_mesh() {
+    heavy(4, async {
+    let (everyone, community, channel) = boosted_call(4, 0, 5_000).await;
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Mesh, "a mesh of four").await;
+    let stray = &everyone[1];
+    dissent_core::test_support::swap_without_links(&stray.engine, true);
+    assert!(dissent_core::test_support::force_tier_move(&stray.engine, true, 0), "the move starts");
+    every_device(&everyone[1..2], Duration::from_secs(60), "the stray swapped in a forwarded room of its own", |p| {
+        dissent_core::test_support::call_debug(&p.engine).contains("swapped in Forwarded")
+    })
+    .await;
+    all_see(&everyone, Topology::Mesh, "everyone back in one mesh of four").await;
+    finish(everyone).await;
+    }).await;
+}
+
 /// The owner's move reaches one peer and the owner swaps it in anyway, with one leaf of five, as before the links rule:
 /// the holds-test split. The owner and its one leaf are short of links; they ask, the four in the mesh are settled
 /// there, and both rejoin it.

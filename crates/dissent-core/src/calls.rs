@@ -3753,10 +3753,18 @@ impl Engine {
         // nothing drives.
         let current = lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room));
         if current {
-            self.tier_check(room);
-            self.forwarder_check(room);
             let mesh_up = mesh.live_count(STALE_LINK);
             self.lonely_check(room, mesh_up).await;
+            // A device that has been short of working links for `rejoin_after` leads no tier move: its peers are not
+            // with it to follow, and a move of its own would keep it migrating, which holds off the rejoin that brings
+            // it back. A stray alone in a room of its own otherwise starts a move back to a mesh every half minute, to
+            // a generation no peer is in. The forwarder check still runs: a leaf whose volunteer stalled fails over
+            // from there, and its peers are as short of links as it is, so none of them would be settled to rejoin.
+            let lonely_since = lock(&room.lonely).0;
+            if may_lead_moves(lonely_since, Instant::now(), self.inner.timings.rejoin_after) {
+                self.tier_check(room);
+            }
+            self.forwarder_check(room);
         }
         let tick = room.capacity_clock.fetch_add(1, Ordering::SeqCst);
         if tick.is_multiple_of(CAPACITY_EVERY) {
@@ -4198,6 +4206,22 @@ fn media_tier(tier: Tier) -> Tier {
 
 /// The generation id of a room migrated to `tier` with this roster. Two devices with the same
 /// roster name the same generation, so their offers match.
+/// Whether a device is lonely in its room now: peers live in the call, yet too few working links to them. A device
+/// alone in the call is not. `None` while a move is under way: that says nothing either way, and the time already
+/// spent lonely is kept, so a move that fails does not restart the wait for the rejoin.
+fn lonely_now(peers: usize, migrating: bool, settled: bool) -> Option<bool> {
+    if migrating {
+        return None;
+    }
+    Some(peers > 0 && !settled)
+}
+
+/// Whether a device lonely since `since` (`None` if it is not) may still start a tier move: always, until it has been
+/// lonely for `after`, so a fresh join whose links are still forming moves as usual.
+fn may_lead_moves(since: Option<Instant>, now: Instant, after: Duration) -> bool {
+    since.is_none_or(|at| now.duration_since(at) < after)
+}
+
 fn gen_id(base: &RoomId, tier: Tier, roster: &[u8; 32], forwarder: u64) -> RoomId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(GEN_DOMAIN);
@@ -5034,7 +5058,11 @@ impl Engine {
     /// from the others for any reason.
     async fn lonely_check(&self, room: &Arc<Room>, mesh_up: usize) {
         let peers = lock(&room.live).len().saturating_sub(1);
-        let lonely = peers > 0 && !room.migrating.load(Ordering::SeqCst) && !self.settled_in(room, mesh_up).await;
+        let migrating = room.migrating.load(Ordering::SeqCst);
+        let settled = migrating || self.settled_in(room, mesh_up).await;
+        let Some(lonely) = lonely_now(peers, migrating, settled) else {
+            return;
+        };
         let now = Instant::now();
         let after = self.inner.timings.rejoin_after;
         let ask = {
@@ -5904,6 +5932,28 @@ mod rejoin_tests {
         ];
         assert_eq!(rejoin_choice(&replies, &live, &[9; 32]), None, "this device is where the majority is");
         assert_eq!(rejoin_choice(&replies, &live, &[3; 32]).map(|c| c.1), Some([9; 32]), "from the minority's room it goes");
+    }
+}
+
+#[cfg(test)]
+mod lonely_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_alone_in_the_call_is_not_lonely() {
+        assert_eq!(lonely_now(0, false, false), Some(false), "no live peers: nobody to rejoin");
+        assert_eq!(lonely_now(3, false, false), Some(true), "peers live, links short");
+        assert_eq!(lonely_now(3, false, true), Some(false), "settled");
+        assert_eq!(lonely_now(3, true, false), None, "a move under way leaves the count alone");
+    }
+
+    #[test]
+    fn a_fresh_join_still_leads_moves_and_a_long_lonely_device_does_not() {
+        let now = Instant::now();
+        let after = Duration::from_secs(10);
+        assert!(may_lead_moves(None, now, after), "not lonely");
+        assert!(may_lead_moves(Some(now - Duration::from_secs(3)), now, after), "links still forming");
+        assert!(!may_lead_moves(Some(now - after), now, after), "lonely for rejoin_after: it rejoins instead");
     }
 }
 
