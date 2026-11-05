@@ -620,8 +620,8 @@ async fn a_host_tells_the_person_when_it_starts_and_stops_holding_their_mail() {
     assert_eq!(seen, (carol_dev.clone(), true), "the app is told, for an in-app notice");
     assert!(!bob.inbox_notices()[0].chosen, "bob has not picked it yet");
 
-    // Setting what is already set sends nothing.
-    carol.host_inbox_for(bob_root, true).expect("again");
+    // Setting what is already set sends nothing. The first notice leaves carol's outbox only when bob's acknowledgement
+    // gets back to her, which can be a moment after bob has taken it, so the check waits for that first.
     let queued = |e: &Engine| {
         e.read()
             .contact_book
@@ -630,6 +630,8 @@ async fn a_host_tells_the_person_when_it_starts_and_stops_holding_their_mail() {
             .filter(|o| matches!(o.msg.msg, ContactMsg::InboxHost { .. }))
             .count()
     };
+    eventually("carol's first notice is acknowledged", || queued(&carol) == 0).await;
+    carol.host_inbox_for(bob_root, true).expect("again");
     assert_eq!(queued(&carol), 0, "no notice for a change that is none");
 
     carol.host_inbox_for(bob_root, false).expect("carol stops");
