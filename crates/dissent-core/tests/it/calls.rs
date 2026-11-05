@@ -1265,29 +1265,117 @@ pub(crate) fn call_summary(p: &Peer) -> String {
     )
 }
 
-/// A second tier move takes the staged slot while the first move still waits on its room, as one started from the staged
-/// room's own checks did. The first room lost its call loop with the slot. Before, the first move swapped it in anyway
-/// once one peer had followed, and the call sat in a room nothing ran: no audio, no checks, no way back. Now the first
-/// move drops its room, the owner stays in a room whose loop runs, and audio keeps reaching it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
-#[ignore = "networked: run with scripts/fwtest.sh"]
-async fn a_move_replaced_while_staged_never_swaps_in_a_room_without_a_loop() {
-    heavy(6, async {
+/// A mesh of six at level 0, everyone in it.
+async fn mesh_of_six() -> Vec<Peer> {
     let (everyone, community, channel) = boosted_call(6, 0, 5_000).await;
     for p in &everyone {
         p.engine.join_call(community, channel).await.expect("join");
     }
     all_see(&everyone, Topology::Mesh, "a mesh of six").await;
-    // One peer follows the first move, so it links and would swap in; the others refuse.
+    everyone
+}
+
+/// Waits until all six are back in one mesh, each with the other five, audio flowing.
+async fn all_back_in_the_mesh(everyone: &[Peer]) {
+    all_see(everyone, Topology::Mesh, "everyone back in one mesh of six").await;
+}
+
+/// The owner moves its mesh of six to forwarded, and only member 1 follows: the others see another roster (as when one
+/// of them is a key epoch behind) and refuse the move, and the follower's own announcement too. With one link of five the owner does not swap the new tier
+/// in, and stays in the mesh. The one peer that followed is left on a room its mover gave up; it finds itself without
+/// links, asks the others where they are, and rejoins their mesh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_tier_move_most_peers_refuse_leaves_its_mover_in_the_call() {
+    heavy(6, async {
+    let everyone = mesh_of_six().await;
     for p in &everyone[2..] {
         dissent_core::test_support::refuse_tier_moves(&p.engine, true);
     }
-    let owner = &everyone[0];
-    assert!(dissent_core::test_support::force_tier_move(&owner.engine, true), "the first move starts");
+    assert!(dissent_core::test_support::force_tier_move(&everyone[0].engine, true, usize::MAX), "the move starts");
+    // Past the 20 s the move waits for its links: the owner never left the mesh.
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let view = everyone[0].engine.call_state().expect("in the call");
+    assert_eq!(view.topology, Topology::Mesh, "the owner stayed in the mesh: {}", call_summary(&everyone[0]));
+    for p in &everyone[2..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, false);
+    }
+    all_back_in_the_mesh(&everyone).await;
+    finish(everyone).await;
+    }).await;
+}
+
+/// Two devices each move to forwarded alone, and swap the new tier in with no links, as a build without the links rule
+/// would. Each is lonely, and each is the other's only other lonely peer: neither adopts the other's empty room, and
+/// both rejoin the mesh the four settled devices are in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn two_lonely_devices_rejoin_the_settled_mesh_not_each_other() {
+    heavy(6, async {
+    let everyone = mesh_of_six().await;
+    for p in &everyone[..2] {
+        dissent_core::test_support::swap_without_links(&p.engine, true);
+    }
+    for p in &everyone[..2] {
+        assert!(dissent_core::test_support::force_tier_move(&p.engine, true, 0), "the move starts");
+    }
+    // Each swaps its empty room in once the move's link wait runs out, and may be back in the mesh before a check of
+    // its topology could see the forwarded room, so the test reads their tier logs instead.
+    every_device(&everyone[..2], Duration::from_secs(60), "both swapped in a forwarded room of their own", |p| {
+        dissent_core::test_support::call_debug(&p.engine).contains("swapped in Forwarded")
+    })
+    .await;
+    all_back_in_the_mesh(&everyone).await;
+    finish(everyone).await;
+    }).await;
+}
+
+/// The owner's move reaches one peer and the owner swaps it in anyway, with one leaf of five, as before the links rule:
+/// the holds-test split. The owner and its one leaf are short of links; they ask, the four in the mesh are settled
+/// there, and both rejoin it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_split_off_forwarder_and_its_leaf_rejoin_the_mesh() {
+    heavy(6, async {
+    let everyone = mesh_of_six().await;
+    for p in &everyone[2..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, true);
+    }
+    dissent_core::test_support::swap_without_links(&everyone[0].engine, true);
+    assert!(dissent_core::test_support::force_tier_move(&everyone[0].engine, true, usize::MAX), "the move starts");
+    every_device(&everyone[..1], Duration::from_secs(60), "the owner forwards a call of its own", |p| {
+        p.engine.call_state().is_some_and(|v| v.topology == Topology::Forwarded)
+    })
+    .await;
+    dissent_core::test_support::swap_without_links(&everyone[0].engine, false);
+    for p in &everyone[2..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, false);
+    }
+    all_back_in_the_mesh(&everyone).await;
+    finish(everyone).await;
+    }).await;
+}
+
+/// A second tier move takes the staged slot while the first move still waits on its room. The first room has lost its
+/// call loop with the slot. Before, the first move swapped it in anyway at the end of its wait, and the call sat in a
+/// room nothing ran: no audio, no checks, no way back. Now the first move drops its room, the call stays in a room
+/// whose loop runs, and audio keeps flowing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_move_replaced_while_staged_never_swaps_in_a_room_without_a_loop() {
+    heavy(6, async {
+    let everyone = mesh_of_six().await;
+    for p in &everyone[1..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, true);
+    }
+    // The first move would swap its room in with no links at all, so only the slot decides whether it does.
+    dissent_core::test_support::swap_without_links(&everyone[0].engine, true);
+    assert!(dissent_core::test_support::force_tier_move(&everyone[0].engine, true, usize::MAX), "the first move starts");
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(dissent_core::test_support::start_second_move(&owner.engine, false), "the second move starts");
+    assert!(dissent_core::test_support::start_second_move(&everyone[0].engine, false), "the second move starts");
     // Past the first move's 20 s wait and the second's.
     tokio::time::sleep(Duration::from_secs(25)).await;
+    let owner = &everyone[0];
     let log = dissent_core::test_support::call_debug(&owner.engine);
     assert!(log.contains("another move took its place"), "the first move dropped its room: {log}");
     let ticks = dissent_core::test_support::call_loop_ticks(&owner.engine);
@@ -1303,6 +1391,57 @@ async fn a_move_replaced_while_staged_never_swaps_in_a_room_without_a_loop() {
         "audio still reaches the owner: {}",
         call_summary(owner)
     );
+    for p in &everyone[1..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, false);
+    }
+    all_back_in_the_mesh(&everyone).await;
+    finish(everyone).await;
+    }).await;
+}
+
+/// Two connects to one peer cross: the second starts while the first is still in its handshake, and each answer comes
+/// back while the other connect still waits for its own, as when a tier move and a join link the same pair at once.
+/// Before, the second replaced the first call, the first answer landed on it, and neither end of the pair connected.
+/// Now the call still connecting is kept, no answer is applied to a call that did not offer it, and the pair ends up
+/// with one call that works on both ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn two_connects_that_cross_leave_one_working_call() {
+    heavy(2, async {
+    let (everyone, community, channel) = boosted_call(2, 0, 5_000).await;
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    // Two devices in a channel call link straight to each other, which the view shows as P2p.
+    all_see(&everyone, Topology::P2p, "a call of two").await;
+    let (a, b) = (&everyone[0], &everyone[1]);
+    let (a_dev, b_dev) = (a.identity.device_id(), b.identity.device_id());
+    assert!(dissent_core::test_support::drop_mesh_call(&a.engine, b_dev).await, "a had a call to b");
+    assert!(dissent_core::test_support::drop_mesh_call(&b.engine, a_dev).await, "b had a call to a");
+    let ((first, second), offerer, answerer) = match dissent_core::test_support::race_connects(&a.engine, b_dev).await {
+        Some(outcomes) => (outcomes, a, b),
+        None => (
+            dissent_core::test_support::race_connects(&b.engine, a_dev).await.expect("one of the two offers"),
+            b,
+            a,
+        ),
+    };
+    assert_eq!(first, "linked", "the first connect makes the call (the second: {second})");
+    let deadline = std::time::Instant::now() + scaled(Duration::from_secs(20));
+    loop {
+        let offerer_live = dissent_core::test_support::mesh_call_live(&offerer.engine, answerer.identity.device_id()).await;
+        let answerer_live = dissent_core::test_support::mesh_call_live(&answerer.engine, offerer.identity.device_id()).await;
+        if offerer_live && answerer_live {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the call works on both ends (offerer {offerer_live}, answerer {answerer_live}; second connect: {second}): {} | {}",
+            call_summary(offerer),
+            call_summary(answerer)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     finish(everyone).await;
     }).await;
 }

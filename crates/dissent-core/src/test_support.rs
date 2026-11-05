@@ -6,16 +6,24 @@ use dissent_identity::Vault;
 #[cfg(feature = "test-hooks")]
 pub use crate::presence::mute_gossip_for_tests;
 
-/// Moves `engine`'s call to forwarded (or back to a mesh) now. False when there is no call to move.
+/// Moves `engine`'s call to forwarded (or back to a mesh), announcing it to only `reach` peers, as when most of them
+/// see another roster and refuse the move. Returns false when there is no call to move.
 #[cfg(feature = "test-hooks")]
-pub fn force_tier_move(engine: &crate::Engine, forwarded: bool) -> bool {
-    engine.force_tier_move_now(forwarded)
+pub fn force_tier_move(engine: &crate::Engine, forwarded: bool, reach: usize) -> bool {
+    engine.force_tier_move_now(forwarded, reach)
 }
 
 /// Makes `engine` refuse every tier announcement, as a device that sees another roster does.
 #[cfg(feature = "test-hooks")]
 pub fn refuse_tier_moves(engine: &crate::Engine, on: bool) {
     engine.refuse_tier_moves_now(on);
+}
+
+/// Makes `engine` swap in its next tier move whatever links it made, as a build without the links-needed rule did,
+/// so a test can leave a device alone in a room of its own. Only that one move: the rejoin after it keeps the rule.
+#[cfg(feature = "test-hooks")]
+pub fn swap_without_links(engine: &crate::Engine, on: bool) {
+    engine.swap_without_links_now(on);
 }
 
 /// Starts a second tier move on `engine` while its first is still staged, past the guard that keeps moves one at a time.
@@ -28,6 +36,28 @@ pub fn start_second_move(engine: &crate::Engine, forwarded: bool) -> bool {
 #[cfg(feature = "test-hooks")]
 pub fn call_loop_ticks(engine: &crate::Engine) -> u64 {
     engine.call_loop_ticks_now()
+}
+
+/// Drops `engine`'s mesh call to `device`, as a link that died. False without one.
+#[cfg(feature = "test-hooks")]
+pub async fn drop_mesh_call(engine: &crate::Engine, device: dissent_identity::DeviceId) -> bool {
+    engine.drop_mesh_call_now(device).await
+}
+
+/// Runs two connects from `engine` to `device` that cross: the second starts while the first is still in its handshake,
+/// and each holds the answer it gets, so an answer comes back while the other connect waits for its own. Returns both
+/// outcomes as text, or `None` when `engine` is not the side that offers to `device`.
+#[cfg(feature = "test-hooks")]
+pub async fn race_connects(engine: &crate::Engine, device: dissent_identity::DeviceId) -> Option<(String, String)> {
+    let (first, second) = engine.race_connects_now(device).await?;
+    let show = |r: crate::Result<()>| r.map_or_else(|e| e.to_string(), |()| "linked".into());
+    Some((show(first), show(second)))
+}
+
+/// Whether `engine`'s mesh call to `device` works: connected, and heard from within the last few seconds.
+#[cfg(feature = "test-hooks")]
+pub async fn mesh_call_live(engine: &crate::Engine, device: dissent_identity::DeviceId) -> bool {
+    engine.mesh_call_live_now(device).await
 }
 
 /// Holds back `engine`'s call `Features` for `hold`, as a joiner whose first one is slow to arrive on a loaded machine.
@@ -88,6 +118,8 @@ pub fn fast_timings() -> crate::Timings {
         tier_return_backoff_cap: Duration::from_secs(12),
         settle_after_swap: Duration::from_secs(3),
         pending_add_wait: Duration::from_secs(2),
+        rejoin_after: Duration::from_secs(3),
+        connect_grace: Duration::from_secs(5),
         epoch_check_every: Duration::from_secs(3),
         epoch_check_gap: Duration::from_secs(1),
     }

@@ -163,6 +163,10 @@ pub(crate) enum CallMsg {
     /// viewer when the set changes, so the viewer shows those streams as paused, not frozen. See
     /// `call_layers`.
     PausedVideo { room: RoomId, streams: Vec<(u64, bool)> },
+    /// The sender has too few working links in its room of this call and asks which room the receiver is in, to
+    /// rejoin it. Answered with `CallReply::There`. Appended after the released variants: a released device answers it
+    /// as a bad request, which counts as no answer. See `rejoin`.
+    WhereIs { room: RoomId },
 }
 
 /// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
@@ -239,6 +243,9 @@ pub(crate) enum CallReply {
     /// The accepting side's answer to an offer.
     Answer(Vec<u8>),
     Ack,
+    /// The room the replier is in for the asked call: its tier, generation and forwarder, and whether it has enough
+    /// working links there to be worth joining. Only a device that asked `WhereIs` reads it.
+    There { tier: Tier, gen: RoomId, forwarder: Option<u64>, settled: bool },
 }
 
 /// A call's audio, both directions. The synthetic one sends constant frames and plays nothing,
@@ -668,6 +675,11 @@ pub(crate) struct Room {
     features: Mutex<BTreeMap<u64, (u64, Instant)>>,
     /// When each live sender id was first seen live, for `Timings::unheard_grace`.
     seen_live: Mutex<BTreeMap<u64, Instant>>,
+    /// Since when this room has had too few working links with peers still live, and when it last asked them where
+    /// they are. See `rejoin`.
+    lonely: Mutex<(Option<Instant>, Option<Instant>)>,
+    /// The engine's count of rooms not yet dropped, for a test that looks for one kept alive. See `Drop for Room`.
+    alive: Arc<AtomicUsize>,
     /// Devices this room has sent its own `Features` to, by sender id.
     told: Mutex<std::collections::BTreeSet<u64>>,
     /// Offers to forward this call from members who are not in it, by sender id. See `volunteers`.
@@ -727,8 +739,10 @@ struct SendCounts {
     sent: u64,
     /// Frames it refused, by error.
     failed: BTreeMap<String, u64>,
-    /// Ticks with no audio to send.
+    /// Ticks with no audio to send, because the source gave nothing.
     empty: u64,
+    /// Ticks that took no audio because the room was not sending.
+    not_sending: u64,
 }
 
 /// Which code last took a room's mesh lock, for `Room::mesh_by`.
@@ -816,16 +830,30 @@ pub(crate) struct CallHub {
     /// Test override of this device's measured capacity in kbps. Zero means measure.
     capacity_override: AtomicU32,
     /// The last tier moves this device made or followed, and why, newest last, for a test that timed out.
-    tier_log: Mutex<VecDeque<String>>,
+    tier_log: Mutex<VecDeque<(Instant, String)>>,
     /// What the current call's tier moves left behind, for the way back from forwarded. See `TierMemory`.
     tier_memory: Mutex<Option<(RoomId, TierMemory)>>,
-    /// Test hook: no `Features` leave this device before then, as when its first one is slow to arrive.
+    /// Test hook: the next tier announcement goes to only this many peers.
     #[cfg(feature = "test-hooks")]
-    features_held_until: Mutex<Option<Instant>>,
+    tier_announce_reach: Mutex<Option<usize>>,
+    /// Test hook: the next tier move swaps in whatever links it made. Taken by that move.
+    #[cfg(feature = "test-hooks")]
+    swap_without_links: AtomicBool,
     /// Test hook: this device refuses every tier announcement, as one that sees another roster does.
     #[cfg(feature = "test-hooks")]
     refuse_tier_moves: AtomicBool,
-    incoming: Mutex<BTreeMap<DeviceId, MediaLink>>,
+    /// Test hook: how long each of the next mesh connects holds the answer it got before applying it, in order.
+    #[cfg(feature = "test-hooks")]
+    answer_holds: Mutex<VecDeque<Duration>>,
+    /// When each device's last `WhereIs` was answered, so a peer cannot keep this device busy answering.
+    where_answered: Mutex<BTreeMap<DeviceId, Instant>>,
+    /// Rooms made and not yet dropped. A room swapped out of a call should go within a tick.
+    pub(crate) rooms_alive: Arc<AtomicUsize>,
+    /// Test hook: no `Features` leave this device before then, as when its first one is slow to arrive.
+    #[cfg(feature = "test-hooks")]
+    features_held_until: Mutex<Option<Instant>>,
+    /// Media links dialled to this device, by the device that dialled, with when each arrived.
+    incoming: Mutex<BTreeMap<DeviceId, (MediaLink, Instant)>>,
     arrived: Notify,
     pub(crate) ringing: Mutex<Option<Ringing>>,
     pub(crate) ring_timeout: Mutex<Duration>,
@@ -859,9 +887,17 @@ impl CallHub {
             tier_log: Mutex::new(VecDeque::new()),
             tier_memory: Mutex::new(None),
             #[cfg(feature = "test-hooks")]
-            features_held_until: Mutex::new(None),
+            tier_announce_reach: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            swap_without_links: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             refuse_tier_moves: AtomicBool::new(false),
+            #[cfg(feature = "test-hooks")]
+            answer_holds: Mutex::new(VecDeque::new()),
+            where_answered: Mutex::new(BTreeMap::new()),
+            rooms_alive: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "test-hooks")]
+            features_held_until: Mutex::new(None),
             incoming: Mutex::new(BTreeMap::new()),
             arrived: Notify::new(),
             ringing: Mutex::new(None),
@@ -882,7 +918,7 @@ pub(crate) struct MediaSink(Weak<Inner>);
 impl MediaHandler for MediaSink {
     fn incoming(&self, from: DeviceId, link: MediaLink) {
         if let Some(inner) = self.0.upgrade() {
-            lock(&inner.calls.incoming).insert(from, link);
+            lock(&inner.calls.incoming).insert(from, (link, Instant::now()));
             inner.calls.arrived.notify_waiters();
         }
     }
@@ -1123,6 +1159,12 @@ fn path_is_direct(link: &MediaLink) -> bool {
     matches!(link.path(), PathKind::Direct | PathKind::Mixed)
 }
 
+impl Drop for Room {
+    fn drop(&mut self) {
+        self.alive.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl Room {
     fn at_step(&self, step: u32) {
         self.step.store(step, Ordering::Relaxed);
@@ -1136,8 +1178,11 @@ impl Room {
         my_sid: u64,
         epoch: u64,
         peer: Option<RootId>,
+        alive: &Arc<AtomicUsize>,
     ) -> Self {
+        alive.fetch_add(1, Ordering::Relaxed);
         Self {
+            alive: alive.clone(),
             id,
             scope,
             my_sid,
@@ -1165,6 +1210,7 @@ impl Room {
             forwarder_since: Mutex::new(None),
             features: Mutex::new(BTreeMap::new()),
             seen_live: Mutex::new(BTreeMap::new()),
+            lonely: Mutex::new((None, None)),
             told: Mutex::new(std::collections::BTreeSet::new()),
             offers: Mutex::new(BTreeMap::new()),
             stall: Mutex::new(volunteers::StallWatch::new()),
@@ -1790,7 +1836,9 @@ async fn drive_loop(weak: Weak<Inner>, room: Weak<Room>) {
         if room.sending.load(Ordering::SeqCst) {
             lock(&room.audio).outgoing(&mut outgoing);
         }
-        if outgoing.is_empty() {
+        if !room.sending.load(Ordering::SeqCst) {
+            lock(&room.sends).not_sending += 1;
+        } else if outgoing.is_empty() {
             lock(&room.sends).empty += 1;
         }
         room.at_step(step::SEND);
@@ -2218,7 +2266,7 @@ impl Engine {
         let auth = self.auth_for(&certs);
         let mesh = Mesh::new_authenticated(key.clone(), my_sid, auth.clone()).map_err(call_err)?;
         // A call starts as a mesh. The live roster moves it to a forwarded tier when it grows.
-        let room = Room::new(room_id, scope, mesh, my_sid, epoch, None);
+        let room = Room::new(room_id, scope, mesh, my_sid, epoch, None, &self.inner.calls.rooms_alive);
         lock(&room.live).insert(my_sid, self.inner.identity.device_id());
         let room = Arc::new(room);
         lock(&room.leaves).extend(indexed.iter().map(|(s, d, _)| (*d, *s)));
@@ -2268,7 +2316,7 @@ impl Engine {
         auth_certs.extend(certs.iter().map(|c| (device_sid(&c.device), c.clone())));
         let mesh = Mesh::new_authenticated(MediaKey::new(key), my_sid, self.auth_for(&auth_certs))
             .map_err(call_err)?;
-        let room = Room::new(room_id, Scope::Dm, mesh, my_sid, 0, Some(peer));
+        let room = Room::new(room_id, Scope::Dm, mesh, my_sid, 0, Some(peer), &self.inner.calls.rooms_alive);
         lock(&room.leaves).extend(devices.iter().map(|d| (*d, device_sid(d))));
         let room = Arc::new(room);
         self.install(room.clone());
@@ -2342,6 +2390,7 @@ impl Engine {
                 if room.offers_to(&device) {
                     if let Err(e) = self.connect(room.clone(), device).await {
                         warn!(device = %device, error = %e, "call link not made");
+                        self.note_tier(format!("link to {} not made: {e}", &device.to_string()[..8]));
                     }
                 }
                 true
@@ -2371,9 +2420,13 @@ impl Engine {
         let link = self.node().open_media(device).await?;
         room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
-        let offer = {
+        let (offer, token) = {
             let mut mesh = room.mesh.lock().await;
             room.mesh_by.store(mesh_site::OFFER, Ordering::Relaxed);
+            // A call already there is replaced only when it no longer works, as when the peer came back from another
+            // room. A working one stays, and so does one still in its handshake, so crossing or duplicate offers cannot
+            // tear it down.
+            mesh.replace_if_stale(sid, STALE_LINK, self.inner.timings.connect_grace).map_err(call_err)?;
             mesh.offer(sid, transport).await.map_err(call_err)?
         };
         let reply = self
@@ -2389,7 +2442,16 @@ impl Engine {
         match reply {
             CallReply::Answer(bytes) => {
                 let answer = Signal::from_bytes(&bytes).map_err(call_err)?;
-                room.mesh.lock().await.apply(sid, answer).map_err(call_err)?;
+                #[cfg(feature = "test-hooks")]
+                {
+                    let hold = lock(&self.inner.calls.answer_holds).pop_front();
+                    if let Some(hold) = hold {
+                        tokio::time::sleep(hold).await;
+                    }
+                }
+                // The token ties the answer to this offer's call. If another connect replaced that call meanwhile,
+                // the answer is refused rather than applied to a call that never offered it.
+                room.mesh.lock().await.apply(sid, token, answer).map_err(call_err)?;
                 room.add_peer(sid, device, self.root_of_device(&device));
                 room.links.fetch_add(1, Ordering::SeqCst);
                 if matches!(room.scope, Scope::Dm) {
@@ -2416,8 +2478,15 @@ impl Engine {
         loop {
             // Created before the check, so a link that lands in between still wakes us.
             let arrived = self.inner.calls.arrived.notified();
-            if let Some(link) = lock(&self.inner.calls.incoming).remove(&from) {
-                return Ok(link);
+            match lock(&self.inner.calls.incoming).remove(&from) {
+                // A link that waited longer than any offer takes to follow its link belongs to an earlier offer that
+                // never came, or was refused. Taking it would bind this offer's call to a link its sender no longer
+                // reads, so it is dropped, and this offer waits for its own.
+                Some((_, at)) if at.elapsed() > STALE_INCOMING => {
+                    self.note_tier(format!("dropped a media link from {} that waited {:?}", &from.to_string()[..8], at.elapsed()));
+                }
+                Some((link, _)) => return Ok(link),
+                None => {}
             }
             if tokio::time::timeout_at(deadline, arrived).await.is_err() {
                 return Err(call_err("no media link from the peer"));
@@ -2544,6 +2613,7 @@ impl Engine {
             CallMsg::ForwarderStalled { room, forwarder, spoke } => self.on_forwarder_stalled(from, room, forwarder, spoke),
             CallMsg::RelayLeaf { room, gen, sid } => self.on_relay_leaf(from, room, gen, sid).await,
             CallMsg::PausedVideo { room, streams } => self.on_paused_video(from, room, streams),
+            CallMsg::WhereIs { room } => self.on_where_is(from, room).await,
         }
     }
 
@@ -3154,7 +3224,7 @@ impl Engine {
         let certs = vec![(my_sid, self.my_cert()), (peer_sid, cert.clone())];
         let mesh = Mesh::new_authenticated(MediaKey::new(key), my_sid, self.auth_for(&certs))
             .map_err(call_err)?;
-        let room = Room::new(id, Scope::Dm, mesh, my_sid, 0, Some(cert.root));
+        let room = Room::new(id, Scope::Dm, mesh, my_sid, 0, Some(cert.root), &self.inner.calls.rooms_alive);
         lock(&room.leaves).insert(cert.device, peer_sid);
         let room = Arc::new(room);
         self.install(room.clone());
@@ -3192,6 +3262,10 @@ impl Engine {
                 None => {
                     let mut mesh = room.mesh.lock().await;
                     room.mesh_by.store(mesh_site::ACCEPT, Ordering::Relaxed);
+                    // A peer offers again after it lost the link or came back from another room. A call to it that no
+                    // longer works is replaced; a working one, or one still in its handshake, stays, and the offer is
+                    // refused.
+                    mesh.replace_if_stale(sid, STALE_LINK, self.inner.timings.connect_grace).map_err(call_err)?;
                     mesh.accept(sid, transport, offer).await.map_err(call_err)?
                 }
             };
@@ -3206,7 +3280,16 @@ impl Engine {
         .await;
         match outcome {
             Ok(bytes) => CallReply::Answer(bytes),
-            Err(e) => CallReply::Refused(e.to_string()),
+            Err(e) => {
+                let sid = room.sid_of(&from).unwrap_or(0);
+                let had = room.mesh.lock().await.describe_call(sid);
+                self.note_tier(format!(
+                    "refused offer from {} gen {}: {e}; call there {had:?}",
+                    &from.to_string()[..8],
+                    hex(&room.gen[..4])
+                ));
+                CallReply::Refused(e.to_string())
+            }
         }
     }
 
@@ -3668,9 +3751,12 @@ impl Engine {
         // Moves start only from the current room. A staged room is checked too, but a move started from it would
         // replace it in the staged slot while its own move still waits on it, and leave that move swapping in a room
         // nothing drives.
-        if lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room)) {
+        let current = lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room));
+        if current {
             self.tier_check(room);
             self.forwarder_check(room);
+            let mesh_up = mesh.live_count(STALE_LINK);
+            self.lonely_check(room, mesh_up).await;
         }
         let tick = room.capacity_clock.fetch_add(1, Ordering::SeqCst);
         if tick.is_multiple_of(CAPACITY_EVERY) {
@@ -4122,6 +4208,58 @@ fn gen_id(base: &RoomId, tier: Tier, roster: &[u8; 32], forwarder: u64) -> RoomI
     *hasher.finalize().as_bytes()
 }
 
+/// One peer's answer to `WhereIs`, as the asker checks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WhereReply {
+    pub from: u64,
+    pub tier: Tier,
+    pub gen: RoomId,
+    pub forwarder: Option<u64>,
+    pub settled: bool,
+}
+
+/// The room a lonely device rejoins, from its peers' answers: the (tier, generation, forwarder) the most settled
+/// peers are in, the lowest generation on a tie, so every lonely device picks the same one. One settled answer is
+/// enough, as a small call needs. Unsettled answers count for nothing: two lonely devices never adopt each other's
+/// room. An answer from a device outside `live`, or naming a forwarder outside it, or a tier other than a mesh or a
+/// forwarded call, is ignored. `None` when nothing settled answers, or when the room they are in is `current`: this
+/// device is in the right room already, and its links need time, not another move. Leaving `current` out of the count
+/// would instead pick the minority, and a device would flap between the two rooms.
+pub(crate) fn rejoin_choice(replies: &[WhereReply], live: &[u64], current: &RoomId) -> Option<(Tier, RoomId, Option<u64>)> {
+    let mut counts: BTreeMap<(RoomId, u8, Option<u64>), (usize, Tier)> = BTreeMap::new();
+    for r in replies {
+        let tier_ok = matches!(r.tier, Tier::Mesh) || (r.tier == Tier::Forwarded && r.forwarder.is_some_and(|f| live.contains(&f)));
+        if !r.settled || !live.contains(&r.from) || !tier_ok {
+            continue;
+        }
+        counts.entry((r.gen, tier_tag(r.tier), r.forwarder)).or_insert((0, r.tier)).0 += 1;
+    }
+    // The most answers win; on a tie the first key, which is the lowest generation.
+    let best = counts.values().map(|(n, _)| *n).max()?;
+    counts
+        .into_iter()
+        .find(|(_, (n, _))| *n == best)
+        .map(|((gen, _, forwarder), (_, tier))| (tier, gen, forwarder))
+        .filter(|(_, gen, _)| gen != current)
+}
+
+/// How long a dialled media link may wait for its offer before it counts as left over from an earlier offer. An
+/// offer follows its link within one request, so this is well above that.
+const STALE_INCOMING: Duration = Duration::from_secs(5);
+
+/// How long a mesh call may go without a datagram before a new link from that peer replaces it. Every call carries
+/// RTCP and keepalives well within this, so a working one is never taken for stale.
+const STALE_LINK: Duration = Duration::from_secs(3);
+
+/// The links a device needs before it swaps in a new tier, of the `expected` ones: a leaf its one link to the
+/// forwarder, anyone else a majority.
+pub(crate) fn links_needed(expected: usize, role: Option<Role>) -> usize {
+    match role {
+        Some(Role::Leaf) => expected.min(1),
+        _ => (expected / 2 + 1).min(expected),
+    }
+}
+
 /// What a call's moves into and out of forwarded leave behind, on each device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TierMemory {
@@ -4234,19 +4372,25 @@ impl Engine {
         }
     }
 
-    /// Keeps a line on a tier move for `call_debug`, the newest eight.
+    /// Keeps a line on a tier move for `call_debug`, with when it happened, the newest sixteen.
     fn note_tier(&self, line: String) {
         let mut log = lock(&self.inner.calls.tier_log);
-        if log.len() == 8 {
+        if log.len() == 16 {
             log.pop_front();
         }
-        log.push_back(line);
+        log.push_back((Instant::now(), line));
     }
 
     fn spawn_migration(&self, old: Arc<Room>, to: Tier, forced: Option<u64>) {
+        self.spawn_migration_to(old, to, forced, None);
+    }
+
+    /// As `spawn_migration`. With `adopt`, the new room joins that generation, with that forwarder, without telling
+    /// anyone: it rejoins a room the others are in already. See `rejoin`.
+    fn spawn_migration_to(&self, old: Arc<Room>, to: Tier, forced: Option<u64>, adopt: Option<(RoomId, Option<u64>)>) {
         let engine = self.clone();
         self.spawn_task(async move {
-            if let Err(e) = engine.migrate(&old, to, forced).await {
+            if let Err(e) = engine.migrate(&old, to, forced, adopt).await {
                 warn!(error = %e, "call migration failed; staying on the current tier");
             }
             old.migrating.store(false, Ordering::SeqCst);
@@ -4255,7 +4399,7 @@ impl Engine {
 
     /// Builds the room for `to` beside the current one, links it to the live roster, and swaps it
     /// in once it is linked enough. Until then the old room carries the audio.
-    async fn migrate(&self, old: &Arc<Room>, to: Tier, forced: Option<u64>) -> Result<()> {
+    async fn migrate(&self, old: &Arc<Room>, to: Tier, forced: Option<u64>, adopt: Option<(RoomId, Option<u64>)>) -> Result<()> {
         let Some(group) = old.scope.group_id() else {
             return Err(call_err("only channel calls migrate"));
         };
@@ -4271,7 +4415,7 @@ impl Engine {
         let certs: Vec<(u64, DeviceCert)> = indexed.iter().map(|(s, _, c)| (*s, c.clone())).collect();
         let auth = self.auth_for(&certs);
         let mesh = Mesh::new_authenticated(key.clone(), my_sid, auth.clone()).map_err(call_err)?;
-        let mut room = Room::new(old.id, old.scope, mesh, my_sid, epoch, None);
+        let mut room = Room::new(old.id, old.scope, mesh, my_sid, epoch, None, &self.inner.calls.rooms_alive);
         room.features = Mutex::new(lock(&old.features).clone());
         room.offers = Mutex::new(lock(&old.offers).clone());
         room.own_kbps = AtomicU32::new(old.own_kbps.load(Ordering::SeqCst));
@@ -4281,14 +4425,18 @@ impl Engine {
         // A tier change elects on the roster and the volunteers' offers alone. Each device sees
         // capacities at its own times, so electing on them here could split the call across two
         // forwarders. An offer reaches every device in the call at once.
-        let (forwarder, volunteer) = match to {
-            Tier::Forwarded => {
+        let (forwarder, volunteer) = match (to, adopt) {
+            (Tier::Forwarded, Some((_, Some(forwarder)))) => (Some(forwarder), None),
+            (Tier::Forwarded, _) => {
                 let (forwarder, volunteer) = self.migration_forwarder(old, &sids, forced)?;
                 (Some(forwarder), volunteer)
             }
             _ => (None, None),
         };
-        room.gen = gen_id(&old.id, to, &roster, forwarder.unwrap_or(0));
+        room.gen = match adopt {
+            Some((gen, _)) => gen,
+            None => gen_id(&old.id, to, &roster, forwarder.unwrap_or(0)),
+        };
         room.tier = to;
         room.sending = AtomicBool::new(false);
         *lock(&room.live) = live.clone();
@@ -4317,7 +4465,13 @@ impl Engine {
         let others: Vec<DeviceId> = live.values().copied().filter(|d| *d != me).collect();
         // A volunteer forwarder is not live. It is told too, since it builds its relay from this.
         let volunteer = volunteer.map(|(device, _)| device);
-        for device in others.iter().chain(volunteer.iter()) {
+        #[cfg(feature = "test-hooks")]
+        let reach = lock(&self.inner.calls.tier_announce_reach).take().unwrap_or(usize::MAX);
+        #[cfg(not(feature = "test-hooks"))]
+        let reach = usize::MAX;
+        // A rejoin joins a room the others are in already, so there is nothing to announce.
+        let reach = if adopt.is_some() { 0 } else { reach };
+        for device in others.iter().chain(volunteer.iter()).take(reach) {
             let engine = self.clone();
             let device = *device;
             let msg = CallMsg::Tier(Box::new(announce.clone()));
@@ -4332,11 +4486,21 @@ impl Engine {
             warn!(error = %e, "forwarder's own link not made for the new tier");
         }
         for device in others.iter().chain(volunteer.iter()) {
-            if room.offers_to(device) {
+            // A rejoin linked through `join_devices` above.
+            if room.offers_to(device) && adopt.is_none() {
                 if let Err(e) = self.connect(room.clone(), *device).await {
                     debug!(device = %device, error = %e, "new-tier link not made yet");
+                    self.note_tier(format!("link to {} not made: {e}", &device.to_string()[..8]));
                 }
             }
+        }
+
+        // A rejoin tells every live peer it is back with a `Join`, so each drops its old call to this device and links
+        // again: it offers to the ones this device does not offer to, and accepts this device's offer, which `join_one`
+        // makes right after the peer answers. They still count it in the call, and would not otherwise notice it left
+        // their room.
+        if adopt.is_some() {
+            self.join_devices(&room, &others, None).await;
         }
 
         // A leaf needs one link, to the forwarder. Anyone else needs one to each live peer.
@@ -4350,19 +4514,41 @@ impl Engine {
                 Role::Root => others.len(),
             },
         };
+        // The new tier is swapped in only with enough of those links: a leaf its one, anyone else a majority. With
+        // fewer, the peers mostly did not follow, as when they see another roster, and moving anyway would leave this
+        // device apart from them. It stays on the old tier instead.
+        let needed = links_needed(expected, room.forwarding.as_ref().map(|f| f.role));
+        #[cfg(feature = "test-hooks")]
+        let needed = if self.inner.calls.swap_without_links.swap(false, Ordering::Relaxed) { 0 } else { needed };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
-            // Another move took the staged slot. This room's loop has stopped, so it can never carry the call: it is
-            // dropped here, which hangs up its links, and the other move goes on.
+            // Another move took the staged slot. This room's driver has stopped, so it can never carry the call: it
+            // is dropped here, which hangs up its links, and the other move goes on.
             if !lock(&self.inner.calls.staged).as_ref().is_some_and(|s| Arc::ptr_eq(s, &room)) {
-                self.note_tier(format!("drops {to:?}: another move took its place"));
+                self.note_tier(format!("drops {to:?} gen {}: another move took its place", hex(&room.gen[..4])));
                 return Err(call_err("another tier move replaced this one"));
             }
-            let linked = room.links.load(Ordering::SeqCst);
+            // Links that work, not offers answered: an answered offer whose other end never connects carries nothing.
+            let mesh_up = room.mesh.lock().await.live_count(STALE_LINK);
+            let linked = match self.links_up(&room, mesh_up).await {
+                Some((up, _)) => up,
+                None => room.links.load(Ordering::SeqCst),
+            };
             if linked >= expected || std::time::Instant::now() >= deadline {
-                if linked == 0 {
+                if linked < needed.max(1) && needed > 0 {
                     clear_staged(&self.inner, &room);
-                    return Err(call_err("the new tier linked no peers in time"));
+                    let calls: Vec<String> = {
+                        let mesh = room.mesh.lock().await;
+                        mesh.peers().into_iter().map(|sid| format!("{sid}: {}", mesh.describe_call(sid).unwrap_or_default())).collect()
+                    };
+                    self.note_tier(format!(
+                        "stays {:?} gen {}: {to:?} gen {} linked {linked} of {expected}, needs {needed}; calls [{}]",
+                        old.tier,
+                        hex(&old.gen[..4]),
+                        hex(&room.gen[..4]),
+                        calls.join(", ")
+                    ));
+                    return Err(call_err("too few peers followed the new tier in time"));
                 }
                 break;
             }
@@ -4398,6 +4584,7 @@ impl Engine {
             *current = Some(new.clone());
             *staged = None;
         }
+        self.note_tier(format!("swapped in {:?} gen {} for gen {}", new.tier, hex(&new.gen[..4]), hex(&old.gen[..4])));
         // The old room's presence clock stops with it, so the new room keeps the roster re-sent.
         // Without it the call's roster lapses for the server's other members after a migration, and a
         // volunteer stops hearing of the call it forwards.
@@ -4710,18 +4897,19 @@ impl Engine {
         }
     }
 
-    /// Test hook: moves the current call to forwarded (or back to a mesh) now, whatever the policy says. False when
-    /// there is no call, or a move is under way. See `test_support::force_tier_move`.
+    /// Test hook: moves this device's call to forwarded (or back to a mesh), announcing it to only `reach` peers, as
+    /// when most of them see another roster and refuse it. Returns false when there is no call to move.
     #[cfg(feature = "test-hooks")]
-    pub(crate) fn force_tier_move_now(&self, forwarded: bool) -> bool {
+    pub(crate) fn force_tier_move_now(&self, forwarded: bool, reach: usize) -> bool {
         let Some(room) = lock(&self.inner.calls.current).clone() else {
             return false;
         };
         if room.migrating.swap(true, Ordering::SeqCst) {
             return false;
         }
+        *lock(&self.inner.calls.tier_announce_reach) = Some(reach);
         let to = if forwarded { Tier::Forwarded } else { Tier::Mesh };
-        self.note_tier(format!("forced {:?}->{to:?}", room.tier));
+        self.note_tier(format!("forced {:?}->{to:?}, announced to {reach}", room.tier));
         self.spawn_migration(room, to, None);
         true
     }
@@ -4743,7 +4931,7 @@ impl Engine {
         let to = if forwarded { Tier::Forwarded } else { Tier::Mesh };
         let engine = self.clone();
         self.spawn_task(async move {
-            if let Err(e) = engine.migrate(&room, to, None).await {
+            if let Err(e) = engine.migrate(&room, to, None, None).await {
                 engine.note_tier(format!("second move ended: {e}"));
             }
         });
@@ -4754,6 +4942,205 @@ impl Engine {
     #[cfg(feature = "test-hooks")]
     pub(crate) fn call_loop_ticks_now(&self) -> u64 {
         lock(&self.inner.calls.current).as_ref().map_or(0, |room| room.loop_stats[0].load(Ordering::Relaxed))
+    }
+
+    /// Test hook: drops the current mesh's call to `device`, as a link that died. See `test_support::drop_mesh_call`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn drop_mesh_call_now(&self, device: DeviceId) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        let Some(sid) = room.sid_of(&device) else {
+            return false;
+        };
+        let dropped = room.mesh.lock().await.remove_peer(sid);
+        dropped
+    }
+
+    /// Test hook: two connects to `device` that cross. The first holds its answer for a second, and the second starts
+    /// while the first is still in its handshake and holds its own answer for two. `None` when this device is not the
+    /// one that offers to `device`. See `test_support::race_connects`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn race_connects_now(&self, device: DeviceId) -> Option<(Result<()>, Result<()>)> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        if room.sid_of(&device)? < room.my_sid() {
+            return None;
+        }
+        lock(&self.inner.calls.answer_holds).extend([Duration::from_secs(1), Duration::from_secs(2)]);
+        let first = self.connect(room.clone(), device);
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.connect(room.clone(), device).await
+        };
+        Some(tokio::join!(first, second))
+    }
+
+    /// Test hook: whether the current mesh's call to `device` works: connected, and heard within `STALE_LINK`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) async fn mesh_call_live_now(&self, device: DeviceId) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        let Some(sid) = room.sid_of(&device) else {
+            return false;
+        };
+        let health = room.mesh.lock().await.call_health(sid);
+        health.is_some_and(|(connected, heard)| connected && heard.is_some_and(|h| h < STALE_LINK))
+    }
+
+    /// Test hook: tier moves swap in whatever links they made. See `test_support::swap_without_links`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn swap_without_links_now(&self, on: bool) {
+        self.inner.calls.swap_without_links.store(on, Ordering::Relaxed);
+    }
+
+    /// The working links this device has in `room` now, and how many it would need for its role: a mesh device's to
+    /// each live peer, a leaf's to its forwarder, a forwarder's to each leaf. `None` for a cascade, which is left to its
+    /// own failover.
+    /// Links count only while they work: connected, with a datagram within `STALE_LINK`. A link that died stays
+    /// in its map until a receive fails, which may never happen, so its presence says nothing. `mesh_up` is the
+    /// mesh's live calls, counted by the caller under the mesh lock.
+    async fn links_up(&self, room: &Room, mesh_up: usize) -> Option<(usize, usize)> {
+        let peers = lock(&room.live).len().saturating_sub(1);
+        match room.forwarding.as_ref() {
+            None => Some((mesh_up, peers)),
+            Some(f) if f.role == Role::Leaf => {
+                let up = f.leaf.lock().await.as_ref().map_or(0, |p| p.live_links(STALE_LINK).min(1));
+                Some((up, 1))
+            }
+            // The forwarder's own leaf is one of its relay's downlinks.
+            Some(f) if f.role == Role::Root && room.tier == Tier::Forwarded => {
+                let up = f.sfu.lock().await.as_ref().map_or(0, |s| s.live_downlinks(STALE_LINK).saturating_sub(1));
+                Some((up, peers))
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// Whether this device is settled in `room`: enough working links for its role, and no move under way.
+    async fn settled_in(&self, room: &Room, mesh_up: usize) -> bool {
+        if room.migrating.load(Ordering::SeqCst) {
+            return false;
+        }
+        match self.links_up(room, mesh_up).await {
+            Some((up, expected)) => up >= links_needed(expected, room.forwarding.as_ref().map(|f| f.role)),
+            None => true,
+        }
+    }
+
+    /// On the membership tick: a device whose room has had too few working links for `Timings::rejoin_after`, with
+    /// peers still live, asks them which room they are in and rejoins the one the settled ones are in. That brings back a
+    /// mover whose peers refused its tier move, a follower left on a move its mover gave up, and a device split off
+    /// from the others for any reason.
+    async fn lonely_check(&self, room: &Arc<Room>, mesh_up: usize) {
+        let peers = lock(&room.live).len().saturating_sub(1);
+        let lonely = peers > 0 && !room.migrating.load(Ordering::SeqCst) && !self.settled_in(room, mesh_up).await;
+        let now = Instant::now();
+        let after = self.inner.timings.rejoin_after;
+        let ask = {
+            let mut state = lock(&room.lonely);
+            if !lonely {
+                state.0 = None;
+                return;
+            }
+            let since = *state.0.get_or_insert(now);
+            let due = now.duration_since(since) >= after && state.1.is_none_or(|at| now.duration_since(at) >= after);
+            if due {
+                state.1 = Some(now);
+            }
+            due
+        };
+        if ask {
+            let engine = self.clone();
+            let room = room.clone();
+            self.spawn_task(async move { engine.rejoin(room).await });
+        }
+    }
+
+    /// Asks every live peer of `room` where it is, and rejoins the room the settled ones are in. A reply is a peer's
+    /// word and may be a lie: it is taken only from a live roster member and only when the forwarder it names is one,
+    /// and the adopted room is still swapped in only with the links it needs (`links_needed`). So a lying peer costs
+    /// one staged room that never swaps in, never a call taken over.
+    async fn rejoin(&self, room: Arc<Room>) {
+        let live: BTreeMap<u64, DeviceId> = lock(&room.live).clone();
+        let me = self.inner.identity.device_id();
+        let mut asks = tokio::task::JoinSet::new();
+        for (sid, device) in live.iter().filter(|(_, d)| **d != me) {
+            let (engine, sid, device, id) = (self.clone(), *sid, *device, room.id);
+            asks.spawn(async move {
+                match engine.call_rpc(device, CallMsg::WhereIs { room: id }).await {
+                    Ok(CallReply::There { tier, gen, forwarder, settled }) => Some(WhereReply { from: sid, tier, gen, forwarder, settled }),
+                    Ok(_) => None,
+                    // A released device answers it as a bad request.
+                    Err(e) => {
+                        debug!(device = %device, error = %e, "where-is not answered");
+                        None
+                    }
+                }
+            });
+        }
+        let replies: Vec<WhereReply> = asks.join_all().await.into_iter().flatten().collect();
+        let sids: Vec<u64> = live.keys().copied().collect();
+        let Some((tier, gen, forwarder)) = rejoin_choice(&replies, &sids, &room.gen).or_else(|| {
+            // The settled peers are in this very room, yet this device has had too few working links here for three
+            // asks. Waiting longer will not bring them: no link is ever made again on its own. It rebuilds the room on
+            // the same generation, which links to each peer afresh.
+            let since = lock(&room.lonely).0?;
+            let stuck = since.elapsed() >= self.inner.timings.rejoin_after * 3;
+            let here = replies.iter().any(|r| r.settled && r.gen == room.gen);
+            (stuck && here).then(|| (room.tier, room.gen, room.forwarding.as_ref().map(|f| f.forwarder)))
+        }) else {
+            return;
+        };
+        if !is_current(&self.inner, &room) || room.migrating.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.note_tier(format!(
+            "rejoins {:?} gen {} of {} settled answers of {}",
+            tier,
+            hex(&gen[..4]),
+            replies.iter().filter(|r| r.settled).count(),
+            replies.len()
+        ));
+        let mut memory = self.tier_memory(&room.id);
+        if tier == Tier::Forwarded {
+            let limit = self.mesh_limit(&room).unwrap_or(LEVEL0_MESH_LIMIT);
+            let t = &self.inner.timings;
+            memory.entered(limit, Instant::now(), t.tier_return_backoff, t.tier_return_backoff_cap);
+        } else {
+            memory.entered_under = None;
+            memory.wait = None;
+        }
+        self.set_tier_memory(room.id, memory);
+        self.spawn_migration_to(room, tier, None, Some((gen, forwarder)));
+    }
+
+    /// Answers a peer's `WhereIs` with the room this device is in for that call, at most once per half
+    /// `Timings::rejoin_after` for each device.
+    async fn on_where_is(&self, from: DeviceId, id: RoomId) -> CallReply {
+        let Some(room) = self.current_room(&id) else {
+            return CallReply::Refused("not in this call".into());
+        };
+        if !lock(&room.live).values().any(|d| *d == from) {
+            return CallReply::Refused("not in this call".into());
+        }
+        let now = Instant::now();
+        {
+            let mut answered = lock(&self.inner.calls.where_answered);
+            if answered.get(&from).is_some_and(|at| now.duration_since(*at) < self.inner.timings.rejoin_after / 2) {
+                return CallReply::Refused("asked too often".into());
+            }
+            answered.retain(|_, at| now.duration_since(*at) < self.inner.timings.rejoin_after);
+            answered.insert(from, now);
+        }
+        let mesh_up = room.mesh.lock().await.live_count(STALE_LINK);
+        let settled = self.settled_in(&room, mesh_up).await;
+        CallReply::There {
+            tier: room.tier,
+            gen: room.gen,
+            forwarder: room.forwarding.as_ref().map(|f| f.forwarder),
+            settled,
+        }
     }
 
     /// Test hook: holds back this device's `Features` for `hold`, as a joiner whose first one is slow to arrive.
@@ -4881,8 +5268,25 @@ impl Engine {
             .iter()
             .map(|(sid, p)| format!("{sid}:muted={} last_frame_ago_ms={:?}", p.muted, p.last_frame.map(|t| now.duration_since(t).as_millis())))
             .collect();
-        let links = match room.mesh.try_lock() {
-            Ok(mesh) => format!("connected={:?} ", mesh.connected())
+        // The pump holds the mesh lock for a moment at a time; a few tries get between its turns.
+        let mut tries = 0;
+        let guard = loop {
+            match room.mesh.try_lock() {
+                Ok(mesh) => break Ok(mesh),
+                Err(e) if tries == 50 => break Err(e),
+                Err(_) => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        };
+        let links = match guard {
+            Ok(mesh) => format!(
+                "connected={:?} drops={:?} calls=[{}] ",
+                mesh.connected(),
+                mesh.drops(),
+                mesh.peers().into_iter().map(|sid| format!("{sid}: {}", mesh.describe_call(sid).unwrap_or_default())).collect::<Vec<_>>().join(", ")
+            )
                 + &mesh
                 .stats()
                 .iter()
@@ -4909,12 +5313,19 @@ impl Engine {
         // Copied out under one guard. A `lock` in each format argument would hold the first guard while taking the
         // next, and deadlock.
         let sends = lock(&room.sends).clone();
-        let tiers: Vec<String> = lock(&self.inner.calls.tier_log).iter().cloned().collect();
+        let tiers: Vec<String> = lock(&self.inner.calls.tier_log)
+            .iter()
+            .map(|(at, line)| format!("-{:.1}s {line}", now.duration_since(*at).as_secs_f32()))
+            .collect();
         format!(
-            "send_ok={} send_err={:?} empty_ticks={} ticks={} forwarded={} sending={} muted={} speaking_checks={checks} speaking_emits={emits} shown={shown} last_sent_ago_ms={sent_ago:?} peers=[{}] links=[{links}] receivers={} tiers=[{}]",
+            "rooms_alive={} staged={:?} gen={} send_ok={} send_err={:?} empty_ticks={} not_sending_ticks={} ticks={} forwarded={} sending={} muted={} speaking_checks={checks} speaking_emits={emits} shown={shown} last_sent_ago_ms={sent_ago:?} peers=[{}] links=[{links}] receivers={} tiers=[{}]",
+            self.inner.calls.rooms_alive.load(Ordering::Relaxed),
+            lock(&self.inner.calls.staged).as_ref().map(|r| hex(&r.gen[..4])),
+            hex(&room.gen[..4]),
             sends.sent,
             sends.failed,
             sends.empty,
+            sends.not_sending,
             room.loop_stats[0].load(Ordering::Relaxed),
             room.forwarding.is_some(),
             room.sending.load(Ordering::SeqCst),
@@ -4973,7 +5384,7 @@ impl Engine {
             .ok_or_else(|| CoreError::Invalid("this device is not in the group".into()))?;
         let certs: Vec<(u64, DeviceCert)> = indexed.iter().map(|(s, _, c)| (*s, c.clone())).collect();
         let mesh = Mesh::new_authenticated(key, my_sid, self.auth_for(&certs)).map_err(call_err)?;
-        let room = Room::new(id, scope, mesh, my_sid, epoch, None);
+        let room = Room::new(id, scope, mesh, my_sid, epoch, None, &self.inner.calls.rooms_alive);
         lock(&room.live).insert(my_sid, my_device);
         lock(&room.leaves).extend(indexed.iter().map(|(s, d, _)| (*d, *s)));
         let room = Arc::new(room);
@@ -5439,6 +5850,74 @@ mod settle_tests {
         assert_eq!(capacity_to_announce(Some(90), 0, true), None, "nothing carried over, nothing announced");
         assert_eq!(capacity_to_announce(Some(90), 400, false), Some(90), "once settled, the measure counts");
         assert_eq!(capacity_to_announce(None, 400, false), None);
+    }
+}
+
+#[cfg(test)]
+mod rejoin_tests {
+    use super::*;
+
+    fn reply(from: u64, tier: Tier, gen: u8, forwarder: Option<u64>, settled: bool) -> WhereReply {
+        WhereReply { from, tier, gen: [gen; 32], forwarder, settled }
+    }
+
+    #[test]
+    fn one_settled_answer_is_enough_and_unsettled_ones_count_for_nothing() {
+        let live = [0, 1, 2, 3];
+        let replies = [reply(1, Tier::Mesh, 7, None, true), reply(2, Tier::Forwarded, 3, Some(2), false)];
+        assert_eq!(rejoin_choice(&replies, &live, &[9; 32]), Some((Tier::Mesh, [7; 32], None)));
+        // Two lonely devices: neither is settled, so nobody moves.
+        let lonely = [reply(1, Tier::Forwarded, 3, Some(1), false), reply(2, Tier::Forwarded, 4, Some(2), false)];
+        assert_eq!(rejoin_choice(&lonely, &live, &[9; 32]), None);
+    }
+
+    #[test]
+    fn the_most_settled_answers_win_and_a_tie_goes_to_the_lowest_generation() {
+        let live = [0, 1, 2, 3, 4];
+        let split = [reply(1, Tier::Mesh, 8, None, true), reply(2, Tier::Mesh, 8, None, true), reply(3, Tier::Mesh, 5, None, true)];
+        assert_eq!(rejoin_choice(&split, &live, &[9; 32]).map(|c| c.1), Some([8; 32]), "two against one");
+        let tie = [reply(1, Tier::Mesh, 8, None, true), reply(2, Tier::Mesh, 5, None, true)];
+        assert_eq!(rejoin_choice(&tie, &live, &[9; 32]).map(|c| c.1), Some([5; 32]), "the lowest generation");
+    }
+
+    #[test]
+    fn answers_outside_the_roster_and_the_current_room_are_ignored() {
+        let live = [0, 1, 2];
+        let replies = [
+            reply(7, Tier::Mesh, 1, None, true),              // not live here
+            reply(1, Tier::Forwarded, 2, Some(7), true),      // a forwarder outside the roster
+            reply(2, Tier::Cascade, 3, Some(2), true),        // not a tier a device rejoins
+        ];
+        assert_eq!(rejoin_choice(&replies, &live, &[9; 32]), None);
+    }
+
+    /// The room this device is in already counts like any other: when most settled peers are in it, the device stays,
+    /// even though a minority is in another room. Leaving it out would pick the minority and flap between the two.
+    #[test]
+    fn a_device_already_in_the_majoritys_room_stays() {
+        let live = [0, 1, 2, 3, 4];
+        let replies = [
+            reply(1, Tier::Mesh, 9, None, true),
+            reply(2, Tier::Mesh, 9, None, true),
+            reply(3, Tier::Mesh, 9, None, true),
+            reply(4, Tier::Forwarded, 3, Some(4), true),
+        ];
+        assert_eq!(rejoin_choice(&replies, &live, &[9; 32]), None, "this device is where the majority is");
+        assert_eq!(rejoin_choice(&replies, &live, &[3; 32]).map(|c| c.1), Some([9; 32]), "from the minority's room it goes");
+    }
+}
+
+#[cfg(test)]
+mod links_needed_tests {
+    use super::*;
+
+    #[test]
+    fn a_leaf_needs_its_link_and_anyone_else_a_majority() {
+        assert_eq!(links_needed(1, Some(Role::Leaf)), 1);
+        for (expected, majority) in [(0, 0), (1, 1), (2, 2), (3, 2), (5, 3), (6, 4), (7, 4)] {
+            assert_eq!(links_needed(expected, None), majority, "a mesh device with {expected} peers");
+            assert_eq!(links_needed(expected, Some(Role::Root)), majority, "a forwarder with {expected} leaves");
+        }
     }
 }
 

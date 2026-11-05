@@ -52,21 +52,21 @@ async fn forgery_scenario(digest_frames: usize, limit: Duration) {
 
     // The real link from the victim to the receiver.
     let (victim_end, receiver_end_victim) = memory_pair();
-    let offer = victim.offer(RECEIVER, victim_end).await.unwrap();
+    let (offer, token) = victim.offer(RECEIVER, victim_end).await.unwrap();
     let answer = receiver
         .accept(VICTIM, receiver_end_victim, offer)
         .await
         .unwrap();
-    victim.apply(RECEIVER, answer).unwrap();
+    victim.apply(RECEIVER, token, answer).unwrap();
 
     // The forged link: the forger offers as its id 2 and the receiver files it under key 1.
     let (forger_end, receiver_end_forger) = memory_pair();
-    let offer = forger.offer(RECEIVER, forger_end).await.unwrap();
+    let (offer, token) = forger.offer(RECEIVER, forger_end).await.unwrap();
     let answer = receiver
         .accept(FORGER, receiver_end_forger, offer)
         .await
         .unwrap();
-    forger.apply(RECEIVER, answer).unwrap();
+    forger.apply(RECEIVER, token, answer).unwrap();
 
     let real_frames = 50u64;
     let forged_frames = 60u64;

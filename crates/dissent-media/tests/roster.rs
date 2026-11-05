@@ -32,9 +32,9 @@ fn payload(index: u32) -> Vec<u8> {
 /// Connects two meshes with one offer and one answer over an in-memory link.
 async fn connect(a: &mut Peer, a_id: u64, b: &mut Peer, b_id: u64) {
     let (a_end, b_end) = memory_pair();
-    let offer = a.offer(b_id, a_end).await.unwrap();
+    let (offer, token) = a.offer(b_id, a_end).await.unwrap();
     let answer = b.accept(a_id, b_end, offer).await.unwrap();
-    a.apply(b_id, answer).unwrap();
+    a.apply(b_id, token, answer).unwrap();
 }
 
 /// Runs one member until the window closes. The joiner sends frames. Every member keeps its

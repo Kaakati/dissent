@@ -16,9 +16,9 @@ fn peer(id: u64, auth: &Auth) -> Peer {
 
 async fn link(a: &mut Peer, a_id: u64, b: &mut Peer, b_id: u64) {
     let (a_end, b_end) = memory_pair();
-    let offer = a.offer(b_id, a_end).await.unwrap();
+    let (offer, token) = a.offer(b_id, a_end).await.unwrap();
     let answer = b.accept(a_id, b_end, offer).await.unwrap();
-    a.apply(b_id, answer).unwrap();
+    a.apply(b_id, token, answer).unwrap();
     let (a_up, b_up) = tokio::join!(a.wait_connected(), b.wait_connected());
     a_up.unwrap();
     b_up.unwrap();

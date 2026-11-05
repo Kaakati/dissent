@@ -377,6 +377,7 @@ impl Engine {
                     | crate::calls::CallMsg::ForwardOffer(_)
                     | crate::calls::CallMsg::ForwarderStalled { .. }
                     | crate::calls::CallMsg::RelayLeaf { .. }
+                    | crate::calls::CallMsg::WhereIs { .. }
             ))
         {
             return Response::Error("bad request: unknown call message".into());

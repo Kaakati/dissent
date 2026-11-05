@@ -28,6 +28,11 @@ pub trait PacketTransport: Send + Sync {
         None
     }
 
+    /// Names the connection under this transport, for diagnostics. Empty when there is nothing to name.
+    fn describe(&self) -> String {
+        String::new()
+    }
+
     /// Sends one datagram. `to` is the destination str0m chose for it. A transport with a single
     /// peer ignores it.
     fn send(&self, to: SocketAddr, bytes: &[u8]) -> impl Future<Output = Result<()>> + Send;

@@ -1005,7 +1005,7 @@ impl Engine {
     fn relay_for(&self, id: RoomId, scope: Scope, community: CommunityId, gen: RoomId, my_sid: u64) -> Result<Arc<Room>> {
         let unused = MediaKey::new(DeviceKey::generate().0.seed());
         let mesh = Mesh::new(unused, my_sid).map_err(super::call_err)?;
-        let mut room = Room::new(id, scope, mesh, my_sid, 0, None);
+        let mut room = Room::new(id, scope, mesh, my_sid, 0, None, &self.inner.calls.rooms_alive);
         room.gen = gen;
         room.tier = Tier::Forwarded;
         room.forwarding = Some(Forwarding {

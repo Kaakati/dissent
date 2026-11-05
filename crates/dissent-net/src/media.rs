@@ -75,6 +75,16 @@ impl MediaLink {
             .map(|p| u64::try_from(p.rtt().as_millis()).unwrap_or(u64::MAX))
     }
 
+    /// The connection's id, stable for its life and unique among this endpoint's connections, for diagnostics.
+    pub fn id(&self) -> usize {
+        self.conn.stable_id()
+    }
+
+    /// Whether the connection has closed, on either side.
+    pub fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
+    }
+
     /// Closes the connection. The peer's pending and later `recv` calls return an error.
     pub fn close(&self) {
         self.conn.close(0u32.into(), b"media closed");

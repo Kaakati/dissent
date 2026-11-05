@@ -43,7 +43,7 @@ pub use error::{MediaError, Result};
 pub use frame::{ReceivedFrame, FRAME_SAMPLES};
 pub use key::MediaKey;
 pub use link::{LinkTransport, Side};
-pub use mesh::Mesh;
+pub use mesh::{Mesh, OfferToken};
 pub use participant::{Failover, FailoverReason, Participant, SILENCE_TIMEOUT};
 pub use sfu::{LayerInfo, Observer, Sfu, SfuStats};
 pub use signal::Signal;

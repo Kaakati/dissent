@@ -210,6 +210,11 @@ impl<T: PacketTransport> Sfu<T> {
         self.active_up
     }
 
+    /// The downlinks that are working: connected, with a datagram within `quiet`.
+    pub fn live_downlinks(&self, quiet: std::time::Duration) -> usize {
+        self.links.values().filter(|call| call.is_live(quiet)).count()
+    }
+
     /// The downlinks with a live link.
     pub fn downlinks(&self) -> Vec<PeerId> {
         self.links.keys().copied().collect()

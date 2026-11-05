@@ -197,6 +197,12 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     sent_seq: u64,
     video_available_cb: Option<Box<dyn FnMut(u32) + Send>>,
     started: Instant,
+    /// When the last datagram arrived. `None` before the first.
+    last_received: Option<Instant>,
+    /// Datagrams in by kind, told apart by their first byte (RFC 7983): STUN, DTLS, RTP or RTCP. For diagnostics.
+    kinds_in: [u64; 3],
+    /// When the last RTP or RTCP datagram arrived. `None` before the first.
+    last_media: Option<Instant>,
     timeout: Instant,
     inbox: VecDeque<ReceivedFrame>,
     raw_inbox: VecDeque<Vec<u8>>,
@@ -460,6 +466,9 @@ impl<T: PacketTransport> Call<T> {
             sent_seq: 0,
             video_available_cb: None,
             started: now,
+            last_received: None,
+            kinds_in: [0; 3],
+            last_media: None,
             timeout: now,
             inbox: VecDeque::new(),
             raw_inbox: VecDeque::new(),
@@ -513,6 +522,26 @@ impl<T: PacketTransport> Call<T> {
     /// Whether ICE and DTLS have completed, so media can flow.
     pub fn is_connected(&self) -> bool {
         self.rtc.is_connected()
+    }
+
+    /// How long this call has existed.
+    pub fn age(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// How long ago the last datagram arrived, `None` before the first.
+    pub fn last_heard(&self) -> Option<Duration> {
+        self.last_received.map(|at| at.elapsed())
+    }
+
+    /// Datagrams in so far as (STUN, DTLS, RTP or RTCP), and how long ago the last RTP or RTCP one came. For diagnostics.
+    pub fn kinds_in(&self) -> ([u64; 3], Option<Duration>) {
+        (self.kinds_in, self.last_media.map(|at| at.elapsed()))
+    }
+
+    /// Whether this call is working: connected, with a datagram within `quiet`.
+    pub fn is_live(&self, quiet: Duration) -> bool {
+        self.is_connected() && self.last_received.is_some_and(|at| at.elapsed() < quiet)
     }
 
     /// Drives the session until ICE and DTLS complete. Frames that arrive meanwhile are kept
@@ -1062,6 +1091,16 @@ impl<T: PacketTransport> Call<T> {
                     Err(e) => return Err(e),
                 };
                 self.stats.packets_received += 1;
+                self.last_received = Some(Instant::now());
+                match bytes.first() {
+                    Some(0..=3) => self.kinds_in[0] += 1,
+                    Some(20..=63) => self.kinds_in[1] += 1,
+                    Some(128..=191) => {
+                        self.kinds_in[2] += 1;
+                        self.last_media = self.last_received;
+                    }
+                    _ => {}
+                }
                 let local = self.transport.local_addr();
                 match Receive::new(Protocol::Udp, source, local, &bytes) {
                     Ok(receive) => {

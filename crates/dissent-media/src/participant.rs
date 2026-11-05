@@ -294,6 +294,11 @@ impl<T: PacketTransport> Participant<T> {
         &self.failovers
     }
 
+    /// The forwarder links that are working: connected, with a datagram within `quiet`.
+    pub fn live_links(&self, quiet: std::time::Duration) -> usize {
+        self.links.values().filter(|call| call.is_live(quiet)).count()
+    }
+
     /// The forwarder links still open.
     pub fn linked(&self) -> Vec<PeerId> {
         self.links.keys().copied().collect()

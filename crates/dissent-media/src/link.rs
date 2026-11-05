@@ -53,6 +53,10 @@ impl PacketTransport for LinkTransport {
         self.link.max_datagram_size()
     }
 
+    fn describe(&self) -> String {
+        format!("conn={} closed={}", self.link.id(), self.link.is_closed())
+    }
+
     async fn send(&self, to: SocketAddr, bytes: &[u8]) -> Result<()> {
         if to != self.peer {
             return Err(MediaError::BadState(

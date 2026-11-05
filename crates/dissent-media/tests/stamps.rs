@@ -45,9 +45,9 @@ async fn full_mesh(ids: &[u64], media_key: MediaKey) -> Vec<Peer> {
         for j in i + 1..ids.len() {
             let (caller_end, callee_end) = memory_pair();
             let (lower, upper) = meshes.split_at_mut(j);
-            let offer = lower[i].offer(ids[j], caller_end).await.unwrap();
+            let (offer, token) = lower[i].offer(ids[j], caller_end).await.unwrap();
             let answer = upper[0].accept(ids[i], callee_end, offer).await.unwrap();
-            lower[i].apply(ids[j], answer).unwrap();
+            lower[i].apply(ids[j], token, answer).unwrap();
         }
     }
     meshes

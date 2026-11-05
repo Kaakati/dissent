@@ -5,10 +5,13 @@ mod common;
 use std::time::Duration;
 
 use common::{assert_from_each, frame, memory_pair, run_mesh_peer, seq_of, MemoryTransport, FRAMES};
-use dissent_media::{MediaKey, Mesh};
+use dissent_media::{MediaKey, Mesh, Signal};
 use tokio::time::timeout;
 
 type Peer = Mesh<MemoryTransport>;
+
+/// How long a call that has not connected counts as still connecting, in these tests.
+const CONNECTING: Duration = Duration::from_secs(10);
 
 fn key(byte: u8) -> MediaKey {
     MediaKey::new([byte; 32])
@@ -25,9 +28,9 @@ async fn full_mesh(ids: &[u64], media_key: MediaKey) -> Vec<Peer> {
         for j in i + 1..ids.len() {
             let (caller_end, callee_end) = memory_pair();
             let (lower, upper) = meshes.split_at_mut(j);
-            let offer = lower[i].offer(ids[j], caller_end).await.unwrap();
+            let (offer, token) = lower[i].offer(ids[j], caller_end).await.unwrap();
             let answer = upper[0].accept(ids[i], callee_end, offer).await.unwrap();
-            lower[i].apply(ids[j], answer).unwrap();
+            lower[i].apply(ids[j], token, answer).unwrap();
         }
     }
     meshes
@@ -180,9 +183,9 @@ async fn a_peer_still_connecting_does_not_silence_the_mesh_toward_the_others() {
     let mut a: Peer = Mesh::new(key(1), 1).unwrap();
     let mut b: Peer = Mesh::new(key(1), 2).unwrap();
     let (a_end, b_end) = memory_pair();
-    let offer = a.offer(2, a_end).await.unwrap();
+    let (offer, token) = a.offer(2, a_end).await.unwrap();
     let answer = b.accept(1, b_end, offer).await.unwrap();
-    a.apply(2, answer).unwrap();
+    a.apply(2, token, answer).unwrap();
     // Peer 3 is offered a call it never answers, so that call stays unconnected.
     let (to_3, _never_answered) = memory_pair();
     a.offer(3, to_3).await.unwrap();
@@ -221,4 +224,67 @@ async fn a_peer_still_connecting_does_not_silence_the_mesh_toward_the_others() {
     .expect("peer 2 heard nothing while the call to 3 was still connecting");
     assert_eq!(received, (0..FRAMES).collect::<Vec<_>>(), "every frame sent reached 2, in order");
     assert!(a.stats().contains_key(&3), "the unconnected call stays in the mesh");
+}
+
+/// A second offer for a peer whose call works is refused, so two offers that cross, or a duplicate, cannot drop the
+/// call. A call that has gone quiet is replaced, so a peer back from another room can link again.
+#[tokio::test]
+async fn a_working_call_is_kept_and_a_quiet_one_is_replaced() {
+    let ids = [1u64, 2];
+    let mut it = full_mesh(&ids, key(1)).await.into_iter();
+    let (a, b) = (it.next().unwrap(), it.next().unwrap());
+    let ((mut a, _), (mut b, _)) = timeout(Duration::from_secs(60), async {
+        tokio::join!(run_mesh_peer(a, FRAMES, FRAMES as usize), run_mesh_peer(b, FRAMES, FRAMES as usize))
+    })
+    .await
+    .expect("the call did not carry frames in time");
+    assert!(b.replace_if_stale(1, Duration::from_secs(3), CONNECTING).is_err(), "a working call is kept");
+    assert_eq!(b.peers(), vec![1], "and is still there");
+    assert!(a.replace_if_stale(2, Duration::ZERO, CONNECTING).is_ok(), "a call quiet for longer than allowed is replaced");
+    assert!(a.peers().is_empty());
+}
+
+/// A call still in its handshake is not stale: a second offer for that peer is refused until the call is older than
+/// the connect grace, so it cannot orphan the answer on its way.
+#[tokio::test]
+async fn a_call_still_connecting_is_kept_until_its_grace_runs_out() {
+    let mut a: Peer = Mesh::new(key(1), 1).unwrap();
+    let (to_2, _unanswered) = memory_pair();
+    a.offer(2, to_2).await.unwrap();
+    let err = a.replace_if_stale(2, Duration::from_secs(3), CONNECTING).unwrap_err();
+    assert!(err.to_string().contains("still connecting"), "{err}");
+    assert_eq!(a.peers(), vec![2], "the connecting call stays");
+    assert!(a.replace_if_stale(2, Duration::from_secs(3), Duration::ZERO).is_ok(), "past its grace it is replaced");
+    assert!(a.peers().is_empty());
+}
+
+/// Two offers to one peer cross: the first call is replaced before its answer comes back. That answer is refused and
+/// leaves the second call alone, and the second call connects with its own answer.
+#[tokio::test]
+async fn an_answer_to_a_replaced_offer_is_refused_and_the_new_call_connects() {
+    let mut a: Peer = Mesh::new(key(1), 1).unwrap();
+    let mut b: Peer = Mesh::new(key(1), 2).unwrap();
+    let (a_end, b_end) = memory_pair();
+    let (first, first_token) = a.offer(2, a_end).await.unwrap();
+    let first_answer = b.accept(1, b_end, first).await.unwrap();
+
+    a.replace_if_stale(2, Duration::from_secs(3), Duration::ZERO).unwrap();
+    b.replace_if_stale(1, Duration::from_secs(3), Duration::ZERO).unwrap();
+    let (a_end, b_end) = memory_pair();
+    let (second, second_token) = a.offer(2, a_end).await.unwrap();
+    assert_ne!(first_token, second_token);
+    let second_answer = b.accept(1, b_end, second).await.unwrap();
+
+    let err = a.apply(2, first_token, first_answer).unwrap_err();
+    assert!(err.to_string().contains("superseded"), "{err}");
+    a.apply(2, second_token, second_answer).expect("the second call takes its own answer");
+    assert!(a.apply(2, second_token, Signal::Answer(String::new())).is_err(), "an answer is applied once");
+
+    let ((_, from_b), (_, from_a)) = timeout(Duration::from_secs(60), async {
+        tokio::join!(run_mesh_peer(a, FRAMES, FRAMES as usize), run_mesh_peer(b, FRAMES, FRAMES as usize))
+    })
+    .await
+    .expect("the second call did not carry frames in time");
+    assert_from_each(&from_b, &[2], FRAMES);
+    assert_from_each(&from_a, &[1], FRAMES);
 }

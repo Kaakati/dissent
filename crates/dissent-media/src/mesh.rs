@@ -9,7 +9,7 @@ use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dissent_identity::DeviceCert;
 use crate::auth::{forget_into, learn_into, Auth, LinkConfig, RxState};
@@ -21,6 +21,11 @@ use crate::key::MediaKey;
 use crate::signal::Signal;
 use crate::transport::PacketTransport;
 use crate::video::{VideoFrame, VideoMeta};
+
+/// Names one offer this mesh made, so its answer is applied to the call that offer started and to no other.
+/// See [`Mesh::offer`] and [`Mesh::apply`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfferToken(u64);
 
 type Boxed<'a, O> = Pin<Box<dyn Future<Output = O> + Send + 'a>>;
 type FrameOut = Result<Option<ReceivedFrame>>;
@@ -41,7 +46,13 @@ pub struct Mesh<T: PacketTransport> {
     tx: SframeSender,
     video_tx: SframeSender,
     calls: BTreeMap<u64, Call<T>>,
+    /// The token of each call this mesh offered whose answer has not been applied yet.
+    offers: BTreeMap<u64, OfferToken>,
+    /// The token the next offer gets.
+    next_offer: u64,
     link: LinkConfig,
+    /// The last calls this mesh dropped, why, and in what state, newest last, for a test that timed out.
+    drops: std::collections::VecDeque<String>,
 }
 
 impl<T: PacketTransport> Mesh<T> {
@@ -57,6 +68,9 @@ impl<T: PacketTransport> Mesh<T> {
             epoch: 0,
             tx,
             calls: BTreeMap::new(),
+            offers: BTreeMap::new(),
+            next_offer: 0,
+            drops: std::collections::VecDeque::new(),
             link: LinkConfig {
                 auth: None,
                 state: Arc::new(Mutex::new(RxState::new(None))),
@@ -74,6 +88,11 @@ impl<T: PacketTransport> Mesh<T> {
     }
 
     /// The ids of the peers this mesh is connected to, in ascending order.
+    /// The calls that are working: connected, with a datagram within `quiet`.
+    pub fn live_count(&self, quiet: Duration) -> usize {
+        self.calls.values().filter(|call| call.is_live(quiet)).count()
+    }
+
     pub fn peers(&self) -> Vec<u64> {
         self.calls.keys().copied().collect()
     }
@@ -83,8 +102,9 @@ impl<T: PacketTransport> Mesh<T> {
         self.epoch
     }
 
-    /// Starts a call to `peer` and returns the offer to send to it. Only the lower id offers.
-    pub async fn offer(&mut self, peer: u64, transport: T) -> Result<Signal> {
+    /// Starts a call to `peer` and returns the offer to send to it, with the token its answer must be applied
+    /// under. Only the lower id offers.
+    pub async fn offer(&mut self, peer: u64, transport: T) -> Result<(Signal, OfferToken)> {
         if self.my_id >= peer {
             return Err(MediaError::BadState("only the lower peer id offers"));
         }
@@ -98,7 +118,10 @@ impl<T: PacketTransport> Mesh<T> {
         )
         .await?;
         self.calls.insert(peer, call);
-        Ok(offer)
+        let token = OfferToken(self.next_offer);
+        self.next_offer += 1;
+        self.offers.insert(peer, token);
+        Ok((offer, token))
     }
 
     /// Answers `peer`'s offer and returns the answer to send back. Only the higher id accepts.
@@ -120,12 +143,19 @@ impl<T: PacketTransport> Mesh<T> {
         Ok(answer)
     }
 
-    /// Applies the answer to an offer this mesh made to `peer`.
-    pub fn apply(&mut self, peer: u64, signal: Signal) -> Result<()> {
-        self.calls
+    /// Applies the answer to the offer `token` names. When the call that offer started was dropped or replaced since,
+    /// the answer belongs to no call here and is refused, and the call now there is left alone.
+    pub fn apply(&mut self, peer: u64, token: OfferToken, signal: Signal) -> Result<()> {
+        if self.offers.get(&peer) != Some(&token) {
+            return Err(MediaError::BadState("answer to a superseded offer"));
+        }
+        let call = self
+            .calls
             .get_mut(&peer)
-            .ok_or(MediaError::BadState("no call with this peer"))?
-            .apply(signal)
+            .ok_or(MediaError::BadState("no call with this peer"))?;
+        call.apply(signal)?;
+        self.offers.remove(&peer);
+        Ok(())
     }
 
     /// Drops the call to `peer`. Frames of this mesh stop reaching it at once. The caller should
@@ -137,7 +167,68 @@ impl<T: PacketTransport> Mesh<T> {
     }
 
     pub fn remove_peer(&mut self, peer: u64) -> bool {
-        self.calls.remove(&peer).is_some()
+        self.drop_call(peer, "removed")
+    }
+
+    /// Drops the call to `peer`, noting why. True when there was one.
+    fn drop_call(&mut self, peer: u64, why: &str) -> bool {
+        self.offers.remove(&peer);
+        let Some(call) = self.calls.remove(&peer) else {
+            return false;
+        };
+        if self.drops.len() == 8 {
+            self.drops.pop_front();
+        }
+        self.drops.push_back(format!(
+            "{peer}:{why} connected={} age={:?} heard={:?}",
+            call.is_connected(),
+            call.age(),
+            call.last_heard()
+        ));
+        true
+    }
+
+    /// The last calls this mesh dropped and why, newest last.
+    pub fn drops(&self) -> Vec<String> {
+        self.drops.iter().cloned().collect()
+    }
+
+    /// The call to `peer` in one line, for a test that timed out: its connection, connected, age, last heard, and
+    /// datagrams in by kind.
+    pub fn describe_call(&self, peer: u64) -> Option<String> {
+        self.calls.get(&peer).map(|call| {
+            let ([stun, dtls, rtp], media_ago) = call.kinds_in();
+            format!(
+                "{} connected={} age={:?} heard={:?} in stun={stun} dtls={dtls} rtp={rtp} media_heard={media_ago:?}",
+                call.transport().describe(),
+                call.is_connected(),
+                call.age(),
+                call.last_heard(),
+            )
+        })
+    }
+
+    /// Whether the call to `peer` is connected, and how long ago it last heard anything. `None` without a call.
+    pub fn call_health(&self, peer: u64) -> Option<(bool, Option<Duration>)> {
+        self.calls.get(&peer).map(|call| (call.is_connected(), call.last_heard()))
+    }
+
+    /// Makes room for a new link to `peer`: drops a call that is no longer working (not connected, or nothing heard
+    /// within `quiet`), so a peer back from another room can link again. A working call stays, and this fails, so two
+    /// offers that cross, or a duplicate one, cannot tear it down. So does a call younger than `connecting` that has
+    /// not connected yet: it may still be in its handshake, and replacing it would orphan the answer on its way.
+    pub fn replace_if_stale(&mut self, peer: u64, quiet: Duration, connecting: Duration) -> Result<()> {
+        match self.calls.get(&peer) {
+            Some(call) if call.is_live(quiet) => Err(MediaError::BadState("already linked to this peer")),
+            Some(call) if !call.is_connected() && call.age() < connecting => {
+                Err(MediaError::BadState("still connecting to this peer"))
+            }
+            Some(_) => {
+                self.drop_call(peer, "replaced as stale");
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     /// Replaces the media key, typically after the MLS group changes. Frames from now on are
@@ -246,7 +337,7 @@ impl<T: PacketTransport> Mesh<T> {
             }
         }
         for peer in failed {
-            self.calls.remove(&peer);
+            self.drop_call(peer, "send failed");
         }
         Ok(())
     }
@@ -269,7 +360,7 @@ impl<T: PacketTransport> Mesh<T> {
             }
         }
         for peer in failed {
-            self.calls.remove(&peer);
+            self.drop_call(peer, "send failed");
         }
         Ok(())
     }
@@ -315,11 +406,11 @@ impl<T: PacketTransport> Mesh<T> {
             match outcome {
                 Ok(Some(frame)) => return Ok(Some(frame)),
                 Ok(None) => {
-                    self.calls.remove(&peer);
+                    self.drop_call(peer, "video ended");
                 }
                 Err(e) => {
                     tracing::debug!(peer, error = %e, "dropping peer after a video receive failure");
-                    self.calls.remove(&peer);
+                    self.drop_call(peer, "video receive failed");
                 }
             }
         }
@@ -363,11 +454,11 @@ impl<T: PacketTransport> Mesh<T> {
             match outcome {
                 Ok(Some(frame)) => return Ok(Some(frame)),
                 Ok(None) => {
-                    self.calls.remove(&peer);
+                    self.drop_call(peer, "ended");
                 }
                 Err(e) => {
                     tracing::debug!(peer, error = %e, "dropping peer after a receive failure");
-                    self.calls.remove(&peer);
+                    self.drop_call(peer, &format!("receive failed: {e}"));
                 }
             }
         }

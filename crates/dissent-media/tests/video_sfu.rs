@@ -151,9 +151,9 @@ async fn a_mesh_sends_one_video_frame_to_every_peer() {
     let mut one = Mesh::new(key.clone(), 1).unwrap();
     let mut two = Mesh::new(key.clone(), 2).unwrap();
     let (end_one, end_two) = memory_pair();
-    let offer = one.offer(2, end_one).await.unwrap();
+    let (offer, token) = one.offer(2, end_one).await.unwrap();
     let answer = two.accept(1, end_two, offer).await.unwrap();
-    one.apply(2, answer).unwrap();
+    one.apply(2, token, answer).unwrap();
     let (a, b) = tokio::join!(one.wait_connected(), two.wait_connected());
     a.unwrap();
     b.unwrap();

@@ -54,7 +54,7 @@ async fn two_peer_mesh_over_an_iroh_link_delivers_every_frame() {
     let mut bob: Mesh<LinkTransport> = Mesh::new(media_key, 2).unwrap();
 
     // Alice has the lower id, so she offers and Bob answers.
-    let offer = alice
+    let (offer, token) = alice
         .offer(2, LinkTransport::new(link_a, Side::Caller))
         .await
         .expect("offer");
@@ -64,7 +64,7 @@ async fn two_peer_mesh_over_an_iroh_link_delivers_every_frame() {
         .await
         .expect("accept");
     let answer = Signal::from_bytes(&answer.to_bytes().unwrap()).unwrap();
-    alice.apply(2, answer).expect("apply answer");
+    alice.apply(2, token, answer).expect("apply answer");
 
     let ((alice, from_bob), (bob, from_alice)) = timeout(Duration::from_secs(60), async {
         tokio::join!(
