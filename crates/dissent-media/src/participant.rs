@@ -299,6 +299,20 @@ impl<T: PacketTransport> Participant<T> {
         self.links.values().filter(|call| call.is_live(quiet)).count()
     }
 
+    /// Whether every forwarder link is dead, as `Call::is_stale` decides, so a new offer would replace it. True with no
+    /// link.
+    pub fn is_stale(&self, quiet: std::time::Duration, connecting: std::time::Duration) -> bool {
+        self.links.values().all(|call| call.is_stale(quiet, connecting))
+    }
+
+    /// For tests: drops `percent` of the datagrams every forwarder link sends, as a dead link does. 0 stops it.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_drop_percent(&mut self, percent: u32) {
+        for call in self.links.values_mut() {
+            call.set_drop_percent(percent);
+        }
+    }
+
     /// The forwarder links still open.
     pub fn linked(&self) -> Vec<PeerId> {
         self.links.keys().copied().collect()

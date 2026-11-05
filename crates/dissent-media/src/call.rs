@@ -544,6 +544,12 @@ impl<T: PacketTransport> Call<T> {
         self.is_connected() && self.last_received.is_some_and(|at| at.elapsed() < quiet)
     }
 
+    /// Whether a new link may replace this one: it is not working (`is_live` within `quiet`), and it is not a call
+    /// younger than `connecting` still in its handshake, whose answer may be on its way.
+    pub fn is_stale(&self, quiet: Duration, connecting: Duration) -> bool {
+        !self.is_live(quiet) && (self.is_connected() || self.age() >= connecting)
+    }
+
     /// Drives the session until ICE and DTLS complete. Frames that arrive meanwhile are kept
     /// for [`Call::next_frame`].
     pub async fn wait_connected(&mut self) -> Result<()> {

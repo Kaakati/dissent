@@ -50,6 +50,7 @@ mod recovery_flow;
 mod seeder_serves;
 mod server_settings;
 mod relays;
+mod relink;
 mod relay_members;
 mod relay_calls;
 mod hide_ip;

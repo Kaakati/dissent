@@ -120,6 +120,9 @@ pub fn fast_timings() -> crate::Timings {
         pending_add_wait: Duration::from_secs(2),
         rejoin_after: Duration::from_secs(3),
         connect_grace: Duration::from_secs(5),
+        relink_after: Duration::from_secs(2),
+        relink_backoff_cap: Duration::from_secs(8),
+        relink_drop_after: Duration::from_secs(6),
         epoch_check_every: Duration::from_secs(3),
         epoch_check_gap: Duration::from_secs(1),
     }
@@ -256,6 +259,43 @@ pub fn event_debug(engine: &crate::Engine, community: dissent_identity::Communit
 #[cfg(feature = "test-hooks")]
 pub fn hold_mls_commits(engine: &crate::Engine, on: bool) {
     engine.inner.hold_commits.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Makes `engine`'s mesh call to `peer_root` drop `percent` of the datagrams it sends, from the next membership tick
+/// on, a call it makes to them later included. 100 kills that direction of the link. 0 stops it. False without the peer.
+#[cfg(feature = "test-hooks")]
+pub fn drop_mesh_media_to(engine: &crate::Engine, peer_root: &str, percent: u32) -> bool {
+    engine.drop_mesh_media_to_now(peer_root, percent)
+}
+
+/// Closes `engine`'s media link to `peer_root`, as a network change does. False without one.
+#[cfg(feature = "test-hooks")]
+pub fn close_media_link(engine: &crate::Engine, peer_root: &str) -> bool {
+    engine.close_media_link_now(peer_root)
+}
+
+/// Makes `engine`'s leaf links drop `percent` of the datagrams they send, from the next membership tick on. 0 stops it.
+#[cfg(feature = "test-hooks")]
+pub fn drop_leaf_media(engine: &crate::Engine, percent: u32) -> bool {
+    engine.drop_leaf_media_now(percent)
+}
+
+/// Whether `engine`'s leaf link to its forwarder works: connected, and heard lately.
+#[cfg(feature = "test-hooks")]
+pub async fn leaf_link_live(engine: &crate::Engine) -> bool {
+    engine.leaf_link_live_now().await
+}
+
+/// The downlinks `engine`'s relay holds, its own leaf included. Zero when it does not forward.
+#[cfg(feature = "test-hooks")]
+pub async fn forwarder_downlinks(engine: &crate::Engine) -> usize {
+    engine.forwarder_downlinks_now().await
+}
+
+/// How many relink offers `engine` made for its link to `peer_root` in its current room.
+#[cfg(feature = "test-hooks")]
+pub fn relink_attempts(engine: &crate::Engine, peer_root: &str) -> u32 {
+    engine.relink_attempts_now(peer_root)
 }
 
 /// Makes `list_folder` fail after linking `files` files, to test that it undoes them. 0 never fails.

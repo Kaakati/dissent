@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, Mutex as AsyncMutex};
 use tracing::{debug, warn};
 
+mod relink;
 pub(crate) mod speaking;
 pub(crate) mod volunteers;
 
@@ -185,9 +186,16 @@ pub(crate) const FEATURE_PAUSED_VIDEO: u64 = 16;
 /// `FEATURE_VOLUNTEERS`, so a client from before this elects nobody outside a call that has one of these in it. See
 /// `volunteers`.
 pub(crate) const FEATURE_SEEDERS_ONLY: u64 = 32;
+/// `CallMsg::Features` bit: the sender replaces a dead call link when its peer offers again, and offers again itself
+/// for a link it offers for. A mesh pair relinks only when both sent it. See `relink`.
+pub(crate) const FEATURE_RELINK: u64 = 128;
 /// Every call feature this device supports.
-const FEATURES: u64 =
-    FEATURE_BOOST_TIERS | FEATURE_VIDEO_LAYERS | FEATURE_SEEDERS_ONLY | FEATURE_SEEDER_FORWARDERS | FEATURE_PAUSED_VIDEO;
+const FEATURES: u64 = FEATURE_BOOST_TIERS
+    | FEATURE_VIDEO_LAYERS
+    | FEATURE_SEEDERS_ONLY
+    | FEATURE_SEEDER_FORWARDERS
+    | FEATURE_PAUSED_VIDEO
+    | FEATURE_RELINK;
 
 /// A device's roster for the DM or group call it is in.
 #[derive(Debug, Serialize, Deserialize)]
@@ -678,6 +686,17 @@ pub(crate) struct Room {
     /// Since when this room has had too few working links with peers still live, and when it last asked them where
     /// they are. See `rejoin`.
     lonely: Mutex<(Option<Instant>, Option<Instant>)>,
+    /// The dead links this device offers for, by sender id. See `relink`.
+    relink: Mutex<BTreeMap<u64, relink::DeadPair>>,
+    /// Test hook: relink offers made, by sender id.
+    #[cfg(feature = "test-hooks")]
+    relink_tries: Mutex<BTreeMap<u64, u32>>,
+    /// Test hook: the share of datagrams, in percent, this device drops toward each mesh peer, by root.
+    #[cfg(feature = "test-hooks")]
+    drop_to: Mutex<BTreeMap<String, u32>>,
+    /// Test hook: the share of datagrams, in percent, this device drops on its leaf links.
+    #[cfg(feature = "test-hooks")]
+    leaf_drop: AtomicU32,
     /// The engine's count of rooms not yet dropped, for a test that looks for one kept alive. See `Drop for Room`.
     alive: Arc<AtomicUsize>,
     /// Devices this room has sent its own `Features` to, by sender id.
@@ -1211,6 +1230,13 @@ impl Room {
             features: Mutex::new(BTreeMap::new()),
             seen_live: Mutex::new(BTreeMap::new()),
             lonely: Mutex::new((None, None)),
+            relink: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "test-hooks")]
+            relink_tries: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "test-hooks")]
+            drop_to: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "test-hooks")]
+            leaf_drop: AtomicU32::new(0),
             told: Mutex::new(std::collections::BTreeSet::new()),
             offers: Mutex::new(BTreeMap::new()),
             stall: Mutex::new(volunteers::StallWatch::new()),
@@ -2899,11 +2925,13 @@ impl Engine {
     }
 
     /// Waits up to five seconds for the room an offer names. A migration on the other side can
-    /// reach this device a moment before this device has built its own room.
+    /// reach this device a moment before this device has built its own room. An offer for the generation this device
+    /// runs now goes to the live room, even while a rebuild of it is staged: it repairs a link there (`relink`).
     async fn await_room(&self, id: &RoomId, gen: &RoomId) -> Option<Arc<Room>> {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if let Some(room) = self.room_for(id, Some(gen)).or_else(|| self.relay_room_gen(id, gen)) {
+            let live = self.current_room(id).filter(|room| room.gen == *gen);
+            if let Some(room) = live.or_else(|| self.room_for(id, Some(gen))).or_else(|| self.relay_room_gen(id, gen)) {
                 return Some(room);
             }
             if std::time::Instant::now() >= deadline {
@@ -3257,6 +3285,8 @@ impl Engine {
                     let sfu = sfu
                         .as_mut()
                         .ok_or_else(|| call_err("this device is not the forwarder"))?;
+                    // A leaf offers again when its link died (`relink`): a dead downlink is replaced, a working one stays.
+                    sfu.replace_if_stale(sid, STALE_LINK, self.inner.timings.connect_grace).map_err(call_err)?;
                     sfu.accept(sid, CallLink::Net(transport), offer).await.map_err(call_err)?
                 }
                 None => {
@@ -3753,6 +3783,7 @@ impl Engine {
         // nothing drives.
         let current = lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room));
         if current {
+            self.relink_check(room, mesh).await;
             let mesh_up = mesh.live_count(STALE_LINK);
             self.lonely_check(room, mesh_up).await;
             // A device that has been short of working links for `rejoin_after` leads no tier move: its peers are not

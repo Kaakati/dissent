@@ -58,6 +58,13 @@ pub struct Timings {
     /// 250 ms RTO and back off to a 3 s cap over 9 retransmits (`is` crate, `StunTiming::default`), about 19 s in
     /// all, while a reachable pair answers within the first few. See `Mesh::replace_if_stale`.
     pub connect_grace: Duration,
+    /// How long a call link stays dead before the side that offers for it offers again, and the first wait before the
+    /// next try. Longer than `STALE_LINK`, so a short stall is never taken for a dead link. See `calls::relink`.
+    pub relink_after: Duration,
+    /// The longest wait between two relink offers for one pair.
+    pub relink_backoff_cap: Duration,
+    /// How long a forwarder keeps a downlink that hears nothing. Its leaf offers again once it sees the link dead.
+    pub relink_drop_after: Duration,
     /// How often a device sends its epoch check while its epoch stays the same. See `forks`.
     pub epoch_check_every: Duration,
     /// The shortest gap between two epoch checks for one community.
@@ -87,6 +94,9 @@ impl Default for Timings {
             pending_add_wait: Duration::from_secs(2),
             rejoin_after: Duration::from_secs(10),
             connect_grace: Duration::from_secs(10),
+            relink_after: Duration::from_secs(4),
+            relink_backoff_cap: Duration::from_secs(30),
+            relink_drop_after: Duration::from_secs(15),
             epoch_check_every: Duration::from_secs(300),
             epoch_check_gap: Duration::from_secs(30),
         }
@@ -126,6 +136,9 @@ mod tests {
         assert_eq!(t.pending_add_wait, Duration::from_secs(2));
         assert_eq!(t.rejoin_after, Duration::from_secs(10));
         assert_eq!(t.connect_grace, Duration::from_secs(10));
+        assert_eq!(t.relink_after, Duration::from_secs(4));
+        assert_eq!(t.relink_backoff_cap, Duration::from_secs(30));
+        assert_eq!(t.relink_drop_after, Duration::from_secs(15));
         assert_eq!(t.epoch_check_every, Duration::from_secs(300));
         assert_eq!(t.epoch_check_gap, Duration::from_secs(30));
     }

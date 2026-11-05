@@ -53,6 +53,9 @@ pub struct Mesh<T: PacketTransport> {
     link: LinkConfig,
     /// The last calls this mesh dropped, why, and in what state, newest last, for a test that timed out.
     drops: std::collections::VecDeque<String>,
+    /// For tests: the share of datagrams, in percent, the call to each peer drops. See `set_drop_percent_for`.
+    #[cfg(feature = "test-hooks")]
+    drop_for: BTreeMap<u64, u32>,
 }
 
 impl<T: PacketTransport> Mesh<T> {
@@ -71,6 +74,8 @@ impl<T: PacketTransport> Mesh<T> {
             offers: BTreeMap::new(),
             next_offer: 0,
             drops: std::collections::VecDeque::new(),
+            #[cfg(feature = "test-hooks")]
+            drop_for: BTreeMap::new(),
             link: LinkConfig {
                 auth: None,
                 state: Arc::new(Mutex::new(RxState::new(None))),
@@ -217,6 +222,12 @@ impl<T: PacketTransport> Mesh<T> {
     /// within `quiet`), so a peer back from another room can link again. A working call stays, and this fails, so two
     /// offers that cross, or a duplicate one, cannot tear it down. So does a call younger than `connecting` that has
     /// not connected yet: it may still be in its handshake, and replacing it would orphan the answer on its way.
+    /// Whether a new link to `peer` would replace the call there now, as `replace_if_stale` decides. True without a
+    /// call.
+    pub fn is_stale(&self, peer: u64, quiet: Duration, connecting: Duration) -> bool {
+        self.calls.get(&peer).is_none_or(|call| call.is_stale(quiet, connecting))
+    }
+
     pub fn replace_if_stale(&mut self, peer: u64, quiet: Duration, connecting: Duration) -> Result<()> {
         match self.calls.get(&peer) {
             Some(call) if call.is_live(quiet) => Err(MediaError::BadState("already linked to this peer")),
@@ -486,7 +497,21 @@ impl<T: PacketTransport> Mesh<T> {
     /// dead link does. 100 keeps a call from ever connecting.
     #[cfg(feature = "test-hooks")]
     pub fn set_drop_percent(&mut self, percent: u32) {
-        for call in self.calls.values_mut() {
+        for (peer, call) in self.calls.iter_mut() {
+            call.set_drop_percent(percent.max(self.drop_for.get(peer).copied().unwrap_or(0)));
+        }
+    }
+
+    /// For tests: drops `percent` of the datagrams the call to `peer` sends, on top of `set_drop_percent`, the calls
+    /// to it made later included. 0 stops it.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_drop_percent_for(&mut self, peer: u64, percent: u32) {
+        if percent == 0 {
+            self.drop_for.remove(&peer);
+        } else {
+            self.drop_for.insert(peer, percent);
+        }
+        if let Some(call) = self.calls.get_mut(&peer) {
             call.set_drop_percent(percent);
         }
     }

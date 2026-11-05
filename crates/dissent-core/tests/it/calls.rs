@@ -1665,7 +1665,7 @@ async fn a_boosted_mesh_holds_on_measured_upload() {
 /// act as released builds: no `Features` and no layer messages, one video stream. They announce
 /// less upload, so a device that knows layers is elected to forward. Returns the peers and the
 /// forwarder's index.
-async fn simulcast_call(released: &[usize]) -> (Vec<Peer>, usize) {
+pub(crate) async fn simulcast_call(released: &[usize]) -> (Vec<Peer>, usize) {
     let (everyone, community, channel) = boosted_call(7, 0, 5_000).await;
     for i in released {
         dissent_core::test_support::act_as_released_calls(&everyone[*i].engine);

@@ -210,6 +210,24 @@ impl<T: PacketTransport> Sfu<T> {
         self.active_up
     }
 
+    /// Makes room for a new link from `downlink`, as `Mesh::replace_if_stale` does: a downlink that no longer works is
+    /// dropped, and a working one, or one still in its handshake, stays and this fails.
+    pub fn replace_if_stale(&mut self, downlink: PeerId, quiet: std::time::Duration, connecting: std::time::Duration) -> Result<()> {
+        match self.links.get(&downlink) {
+            Some(call) if !call.is_stale(quiet, connecting) => Err(MediaError::BadState("already linked to this downlink")),
+            Some(_) => {
+                self.links.remove(&downlink);
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// How long ago `downlink` last sent anything. `None` without the downlink, or before its first datagram.
+    pub fn downlink_quiet(&self, downlink: PeerId) -> Option<std::time::Duration> {
+        self.links.get(&downlink)?.last_heard()
+    }
+
     /// The downlinks that are working: connected, with a datagram within `quiet`.
     pub fn live_downlinks(&self, quiet: std::time::Duration) -> usize {
         self.links.values().filter(|call| call.is_live(quiet)).count()
