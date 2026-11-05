@@ -6,6 +6,30 @@ use dissent_identity::Vault;
 #[cfg(feature = "test-hooks")]
 pub use crate::presence::mute_gossip_for_tests;
 
+/// Moves `engine`'s call to forwarded (or back to a mesh) now. False when there is no call to move.
+#[cfg(feature = "test-hooks")]
+pub fn force_tier_move(engine: &crate::Engine, forwarded: bool) -> bool {
+    engine.force_tier_move_now(forwarded)
+}
+
+/// Makes `engine` refuse every tier announcement, as a device that sees another roster does.
+#[cfg(feature = "test-hooks")]
+pub fn refuse_tier_moves(engine: &crate::Engine, on: bool) {
+    engine.refuse_tier_moves_now(on);
+}
+
+/// Starts a second tier move on `engine` while its first is still staged, past the guard that keeps moves one at a time.
+#[cfg(feature = "test-hooks")]
+pub fn start_second_move(engine: &crate::Engine, forwarded: bool) -> bool {
+    engine.start_second_move_now(forwarded)
+}
+
+/// How many times `engine`'s current call room has run its loop. A number that stops growing means nothing drives it.
+#[cfg(feature = "test-hooks")]
+pub fn call_loop_ticks(engine: &crate::Engine) -> u64 {
+    engine.call_loop_ticks_now()
+}
+
 /// Holds back `engine`'s call `Features` for `hold`, as a joiner whose first one is slow to arrive on a loaded machine.
 #[cfg(feature = "test-hooks")]
 pub fn hold_call_features(engine: &crate::Engine, hold: std::time::Duration) {
@@ -62,6 +86,7 @@ pub fn fast_timings() -> crate::Timings {
         unheard_grace: Duration::from_secs(10),
         tier_return_backoff: Duration::from_secs(3),
         tier_return_backoff_cap: Duration::from_secs(12),
+        settle_after_swap: Duration::from_secs(3),
         pending_add_wait: Duration::from_secs(2),
         epoch_check_every: Duration::from_secs(3),
         epoch_check_gap: Duration::from_secs(1),

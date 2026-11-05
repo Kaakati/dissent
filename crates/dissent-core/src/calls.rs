@@ -54,6 +54,8 @@ const LATE_TICK: Duration = Duration::from_millis(40);
 const FRAME_BYTES: usize = 160;
 /// How long the accepting side waits for the media link that the offering side dials.
 const LINK_WAIT: Duration = Duration::from_secs(10);
+/// How long the current room's call loop may go without a tick before `watch_driver` warns.
+const DRIVER_STALL: Duration = Duration::from_secs(5);
 /// How long one signalling request may take.
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// The driver rechecks rekeying and bans this many frames apart, about every half second.
@@ -654,8 +656,10 @@ pub(crate) struct Room {
     migrating: AtomicBool,
     /// Capacities the other devices announced, by sender id, with when each arrived.
     capacities: Mutex<BTreeMap<u64, (u32, Instant)>>,
-    /// This device's own measured capacity in kbps. Zero until measured.
+    /// This device's own measured capacity in kbps. Zero until measured. A migrated room starts from the old one's.
     own_kbps: AtomicU32,
+    /// When this room was swapped in, `None` for a room that never was. See `Timings::settle_after_swap`.
+    swapped_at: Mutex<Option<Instant>>,
     /// Ticks since the last capacity measurement and announcement.
     capacity_clock: AtomicU64,
     /// When a better forwarder first appeared. Cleared when it no longer does.
@@ -692,6 +696,8 @@ pub(crate) struct Room {
     /// How the call loop keeps time: ticks run, ticks that fired over `LATE_TICK` late, the worst lateness in
     /// microseconds, and audio frames received. For tests and diagnostics.
     loop_stats: [AtomicU64; 4],
+    /// Whether a call loop (`drive`) runs this room. Set when the loop is spawned, cleared when it ends.
+    driven: AtomicBool,
     /// The link's last bandwidth estimate, in kbps. Zero before the first. For tests and diagnostics.
     link_estimate: AtomicU32,
     /// For tests: an estimate that replaces the link's when above zero.
@@ -816,6 +822,9 @@ pub(crate) struct CallHub {
     /// Test hook: no `Features` leave this device before then, as when its first one is slow to arrive.
     #[cfg(feature = "test-hooks")]
     features_held_until: Mutex<Option<Instant>>,
+    /// Test hook: this device refuses every tier announcement, as one that sees another roster does.
+    #[cfg(feature = "test-hooks")]
+    refuse_tier_moves: AtomicBool,
     incoming: Mutex<BTreeMap<DeviceId, MediaLink>>,
     arrived: Notify,
     pub(crate) ringing: Mutex<Option<Ringing>>,
@@ -851,6 +860,8 @@ impl CallHub {
             tier_memory: Mutex::new(None),
             #[cfg(feature = "test-hooks")]
             features_held_until: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            refuse_tier_moves: AtomicBool::new(false),
             incoming: Mutex::new(BTreeMap::new()),
             arrived: Notify::new(),
             ringing: Mutex::new(None),
@@ -1149,6 +1160,7 @@ impl Room {
             migrating: AtomicBool::new(false),
             capacities: Mutex::new(BTreeMap::new()),
             own_kbps: AtomicU32::new(0),
+            swapped_at: Mutex::new(None),
             capacity_clock: AtomicU64::new(0),
             forwarder_since: Mutex::new(None),
             features: Mutex::new(BTreeMap::new()),
@@ -1166,6 +1178,7 @@ impl Room {
             screen: Mutex::new(None),
             remote_video: Mutex::new(RemoteVideo::default()),
             loop_stats: Default::default(),
+            driven: AtomicBool::new(false),
             link_estimate: AtomicU32::new(0),
             forced_estimate: AtomicU32::new(0),
             #[cfg(feature = "test-hooks")]
@@ -1372,6 +1385,14 @@ impl Room {
 }
 
 /// True if `room` is still the call this device is in.
+/// Empties the staged slot if it still holds `room`. A newer move's room there is left alone.
+fn clear_staged(inner: &Inner, room: &Arc<Room>) {
+    let mut staged = lock(&inner.calls.staged);
+    if staged.as_ref().is_some_and(|s| Arc::ptr_eq(s, room)) {
+        *staged = None;
+    }
+}
+
 fn is_current(inner: &Inner, room: &Arc<Room>) -> bool {
     let matches = |c: &Arc<Room>| Arc::ptr_eq(c, room);
     lock(&inner.calls.current).as_ref().is_some_and(matches)
@@ -1703,6 +1724,19 @@ async fn pump_video_leaf(engine: &Engine, room: &Room, participant: &mut Partici
 /// Runs one call: sends a synthetic frame every 20 ms, drains arriving frames, and every half
 /// second rekeys a channel call and drops banned participants. Stops when the call ends.
 async fn drive(weak: Weak<Inner>, room: Weak<Room>) {
+    drive_loop(weak, room.clone()).await;
+    if let Some(room) = room.upgrade() {
+        room.driven.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Spawns the call loop for `room`.
+fn spawn_drive(engine: &Engine, room: &Arc<Room>) {
+    room.driven.store(true, Ordering::SeqCst);
+    engine.spawn_task(drive(Arc::downgrade(&engine.inner), Arc::downgrade(room)));
+}
+
+async fn drive_loop(weak: Weak<Inner>, room: Weak<Room>) {
     let mut tick = tokio::time::interval(Duration::from_millis(FRAME_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut since_check: u32 = 0;
@@ -2062,7 +2096,8 @@ impl Engine {
             }
         }
         *lock(&self.inner.calls.current) = Some(room.clone());
-        self.spawn_task(drive(Arc::downgrade(&self.inner), Arc::downgrade(&room)));
+        spawn_drive(self, &room);
+        self.watch_driver(&room);
         // A device in a call of its own forwards no other call as a volunteer.
         let engine = self.clone();
         self.spawn_task(async move { engine.withdraw_forward_offers(None).await });
@@ -3630,8 +3665,13 @@ impl Engine {
         if room.forwarding.is_some() {
             self.spawn_signal_layers(room);
         }
-        self.tier_check(room);
-        self.forwarder_check(room);
+        // Moves start only from the current room. A staged room is checked too, but a move started from it would
+        // replace it in the staged slot while its own move still waits on it, and leave that move swapping in a room
+        // nothing drives.
+        if lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room)) {
+            self.tier_check(room);
+            self.forwarder_check(room);
+        }
         let tick = room.capacity_clock.fetch_add(1, Ordering::SeqCst);
         if tick.is_multiple_of(CAPACITY_EVERY) {
             // Sent again with each capacity, so a device that missed it, or rejoined, hears it.
@@ -3641,7 +3681,9 @@ impl Engine {
             } else {
                 Vec::new()
             };
-            if let Some(kbps) = self.measure_capacity(room, mesh_links).await {
+            let measured = self.measure_capacity(room, mesh_links).await;
+            let settling = self.settling(room);
+            if let Some(kbps) = capacity_to_announce(measured, room.own_kbps.load(Ordering::SeqCst), settling) {
                 room.own_kbps.store(kbps, Ordering::SeqCst);
                 self.announce_capacity(room, kbps).await;
             }
@@ -4137,6 +4179,13 @@ impl Engine {
             mesh_limit,
         };
         let mut want = media_tier(policy.tier_for(live, room.tier));
+        if want != room.tier && self.settling(room) {
+            let uncapped = self.mesh_limit_with(room, false).unwrap_or(mesh_limit);
+            if settling_holds(mesh_limit, uncapped, live) {
+                *lock(&room.tier_since) = None;
+                return;
+            }
+        }
         let mut memory = self.tier_memory(&room.id);
         let mut sustain = self.inner.timings.tier_sustain;
         let returning = room.tier == Tier::Forwarded && want == Tier::Forwarded && memory.may_return(live, mesh_limit);
@@ -4175,8 +4224,9 @@ impl Engine {
                     })
                     .collect()
             };
+            let caps = self.fresh_capacities(room);
             self.note_tier(format!(
-                "moves {:?}->{want:?}: live={live} mesh_limit={mesh_limit} heard=[{}]",
+                "moves {:?}->{want:?}: live={live} mesh_limit={mesh_limit} heard=[{}] caps={caps:?}",
                 room.tier,
                 heard.join(" ")
             ));
@@ -4224,6 +4274,7 @@ impl Engine {
         let mut room = Room::new(old.id, old.scope, mesh, my_sid, epoch, None);
         room.features = Mutex::new(lock(&old.features).clone());
         room.offers = Mutex::new(lock(&old.offers).clone());
+        room.own_kbps = AtomicU32::new(old.own_kbps.load(Ordering::SeqCst));
         // Stall reports carry over, so a device that follows a failover before it judged the
         // volunteer itself still excludes it once the reports add up.
         room.stall = Mutex::new(lock(&old.stall).carried());
@@ -4257,7 +4308,7 @@ impl Engine {
         }
         let room = Arc::new(room);
         *lock(&self.inner.calls.staged) = Some(room.clone());
-        self.spawn_task(drive(Arc::downgrade(&self.inner), Arc::downgrade(&room)));
+        spawn_drive(self, &room);
 
         // Tell the others which tier and roster this comes from, so they can follow.
         let me = self.inner.identity.device_id();
@@ -4301,32 +4352,49 @@ impl Engine {
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
+            // Another move took the staged slot. This room's loop has stopped, so it can never carry the call: it is
+            // dropped here, which hangs up its links, and the other move goes on.
+            if !lock(&self.inner.calls.staged).as_ref().is_some_and(|s| Arc::ptr_eq(s, &room)) {
+                self.note_tier(format!("drops {to:?}: another move took its place"));
+                return Err(call_err("another tier move replaced this one"));
+            }
             let linked = room.links.load(Ordering::SeqCst);
             if linked >= expected || std::time::Instant::now() >= deadline {
                 if linked == 0 {
-                    *lock(&self.inner.calls.staged) = None;
+                    clear_staged(&self.inner, &room);
                     return Err(call_err("the new tier linked no peers in time"));
                 }
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        self.swap_in(old, room);
-        Ok(())
+        if self.swap_in(old, room) {
+            Ok(())
+        } else {
+            Err(call_err("the call moved on while this tier move waited"))
+        }
     }
 
-    /// Makes `new` the current room. The audio moves to it, so the stream keeps its place.
-    fn swap_in(&self, old: &Arc<Room>, new: Arc<Room>) {
+    /// Makes `new` the current room. The audio moves to it, so the stream keeps its place. Only the staged room is
+    /// swapped in, and only over the room it was built from: a room another move replaced in the staged slot has no
+    /// loop left, and would hold the call without carrying it. False when nothing was swapped.
+    fn swap_in(&self, old: &Arc<Room>, new: Arc<Room>) -> bool {
         {
             let mut current = lock(&self.inner.calls.current);
             let mut staged = lock(&self.inner.calls.staged);
-            if !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, old)) {
-                *staged = None;
-                return;
+            let ours = staged.as_ref().is_some_and(|s| Arc::ptr_eq(s, &new));
+            if !ours || !current.as_ref().is_some_and(|c| Arc::ptr_eq(c, old)) {
+                if ours {
+                    *staged = None;
+                }
+                return false;
             }
+            // A staged room keeps its loop until it leaves the staged slot, and it is swapped in only from there.
+            debug_assert!(new.driven.load(Ordering::SeqCst), "swapped in a room with no call loop");
             let audio = std::mem::replace(&mut *lock(&old.audio), Box::new(SyntheticAudio::default()));
             *lock(&new.audio) = audio;
             new.sending.store(true, Ordering::SeqCst);
+            *lock(&new.swapped_at) = Some(Instant::now());
             *current = Some(new.clone());
             *staged = None;
         }
@@ -4334,11 +4402,47 @@ impl Engine {
         // Without it the call's roster lapses for the server's other members after a migration, and a
         // volunteer stops hearing of the call it forwards.
         self.start_presence_clock(&new);
+        self.watch_driver(&new);
         self.emit(EngineEvent::CallUpdated);
+        true
+    }
+
+    /// Warns once if `room`'s call loop stops ticking for `DRIVER_STALL` while it is the current room: a current room
+    /// nothing drives holds the call in silence, with no check left to bring it back. Ends when the room is no
+    /// longer current.
+    fn watch_driver(&self, room: &Arc<Room>) {
+        let (weak, room) = (Arc::downgrade(&self.inner), Arc::downgrade(room));
+        self.spawn_task(async move {
+            let mut last = (u64::MAX, Instant::now());
+            let mut warned = false;
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let (Some(inner), Some(room)) = (weak.upgrade(), room.upgrade()) else {
+                    return;
+                };
+                if !lock(&inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, &room)) {
+                    return;
+                }
+                let ticks = room.loop_stats[0].load(Ordering::Relaxed);
+                if ticks != last.0 {
+                    last = (ticks, Instant::now());
+                    warned = false;
+                } else if !warned && last.1.elapsed() >= DRIVER_STALL {
+                    warned = true;
+                    let gen = hex(&room.gen[..4]);
+                    warn!(gen = %gen, driven = room.driven.load(Ordering::SeqCst), "the current call room stopped running; the call is silent");
+                    Engine { inner }.note_tier(format!("call loop of gen {gen} stopped"));
+                }
+            }
+        });
     }
 
     /// Applies a tier change another device announced, if it describes the roster we see.
     async fn on_tier(&self, from: DeviceId, msg: TierMsg) -> CallReply {
+        #[cfg(feature = "test-hooks")]
+        if self.inner.calls.refuse_tier_moves.load(Ordering::Relaxed) {
+            return CallReply::Refused("the tier change names another roster".into());
+        }
         let msg_forwarder = msg.forwarder;
         let Some(room) = self.current_room(&msg.room) else {
             // Not in the call: it may name this device as the call's volunteer forwarder.
@@ -4604,6 +4708,52 @@ impl Engine {
             *lock(&room.forwarder_since) = None;
             self.spawn_migration(room.clone(), Tier::Forwarded, Some(best));
         }
+    }
+
+    /// Test hook: moves the current call to forwarded (or back to a mesh) now, whatever the policy says. False when
+    /// there is no call, or a move is under way. See `test_support::force_tier_move`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn force_tier_move_now(&self, forwarded: bool) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        if room.migrating.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let to = if forwarded { Tier::Forwarded } else { Tier::Mesh };
+        self.note_tier(format!("forced {:?}->{to:?}", room.tier));
+        self.spawn_migration(room, to, None);
+        true
+    }
+
+    /// Test hook: refuse every tier announcement. See `test_support::refuse_tier_moves`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn refuse_tier_moves_now(&self, on: bool) {
+        self.inner.calls.refuse_tier_moves.store(on, Ordering::Relaxed);
+    }
+
+    /// Test hook: starts a second tier move from the current room while another is staged, past the guard that keeps
+    /// moves one at a time, as a move started from a staged room's own checks once did. False without a call.
+    /// See `test_support::start_second_move`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn start_second_move_now(&self, forwarded: bool) -> bool {
+        let Some(room) = lock(&self.inner.calls.current).clone() else {
+            return false;
+        };
+        let to = if forwarded { Tier::Forwarded } else { Tier::Mesh };
+        let engine = self.clone();
+        self.spawn_task(async move {
+            if let Err(e) = engine.migrate(&room, to, None).await {
+                engine.note_tier(format!("second move ended: {e}"));
+            }
+        });
+        true
+    }
+
+    /// Test hook: how many times the current room's call loop has ticked. Zero without a call.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn call_loop_ticks_now(&self) -> u64 {
+        lock(&self.inner.calls.current).as_ref().map_or(0, |room| room.loop_stats[0].load(Ordering::Relaxed))
     }
 
     /// Test hook: holds back this device's `Features` for `hold`, as a joiner whose first one is slow to arrive.
@@ -5112,6 +5262,23 @@ enum BoostHeard {
 /// capacity counts as the election's default. `None` while a device has not been heard from yet: a
 /// joiner's first `Features` can take seconds on a loaded machine, and counting it released meanwhile
 /// would move a boosted mesh to forwarded, where it then stays at the limit.
+/// Whether a room still settling after its swap keeps its tier: when only capacity lowers the limit (`limit` below
+/// `uncapped`, the limit without capacities) and the call has not outgrown the uncapped one. A room that just swapped
+/// in measures this device's upload on links still ramping, so a move then would follow a dip, not the call.
+fn settling_holds(limit: usize, uncapped: usize, live: usize) -> bool {
+    limit < uncapped && live <= uncapped
+}
+
+/// The capacity to announce for this device: what was measured, or while the room is settling after its swap, the
+/// value it carried over from the room before, so peers do not lower their limit on a dip. `None` announces nothing.
+fn capacity_to_announce(measured: Option<u32>, carried: u32, settling: bool) -> Option<u32> {
+    if settling {
+        (carried > 0).then_some(carried)
+    } else {
+        measured
+    }
+}
+
 fn effective_mesh_limit(
     boosted: usize,
     live: &[u64],
@@ -5144,6 +5311,17 @@ impl Engine {
     /// The mesh limit for `room` now: its server's boosted one when every device can take it. `None` while
     /// a live device has not been heard from yet. See `effective_mesh_limit`.
     fn mesh_limit(&self, room: &Room) -> Option<usize> {
+        self.mesh_limit_with(room, true)
+    }
+
+    /// Whether `room` was swapped in less than `Timings::settle_after_swap` ago.
+    fn settling(&self, room: &Room) -> bool {
+        lock(&room.swapped_at).is_some_and(|at| at.elapsed() < self.inner.timings.settle_after_swap)
+    }
+
+    /// As `mesh_limit`. Without `capacities`, every device counts as able to carry the mesh, which gives the limit
+    /// the server's boost and the devices' clients allow.
+    fn mesh_limit_with(&self, room: &Room, capacities: bool) -> Option<usize> {
         if self.inner.legacy_calls.load(Ordering::Relaxed) {
             return Some(LEVEL0_MESH_LIMIT);
         }
@@ -5154,7 +5332,7 @@ impl Engine {
             || lock(&room.remote_video).receiving();
         let copy_kbps = AUDIO_STREAM_KBPS + if video { VIDEO_720P_KBPS } else { 0 };
         let live: Vec<u64> = lock(&room.live).keys().copied().collect();
-        let capacities = self.fresh_capacities(room);
+        let capacities = if capacities { self.fresh_capacities(room) } else { BTreeMap::new() };
         let now = Instant::now();
         let features = lock(&room.features).clone();
         let seen = {
@@ -5240,6 +5418,27 @@ impl Engine {
         }
         lock(&room.features).insert(sender_id_of(&room, &from), (bits, Instant::now()));
         CallReply::Ack
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    #[test]
+    fn a_settling_room_holds_against_a_limit_only_capacity_lowered() {
+        assert!(settling_holds(6, 8, 7), "seven fit the boosted limit; only a capacity dip says six");
+        assert!(!settling_holds(8, 8, 9), "nine outgrew the limit: real growth moves");
+        assert!(!settling_holds(6, 8, 9), "past the uncapped limit it moves whatever the capacities say");
+        assert!(!settling_holds(6, 6, 7), "a limit the clients or the boost set is not capacity's doing");
+    }
+
+    #[test]
+    fn a_settling_room_announces_the_capacity_it_carried_over() {
+        assert_eq!(capacity_to_announce(Some(90), 400, true), Some(400), "the dip is not announced");
+        assert_eq!(capacity_to_announce(Some(90), 0, true), None, "nothing carried over, nothing announced");
+        assert_eq!(capacity_to_announce(Some(90), 400, false), Some(90), "once settled, the measure counts");
+        assert_eq!(capacity_to_announce(None, 400, false), None);
     }
 }
 

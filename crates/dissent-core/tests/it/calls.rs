@@ -1265,6 +1265,48 @@ pub(crate) fn call_summary(p: &Peer) -> String {
     )
 }
 
+/// A second tier move takes the staged slot while the first move still waits on its room, as one started from the staged
+/// room's own checks did. The first room lost its call loop with the slot. Before, the first move swapped it in anyway
+/// once one peer had followed, and the call sat in a room nothing ran: no audio, no checks, no way back. Now the first
+/// move drops its room, the owner stays in a room whose loop runs, and audio keeps reaching it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_move_replaced_while_staged_never_swaps_in_a_room_without_a_loop() {
+    heavy(6, async {
+    let (everyone, community, channel) = boosted_call(6, 0, 5_000).await;
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    all_see(&everyone, Topology::Mesh, "a mesh of six").await;
+    // One peer follows the first move, so it links and would swap in; the others refuse.
+    for p in &everyone[2..] {
+        dissent_core::test_support::refuse_tier_moves(&p.engine, true);
+    }
+    let owner = &everyone[0];
+    assert!(dissent_core::test_support::force_tier_move(&owner.engine, true), "the first move starts");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(dissent_core::test_support::start_second_move(&owner.engine, false), "the second move starts");
+    // Past the first move's 20 s wait and the second's.
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let log = dissent_core::test_support::call_debug(&owner.engine);
+    assert!(log.contains("another move took its place"), "the first move dropped its room: {log}");
+    let ticks = dissent_core::test_support::call_loop_ticks(&owner.engine);
+    let frames = owner.engine.call_state().expect("in the call").frames_received;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        dissent_core::test_support::call_loop_ticks(&owner.engine) > ticks,
+        "the current room's loop runs: {}",
+        call_summary(owner)
+    );
+    assert!(
+        owner.engine.call_state().expect("in the call").frames_received > frames,
+        "audio still reaches the owner: {}",
+        call_summary(owner)
+    );
+    finish(everyone).await;
+    }).await;
+}
+
 /// The eighth device stays silent past the grace, so the others count it released, the limit falls to level 0's
 /// and the call moves to forwarded. Once it is heard, the limit is back at eight with eight in the call, and the
 /// call returns to a mesh: it moved because the limit fell, not because it grew.
@@ -1450,7 +1492,7 @@ async fn a_boosted_mesh_holds_on_measured_upload() {
         let upload = dissent_core::test_support::own_call_capacity(&p.engine).expect("measured");
         assert!(upload >= 6 * 32, "six copies of audio are measured: {upload} kbps");
         let view = p.engine.call_state().expect("in call");
-        assert_eq!(view.topology, Topology::Mesh, "measured upload carries a mesh of seven at level 2");
+        assert_eq!(view.topology, Topology::Mesh, "measured upload carries a mesh of seven at level 2: {}", call_summary(p));
     }
     finish(everyone).await;
     }).await;
