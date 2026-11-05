@@ -29,9 +29,9 @@ use crate::{
     addr::PeerAddr,
     extra::{self, Shared},
     lan,
-    media::MEDIA_ALPN,
+    media::{MEDIA_ALPN, MEDIA_TOKEN_ALPN},
     error::{NetError, Result},
-    media::{MediaHandler, MediaLink, MediaProtocol, dial_media},
+    media::{LinkToken, MediaHandler, MediaLink, MediaProtocol, MediaTokenProtocol, dial_media, dial_media_tokened},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
     rpc::{RPC_ALPN, RpcHandler, RpcProtocol, run_request},
     source::{self, DialLog, DialStats, Recorded},
@@ -314,7 +314,8 @@ impl Node {
             router = router.accept(RPC_ALPN, RpcProtocol(handler));
         }
         if let Some(handler) = cfg.media {
-            router = router.accept(MEDIA_ALPN, MediaProtocol(handler));
+            router = router.accept(MEDIA_ALPN, MediaProtocol(handler.clone()));
+            router = router.accept(MEDIA_TOKEN_ALPN, MediaTokenProtocol(handler));
         }
         for (alpn, handler) in cfg.extra_protocols {
             router = router.accept(alpn, Shared(handler));
@@ -525,6 +526,20 @@ impl Node {
     pub async fn open_media(&self, peer: DeviceId) -> Result<MediaLink> {
         self.note_contacted(peer);
         dial_media(&self.inner.endpoint, peer).await
+    }
+
+    /// As `open_media`, for a peer that takes link tokens: dials it on the token ALPN, sends a fresh random token
+    /// on the link and returns both. The offer for this link names the token, so the peer pairs the two.
+    pub async fn open_media_tokened(&self, peer: DeviceId) -> Result<(MediaLink, LinkToken)> {
+        self.note_contacted(peer);
+        let token: LinkToken = rand::random();
+        Ok((dial_media_tokened(&self.inner.endpoint, peer, token).await?, token))
+    }
+
+    /// Test hook: as `open_media_tokened`, but sends no token, as a peer that never names its link would.
+    #[cfg(feature = "test-hooks")]
+    pub async fn open_media_untokened(&self, peer: DeviceId) -> Result<MediaLink> {
+        crate::media::dial_media_untokened(&self.inner.endpoint, peer).await
     }
 
     /// Most peers `contacted_within` remembers. The ones dialled longest ago are dropped first.

@@ -2596,6 +2596,7 @@ dependencies = [
  "data-encoding",
  "dissent-files",
  "dissent-identity",
+ "dissent-net",
  "ed25519-dalek 3.0.0",
  "futures-lite",
  "iroh",

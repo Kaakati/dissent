@@ -10,14 +10,14 @@ use iroh_gossip::ALPN as GOSSIP_ALPN;
 
 use crate::{
     error::{NetError, Result},
-    media::MEDIA_ALPN,
+    media::{MEDIA_ALPN, MEDIA_TOKEN_ALPN},
     ping::PING_ALPN,
     rpc::RPC_ALPN,
 };
 
 /// ALPNs the node registers itself. Extra handlers cannot reuse them, whether or not the
 /// optional handlers are set.
-const RESERVED_ALPNS: [&[u8]; 4] = [PING_ALPN, GOSSIP_ALPN, RPC_ALPN, MEDIA_ALPN];
+const RESERVED_ALPNS: [&[u8]; 5] = [PING_ALPN, GOSSIP_ALPN, RPC_ALPN, MEDIA_ALPN, MEDIA_TOKEN_ALPN];
 
 /// Rejects a reserved or repeated ALPN before the endpoint binds.
 pub(crate) fn validate(extra: &[(Vec<u8>, Arc<dyn DynProtocolHandler>)]) -> Result<()> {

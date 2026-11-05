@@ -29,7 +29,7 @@ use dissent_media::{
     Side, Signal, FRAME_SAMPLES,
 };
 use std::collections::VecDeque;
-use dissent_net::{MediaHandler, MediaLink, PathKind, PeerAddr};
+use dissent_net::{LinkToken, MediaHandler, MediaLink, PathKind, PeerAddr};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -168,6 +168,14 @@ pub(crate) enum CallMsg {
     /// rejoin it. Answered with `CallReply::There`. Appended after the released variants: a released device answers it
     /// as a bad request, which counts as no answer. See `rejoin`.
     WhereIs { room: RoomId },
+    /// As `Offer`, for the link the sender dialled with `link` as its token, which the receiver pairs it with. Sent
+    /// only to a device whose `Features` carry `FEATURE_LINK_TOKENS`. Appended after the released variants.
+    OfferV2 {
+        room: RoomId,
+        gen: RoomId,
+        signal: Vec<u8>,
+        link: LinkToken,
+    },
 }
 
 /// `CallMsg::Features` bit: the sender keeps a call as a mesh up to its server's boosted limit.
@@ -186,6 +194,9 @@ pub(crate) const FEATURE_PAUSED_VIDEO: u64 = 16;
 /// `FEATURE_VOLUNTEERS`, so a client from before this elects nobody outside a call that has one of these in it. See
 /// `volunteers`.
 pub(crate) const FEATURE_SEEDERS_ONLY: u64 = 32;
+/// `CallMsg::Features` bit: the sender takes media links dialled with a token, and `OfferV2` naming them. See
+/// `dissent_net::LinkToken`.
+pub(crate) const FEATURE_LINK_TOKENS: u64 = 64;
 /// `CallMsg::Features` bit: the sender replaces a dead call link when its peer offers again, and offers again itself
 /// for a link it offers for. A mesh pair relinks only when both sent it. See `relink`.
 pub(crate) const FEATURE_RELINK: u64 = 128;
@@ -195,6 +206,7 @@ const FEATURES: u64 = FEATURE_BOOST_TIERS
     | FEATURE_SEEDERS_ONLY
     | FEATURE_SEEDER_FORWARDERS
     | FEATURE_PAUSED_VIDEO
+    | FEATURE_LINK_TOKENS
     | FEATURE_RELINK;
 
 /// A device's roster for the DM or group call it is in.
@@ -874,6 +886,9 @@ pub(crate) struct CallHub {
     /// Media links dialled to this device, by the device that dialled, with when each arrived.
     incoming: Mutex<BTreeMap<DeviceId, (MediaLink, Instant)>>,
     arrived: Notify,
+    /// Media links dialled to this device with a token, by the device that dialled, oldest first, with when each
+    /// arrived. An offer that names the token takes its link. See `file_link`.
+    tokened: Mutex<BTreeMap<DeviceId, VecDeque<WaitingLink>>>,
     pub(crate) ringing: Mutex<Option<Ringing>>,
     pub(crate) ring_timeout: Mutex<Duration>,
     /// Calls this device answers as unanswered because of its call setting, by caller device. See `call_privacy`.
@@ -919,6 +934,7 @@ impl CallHub {
             features_held_until: Mutex::new(None),
             incoming: Mutex::new(BTreeMap::new()),
             arrived: Notify::new(),
+            tokened: Mutex::new(BTreeMap::new()),
             ringing: Mutex::new(None),
             ring_timeout: Mutex::new(timings.ring_timeout),
             quiet: Mutex::new(BTreeMap::new()),
@@ -941,6 +957,48 @@ impl MediaHandler for MediaSink {
             inner.calls.arrived.notify_waiters();
         }
     }
+
+    fn incoming_tokened(&self, from: DeviceId, token: LinkToken, link: MediaLink) {
+        if let Some(inner) = self.0.upgrade() {
+            let dropped = {
+                let mut tokened = lock(&inner.calls.tokened);
+                file_link(tokened.entry(from).or_default(), token, link, Instant::now())
+            };
+            for link in dropped {
+                link.close();
+            }
+            inner.calls.arrived.notify_waiters();
+        }
+    }
+}
+
+/// The offer for a link dialled with `token`, or for a link without one.
+fn offer_msg(room: &Room, signal: Vec<u8>, token: Option<LinkToken>) -> CallMsg {
+    match token {
+        Some(link) => CallMsg::OfferV2 { room: room.id, gen: room.gen, signal, link },
+        None => CallMsg::Offer { room: room.id, gen: room.gen, signal },
+    }
+}
+
+/// A link dialled with a token, waiting for the offer that names it: the token, the link, and when it arrived.
+type WaitingLink = (LinkToken, MediaLink, Instant);
+
+/// Most links one device may have waiting for their offers. Past this the oldest is dropped, so a peer cannot pile up
+/// open connections.
+const MOST_WAITING_LINKS: usize = 4;
+
+/// Files a link that arrived with `token` among one device's waiting links, and returns the ones to hang up: any that
+/// waited longer than an offer takes to follow its link (`LINK_WAIT`), and the oldest past `MOST_WAITING_LINKS`.
+fn file_link<L>(waiting: &mut VecDeque<(LinkToken, L, Instant)>, token: LinkToken, link: L, now: Instant) -> Vec<L> {
+    let mut dropped = Vec::new();
+    while waiting.front().is_some_and(|(_, _, at)| now.duration_since(*at) > LINK_WAIT) {
+        dropped.extend(waiting.pop_front().map(|(_, link, _)| link));
+    }
+    waiting.push_back((token, link, now));
+    while waiting.len() > MOST_WAITING_LINKS {
+        dropped.extend(waiting.pop_front().map(|(_, link, _)| link));
+    }
+    dropped
 }
 
 /// The media handler the engine installs when the caller did not bring one.
@@ -1961,7 +2019,7 @@ impl Engine {
         let root = room
             .sid_of(&device)
             .ok_or_else(|| call_err("this device is not a parent in this call"))?;
-        let link = self.node().open_media(device).await?;
+        let (link, link_token) = self.dial_for_offer(&room, device).await?;
         room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
@@ -1977,11 +2035,7 @@ impl Engine {
         let reply = self
             .call_rpc(
                 device,
-                CallMsg::Offer {
-                    room: room.id,
-                    gen: room.gen,
-                    signal: offer.to_bytes().map_err(call_err)?,
-                },
+                offer_msg(&room, offer.to_bytes().map_err(call_err)?, link_token),
             )
             .await?;
         match reply {
@@ -2050,7 +2104,7 @@ impl Engine {
         if forwarding.volunteer.is_some() {
             self.tell_relay_leaf(&room, device).await?;
         }
-        let link = self.node().open_media(device).await?;
+        let (link, link_token) = self.dial_for_offer(&room, device).await?;
         room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let offer = {
@@ -2063,11 +2117,7 @@ impl Engine {
         let reply = self
             .call_rpc(
                 device,
-                CallMsg::Offer {
-                    room: room.id,
-                    gen: room.gen,
-                    signal: offer.to_bytes().map_err(call_err)?,
-                },
+                offer_msg(&room, offer.to_bytes().map_err(call_err)?, link_token),
             )
             .await?;
         match reply {
@@ -2443,7 +2493,7 @@ impl Engine {
         let sid = room
             .sid_of(&device)
             .ok_or_else(|| call_err("device is not in this call"))?;
-        let link = self.node().open_media(device).await?;
+        let (link, link_token) = self.dial_for_offer(&room, device).await?;
         room.note_link(device, &link);
         let transport = LinkTransport::new(link, Side::Caller);
         let (offer, token) = {
@@ -2458,11 +2508,7 @@ impl Engine {
         let reply = self
             .call_rpc(
                 device,
-                CallMsg::Offer {
-                    room: room.id,
-                    gen: room.gen,
-                    signal: offer.to_bytes().map_err(call_err)?,
-                },
+                offer_msg(&room, offer.to_bytes().map_err(call_err)?, link_token),
             )
             .await?;
         match reply {
@@ -2496,6 +2542,44 @@ impl Engine {
             .directory
             .root_of(device)
             .unwrap_or(self.inner.me)
+    }
+
+    /// Waits for the media link `from` dialled for the offer that names `token`.
+    async fn wait_tokened(&self, from: DeviceId, token: LinkToken) -> Result<MediaLink> {
+        let deadline = tokio::time::Instant::now() + LINK_WAIT;
+        loop {
+            let arrived = self.inner.calls.arrived.notified();
+            {
+                let mut tokened = lock(&self.inner.calls.tokened);
+                if let Some(waiting) = tokened.get_mut(&from) {
+                    if let Some(i) = waiting.iter().position(|(t, _, _)| *t == token) {
+                        let (_, link, _) = waiting.remove(i).expect("found");
+                        if waiting.is_empty() {
+                            tokened.remove(&from);
+                        }
+                        return Ok(link);
+                    }
+                }
+            }
+            if tokio::time::timeout_at(deadline, arrived).await.is_err() {
+                return Err(call_err("no media link from the peer for this offer"));
+            }
+        }
+    }
+
+    /// Dials the media link for an offer to `device`: with a token when its `Features` say it takes one, so the
+    /// offer names the link it belongs to.
+    async fn dial_for_offer(&self, room: &Room, device: DeviceId) -> Result<(MediaLink, Option<LinkToken>)> {
+        let tokens = room
+            .sid_of(&device)
+            .and_then(|sid| lock(&room.features).get(&sid).map(|(bits, _)| bits & FEATURE_LINK_TOKENS != 0))
+            .unwrap_or(false);
+        if tokens {
+            let (link, token) = self.node().open_media_tokened(device).await?;
+            Ok((link, Some(token)))
+        } else {
+            Ok((self.node().open_media(device).await?, None))
+        }
     }
 
     /// Waits for the media link that `from` dials to us.
@@ -2552,7 +2636,8 @@ impl Engine {
                 }
                 self.on_join(from, room, scope, cert, key, muted, addr, ring)
             }
-            CallMsg::Offer { room, gen, signal } => self.on_offer(from, room, gen, signal).await,
+            CallMsg::Offer { room, gen, signal } => self.on_offer(from, room, gen, signal, None).await,
+            CallMsg::OfferV2 { room, gen, signal, link } => self.on_offer(from, room, gen, signal, Some(link)).await,
             CallMsg::Tier(msg) => self.on_tier(from, *msg).await,
             CallMsg::Capacity { room, kbps, sig } => self.on_capacity(from, room, kbps, sig),
             CallMsg::Mute { room, muted } => {
@@ -3261,12 +3346,17 @@ impl Engine {
     }
 
     /// Accepts an offer. The offerer dialled the link, so it is already waiting for us.
-    async fn on_offer(&self, from: DeviceId, id: RoomId, gen: RoomId, signal: Vec<u8>) -> CallReply {
+    /// `token` names the link the offerer dialled for it. Without one, the offerer is a client that sends none, and
+    /// the link waiting from it is taken.
+    async fn on_offer(&self, from: DeviceId, id: RoomId, gen: RoomId, signal: Vec<u8>, token: Option<LinkToken>) -> CallReply {
         let Some(room) = self.await_room(&id, &gen).await else {
             return CallReply::Refused("not in this call".into());
         };
         let outcome: Result<Vec<u8>> = async {
-            let link = self.wait_incoming(from).await?;
+            let link = match token {
+                Some(token) => self.wait_tokened(from, token).await?,
+                None => self.wait_incoming(from).await?,
+            };
             room.note_link(from, &link);
             let offer = Signal::from_bytes(&signal).map_err(call_err)?;
             let sid = room
@@ -6004,6 +6094,46 @@ mod lonely_tests {
         assert!(may_lead_moves(None, now, after), "not lonely");
         assert!(may_lead_moves(Some(now - Duration::from_secs(3)), now, after), "links still forming");
         assert!(!may_lead_moves(Some(now - after), now, after), "lonely for rejoin_after: it rejoins instead");
+    }
+}
+
+#[cfg(test)]
+mod link_token_tests {
+    use super::*;
+
+    /// Postcard writes an enum's variant index first. `OfferV2` comes after every released variant, so it shifts
+    /// nothing a released client decodes.
+    #[test]
+    fn offer_v2_is_appended_and_its_feature_bit_is_pinned() {
+        let msg = CallMsg::OfferV2 { room: [1; 32], gen: [2; 32], signal: vec![3], link: [4; 16] };
+        assert_eq!(postcard::to_allocvec(&msg).expect("encode")[0], 18);
+        let where_is = CallMsg::WhereIs { room: [1; 32] };
+        assert_eq!(postcard::to_allocvec(&where_is).expect("encode")[0], 17);
+        let offer = CallMsg::Offer { room: [1; 32], gen: [2; 32], signal: vec![3] };
+        assert_eq!(postcard::to_allocvec(&offer).expect("encode")[0], 1);
+        assert_eq!(FEATURE_LINK_TOKENS, 64);
+        assert_ne!(FEATURES & FEATURE_LINK_TOKENS, 0, "this build takes link tokens");
+    }
+
+    #[test]
+    fn waiting_links_are_capped_per_device_and_the_oldest_go_first() {
+        let now = Instant::now();
+        let mut waiting = VecDeque::new();
+        for n in 0..MOST_WAITING_LINKS as u8 {
+            assert!(file_link(&mut waiting, [n; 16], n, now).is_empty());
+        }
+        assert_eq!(file_link(&mut waiting, [9; 16], 9, now), vec![0], "the fifth pushes out the first");
+        let tokens: Vec<u8> = waiting.iter().map(|(t, _, _)| t[0]).collect();
+        assert_eq!(tokens, vec![1, 2, 3, 9]);
+    }
+
+    #[test]
+    fn a_link_that_waited_past_link_wait_is_dropped() {
+        let now = Instant::now();
+        let then = now - LINK_WAIT - Duration::from_secs(1);
+        let mut waiting = VecDeque::from([([1; 16], 1u8, then), ([2; 16], 2u8, now)]);
+        assert_eq!(file_link(&mut waiting, [3; 16], 3, now), vec![1]);
+        assert_eq!(waiting.len(), 2);
     }
 }
 
