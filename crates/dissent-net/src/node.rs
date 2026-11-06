@@ -10,7 +10,7 @@ use iroh::{
     address_lookup::{
         AddressLookup, AddressLookupBuilder, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver,
     },
-    endpoint::{default_relay_mode, presets},
+    endpoint::{BindOpts, default_relay_mode, presets},
     protocol::Router,
     tls::CaTlsConfig,
 };
@@ -64,7 +64,7 @@ pub const DEFAULT_GOSSIP_MAX_MESSAGE: usize = 128 * 1024;
 #[derive(Clone)]
 pub struct NodeConfig {
     pub relay: RelayChoice,
-    /// UDP port to bind on all IPv4 interfaces. `0` picks any free port.
+    /// UDP port to bind on all IPv4 and IPv6 interfaces. `0` picks any free port.
     pub bind_port: u16,
     /// Handler for incoming requests on the RPC ALPN. `None` refuses RPC.
     pub rpc: Option<Arc<dyn RpcHandler>>,
@@ -260,8 +260,14 @@ impl Node {
                 .bind_addr(addr)
                 .map_err(|e| NetError::Config(e.to_string()))?;
         } else if cfg.bind_port != 0 {
-            let addr = SocketAddr::from(([0, 0, 0, 0], cfg.bind_port));
-            builder = builder.bind_addr(addr).map_err(|e| NetError::Config(e.to_string()))?;
+            // Binding one family replaces only that family's default socket, so IPv6 gets the port too. A host
+            // without IPv6 keeps going on IPv4, as it does with the default sockets.
+            let v4 = SocketAddr::from(([0, 0, 0, 0], cfg.bind_port));
+            let v6 = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, cfg.bind_port));
+            builder = builder
+                .bind_addr(v4)
+                .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
+                .map_err(|e| NetError::Config(e.to_string()))?;
         }
         let endpoint = builder.bind().await?;
         // Added after bind, so each service can be wrapped to record which one resolves a dial. The
