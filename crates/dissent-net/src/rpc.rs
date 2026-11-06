@@ -4,7 +4,7 @@ use dissent_identity::DeviceId;
 use futures_lite::future::Boxed;
 use iroh::{
     Endpoint, EndpointId,
-    endpoint::Connection,
+    endpoint::{Connection, ConnectionError, VarInt},
     protocol::{AcceptError, ProtocolHandler},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -45,7 +45,7 @@ impl ProtocolHandler for RpcProtocol {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let from = DeviceId(*connection.remote_id().as_bytes());
         log_key_exchange(&connection, from, "accept");
-        let Some(permit) = self.inbound.admit(from) else {
+        let Some(permit) = self.inbound.admit(from).await else {
             connection.close(BUSY.into(), b"busy");
             return Ok(());
         };
@@ -80,7 +80,7 @@ impl RpcProtocol {
             Err(_) => return Err(timed_out(connection)),
         };
         let exchange = async {
-            let req = read_payload(&mut recv, len).await.map_err(AcceptError::from_err)?;
+            let req = read_payload_counted(&mut recv, len, |n| permit.received(n)).await.map_err(AcceptError::from_err)?;
             permit.done_reading();
             let resp = self.handler.handle(from, req).await;
             if resp.is_empty() {
@@ -114,16 +114,36 @@ pub(crate) async fn run_request(endpoint: &Endpoint, peer: DeviceId, req: Vec<u8
     }
     let id = EndpointId::from_bytes(&peer.0).map_err(|e| NetError::BadPeer(e.to_string()))?;
     let exchange = async {
-        let conn = endpoint.connect(id, RPC_ALPN).await?;
-        log_key_exchange(&conn, peer, "dial");
-        let (mut send, mut recv) = conn.open_bi().await?;
-        write_frame(&mut send, &req, MAX_FRAME).await?;
-        send.finish().map_err(stream)?;
-        let resp = read_frame(&mut recv, MAX_FRAME).await?;
-        conn.close(0u32.into(), b"done");
-        Ok(resp)
+        loop {
+            let conn = endpoint.connect(id, RPC_ALPN).await?;
+            log_key_exchange(&conn, peer, "dial");
+            match exchange_once(&conn, &req).await {
+                Ok(resp) => {
+                    conn.close(0u32.into(), b"done");
+                    return Ok(resp);
+                }
+                // A busy node turned the request away, or gave its slot to another: try again shortly.
+                Err(_) if turned_away(&conn) => tokio::time::sleep(BUSY_RETRY).await,
+                Err(e) => return Err(e),
+            }
+        }
     };
     tokio::time::timeout(REQUEST_TIMEOUT, exchange).await.map_err(|_| NetError::Timeout)?
+}
+
+/// How long a requester waits before asking again a node that was busy.
+const BUSY_RETRY: Duration = Duration::from_millis(250);
+
+async fn exchange_once(conn: &Connection, req: &[u8]) -> Result<Vec<u8>> {
+    let (mut send, mut recv) = conn.open_bi().await?;
+    write_frame(&mut send, req, MAX_FRAME).await?;
+    send.finish().map_err(stream)?;
+    read_frame(&mut recv, MAX_FRAME).await
+}
+
+/// Whether the peer closed `conn` because it was busy.
+fn turned_away(conn: &Connection) -> bool {
+    matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(close)) if close.error_code == VarInt::from_u32(BUSY))
 }
 
 /// Reads a `u32` big-endian length, then the payload. Rejects lengths above `max` before allocating.
@@ -158,10 +178,24 @@ pub(crate) async fn read_payload<R>(r: &mut R, len: usize) -> Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
+    read_payload_counted(r, len, |_| {}).await
+}
+
+/// As [`read_payload`], and tells `arrived` how many bytes each read brought.
+async fn read_payload_counted<R>(r: &mut R, len: usize, mut arrived: impl FnMut(usize)) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
     let mut buf = Vec::with_capacity(len.min(FIRST_READ));
-    r.take(len as u64).read_to_end(&mut buf).await.map_err(stream)?;
-    if buf.len() != len {
-        return Err(NetError::Stream(format!("frame ended after {} of {len} bytes", buf.len())));
+    let mut chunk = vec![0u8; len.clamp(1, FIRST_READ)];
+    while buf.len() < len {
+        let want = (len - buf.len()).min(chunk.len());
+        let n = r.read(&mut chunk[..want]).await.map_err(stream)?;
+        if n == 0 {
+            return Err(NetError::Stream(format!("frame ended after {} of {len} bytes", buf.len())));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        arrived(n);
     }
     Ok(buf)
 }

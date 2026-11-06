@@ -932,9 +932,13 @@ Now (`dissent-net/src/inbound.rs`, `NodeConfig::inbound`):
 - Every exchange has a deadline: 20 s for the stream and its length to arrive, and 20 s plus the declared length at
   256 KiB/s in all. An honest requester gives up after 15 s, so no honest exchange is cut off. A reply waits at most
   5 s for the requester to close.
-- At most 64 requests and pings are served at once, and 8 for one device. When every slot is taken, the oldest
-  connection that has been sending its request for over 2 s gives its slot to the new one, so connections that send
-  nothing, from any number of fresh ids, cannot keep an honest request out.
+- At most 64 requests and pings are served at once, and 8 for one device. When every slot is taken, of the
+  connections that have been sending their request for over 2 s, the one that sent the fewest bytes per second gives
+  its slot to the new one. Connections that send little or nothing, from any number of fresh ids, cannot keep an
+  honest request out, and a large honest request that arrives steadily, as one over a relay does, is the last to go.
+- A connection that finds no slot to take waits up to 2 s in a first-come line, so peers that dial again and again
+  cannot take every slot that frees before an honest one gets its turn. A requester turned away as busy asks again
+  after 250 ms, within its own 15 s.
 
 What remains: each handshake still costs some CPU, since iroh offers no hook before it, and fresh ids cost an attacker
 nothing. A crowd that keeps every slot busy with requests it does send in full still delays everyone else.
