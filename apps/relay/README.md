@@ -117,5 +117,10 @@ Clients then use `http://127.0.0.1:3340`.
 | `--cert` / `--key` | none | PEM certificate chain and private key. Use together. |
 | `--data-dir` | none | State directory: ACME cache and logs. Required to install a service. |
 | `--log-dir` | none | Also write rolling log files here. |
+| `--join` | none | Carry traffic only for the members of these servers. Repeat it, or separate invites with commas. Needs `--data-dir`. |
+| `--bandwidth` | `2097152` | Most bytes per second the relay reads from all clients together. Each gets an equal share over `--max-connections`. |
+| `--max-connections` | `16` | Most connections open at once. |
+
+Without `--join` the relay is open: any device that has its URL may use it. It still keeps to `--bandwidth` and `--max-connections`, and says so when it starts. Raise both if you run an open relay for many people. `/healthz` on the HTTPS address answers when the relay is up.
 
 Service subcommands: `service install [--user|--system] [--run-as <user>] -- <run arguments>`, `service uninstall`, `service start`, `service stop`, and `service status`. Set `RUST_LOG=debug` for more logging.

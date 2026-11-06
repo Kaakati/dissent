@@ -1,5 +1,6 @@
 //! A relay for one person's own servers. It admits only the device keys of members of those servers,
-//! caps how many connections are open at once, and caps how fast each client can send to the relay.
+//! caps how many connections are open at once, and caps how fast each client can send to the relay. An open relay,
+//! run without `--join`, admits any device but keeps the same two caps ([`HostedAccess::open`]).
 //!
 //! The allow-list comes from the community state, so it follows joins, leaves and bans. iroh-relay
 //! checks access once, when a connection opens, so a ban also closes the banned device's open
@@ -83,7 +84,8 @@ pub struct HostedAccess {
 
 #[derive(Debug, Default)]
 struct State {
-    allowed: HashSet<NodeKey>,
+    /// The keys that may connect. `None` admits any key: an open relay.
+    allowed: Option<HashSet<NodeKey>>,
     /// Admitted connections, and the key each one authenticated.
     live: HashMap<ConnectionId, NodeKey>,
 }
@@ -94,10 +96,15 @@ impl HostedAccess {
         Arc::new(HostedAccess {
             max_connections: caps.max_connections,
             state: Mutex::new(State {
-                allowed: allowed.into_iter().collect(),
+                allowed: Some(allowed.into_iter().collect()),
                 live: HashMap::new(),
             }),
         })
+    }
+
+    /// A hook that admits any key, up to `caps.max_connections` at once.
+    pub fn open(caps: &Caps) -> Arc<Self> {
+        Arc::new(HostedAccess { max_connections: caps.max_connections, state: Mutex::new(State::default()) })
     }
 
     /// Replaces the allow-list with the keys of the current members. Call it on every join, leave or
@@ -115,7 +122,7 @@ impl HostedAccess {
         stranded.sort();
         stranded.dedup();
         state.live.retain(|_, key| allowed.contains(key));
-        state.allowed = allowed;
+        state.allowed = Some(allowed);
         stranded
     }
 
@@ -126,7 +133,7 @@ impl HostedAccess {
 
     /// Whether `key` is on the list right now.
     pub fn is_allowed(&self, key: &NodeKey) -> bool {
-        lock(&self.state).allowed.contains(key)
+        lock(&self.state).allowed.as_ref().is_none_or(|allowed| allowed.contains(key))
     }
 
     /// Connections open right now.
@@ -149,7 +156,7 @@ impl AccessControl for HostedAccess {
     async fn on_connect(&self, request: &ClientRequest) -> Access {
         let key: NodeKey = *request.endpoint_id().as_bytes();
         let mut state = lock(&self.state);
-        if !state.allowed.contains(&key) {
+        if state.allowed.as_ref().is_some_and(|allowed| !allowed.contains(&key)) {
             return Access::Deny {
                 reason: Some(NOT_A_MEMBER.into()),
             };
@@ -359,6 +366,32 @@ mod tests {
         // With nothing left to close, a change closes nothing.
         assert_eq!(host.set_members([kept]), 0);
         host.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_open_relay_admits_anyone_up_to_the_connection_cap() {
+        let caps = Caps { max_connections: 2, ..Caps::default() };
+        let access = HostedAccess::open(&caps);
+        let (first, second) = (request(key()), request(key()));
+        assert!(matches!(access.on_connect(&first).await, Access::Allow));
+        assert!(matches!(access.on_connect(&second).await, Access::Allow));
+        match access.on_connect(&request(key())).await {
+            Access::Deny { reason } => assert_eq!(reason.as_deref(), Some(FULL)),
+            Access::Allow => panic!("a connection past the cap was admitted"),
+        }
+        access.on_disconnect(first.endpoint_id(), first.connection_id());
+        assert!(matches!(access.on_connect(&request(key())).await, Access::Allow), "a closed connection frees its place");
+        assert!(access.is_allowed(&key()));
+    }
+
+    #[test]
+    fn apply_puts_the_open_hook_and_the_per_client_limit_into_the_config() {
+        let caps = Caps { total_bytes_per_second: 1000, max_connections: 10 };
+        let mut config = ServerConfig::default();
+        config.relay = Some(iroh_relay::server::RelayConfig::new(([127, 0, 0, 1], 0)));
+        apply(&caps, HostedAccess::open(&caps), &mut config);
+        let relay = config.relay.expect("relay config");
+        assert_eq!(relay.limits.client_rx.map(|l| l.bytes_per_second.get()), Some(100));
     }
 
     #[test]
