@@ -39,6 +39,9 @@ pub(crate) struct Inner {
     /// Whether loopback relays are accepted, for a node that runs on loopback alone. From
     /// `NodeConfig::loopback_only`. Private and local relay addresses are refused otherwise.
     pub loopback_relays: bool,
+    /// Where this device's own fetches go: direct, relayed (the IP is hidden from peers) or through a proxy. From
+    /// `NodeConfig::egress`. See `egress`.
+    pub egress: crate::egress::Egress,
     /// Whether this device announces simulcast layers and acts on a forwarder's mask. On by
     /// default. Off, the device sends one stream as a released client does, which tests use to
     /// stand in for one. See `call_layers`.
@@ -261,7 +264,7 @@ impl Engine {
         // A relay-only node ("Hide my IP address") stays off the Mainline DHT too: a DHT client talks to
         // strangers from its own UDP socket, which would show them this device's IP beside the keys it
         // looks up and publishes.
-        let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only || net.relay_only {
+        let discovery = if matches!(net.relay, RelayChoice::Disabled) || net.loopback_only || net.egress().hides_ip() {
             None
         } else {
             match Discovery::new() {
@@ -277,6 +280,7 @@ impl Engine {
             identity,
             community_relays: net.community_relays,
             loopback_relays: net.loopback_only,
+            egress: net.egress(),
             relay_reconcile: tokio::sync::Mutex::new(()),
             simulcast: AtomicBool::new(true),
             me,

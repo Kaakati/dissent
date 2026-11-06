@@ -1,10 +1,14 @@
 //! In-app updates from GitHub releases. A check runs 10 seconds after startup and then every six hours.
 //! Failures are logged and never shown, and never crash the app. Manual checks report their errors to the caller.
+//!
+//! While "Hide my IP address" is on, nothing is checked on its own: a check shows the IP to GitHub, which the relay
+//! hides from everyone else. The user checks by hand, warned, and is reminded once no check has run for
+//! `REMIND_AFTER`, so a hidden device does not stay on an old version unknowingly.
 
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
@@ -21,6 +25,60 @@ pub const EVENT_AVAILABLE: &str = "dissent://update-available";
 pub const EVENT_PROGRESS: &str = "dissent://update-progress";
 const FIRST_CHECK: Duration = Duration::from_secs(10);
 const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long a device that hides its IP may go without an update check before it is reminded.
+const REMIND_AFTER: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// When the last update check finished, in milliseconds, next to `network.json`. A setting of the app, not of the
+/// engine's store, as `network.json` is.
+const LAST_CHECK_FILE: &str = "update-check.json";
+
+/// Whether updates are checked on their own, and whether the user should be reminded to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UpdatePolicy {
+    /// Updates are checked on their own. False while the IP is hidden.
+    pub automatic: bool,
+    /// The IP is hidden, so a check shows it to GitHub. The UI says so before a check.
+    pub hidden_ip: bool,
+    /// When the last check finished, in milliseconds since the Unix epoch.
+    pub last_checked_ms: Option<u64>,
+    /// No check has run for `REMIND_AFTER` while checks are not automatic.
+    pub remind: bool,
+}
+
+/// The policy for a device that does or doesn't hide its IP, last checked at `last_ms`, now `now_ms`.
+pub fn policy(hidden_ip: bool, last_ms: Option<u64>, now_ms: u64) -> UpdatePolicy {
+    let stale = last_ms.is_none_or(|at| now_ms.saturating_sub(at) >= REMIND_AFTER.as_millis() as u64);
+    UpdatePolicy { automatic: !hidden_ip, hidden_ip, last_checked_ms: last_ms, remind: hidden_ip && stale }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn last_check(data_dir: &std::path::Path) -> Option<u64> {
+    let text = std::fs::read_to_string(data_dir.join(LAST_CHECK_FILE)).ok()?;
+    serde_json::from_str::<u64>(&text).ok()
+}
+
+fn note_check(data_dir: &std::path::Path) {
+    let tmp = data_dir.join("update-check.json.tmp");
+    let written = std::fs::write(&tmp, now_ms().to_string()).and_then(|()| std::fs::rename(&tmp, data_dir.join(LAST_CHECK_FILE)));
+    if let Err(e) = written {
+        warn!(error = %e, "could not note the update check");
+    }
+}
+
+fn hides_ip(app: &AppHandle) -> bool {
+    app.try_state::<AppState>().is_some_and(|state| crate::network::load(&state.data_dir).hide_ip)
+}
+
+/// Whether updates are checked on their own, and whether to remind the user to check.
+#[tauri::command]
+pub fn update_policy(state: tauri::State<'_, AppState>) -> UpdatePolicy {
+    let hidden = crate::network::load(&state.data_dir).hide_ip;
+    policy(hidden, last_check(&state.data_dir), now_ms())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct UpdateInfo {
@@ -66,6 +124,9 @@ pub fn background_outcome<T, E: std::fmt::Display>(result: Result<Option<T>, E>)
 pub async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
     let found = updater.check().await.map_err(|e| e.to_string())?;
+    if let Some(state) = app.try_state::<AppState>() {
+        note_check(&state.data_dir);
+    }
     Ok(found.as_ref().map(describe))
 }
 
@@ -121,13 +182,21 @@ pub fn start_background(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK).await;
         loop {
-            let result = match app.updater() {
-                Ok(updater) => updater.check().await.map(|found| found.as_ref().map(describe)),
-                Err(e) => Err(e),
-            };
-            if let Some(found) = background_outcome(result) {
-                info!(version = %found.version, "update available");
-                let _ = app.emit(EVENT_AVAILABLE, found);
+            // Read each time, so turning the setting on stops the checks without a restart.
+            if hides_ip(&app) {
+                info!("automatic update check skipped: the IP is hidden");
+            } else {
+                let result = match app.updater() {
+                    Ok(updater) => updater.check().await.map(|found| found.as_ref().map(describe)),
+                    Err(e) => Err(e),
+                };
+                if let Some(state) = app.try_state::<AppState>() {
+                    note_check(&state.data_dir);
+                }
+                if let Some(found) = background_outcome(result) {
+                    info!(version = %found.version, "update available");
+                    let _ = app.emit(EVENT_AVAILABLE, found);
+                }
             }
             tokio::time::sleep(EVERY).await;
         }
@@ -137,6 +206,18 @@ pub fn start_background(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hidden_device_is_reminded_after_two_weeks_without_a_check() {
+        let day = 24 * 60 * 60 * 1000;
+        let now = 100 * day;
+        let open = policy(false, None, now);
+        assert!(open.automatic && !open.remind, "a device that shows its IP checks on its own");
+        assert!(policy(true, None, now).remind, "never checked");
+        assert!(!policy(true, Some(now - 13 * day), now).remind, "checked within two weeks");
+        let stale = policy(true, Some(now - 14 * day), now);
+        assert!(stale.remind && !stale.automatic && stale.hidden_ip);
+    }
 
     #[test]
     fn unreachable_feed_is_quiet() {

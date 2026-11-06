@@ -254,6 +254,11 @@ pub async fn link_previews(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
+pub async fn link_previews_blocked(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(engine(&state).await?.link_previews_blocked())
+}
+
+#[tauri::command]
 pub async fn set_link_previews(state: State<'_, AppState>, on: bool) -> Result<(), String> {
     engine(&state).await?.set_link_previews(on).map_err(err)
 }

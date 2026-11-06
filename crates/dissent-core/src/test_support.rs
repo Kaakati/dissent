@@ -581,6 +581,16 @@ pub fn newest_files_generation(engine: &crate::Engine, community: dissent_identi
     engine.with_tracker(community, |l| l.newest().map(|(g, _)| g))
 }
 
+/// How many IP sockets `engine`'s endpoint has bound. Zero for a device that hides its IP.
+pub fn bound_socket_count(engine: &crate::Engine) -> usize {
+    engine.node().bound_socket_count()
+}
+
+/// Whether `engine` looks devices up through number0's DNS, which asks the system resolver outside any proxy.
+pub fn uses_dns_lookup(engine: &crate::Engine) -> bool {
+    engine.node().uses_dns_lookup()
+}
+
 /// The direct IP addresses `engine` holds for `device`, from the signed addresses it has learned. A
 /// device that hides its IP should have none.
 pub fn direct_addrs_known(engine: &crate::Engine, device: dissent_identity::DeviceId) -> usize {

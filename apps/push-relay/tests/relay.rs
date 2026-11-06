@@ -1,6 +1,9 @@
 //! End-to-end tests of the wake relay over HTTP, on loopback. A fake UnifiedPush endpoint stands in
 //! for a distributor. Nothing here reaches the public internet.
 
+// Tests of a server on loopback: they build their own HTTP clients.
+#![allow(clippy::disallowed_methods)]
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

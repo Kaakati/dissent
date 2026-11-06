@@ -22,7 +22,7 @@ const RELAYED_FLOOR: u64 = 30;
 pub(crate) struct TestRelay {
     pub(crate) server: Server,
     pub(crate) url: Url,
-    cert: CertificateDer<'static>,
+    pub(crate) cert: CertificateDer<'static>,
 }
 
 impl TestRelay {

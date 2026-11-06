@@ -200,6 +200,18 @@ It also turns off what would talk to strangers from this device's own socket:
   to the keys it looks up. Short invite links and address links therefore don't open; full links do.
   This device publishes no community or user record, so other members keep those current.
 - **LAN discovery.** Off, since its beacons go out on the local network.
+- **number0's DNS lookup.** Off. It asks the system resolver, which would learn which devices this one looks
+  for; the HTTPS lookups in number0's directory stay, while that setting is on.
+- **Gateway port mapping** (UPnP, PCP, NAT-PMP). Off: there is no IP socket to map.
+- **Link previews.** Off, whatever the setting says: fetching a link's page would show the IP to the site.
+  Settings › Contacts & privacy says so.
+- **Automatic update checks.** Off: a check shows the IP to GitHub. Checking by hand still works, and says
+  so first; once no check has run for 14 days, Settings › Updates, Settings › About and the header remind the
+  user, so a hidden device does not stay on an old version unknowingly.
+
+Every HTTP client and host-name lookup of the engine goes through `egress.rs`, which follows this mode, and
+`clippy.toml` refuses a client or a lookup built anywhere else. The relay probes measure through a second
+endpoint, which goes out the same way.
 
 Who still sees the IP:
 
@@ -215,6 +227,28 @@ setting is off by default and applies when the engine restarts, which the app as
 it ends a call in progress. Tested by `tests/it/hide_ip.rs` (two relay-only engines join a server,
 exchange channel and direct messages, and hold no IP address for each other) and
 `tests/it/relay_calls.rs` (calls over the relay).
+
+### What each mode shows, and to whom
+
+`NodeConfig::egress` names the mode: `Direct`, `Relayed` ("Hide my IP address"), or `Proxied` (every
+connection through an HTTP proxy, which "Hide my IP through Tor" will use; not in the app yet).
+
+| Who | Direct | Relayed (Hide my IP address) | Proxied (through Tor, planned) |
+|---|---|---|---|
+| Peers you talk to (members, contacts) | Your IP, in signed addresses and on direct paths | The relay's address only | The relay's address only |
+| The relays you use, and each relay measured | Your IP, and who you exchange traffic with, when and how much | The same | The proxy's exit, not your IP; the same traffic metadata |
+| Mainline DHT nodes | Your IP, beside the keys you look up and publish | Nothing: the DHT is off | Nothing: the DHT is off |
+| The local network | LAN beacons, if that setting is on; gateway port mapping | Nothing | Nothing |
+| Your system's DNS resolver | Relay and site host names; with number0's directory, the device ids you look up | Relay host names | Nothing: the proxy resolves every name |
+| number0's directory (while on) | Your IP and device id | Your IP (HTTPS) and device id | The proxy's exit and your device id |
+| Sites of your link previews | Your IP | Nothing: previews are off | The proxy's exit |
+| GitHub, for updates | Your IP, every six hours | Your IP only when you check by hand | The proxy's exit (planned) |
+| The proxy itself | — | — | Your IP, and the hosts you connect to (Tor's entry guard sees the IP, its exit the hosts) |
+
+`tests/it/egress.rs` runs both hidden modes on loopback, with a local proxy standing in for Tor. Proxied
+engines bind no IP socket, reach their relay and the sites of their link previews only through the proxy,
+and name every host to it, so nothing is resolved on the device. Relayed engines bind no IP socket and fetch
+no link preview.
 
 ## Who learns what from a device's answers
 
