@@ -33,6 +33,11 @@ impl Directory {
         self.certs.get(device).map(|cert| cert.root)
     }
 
+    /// Every device we hold a cert for, with the root it names.
+    pub fn device_roots(&self) -> impl Iterator<Item = (DeviceId, RootId)> + '_ {
+        self.certs.iter().map(|(device, cert)| (*device, cert.root))
+    }
+
     /// The verified cert of a device, if we hold one.
     pub fn cert_of(&self, device: &DeviceId) -> Option<DeviceCert> {
         self.certs.get(device).cloned()

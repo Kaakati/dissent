@@ -231,7 +231,7 @@ impl World {
     }
 
     /// The root of `device`: from its certificate, else from the events it signed in a community.
-    fn root_of_device(&self, device: &DeviceId) -> Option<RootId> {
+    pub(crate) fn root_of_device(&self, device: &DeviceId) -> Option<RootId> {
         if self.blob_scopes.forgotten.contains(device) {
             return None;
         }
@@ -256,7 +256,7 @@ impl World {
     }
 
     /// Whether `root` is a contact, or shares a community or a conversation with this device.
-    fn shares_with(&self, root: &RootId) -> bool {
+    pub(crate) fn shares_with(&self, root: &RootId) -> bool {
         self.is_contact(root)
             || self.communities.keys().any(|c| self.is_member(c, root, false))
             || self.conv_book.convs.keys().any(|conv| self.in_conv(conv, root))

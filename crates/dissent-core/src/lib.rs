@@ -9,6 +9,7 @@ pub mod test_support;
 mod access;
 mod addr_record;
 mod blob_gate;
+mod conn_gate;
 mod blob_release;
 mod recovery_flow;
 mod announce;

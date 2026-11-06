@@ -963,8 +963,24 @@ Now (`dissent-net/src/inbound.rs`, `NodeConfig::inbound`):
   cannot take every slot that frees before an honest one gets its turn. A requester turned away as busy asks again
   after 250 ms, within its own 15 s.
 
+Every incoming connection, on any protocol, then passes one gate after its handshake (`dissent-net/src/gate.rs`,
+`dissent-core/src/conn_gate.rs`):
+
+- A device a server revoked, or one whose user is banned and shares nothing else with us, is closed at once, on
+  requests, gossip, file blobs and call links alike. Only explicit revocations and bans refuse; a device we hold no
+  certificate for, such as a member who is joining, is never refused.
+- A device whose user shares a server, a conversation or a contact with us is known. Any other device is a stranger,
+  and all strangers together hold at most 256 connections. Once that pool is full, a stranger gets the busy code and
+  asks again; members, contacts and seeders never wait on it. Every device holds at most 32 connections.
+- The gate judges from a snapshot that the engine rebuilds and swaps in whole within 250 ms of a membership, ban,
+  revocation, conversation or contact change, and every 30 s in any case. Judging a connection reads no other state
+  and waits on no lock the engine holds.
+
 What remains: each handshake still costs some CPU, since iroh offers no hook before it, and fresh ids cost an attacker
-nothing. A crowd that keeps every slot busy with requests it does send in full still delays everyone else.
+nothing. A crowd that keeps every slot busy with requests it does send in full still delays everyone else, and a
+crowd of strangers that fills their pool delays real joiners and invite previews until it thins. The gate acts on new
+connections: one already open when its device is banned is not closed by the gate, and each protocol's own checks
+still apply to what it carries. Dials this device makes are never judged.
 
 ## Findings
 

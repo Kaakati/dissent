@@ -771,6 +771,11 @@ impl Files {
                 Ok(Some(GetProgressItem::Error(e))) => break Err(fetch_error(e.to_string())),
             }
         };
+        // Read before closing: once this side closes, the close reason is its own.
+        let outcome = match outcome {
+            Err(e) if refused_by_gate(&closer) => Err(FilesError::Refused(format!("the provider refused this device: {e}"))),
+            other => other,
+        };
         closer.close(0u32.into(), b"done");
         outcome
     }
@@ -1050,6 +1055,18 @@ where
 
 pub(crate) fn store_err(e: impl std::fmt::Display) -> FilesError {
     FilesError::Store(e.to_string())
+}
+
+/// The close code a provider's connection gate gives a device it refuses, revoked or banned, before iroh-blobs sees
+/// the connection. The same as `dissent-net`'s gate, which this crate does not depend on.
+const GATE_REFUSED: u32 = 5;
+
+/// Whether the provider's connection gate closed `conn` because it refuses this device.
+fn refused_by_gate(conn: &iroh::endpoint::Connection) -> bool {
+    matches!(
+        conn.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(close)) if close.error_code == iroh::endpoint::VarInt::from_u32(GATE_REFUSED)
+    )
 }
 
 /// A failed fetch from one provider. A provider that refuses this device resets the request's stream with iroh-blobs'
