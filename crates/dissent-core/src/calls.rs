@@ -3900,9 +3900,15 @@ impl Engine {
             } else {
                 Vec::new()
             };
-            let measured = self.measure_capacity(room, mesh_links).await;
-            let settling = self.settling(room);
-            if let Some(kbps) = capacity_to_announce(measured, room.own_kbps.load(Ordering::SeqCst), settling) {
+            // A measure counts only from a room settled in where this device sends a copy to every other: a mesh, or
+            // the forwarder's relay. A leaf sends one stream upstream, so its figure is one stream's worth, not what
+            // its upload can carry, and announced it would keep a forwarded call from ever returning to a mesh. It
+            // keeps the figure it carried over instead. An override, set by tests, always counts.
+            let overridden = self.inner.calls.capacity_override.load(Ordering::SeqCst) > 0;
+            let role = room.forwarding.as_ref().map(|f| f.role);
+            let hold = !overridden && (self.settling(room) || !measures_own_upload(role));
+            let measured = if hold { None } else { self.measure_capacity(room, mesh_links).await };
+            if let Some(kbps) = capacity_to_announce(measured, room.own_kbps.load(Ordering::SeqCst), hold) {
                 room.own_kbps.store(kbps, Ordering::SeqCst);
                 self.announce_capacity(room, kbps).await;
             }
@@ -5844,15 +5850,22 @@ fn settling_holds(limit: usize, uncapped: usize, live: usize) -> bool {
     limit < uncapped && live <= uncapped
 }
 
-/// The capacity to announce for this device: what was measured, or while the room is settling after its swap, the
-/// value it carried over from the room before, so peers do not lower their limit on a dip. `None` announces nothing.
 /// Whether a room that began carrying the call at `at` (joined or swapped in, `None` for neither yet) is still settling.
 fn settling_since(at: Option<Instant>, now: Instant, settle: Duration) -> bool {
     at.is_some_and(|at| now.duration_since(at) < settle)
 }
 
-fn capacity_to_announce(measured: Option<u32>, carried: u32, settling: bool) -> Option<u32> {
-    if settling {
+/// Whether this device's upload is measured in a room where it has `role` (`None` for a mesh): only where it sends a
+/// copy of its media to every other device, as in a mesh or as the forwarder.
+fn measures_own_upload(role: Option<Role>) -> bool {
+    matches!(role, None | Some(Role::Root))
+}
+
+/// The capacity to announce for this device: what was measured, or while it `hold`s (the room is settling, or does not
+/// measure its upload, see `measures_own_upload`), the value it carried over from the room before, so peers do not
+/// lower their limit on a dip. `None` announces nothing.
+fn capacity_to_announce(measured: Option<u32>, carried: u32, hold: bool) -> Option<u32> {
+    if hold {
         (carried > 0).then_some(carried)
     } else {
         measured
@@ -6023,6 +6036,20 @@ mod settle_tests {
         assert!(!settling_since(Some(now - settle), now, settle), "settled");
         assert!(!settling_since(None, now, settle), "a staged room not carrying the call yet");
         assert_eq!(capacity_to_announce(Some(31), 0, settling_since(Some(now), now, settle)), None);
+    }
+
+    /// A leaf sends one stream to its forwarder, so what it sends says nothing of its upload. It keeps announcing the
+    /// figure it measured in the mesh, and a forwarded call can still return.
+    #[test]
+    fn a_forwarded_measure_does_not_lower_the_announced_capacity() {
+        assert!(measures_own_upload(None), "a mesh sends a copy to every peer");
+        assert!(measures_own_upload(Some(Role::Root)), "so does the forwarder, to every leaf");
+        for role in [Role::Leaf, Role::Child, Role::Standby] {
+            assert!(!measures_own_upload(Some(role)), "{role:?} sends upstream only");
+        }
+        let hold = !measures_own_upload(Some(Role::Leaf));
+        assert_eq!(capacity_to_announce(Some(13), 640, hold), Some(640), "the leaf's one-stream 13 kbps is not announced");
+        assert_eq!(capacity_to_announce(Some(13), 0, hold), None, "with no mesh figure it announces nothing");
     }
 
     #[test]
