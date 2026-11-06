@@ -664,6 +664,10 @@ pub(crate) struct Room {
     /// Set for a forwarded call. Media then goes through one elected forwarder, not a mesh.
     forwarding: Option<Forwarding>,
     muted: AtomicBool,
+    /// A task is telling the peers this device's mute. It sends the latest value until it is the one they have.
+    telling_mute: AtomicBool,
+    /// The rounds of mute RPCs sent to the peers so far.
+    mute_rounds: AtomicU64,
     /// Channel rooms: the MLS epoch of the key the mesh uses. DM rooms stay at 0.
     epoch: AtomicU64,
     mesh: AsyncMutex<Mesh<LinkTransport>>,
@@ -1271,6 +1275,8 @@ impl Room {
             leaves: Mutex::new(BTreeMap::new()),
             forwarding: None,
             muted: AtomicBool::new(false),
+            telling_mute: AtomicBool::new(false),
+            mute_rounds: AtomicU64::new(0),
             epoch: AtomicU64::new(epoch),
             mesh: AsyncMutex::new(mesh),
             peers: Mutex::new(BTreeMap::new()),
@@ -3423,19 +3429,52 @@ impl Engine {
             .clone()
             .ok_or_else(|| CoreError::Invalid("not in a call".into()))?;
         room.muted.store(muted, Ordering::Relaxed);
-        let devices: Vec<DeviceId> = lock(&room.peers).values().map(|p| p.device).collect();
-        for device in devices {
-            let msg = CallMsg::Mute {
-                room: room.id,
-                muted,
-            };
-            if let Err(e) = self.call_rpc(device, msg).await {
-                debug!(device = %device, error = %e, "mute not sent");
-            }
-        }
         self.announce_call(&room, self.roster_of(&room));
         self.emit(EngineEvent::CallUpdated);
+        // The peers hear of it in the background, all at once, so a peer that is gone delays nobody's mute.
+        if !room.telling_mute.swap(true, Ordering::AcqRel) {
+            let engine = self.clone();
+            tokio::spawn(async move { engine.tell_mute(room).await });
+        }
         Ok(())
+    }
+
+    /// Tells every peer of `room` this device's mute, all at once, again while it changed meanwhile, so the peers end
+    /// with the latest value and never an older one sent last. A round goes out only for a value the last round did not
+    /// carry, so a task sends at most one round per change made while it runs, however long a gone peer takes to time
+    /// out, and stops once the room is no longer this device's call.
+    async fn tell_mute(&self, room: Arc<Room>) {
+        loop {
+            let current = lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, &room));
+            if !current {
+                room.telling_mute.store(false, Ordering::Release);
+                return;
+            }
+            let muted = room.muted.load(Ordering::Relaxed);
+            let devices: Vec<DeviceId> = lock(&room.peers).values().map(|p| p.device).collect();
+            room.mute_rounds.fetch_add(1, Ordering::Relaxed);
+            self.tell_peers(devices, |_| CallMsg::Mute { room: room.id, muted }, "mute not sent").await;
+            room.telling_mute.store(false, Ordering::Release);
+            // A change made while the last round was out, and not picked up by a new task, is sent now.
+            if room.muted.load(Ordering::Relaxed) == muted || room.telling_mute.swap(true, Ordering::AcqRel) {
+                return;
+            }
+        }
+    }
+
+    /// Sends `msg` to each of `devices` at once, and waits for them all, each within the call RPC's timeout. A peer
+    /// that does not answer is logged as `what`, and never holds up the others.
+    async fn tell_peers(&self, devices: Vec<DeviceId>, msg: impl Fn(DeviceId) -> CallMsg, what: &'static str) {
+        let mut sends = tokio::task::JoinSet::new();
+        for device in devices {
+            let (engine, msg) = (self.clone(), msg(device));
+            sends.spawn(async move {
+                if let Err(e) = engine.call_rpc(device, msg).await {
+                    debug!(device = %device, error = %e, "{what}");
+                }
+            });
+        }
+        while sends.join_next().await.is_some() {}
     }
 
     fn current_or_err(&self) -> Result<Arc<Room>> {
@@ -3744,11 +3783,8 @@ impl Engine {
         devices.extend(room.forwarding.as_ref().and_then(|f| f.volunteer.map(|(device, _)| device)));
         devices.sort();
         devices.dedup();
-        for device in devices {
-            if let Err(e) = self.call_rpc(device, CallMsg::Leave { room: room.id }).await {
-                debug!(device = %device, error = %e, "leave not sent");
-            }
-        }
+        // All at once: one peer that is gone costs one RPC timeout, not one each.
+        self.tell_peers(devices, |_| CallMsg::Leave { room: room.id }, "leave not sent").await;
         let sids: Vec<u64> = lock(&room.peers).keys().copied().collect();
         let mut mesh = room.mesh.lock().await;
         room.mesh_by.store(mesh_site::LEAVE, Ordering::Relaxed);
@@ -5512,6 +5548,12 @@ impl Engine {
             self.inner.events.receiver_count(),
             tiers.join(" | "),
         )
+    }
+
+    /// Whether a task is telling the current call's peers this device's mute, and the rounds it has sent them so far.
+    pub(crate) fn mute_telling(&self) -> Option<(bool, u64)> {
+        let room = lock(&self.inner.calls.current).clone()?;
+        Some((room.telling_mute.load(Ordering::Acquire), room.mute_rounds.load(Ordering::Relaxed)))
     }
 
     pub(crate) fn call_key_state(&self) -> Option<([u8; 4], u64, u64)> {
