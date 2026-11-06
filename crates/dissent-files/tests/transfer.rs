@@ -620,9 +620,13 @@ fn timeout_budget_scales_and_caps() {
     assert_eq!(t.overall(1), Duration::from_secs(70));
     assert_eq!(t.overall(5 * MIB as u64), Duration::from_secs(60 + 50));
     assert_eq!(t.overall(5 * MIB as u64 + 1), Duration::from_secs(60 + 60));
-    // The overall cap is 24 hours, and a 10 GB file reaches it.
-    assert_eq!(t.max, Duration::from_secs(24 * 60 * 60));
-    assert_eq!(t.overall(MAX_FILE_SIZE), Duration::from_secs(24 * 60 * 60));
+    // The overall cap is 30 days: a 500 GB file at 1 MB/s takes about six days. Stall timeouts catch a dead link
+    // long before that.
+    assert_eq!(t.max, Duration::from_secs(30 * 24 * 60 * 60));
+    let gb500 = 500 * 1024 * MIB as u64;
+    assert_eq!(t.overall(gb500), t.max, "500 GB gets the whole 30 days");
+    assert!(t.max > Duration::from_secs(gb500 / 1_000_000), "which outlasts 500 GB at 1 MB/s");
+    assert_eq!(t.overall(MAX_FILE_SIZE), Duration::from_secs(30 * 24 * 60 * 60));
 }
 
 #[tokio::test]
@@ -1627,10 +1631,9 @@ async fn a_swarm_download_takes_slices_from_every_provider_and_skips_one_without
 
     // Pieces: alice holds them all, carol none.
     let full = dan.files.piece_map(&dan.endpoint, alice.addr(), a.hash, a.cipher_size).await.unwrap();
-    assert_eq!(full.len() as u64, dissent_files::pieces_of(a.cipher_size));
-    assert!(full.iter().all(|p| *p));
+    assert_eq!(full, vec![(0, dissent_files::pieces_of(a.cipher_size))], "every piece, as one run");
     let none = dan.files.piece_map(&dan.endpoint, carol.addr(), a.hash, a.cipher_size).await;
-    assert!(none.map(|m| m.iter().all(|p| !*p)).unwrap_or(true));
+    assert!(none.map(|m| m.is_empty()).unwrap_or(true));
 }
 
 #[tokio::test]
@@ -1663,7 +1666,7 @@ async fn a_linked_file_is_served_from_disk_without_a_copy() {
     assert_eq!(fs::read(&done.path).unwrap(), plain);
     assert!(done.failed.is_empty(), "{:?}", done.failed);
     let map = dan.files.piece_map(&dan.endpoint, alice.addr(), linked.hash, linked.cipher_size).await.unwrap();
-    assert!(map.iter().all(|p| *p), "a linked file is all there");
+    assert_eq!(map, vec![(0, dissent_files::pieces_of(linked.cipher_size))], "a linked file is all there");
 
     // A wrong fingerprint is refused, and unlinking stops serving.
     assert!(matches!(

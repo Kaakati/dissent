@@ -1,4 +1,4 @@
-// The file page's swarm: piece availability (each cell is 8 pieces of 64 KiB, coloured by how many online members hold
+// The file page's swarm: piece availability (each cell is at least 8 pieces of 64 KiB, as the engine groups them, coloured by how many online members hold
 // all of them) and the members who hold the file, with how much and their level.
 import { useEffect, useState } from 'react';
 import { formatBytes } from '@/components/transfers/format';
@@ -6,7 +6,6 @@ import { filesApi, type ListingView, type LiveSwarm, type SwarmPeerView, type Sw
 import type { Id } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
-const PER_CELL = 8;
 // The live figures are read from this device, so asking each second costs nothing on the network.
 const LIVE_EVERY_MS = 1000;
 // Who holds what comes from other devices: asked more often while something moves, and less often with many holders.
@@ -76,13 +75,14 @@ export function SwarmPanel({ communityId, listing }: { communityId: Id; listing:
   if (error) return <p className="m-0 text-sm text-muted-foreground">The swarm could not be read: {error}</p>;
   if (!swarm) return <p className="m-0 text-sm text-muted-foreground">Asking who has this file…</p>;
   // The pieces this device has fetched so far count at once; other holders' come with the slower swarm read.
-  const pieces = swarm.pieces.slice();
+  // The engine sends cells, at most 2,048 of them, each the fewest holders of any piece in it.
+  const perCell = swarm.pieces_per_cell ?? 8;
+  const pieceCount = swarm.piece_count ?? swarm.pieces.length * perCell;
+  const cells = swarm.pieces.slice();
   for (const [start, end] of now?.own_pieces ?? []) {
-    for (let i = start; i < end && i < pieces.length; i++) pieces[i] += 1;
-  }
-  const cells: number[] = [];
-  for (let i = 0; i < pieces.length; i += PER_CELL) {
-    cells.push(Math.min(...pieces.slice(i, i + PER_CELL)));
+    // A cell counts once all its pieces are here; the short last cell ends at the file's end.
+    const last = end >= pieceCount ? cells.length : Math.floor(end / perCell);
+    for (let c = Math.ceil(start / perCell); c < last && c < cells.length; c++) cells[c] += 1;
   }
   const rates = new Map((now?.peers ?? []).map((p) => [p.root_id, p]));
   // Someone this device is sending to shows at once; the swarm read may not have heard of them yet.
@@ -107,7 +107,7 @@ export function SwarmPanel({ communityId, listing }: { communityId: Id; listing:
         <div className="flex items-baseline justify-between">
           <h3 className="m-0 text-ui font-semibold text-text-strong">Piece availability</h3>
           <span className="text-sm text-muted-foreground">
-            {swarm.pieces.length.toLocaleString()} pieces of 64 KiB · each cell is {PER_CELL} pieces
+            {pieceCount.toLocaleString()} pieces of 64 KiB · each cell is {perCell.toLocaleString()} pieces
           </span>
         </div>
         <div className="flex flex-wrap gap-[2px]" role="img" aria-label={`${cells.filter((n) => n > 0).length} of ${cells.length} cells held by someone online`}>

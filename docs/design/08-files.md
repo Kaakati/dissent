@@ -88,7 +88,13 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
   stops a fetch at half, reopens the data folder, and checks that only the rest crosses the wire.
 - **Timeouts.** A provider gets 15 seconds to connect and 30 seconds of silence before it is
   dropped. The 30-second stall timeout is the main guard against hangs. The whole download gets
-  60 seconds plus 10 seconds per MiB, capped at 24 hours.
+  60 seconds plus 10 seconds per MiB, capped at 30 days, which outlasts a 500 GB file at 1 MB/s.
+  The stall timeouts, not this budget, are what catch a dead link.
+- **Large files.** Nothing holds a whole file in memory: encrypting, importing, fetching, decrypting,
+  a linked file's outboard (written to disk as it is made) and the piece maps (worked out from the
+  missing ranges' edges, and sent to the page as at most 2,048 cells). Decrypting copies the
+  ciphertext out of the store first, so a download needs about three times the file's size free at
+  its end; the space check says so before it starts.
 - **Seeder policy.** `mirror` takes a `MirrorPolicy`. Its defaults are 2 GB per file and 50 GB of
   pinned ciphertext in total, counting the node's own files. A refused file moves no bytes.
 - **No revocation.** A removed member who already holds a `FileRef` keeps the key and can decrypt

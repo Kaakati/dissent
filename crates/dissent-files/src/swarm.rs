@@ -225,25 +225,12 @@ impl Files {
     /// The whole 64 KiB pieces of `hash` this store holds, as (start, end) runs.
     pub async fn held_pieces(&self, hash: [u8; 32], cipher_size: u64) -> Result<Vec<(u64, u64)>> {
         let missing = missing(&self.store, Hash::from_bytes(hash)).await?;
-        let chunks = cipher_size.div_ceil(1024);
-        let per_piece = PIECE_BYTES / 1024;
-        let mut runs: Vec<(u64, u64)> = Vec::new();
-        for i in 0..crate::tally::pieces_of(cipher_size) {
-            let piece = ChunkRanges::chunks(i * per_piece..((i + 1) * per_piece).min(chunks));
-            if !(piece & missing.clone()).is_empty() {
-                continue;
-            }
-            match runs.last_mut() {
-                Some((_, end)) if *end == i => *end = i + 1,
-                _ => runs.push((i, i + 1)),
-            }
-        }
-        Ok(runs)
+        Ok(held_runs(&missing, cipher_size))
     }
 
-    /// Which 64 KiB pieces of `hash` the provider at `addr` holds, from its first answer to an observe request. A piece
-    /// counts as held only when all of it is.
-    pub async fn piece_map(&self, endpoint: &Endpoint, addr: EndpointAddr, hash: [u8; 32], cipher_size: u64) -> Result<Vec<bool>> {
+    /// Which 64 KiB pieces of `hash` the provider at `addr` holds, as (start, end) runs, from its first answer to an
+    /// observe request. A piece counts as held only when all of it is.
+    pub async fn piece_map(&self, endpoint: &Endpoint, addr: EndpointAddr, hash: [u8; 32], cipher_size: u64) -> Result<Vec<(u64, u64)>> {
         let timeouts = self.timeouts;
         let conn = tokio::time::timeout(timeouts.connect, endpoint.connect(addr, iroh_blobs::ALPN))
             .await
@@ -261,15 +248,45 @@ impl Files {
             Err(_) => return Err(FilesError::Fetch("no answer in time".to_owned())),
         };
         let chunks = cipher_size.div_ceil(1024);
-        let per_piece = PIECE_BYTES / 1024;
-        Ok((0..crate::tally::pieces_of(cipher_size))
-            .map(|i| {
-                let piece = ChunkRanges::chunks(i * per_piece..((i + 1) * per_piece).min(chunks));
-                (piece - bitfield.ranges.clone()).is_empty()
-            })
-            .collect())
+        Ok(held_runs(&(ChunkRanges::chunks(0..chunks) - bitfield.ranges), cipher_size))
     }
 }
+
+/// The runs of whole 64 KiB pieces, as (start, end), of a blob of `cipher_size` bytes whose `missing` 1 KiB chunks are
+/// not held. Worked out from the missing ranges' edges, so a 500 GB file's 7.6 million pieces cost nothing to count.
+pub(crate) fn held_runs(missing: &ChunkRanges, cipher_size: u64) -> Vec<(u64, u64)> {
+    let chunks = cipher_size.div_ceil(1024);
+    let per_piece = PIECE_BYTES / 1024;
+    let total = crate::tally::pieces_of(cipher_size);
+    let edges = missing.boundaries();
+    // The pieces any missing chunk falls in, merged.
+    let mut touched: Vec<(u64, u64)> = Vec::new();
+    for pair in edges.chunks(2) {
+        let start = pair[0].0.min(chunks);
+        let end = pair.get(1).map_or(chunks, |e| e.0.min(chunks));
+        let (first, last) = (start / per_piece, end.div_ceil(per_piece).min(total));
+        if first >= last {
+            continue;
+        }
+        match touched.last_mut() {
+            Some((_, e)) if *e >= first => *e = (*e).max(last),
+            _ => touched.push((first, last)),
+        }
+    }
+    let mut runs = Vec::new();
+    let mut at = 0;
+    for (first, last) in touched {
+        if first > at {
+            runs.push((at, first));
+        }
+        at = at.max(last);
+    }
+    if at < total {
+        runs.push((at, total));
+    }
+    runs
+}
+
 
 /// The missing ranges of `hash`, as `store` sees them now.
 async fn missing(store: &FsStore, hash: Hash) -> Result<ChunkRanges> {
@@ -382,5 +399,31 @@ impl Worker {
 
     async fn fail(&self, error: String) {
         let _ = self.tx.send(Event::Failed { provider: self.provider, error }).await;
+    }
+}
+
+#[cfg(test)]
+mod held_runs_tests {
+    use super::*;
+
+    const PIECE_CHUNKS: u64 = PIECE_BYTES / 1024;
+
+    #[test]
+    fn whole_pieces_are_held_only_where_no_chunk_is_missing() {
+        let cipher = 10 * PIECE_BYTES;
+        assert_eq!(held_runs(&ChunkRanges::empty(), cipher), vec![(0, 10)]);
+        assert_eq!(held_runs(&ChunkRanges::all(), cipher), vec![]);
+        // One chunk missing in piece 3, and everything from piece 7 on.
+        let missing = ChunkRanges::chunks(3 * PIECE_CHUNKS + 5..3 * PIECE_CHUNKS + 6) | ChunkRanges::chunks(7 * PIECE_CHUNKS..);
+        assert_eq!(held_runs(&missing, cipher), vec![(0, 3), (4, 7)]);
+    }
+
+    #[test]
+    fn a_short_last_piece_and_a_huge_blob_count_right() {
+        let cipher = 2 * PIECE_BYTES + 100;
+        assert_eq!(held_runs(&ChunkRanges::empty(), cipher), vec![(0, 3)]);
+        let huge = 500 * 1024 * 1024 * 1024;
+        let missing = ChunkRanges::chunks(PIECE_CHUNKS..2 * PIECE_CHUNKS);
+        assert_eq!(held_runs(&missing, huge), vec![(0, 1), (2, crate::tally::pieces_of(huge))]);
     }
 }

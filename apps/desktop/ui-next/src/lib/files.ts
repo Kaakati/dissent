@@ -164,7 +164,9 @@ export interface SwarmView {
   seeders: number;
   downloading: number;
   peers: SwarmPeerView[];
-  pieces: number[]; // holders per 64 KiB piece, among `asked`
+  pieces: number[]; // holders per cell of `pieces_per_cell` pieces (the fewest of any piece in it), among `asked`
+  pieces_per_cell?: number;
+  piece_count?: number;
   asked: number;
 }
 

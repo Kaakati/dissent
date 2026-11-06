@@ -1227,9 +1227,12 @@ if (!window.__TAURI__) {
     },
     listing_swarm: ({ communityId, listingId }) => {
       const l = servers[communityId].files.listings.find((x) => x.id === listingId);
-      const pieces = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
+      // Cells of 8 pieces, as the engine groups them: the fewest holders of any piece in each.
+      const per = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
+      const pieces = [];
+      for (let i = 0; i < per.length; i += 8) pieces.push(Math.min(...per.slice(i, i + 8)));
       return {
-        seeders: l.seeders, downloading: l.leechers, asked: 8, pieces,
+        seeders: l.seeders, downloading: l.leechers, asked: 8, pieces, pieces_per_cell: 8, piece_count: l.pieces,
         peers: [{ root_id: LINUS, you: false, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
       };
     },

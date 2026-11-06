@@ -81,7 +81,7 @@ impl Default for Timeouts {
             stall: Duration::from_secs(30),
             base: Duration::from_secs(60),
             per_mib: Duration::from_secs(10),
-            max: Duration::from_secs(24 * 60 * 60),
+            max: Duration::from_secs(30 * 24 * 60 * 60),
             refused_retry: Duration::from_secs(1),
         }
     }
