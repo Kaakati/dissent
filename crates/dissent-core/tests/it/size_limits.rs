@@ -92,7 +92,9 @@ async fn a_servers_limit_is_kept_by_members_and_a_file_over_my_limit_waits_for_a
                 .channel_messages(id, general, 50)
                 .into_iter()
                 .find(|m| m.id == sent.id)
-                .map(|m| m.attachments[0].clone())
+                // A message can show locked, with no text or files, until its sealed text opens: wait for the file.
+                .filter(|m| !m.locked)
+                .and_then(|m| m.attachments.first().cloned())
         })
         .await;
         assert_eq!(card.over_limit.as_deref(), Some("Larger than your download limit (1 MB)"));
