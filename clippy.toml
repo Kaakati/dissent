@@ -5,4 +5,8 @@ disallowed-methods = [
     { path = "reqwest::Client::builder", reason = "build HTTP clients with egress::http_client, which follows the egress mode" },
     { path = "reqwest::get", reason = "fetch through egress::http_client, which follows the egress mode" },
     { path = "tokio::net::lookup_host", reason = "resolve with egress::lookup_host, which resolves nothing for a proxied device" },
+    # Data sent in 0-RTT can be replayed by anyone who captured it, and nothing here is safe to run twice. iroh's
+    # router waits for the full handshake before any handler runs, so keeping 0-RTT off on our side keeps replays out.
+    { path = "iroh::endpoint::Connecting::into_0rtt", reason = "0-RTT data can be replayed; dial with a full handshake" },
+    { path = "iroh::endpoint::Accepting::into_0rtt", reason = "0-RTT data can be replayed; accept with a full handshake" },
 ]
