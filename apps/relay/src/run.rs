@@ -110,6 +110,22 @@ pub struct RunArgs {
         env = "DISSENT_RELAY_MAX_CONNECTIONS"
     )]
     pub max_connections: usize,
+
+    /// UDP address for QUIC address discovery, which tells clients their public address so they can connect
+    /// directly. TLS modes only. Clients look for it on port 7842.
+    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:7842", env = "DISSENT_RELAY_QAD_BIND")]
+    pub qad_bind: SocketAddr,
+
+    /// Do not serve QUIC address discovery. Clients then cannot learn their public address from this relay.
+    #[arg(long, env = "DISSENT_RELAY_NO_QAD")]
+    pub no_qad: bool,
+}
+
+impl RunArgs {
+    /// Where QUIC address discovery is served: in TLS modes, unless `--no-qad`. Dev mode has no certificate for it.
+    pub fn qad(&self) -> Option<SocketAddr> {
+        (!self.dev && !self.no_qad).then_some(self.qad_bind)
+    }
 }
 
 /// Says that a relay run without `--join` carries traffic for anyone who has its URL.
@@ -253,6 +269,9 @@ async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
         ),
     };
     crate::hosted::apply(&caps, crate::hosted::HostedAccess::open(&caps), &mut config);
+    if let Some(bind) = run.qad() {
+        crate::enable_qad(&mut config, bind);
+    }
     let warning = open_relay_warning(&caps);
     println!("{warning}");
     warn!("{warning}");
@@ -420,6 +439,10 @@ mod tests {
         );
         let warning = open_relay_warning(&crate::hosted::Caps::default());
         assert!(warning.contains("--join") && warning.contains("16 connections"), "{warning}");
+        assert_eq!(run.qad(), None, "dev mode has no certificate to serve QUIC address discovery with");
+        let tls = parse(&["--cert", "c.pem", "--key", "k.pem"]);
+        assert_eq!(tls.qad(), Some("0.0.0.0:7842".parse().unwrap()), "on by default with TLS, on the port clients probe");
+        assert_eq!(parse(&["--cert", "c.pem", "--key", "k.pem", "--no-qad"]).qad(), None);
         assert_eq!(run.bind, "0.0.0.0:3340".parse().unwrap());
         assert_eq!(run.mode().unwrap(), Mode::Dev);
     }

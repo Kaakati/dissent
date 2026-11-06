@@ -18,9 +18,20 @@ use std::sync::Arc;
 pub use iroh_relay::server::{Server, ServerConfig};
 
 use iroh_relay::server::{
-    AcmeConfig, CertConfig, DEFAULT_CERT_RELOAD_INTERVAL, RelayConfig, TlsConfig,
+    AcmeConfig, CertConfig, DEFAULT_CERT_RELOAD_INTERVAL, QuicConfig, RelayConfig, TlsConfig,
     reloading_resolver,
 };
+
+/// The UDP port clients probe for QUIC address discovery unless a relay says otherwise.
+pub const QAD_PORT: u16 = iroh_relay::defaults::DEFAULT_RELAY_QUIC_PORT;
+
+/// Serves QUIC address discovery on UDP `bind`: a client learns the public address and port its packets come from,
+/// which it needs to connect directly to a peer behind another router. iroh finds that address no other way, and a
+/// client assumes every relay it was given answers on [`QAD_PORT`]. It reuses the relay's TLS certificate, so it
+/// needs a TLS mode.
+pub fn enable_qad(config: &mut ServerConfig, bind: SocketAddr) {
+    config.quic = Some(QuicConfig::new(bind));
+}
 
 /// How the relay gets its TLS certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
