@@ -124,6 +124,8 @@ pub(crate) async fn run_request(endpoint: &Endpoint, peer: DeviceId, req: Vec<u8
                 }
                 // A busy node turned the request away, or gave its slot to another: try again shortly.
                 Err(_) if turned_away(&conn) => tokio::time::sleep(BUSY_RETRY).await,
+                // Its connection gate refused this device: revoked, or banned. Asking again changes nothing.
+                Err(_) if closed_with(&conn, crate::gate::REFUSED) => return Err(NetError::Refused),
                 Err(e) => return Err(e),
             }
         }
@@ -143,7 +145,12 @@ async fn exchange_once(conn: &Connection, req: &[u8]) -> Result<Vec<u8>> {
 
 /// Whether the peer closed `conn` because it was busy.
 fn turned_away(conn: &Connection) -> bool {
-    matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(close)) if close.error_code == VarInt::from_u32(BUSY))
+    closed_with(conn, BUSY)
+}
+
+/// Whether the peer closed `conn` with `code`.
+fn closed_with(conn: &Connection, code: u32) -> bool {
+    matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(close)) if close.error_code == VarInt::from_u32(code))
 }
 
 /// Reads a `u32` big-endian length, then the payload. Rejects lengths above `max` before allocating.

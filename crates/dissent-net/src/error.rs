@@ -27,6 +27,8 @@ pub enum NetError {
     Timeout,
     #[error("datagram failed: {0}")]
     Datagram(String),
+    #[error("the peer refused this device")]
+    Refused,
 }
 
 pub type Result<T> = std::result::Result<T, NetError>;

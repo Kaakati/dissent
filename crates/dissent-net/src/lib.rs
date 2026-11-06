@@ -3,6 +3,7 @@
 mod addr;
 mod error;
 mod extra;
+mod gate;
 mod inbound;
 mod lan;
 mod node;
@@ -19,6 +20,7 @@ pub use error::{NetError, Result};
 pub use node::{DEFAULT_GOSSIP_MAX_MESSAGE, Node, NodeConfig, RelayChoice, RelayReport};
 pub use relay_rank::{merge as merge_relays, rank as rank_relays, Entry as RelayEntry, Source as RelaySource, MAX_LIST as MAX_RELAY_LIST};
 pub use media::{LinkToken, MediaHandler, MediaLink, LINK_TOKEN_WAIT};
+pub use gate::{ConnectionGate, Gate, GateLimits};
 pub use inbound::InboundLimits;
 pub use rpc::{RpcHandler, REQUEST_TIMEOUT};
 pub use lan::community_key as lan_key;

@@ -180,8 +180,8 @@ async fn a_member_outside_the_call_is_refused_and_never_elected() {
     let reply = offer_to_forward(&member.engine, community, channel, target).await;
     assert_eq!(reply, "not in this call", "a member's offer is refused");
     let reply = offer_to_forward(&banned.engine, community, channel, target).await;
-    // Both hear what anyone hears for a call the device is not in, so neither learns it is in one.
-    assert_eq!(reply, "not in this call", "a banned member's offer is refused");
+    // A banned member is refused at the connection, before any call is looked at, so it learns nothing of the call.
+    assert!(reply.contains("refused this device"), "a banned member's offer is refused: {reply}");
     let reply = offer_to_forward(&outsider.engine, community, channel, target).await;
     assert_eq!(reply, "not in this call", "an outsider's offer is refused");
 

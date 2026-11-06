@@ -7,6 +7,7 @@ mod common;
 mod addresses;
 mod attachments;
 mod blob_gate;
+mod conn_gate;
 mod thumbnails;
 mod avatars;
 mod boosts;

@@ -34,6 +34,8 @@ const MAX_NAME_CHARS: usize = 64;
 /// Shared engine state. Tasks hold `Weak` references to it.
 pub(crate) struct Inner {
     pub identity: Identity,
+    /// What the connection gate knows about other devices. See `conn_gate`.
+    pub conn_gate: Arc<crate::conn_gate::GateCell>,
     /// Whether communities' relays are added to the node. From `NodeConfig::community_relays`.
     pub community_relays: bool,
     /// Whether loopback relays are accepted, for a node that runs on loopback alone. From
@@ -350,6 +352,7 @@ impl Engine {
             dm_sync_seen: Default::default(),
             mirror_hints: Default::default(),
             introductions: Default::default(),
+            conn_gate: Default::default(),
         });
         let media = net.media.clone().unwrap_or_else(|| crate::calls::media_sink(&inner));
         let mut net = net;
@@ -369,9 +372,12 @@ impl Engine {
                 })
             })),
         ));
+        // Judged from a snapshot that is ready before the node takes its first connection.
+        crate::conn_gate::rebuild(&inner);
         let config = NodeConfig {
             rpc: Some(handler_for(&inner)),
             media: Some(media),
+            gate: Some(inner.conn_gate.clone() as Arc<dyn dissent_net::ConnectionGate>),
             ..net
         };
         let node = Node::spawn(&inner.identity.device, config).await?;
@@ -412,6 +418,7 @@ impl Engine {
         engine.declare_history_everywhere();
         engine.spawn_addr_watch();
         engine.spawn_task(maintenance(Arc::downgrade(&engine.inner)));
+        engine.spawn_task(crate::conn_gate::gate_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::store::log_flush_loop(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::saved::reminder_clock(Arc::downgrade(&engine.inner)));
         engine.spawn_task(crate::presence::presence_loop(Arc::downgrade(&engine.inner)));
@@ -605,6 +612,7 @@ impl Engine {
     }
 
     pub(crate) fn emit(&self, event: EngineEvent) {
+        crate::conn_gate::note_event(&self.inner, &event);
         let _ = self.inner.events.send(event);
     }
 

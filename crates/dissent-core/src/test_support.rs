@@ -657,3 +657,41 @@ pub fn slot_holds(engine: &crate::Engine, device: dissent_identity::DeviceId) ->
 pub fn slot_refusals(engine: &crate::Engine, device: dissent_identity::DeviceId) -> u64 {
     engine.inner.tracker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).slot_refusals.get(&device).copied().unwrap_or(0)
 }
+
+/// The protocols every incoming connection can arrive on, as the connection gate sees them: requests, gossip, file
+/// blobs and both call media links.
+pub const GATED_ALPNS: [&[u8]; 5] = [b"dissent/rpc/0", b"/iroh-gossip/1", dissent_files::ALPN, b"dissent/media/0", b"dissent/media/1"];
+
+/// What `engine`'s connection gate makes of `device` now, after rebuilding its snapshot: `known`, `stranger` or
+/// `refused`.
+pub fn connection_verdict(engine: &crate::Engine, device: dissent_identity::DeviceId) -> &'static str {
+    use dissent_net::ConnectionGate as _;
+    crate::conn_gate::rebuild(&engine.inner);
+    match engine.inner.conn_gate.verdict(device) {
+        dissent_net::Gate::Known => "known",
+        dissent_net::Gate::Stranger => "stranger",
+        dissent_net::Gate::Refuse => "refused",
+    }
+}
+
+/// Dials `peer` from `engine`'s node on `alpn` and waits up to `wait` for the peer to close it. Returns the close code
+/// the peer gave, or `None` when the connection stayed open.
+pub async fn dial_and_watch(
+    engine: &crate::Engine,
+    peer: dissent_identity::DeviceId,
+    alpn: &[u8],
+    wait: std::time::Duration,
+) -> Result<Option<u64>, String> {
+    let id = iroh::EndpointId::from_bytes(&peer.0).map_err(|e| e.to_string())?;
+    let conn = engine.node().endpoint().connect(id, alpn).await.map_err(|e| e.to_string())?;
+    match tokio::time::timeout(wait, conn.closed()).await {
+        Ok(iroh::endpoint::ConnectionError::ApplicationClosed(close)) => Ok(Some(close.error_code.into_inner())),
+        Ok(other) => Err(other.to_string()),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The address `engine`'s node can be dialled at now.
+pub async fn node_addr(engine: &crate::Engine) -> dissent_net::PeerAddr {
+    engine.node().addr().await
+}

@@ -31,6 +31,7 @@ use crate::{
     lan,
     media::{MEDIA_ALPN, MEDIA_TOKEN_ALPN},
     error::{NetError, Result},
+    gate::{ConnectionGate, GateLimits, Hooks},
     inbound::{Inbound, InboundLimits},
     media::{LinkToken, MediaHandler, MediaLink, MediaProtocol, MediaTokenProtocol, dial_media, dial_media_tokened},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
@@ -110,6 +111,11 @@ pub struct NodeConfig {
     pub n0_address_lookup: bool,
     /// What devices that dial this node may make it hold: how many requests and pings at once, and for how long.
     pub inbound: InboundLimits,
+    /// Judges every incoming connection after its handshake, on every protocol. `None` admits every device, with
+    /// no connection caps.
+    pub gate: Option<Arc<dyn ConnectionGate>>,
+    /// How many connections the gate lets in, per device and from strangers together.
+    pub gate_limits: GateLimits,
 }
 
 impl Default for NodeConfig {
@@ -130,6 +136,8 @@ impl Default for NodeConfig {
             serves_lookups: false,
             n0_address_lookup: true,
             inbound: InboundLimits::default(),
+            gate: None,
+            gate_limits: GateLimits::default(),
         }
     }
 }
@@ -153,6 +161,8 @@ impl fmt::Debug for NodeConfig {
             .field("lan_discovery", &self.lan_discovery)
             .field("serves_lookups", &self.serves_lookups)
             .field("inbound", &self.inbound)
+            .field("gate", &self.gate.as_ref().map(|_| "ConnectionGate"))
+            .field("gate_limits", &self.gate_limits)
             .finish()
     }
 }
@@ -268,6 +278,9 @@ impl Node {
                 .bind_addr(v4)
                 .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
                 .map_err(|e| NetError::Config(e.to_string()))?;
+        }
+        if let Some(gate) = cfg.gate.clone() {
+            builder = builder.hooks(Hooks::new(gate, cfg.gate_limits));
         }
         let endpoint = builder.bind().await?;
         // Added after bind, so each service can be wrapped to record which one resolves a dial. The
