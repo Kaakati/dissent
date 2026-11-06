@@ -8,7 +8,7 @@ import type { LucideProps } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ProgressBar } from '@/components/transfers/progress';
 import { DANGER_TEXT, MAX_FILE_LABEL, extOf, formatSize, iconFor, isImage, isVideo, transferText, type FileIconName } from '@/lib/attachments';
-import { downloadWithin, isOver, limitLabel, useUploadLimit } from '@/lib/limits';
+import { downloadWithin, isOver, limitLabel, OLDER_VERSIONS_NOTE, RELEASED_LIMIT, useUploadLimit } from '@/lib/limits';
 import { toast } from '@/lib/toasts';
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
@@ -257,8 +257,9 @@ export function StagedChip({ file, onRemove }: { file: StagedFile; onRemove: () 
   const limit = useUploadLimit();
   const over = isOver(file, limit);
   const name = String(file.name);
+  const older = !over && isOver(file, RELEASED_LIMIT);
   return (
-    <div className={cn('chip-file', over && 'danger')} role="listitem" title={over ? `${name} is over ${limitLabel(limit)} and cannot be sent` : name}>
+    <div className={cn('chip-file', over && 'danger')} role="listitem" data-older-note={older || undefined} title={over ? `${name} is over ${limitLabel(limit)} and cannot be sent` : older ? `${name}: ${OLDER_VERSIONS_NOTE}` : name}>
       <FileGlyph name={name} mime={file.mime} />
       <span className="chip-name">{name}</span>
       <span className="chip-size tnum">{over ? `over ${limitLabel(limit)}` : formatSize(file.size)}</span>

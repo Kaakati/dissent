@@ -1,7 +1,7 @@
 // Settings › Downloads: the largest file this device shares and the largest it downloads. 10 GB each until changed.
 import { useEffect } from 'react';
 import { SizeLimitInput } from '@/components/settings/size-limit-input';
-import { DEFAULT_LIMIT, useSizeLimits } from '@/lib/limits';
+import { DEFAULT_LIMIT, OLDER_VERSIONS_NOTE, RELEASED_LIMIT, useSizeLimits } from '@/lib/limits';
 
 export function SizeLimits() {
   const limits = useSizeLimits((s) => s.limits);
@@ -19,7 +19,7 @@ export function SizeLimits() {
         label="Largest file I share"
         value={upload}
         disabled={!limits}
-        hint="A server can set a lower limit for what its members share."
+        hint={upload > RELEASED_LIMIT ? OLDER_VERSIONS_NOTE : 'A server can set a lower limit for what its members share.'}
         onSave={(bytes) => (limits ? save({ ...limits, max_upload: bytes }) : undefined)}
       />
       <SizeLimitInput

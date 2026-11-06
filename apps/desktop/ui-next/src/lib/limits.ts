@@ -14,6 +14,9 @@ export const TB = 1024 ** 4;
 export const MIN_LIMIT = MB;
 export const MAX_LIMIT = TB;
 export const DEFAULT_LIMIT = 10 * GB;
+// The most Dissent 0.1.35 and earlier accept: a larger file does not reach members on those versions.
+export const RELEASED_LIMIT = 10 * GB;
+export const OLDER_VERSIONS_NOTE = 'Members on Dissent 0.1.35 or earlier can’t download files over 10 GB.';
 
 export type SizeUnit = 'MB' | 'GB' | 'TB';
 export const UNITS: Record<SizeUnit, number> = { MB, GB, TB };

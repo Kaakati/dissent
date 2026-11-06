@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Link2, Plus, Trash2 } from 'lucide-react';
 import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/settings/settings-ui';
 import { SizeLimitInput } from '@/components/settings/size-limit-input';
-import { DEFAULT_LIMIT, limitLabel, limitsApi } from '@/lib/limits';
+import { limitLabel, limitsApi, OLDER_VERSIONS_NOTE, RELEASED_LIMIT } from '@/lib/limits';
 import { useShell } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,7 +48,7 @@ export function FilesSection({ community }: { community: CommunityView }) {
   const [selected, setSelected] = useState<string | null>(null);
   if (!view) return <Hint>Loading files…</Hint>;
   const cat = selected && selected !== 'new' ? (view.categories.find((c) => c.id === selected) ?? null) : null;
-  const maxFile = community.max_file_size ?? DEFAULT_LIMIT;
+  const maxFile = community.max_file_size ?? RELEASED_LIMIT;
   const saveMaxFile = async (bytes: number) => {
     try {
       await limitsApi.setServer(community.id, bytes);
@@ -65,7 +65,7 @@ export function FilesSection({ community }: { community: CommunityView }) {
             name="server"
             label="Largest file members may share"
             value={maxFile}
-            hint="Each member’s app keeps to it. Larger files are not downloaded on arrival."
+            hint={maxFile > RELEASED_LIMIT ? OLDER_VERSIONS_NOTE : 'Each member’s app keeps to it. Larger files are not downloaded on arrival.'}
             onSave={saveMaxFile}
           />
         ) : (

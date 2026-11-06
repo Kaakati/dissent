@@ -63,7 +63,8 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
   message files, listings and folders alike. A file over the device's download limit, or over the
   server's (an older client may still post one), is never fetched on arrival, and its card says why.
   A download past the device's own limit asks first ("Download anyway"); the server's limit does not
-  stop a download someone chooses.
+  stop a download someone chooses. A file over 10 GiB tells its sender that members on older versions
+  cannot download it: their app shows it as too large, and a folder holding one does not open there.
 - **Bytes input.** `Input::Bytes` holds its payload in memory, so it is for small payloads only. It
   refuses data over 64 MiB (`MAX_BYTES_INPUT`) and points the caller to `Input::Path`.
 - **Memory.** No path reads a whole file into memory. `add` streams the file through the encryptor

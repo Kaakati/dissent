@@ -5748,7 +5748,7 @@ check('SL3 a limit over 1 TB is refused before saving', (await ev(`document.quer
 await typeLimit('upload', '500', 'GB');
 await ev(`document.querySelector('${limitBox('upload')} button').click()`);
 await sleep(400);
-check('SL4 a limit over 10 GB saves', (await ev(`window.__TAURI__.core.invoke('size_limits')`))?.max_upload === 500 * 1024 ** 3);
+check('SL4 a limit over 10 GB saves, and says older versions cannot take such files', (await ev(`window.__TAURI__.core.invoke('size_limits')`))?.max_upload === 500 * 1024 ** 3 && (await ev(`document.querySelector('${limitBox('upload')}').textContent.includes('0.1.35 or earlier')`)) === true);
 await click('Change');
 await until(async () => (await path()).endsWith('/Dissent'), 2000);
 check('DL3 Change in Settings saves the folder', (await path()) === 'C:/Users/ada/Downloads/Dissent', await path());
