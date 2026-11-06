@@ -217,6 +217,48 @@ const normalizeStatus = (s: Partial<UserStatus> | null | undefined): UserStatus 
 });
 
 // Shared by every path that sets the call: the voice connection lasts only while the call is a channel call here.
+// A call control shows its change at once. The engine answers only after it told each peer, which over a real network
+// takes from 100 ms to seconds, and a control that waited for that looked dead and got a second click, which undid the
+// first. So the change shows before the engine answers, and stays over the call's own updates until it does: the camera
+// is reported on only once it has started. A failed change goes back and says why.
+type CallToggle = 'muted' | 'deafened' | 'camera' | 'screen';
+const pendingCall: Partial<Record<CallToggle, boolean>> = {};
+// The call this device is leaving, while the engine still tells its peers. Its updates no longer show.
+let leavingCall: string | null = null;
+const LEFT_CALL = '(left)';
+
+// A call this window starts or joins shows at once, even one with the id of the call just left.
+export function forgetLeftCall(): void {
+  leavingCall = null;
+}
+
+function overPending(call: CallState | null): CallState | null {
+  if (!call) return call;
+  if (leavingCall !== null && (leavingCall === LEFT_CALL || call.id === leavingCall)) return null;
+  return { ...call, ...pendingCall };
+}
+
+// Shows `field` as `next` now, asks the engine, and keeps it until the engine answers. The latest click wins.
+async function toggleCall(
+  set: (partial: Partial<ShellState> | ((s: ShellState) => Partial<ShellState>)) => void,
+  field: CallToggle,
+  next: boolean,
+  send: () => Promise<unknown>,
+): Promise<void> {
+  pendingCall[field] = next;
+  set((s) => (s.call ? { call: { ...s.call, [field]: next } } : {}));
+  try {
+    await send();
+  } catch (err) {
+    if (pendingCall[field] === next) {
+      delete pendingCall[field];
+      set((s) => (s.call ? { call: { ...s.call, [field]: !next } } : {}));
+    }
+    throw err;
+  }
+  if (pendingCall[field] === next) delete pendingCall[field];
+}
+
 function withCall(state: ShellState, next: CallState | null): Partial<ShellState> {
   return {
     call: next,
@@ -565,8 +607,7 @@ export const useShell = create<ShellState>()((set, get) => ({
       const { call } = get();
       if (!call) return;
       const next = !call.muted;
-      await api.setMuted(next);
-      set({ call: { ...call, muted: next } });
+      await toggleCall(set, 'muted', next, () => api.setMuted(next));
     });
   },
 
@@ -576,8 +617,7 @@ export const useShell = create<ShellState>()((set, get) => ({
       if (!call) return;
       const next = target !== undefined || !call.screen;
       if (next) await sendShareQuality(savedShareSettings());
-      await api.setScreenShare(next, target);
-      set({ call: { ...call, screen: next } });
+      await toggleCall(set, 'screen', next, () => api.setScreenShare(next, target));
     });
   },
 
@@ -586,8 +626,7 @@ export const useShell = create<ShellState>()((set, get) => ({
       const { call } = get();
       if (!call) return;
       const next = !call.camera;
-      await api.setCamera(next);
-      set({ call: { ...call, camera: next } });
+      await toggleCall(set, 'camera', next, () => api.setCamera(next));
     });
   },
 
@@ -596,16 +635,27 @@ export const useShell = create<ShellState>()((set, get) => ({
       const { call } = get();
       if (!call) return;
       const next = !call.deafened;
-      await api.setDeafened(next);
-      set({ call: { ...call, deafened: next } });
+      await toggleCall(set, 'deafened', next, () => api.setDeafened(next));
     });
   },
 
   leaveCall: async () => {
-    await guard(async () => {
+    // Gone from the window at once; the engine tells the peers meanwhile. If it cannot, the call comes back.
+    const leaving = get().call?.id ?? LEFT_CALL;
+    leavingCall = leaving;
+    for (const field of Object.keys(pendingCall) as CallToggle[]) delete pendingCall[field];
+    set((s) => ({ ...withCall(s, null), voiceChannelId: null }));
+    try {
       await api.leaveCall();
-      set((s) => ({ ...withCall(s, null), voiceChannelId: null }));
-    });
+    } catch (err) {
+      if (leavingCall === leaving) leavingCall = null;
+      toast(err);
+      return;
+    }
+    // Updates the engine sent before it left may still be on their way.
+    setTimeout(() => {
+      if (leavingCall === leaving) leavingCall = null;
+    }, 2000);
   },
 
   // Engine events. A message or conversation in the open place is read by its view; anything else is marked unread.
@@ -672,7 +722,10 @@ export const useShell = create<ShellState>()((set, get) => ({
 
   handleCallEvent: (call) => {
     if (!has('calls')) return;
-    set((s) => withCall(s, call));
+    // A new call, or a join this window started, is never the one being left.
+    if (call && leavingCall !== null && leavingCall !== LEFT_CALL && call.id !== leavingCall) leavingCall = null;
+    if (call && get().voiceConnection?.joining) leavingCall = null;
+    set((s) => withCall(s, overPending(call)));
   },
 
   handleTransfersEvent: (payload) => {

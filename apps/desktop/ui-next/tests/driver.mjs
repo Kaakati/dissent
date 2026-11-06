@@ -6026,6 +6026,93 @@ check('XL16 a link the window tried to open by itself asks first', (await ev(`do
 await close();
 }
 
+// Call controls take one click, while the call updates at the real rate: speaking and frames about every 100 ms.
+async function section_callclicks() {
+const b = await launch({ url: `${BASE}/`, width: 1400, height: 900, port: 9839, profile: `${SCRATCH}/callclicks-next-profile` });
+const { send, ev } = b;
+await sleep(1500);
+await until(async () => (await ev(`!!document.querySelector('button[aria-label="Direct messages"]')`)) === true, 10000);
+await ev(`document.querySelector('button[aria-label="Direct messages"]').click()`);
+await sleep(400);
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('Maya'))?.click()`);
+await sleep(600);
+await ev(`document.querySelector('button[aria-label="Start voice call with Maya"]').click()`);
+await until(async () => (await ev(`!!document.querySelector('[data-call-tiles] [data-tile]')`)) === true, 10000);
+// The engine's rate: a speaking change and a video frame each about every 100 ms, for the whole check.
+await ev(`(() => {
+  let on = false;
+  window.__ticks = setInterval(() => {
+    on = !on;
+    window.__mockSpeaking('Maya', on);
+    window.__mockSpeaking('me', !on);
+    window.__mockEngineEvent({ kind: 'video_frame', sender: 1, root_id: 'tick', screen: false, width: 2, height: 2, jpeg: 'AAAA' });
+  }, 100);
+})()`);
+// The engine answers a control after telling each peer: over a real network that is 100 ms to seconds.
+await ev(`window.__mockCallLatencyMs = 1500`);
+// A real press and release, a human's 90 ms apart, so an update always lands between them.
+const press = async (selector) => {
+  const box = await ev(`(() => { const r = document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect(); return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`);
+  if (!box) throw new Error(`no ${selector}`);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y });
+  await sleep(40);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 });
+  await sleep(90);
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 });
+  await sleep(150);
+};
+// What the engine itself holds now.
+const engineCall = () => ev(`window.__TAURI__.core.invoke('call_state').then((c) => JSON.stringify(c ? { muted: c.muted, deafened: c.deafened, camera: Boolean(c.camera) } : null), () => 'none')`);
+const STAGE = 'section[aria-label="Call"]';
+const node = (label) => `document.querySelector('${STAGE} button[aria-label="${label}"]')`;
+await sleep(500);
+await ev(`window.__muteNode = ${node('Mute microphone')}`);
+await sleep(400);
+check('CK0 the mute button is the same element across updates', (await ev(`window.__muteNode === ${node('Mute microphone')} && window.__muteNode.isConnected`)) === true);
+await press(`${STAGE} button[aria-label="Mute microphone"]`);
+check('CK1 one click mutes at once, before the engine has told every peer', (await ev(`!!${node('Unmute microphone')}`)) === true && (await ev(`${node('Unmute microphone')}.getAttribute('aria-pressed')`)) === 'true');
+await sleep(1800);
+check('CK1 and stays muted once the engine answers, with the call updating meanwhile', (await ev(`!!${node('Unmute microphone')}`)) === true);
+await press(`${STAGE} button[aria-label="Unmute microphone"]`);
+check('CK2 one click unmutes at once', (await ev(`!!${node('Mute microphone')}`)) === true);
+// Two quick clicks while the engine is still answering the first one: mute, then unmute. The second is not lost.
+await press(`${STAGE} button[aria-label="Mute microphone"]`);
+await press(`${STAGE} button[aria-label="Unmute microphone"]`);
+await sleep(3300);
+check('CK2 two quick clicks end unmuted, in the window and in the engine', (await ev(`!!${node('Mute microphone')}`)) === true && JSON.parse(await engineCall())?.muted === false, await engineCall());
+await press(`${STAGE} button[aria-label="Deafen"]`);
+check('CK3 one click deafens', (await ev(`${node('Undeafen')}?.getAttribute('aria-pressed')`)) === 'true');
+await press(`${STAGE} button[aria-label="Undeafen"]`);
+await sleep(1600);
+await press(`${STAGE} button[aria-label="Turn camera on"]`);
+check('CK4 one click turns the camera on at once', (await ev(`!!${node('Turn camera off')}`)) === true);
+await sleep(700);
+check('CK4 and the call’s updates while it starts do not turn it back off', (await ev(`!!${node('Turn camera off')}`)) === true);
+await sleep(1200);
+await press(`${STAGE} button[aria-label="Turn camera off"]`);
+check('CK4 one click turns it off', (await ev(`!!${node('Turn camera on')}`)) === true);
+await sleep(1600);
+await press(`${STAGE} button[aria-label="Leave call"]`);
+check('CK5 one click on Leave ends the call at once', (await ev(`!document.querySelector('${STAGE}')`)) === true);
+await sleep(1800);
+check('CK5 and it stays ended', (await ev(`!document.querySelector('${STAGE}')`)) === true);
+// The user bar's Disconnect, in a voice channel.
+await ev(`window.__mockCallLatencyMs = 0`);
+await ev(`document.querySelector('button[aria-label="Riverside Makers"]').click()`);
+await sleep(700);
+const voice = await ev(`(() => { const b = [...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((x) => x.textContent.includes('workshop')); b?.click(); return b?.textContent ?? null; })()`);
+await until(async () => (await ev(`!!document.querySelector('button[aria-label="Disconnect"]')`)) === true, 6000);
+if (await ev(`!!document.querySelector('button[aria-label="Disconnect"]')`)) {
+  await sleep(1500);
+  await ev(`window.__mockCallLatencyMs = 1500`);
+  await press('button[aria-label="Disconnect"]');
+  check('CK6 one click on the user bar’s Disconnect leaves at once', (await ev(`!document.querySelector('button[aria-label="Disconnect"]')`)) === true, voice);
+} else {
+  check('CK6 a voice channel could be joined for the Disconnect check', false, voice);
+}
+await ev(`clearInterval(window.__ticks)`);
+}
+
 async function section_memberonly() {
 const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9821, profile: `${SCRATCH}/privacy-next-profile` });
 const { ev } = b;
@@ -6606,6 +6693,7 @@ const SECTIONS = [
   ['activebadge', section_activebadge],
   ['channelorder', section_channelorder],
   ['memberonly', section_memberonly],
+  ['callclicks', section_callclicks],
   ['filedrop', section_filedrop],
   ['filepages', section_filepages],
   ['downloadfolder', section_downloadfolder],

@@ -569,6 +569,8 @@ if (!window.__TAURI__) {
     servers[communityId].msgs[channelId].push({ ...msg(0, 0, LINUS, `@${people[ME]} the laser is free after all.`), mentions: [{ id: ME, display_name: people[ME] }], mentions_me: true, mentions_everyone: false });
   };
   window.__mockEngineEvent = (ev) => emit(ev);
+  // How long the engine takes to answer a call control, as it waits on each peer in turn.
+  const callLatency = () => new Promise((resolve) => setTimeout(resolve, window.__mockCallLatencyMs ?? 0));
   // Who speaks in the call: `who` is 'me', or a participant's display name. Sends the call state, as the engine's
   // `call_speaking` does.
   window.__mockCannotDecrypt = (on) => {
@@ -2182,8 +2184,10 @@ if (!window.__TAURI__) {
       if (!wait && !fail) return joinChannelCall(args);
       return new Promise((resolve, reject) => setTimeout(() => (fail ? reject(new Error(fail)) : resolve(joinChannelCall(args))), wait ?? 0));
     },
-    leave_call: () => {
+    leave_call: async () => {
       calls.current = null;
+      // The engine tells each peer before the command returns; the call is already gone meanwhile.
+      await callLatency();
       for (const c of Object.values(servers)) {
         for (const v of c.voice ?? []) {
           const before = v.participants.length;
@@ -2244,9 +2248,11 @@ if (!window.__TAURI__) {
       (window.__mockAlertLog ??= []).push({ communityId, mentioned, byName, alerts });
       return alerts;
     },
-    set_muted: ({ muted }) => { if (calls.current) calls.current.muted = muted; return null; },
-    set_deafened: ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; return null; },
-    set_camera: ({ on }) => { if (calls.current) calls.current.camera = on; return null; },
+    // As the engine does: mute and deafen take effect at once and the command returns once each peer was told; the
+    // camera counts as on only once it has started. `window.__mockCallLatencyMs` is how long that takes (0 by default).
+    set_muted: async ({ muted }) => { if (calls.current) calls.current.muted = muted; await callLatency(); return null; },
+    set_deafened: async ({ deafened }) => { if (calls.current) calls.current.deafened = deafened; await callLatency(); return null; },
+    set_camera: async ({ on }) => { await callLatency(); if (calls.current) calls.current.camera = on; return null; },
     set_camera_preview: () => null,
     // The tile's drawn width is kept on window, so the driver can check that a tile reported it. Width 0 removes it.
     set_video_tile: ({ rootId, screen, width }) => {

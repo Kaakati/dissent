@@ -6,7 +6,7 @@ import { api } from './api';
 import { has } from './features';
 import { toast } from './toasts';
 import { beginOutgoingRing, callChanged } from './sounds';
-import { useShell } from './store';
+import { useShell, forgetLeftCall } from './store';
 import type { CallState, Id, IncomingCall } from './types';
 
 // The group of a group call this device is in. A group call's room carries no peer, so the group is remembered here.
@@ -50,6 +50,7 @@ export function watchLobbyDismissal(): () => void {
 // Clicking a voice channel joins it. Another call on this device is left first, so this one replaces it. The click
 // shows you in the channel at once; the engine's answer confirms it, or takes it back with the reason.
 export async function openVoiceChannel(channelId: Id): Promise<void> {
+  forgetLeftCall();
   const { community, voiceConnection, call } = useShell.getState();
   if (!has('calls') || !community) return;
   if (voiceConnection?.channelId === channelId && (call || voiceConnection.joining)) {
@@ -75,6 +76,7 @@ export async function openVoiceChannel(channelId: Id): Promise<void> {
 
 // Joins a call that is already live in a direct conversation or a group (the lobby). `muted` mutes the mic on arrival.
 export async function joinLiveCall(target: { groupId: Id } | { peer: Id }, muted: boolean): Promise<boolean> {
+  forgetLeftCall();
   try {
     const next = 'groupId' in target
       ? ((await api.joinGroupCall(target.groupId)) as CallState | null)
@@ -100,6 +102,7 @@ async function applyWithMute(next: CallState | null, muted: boolean): Promise<vo
 // The voice call button of a conversation. A direct call starts and rings the other person (start_call). A group call
 // starts the group's call, which rings everyone, or joins the one already running (join_group_call).
 export async function startConversationCall(target: { groupId: Id } | { peer: Id }): Promise<boolean> {
+  forgetLeftCall();
   try {
     if ('groupId' in target) {
       useCallRoom.setState({ groupId: target.groupId });
@@ -119,6 +122,7 @@ export async function startConversationCall(target: { groupId: Id } | { peer: Id
 // Starts a call with a person and turns the camera on as it starts. The camera is the call's own toggle, so a camera
 // that cannot start is reported, and the call stays up.
 export async function startVideoConversationCall(peer: Id): Promise<boolean> {
+  forgetLeftCall();
   const started = await startConversationCall({ peer });
   if (!started) return false;
   try {
@@ -131,6 +135,7 @@ export async function startVideoConversationCall(peer: Id): Promise<boolean> {
 
 // Answers a ringing call. Answering with the mic muted mutes it once the call connects.
 export async function acceptIncoming(call: IncomingCall, muted: boolean): Promise<boolean> {
+  forgetLeftCall();
   try {
     await api.acceptCall(call.call_id);
     useCallRoom.setState({ groupId: call.scope === 'group' ? (call.group_id ?? null) : null });
