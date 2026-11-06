@@ -1613,22 +1613,33 @@ async fn measured_upload_elects_a_forwarder() {
         p.engine.join_call(community, channel).await.expect("join");
     }
     all_see(&everyone, Topology::Forwarded, "a forwarded call of seven").await;
-    // Each device's announced upload covers a forwarder's load for seven, so the election over the
-    // measured numbers alone picks one.
+    // Only the forwarder sends a copy to every other device, so only it measures its upload here. A leaf announces at
+    // most the figure it carried over from the mesh it was in before the call grew, never its one stream to the
+    // forwarder. No such figure covers a forwarder's load for seven, so the election over the measured numbers picks the
+    // forwarder.
+    let root = everyone
+        .iter()
+        .find(|p| p.engine.call_role() == Some("root"))
+        .expect("a forwarder");
+    let root_sid = dissent_core::test_support::call_key_state(&root.engine).expect("in the call").2;
+    // A leaf measures nothing: what it announces stays what it carried over, through two capacity rounds and more.
+    let leaves: Vec<&Peer> = everyone.iter().filter(|p| !std::ptr::eq(*p, root)).collect();
+    let carried: Vec<Option<u32>> = leaves.iter().map(|p| dissent_core::test_support::own_call_capacity(&p.engine)).collect();
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    for (p, was) in leaves.iter().zip(&carried) {
+        assert_eq!(dissent_core::test_support::own_call_capacity(&p.engine), *was, "a leaf's announced upload is not its one stream");
+    }
+    eventually_within(Duration::from_secs(60), "the forwarder's measured upload", || {
+        dissent_core::test_support::own_call_capacity(&root.engine).filter(|kbps| *kbps >= 7 * 96)
+    })
+    .await;
     for p in &everyone {
-        eventually_within(Duration::from_secs(60), "an election over measured capacities", || {
+        eventually_within(Duration::from_secs(60), "an election over measured capacities that picks the forwarder", || {
             let (measured, elected) = dissent_core::test_support::measured_election(&p.engine);
-            (measured == 7).then_some(elected).flatten()
+            (measured >= 1 && elected == Some(root_sid)).then_some(())
         })
         .await;
     }
-    // The forwarder sends a copy of the top speakers to six listeners, so it measures the most.
-    let most = everyone
-        .iter()
-        .filter_map(|p| dissent_core::test_support::own_call_capacity(&p.engine))
-        .max()
-        .expect("measured");
-    assert!(most >= 7 * 96, "the forwarder's measured upload covers seven listeners: {most} kbps");
     finish(everyone).await;
     }).await;
 }
