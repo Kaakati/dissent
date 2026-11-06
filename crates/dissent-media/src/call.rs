@@ -129,6 +129,9 @@ pub struct CallStats {
     pub frames_sender_capped: u64,
     /// Frames dropped because the link takes no more key ids under the current key until the next rekey.
     pub frames_id_capped: u64,
+    /// How long media has been arriving on the link, since its first RTP or RTCP datagram. `None` before that. A link
+    /// that has carried media only briefly is still ramping, so what it sends says little of what it could.
+    pub media_for: Option<Duration>,
     /// What this side sent on the link, in kbps, every byte of every datagram, smoothed over the
     /// stats intervals. `None` until two stats reports have arrived. It is a floor for what the link
     /// carries, not an estimate of what it could: str0m's TWCC estimate stays at its starting value
@@ -203,6 +206,8 @@ pub struct Call<T: PacketTransport = UdpTransport> {
     kinds_in: [u64; 3],
     /// When the last RTP or RTCP datagram arrived. `None` before the first.
     last_media: Option<Instant>,
+    /// When the first RTP or RTCP datagram arrived. `None` before it.
+    first_media: Option<Instant>,
     timeout: Instant,
     inbox: VecDeque<ReceivedFrame>,
     raw_inbox: VecDeque<Vec<u8>>,
@@ -469,6 +474,7 @@ impl<T: PacketTransport> Call<T> {
             last_received: None,
             kinds_in: [0; 3],
             last_media: None,
+            first_media: None,
             timeout: now,
             inbox: VecDeque::new(),
             raw_inbox: VecDeque::new(),
@@ -1039,6 +1045,7 @@ impl<T: PacketTransport> Call<T> {
     pub fn stats(&self) -> CallStats {
         CallStats {
             target_kbps: self.bwe.target_kbps(),
+            media_for: self.first_media.map(|at| at.elapsed()),
             ..self.stats
         }
     }
@@ -1104,6 +1111,7 @@ impl<T: PacketTransport> Call<T> {
                     Some(128..=191) => {
                         self.kinds_in[2] += 1;
                         self.last_media = self.last_received;
+                        self.first_media = self.first_media.or(self.last_received);
                     }
                     _ => {}
                 }

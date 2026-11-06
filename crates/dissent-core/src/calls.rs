@@ -24,7 +24,7 @@ use dissent_events::{ChannelId, Payload};
 use dissent_identity::{CommunityId, DeviceCert, DeviceId, DeviceKey, RootId};
 use dissent_audio::{OpusEncoder, SenderConfig, SenderPacket, VoiceReceiver, VoiceSender};
 use dissent_media::{
-    assign_forwarders, elect, plan as cascade_plan, Auth, Candidate, LinkTransport, MediaKey, Mesh, Mode, Participant, ReceivedFrame, Sfu,
+    assign_forwarders, elect, plan as cascade_plan, Auth, CallStats, Candidate, LinkTransport, MediaKey, Mesh, Mode, Participant, ReceivedFrame, Sfu,
     PacketTransport, AUDIO_STREAM_KBPS, MAX_SENDER_ID, SYNTHETIC_CALLEE, SYNTHETIC_CALLER, VIDEO_720P_KBPS,
     Side, Signal, FRAME_SAMPLES,
 };
@@ -3895,19 +3895,24 @@ impl Engine {
         if tick.is_multiple_of(CAPACITY_EVERY) {
             // Sent again with each capacity, so a device that missed it, or rejoined, hears it.
             self.tell_features(room, true);
-            let mesh_links: Vec<Option<u32>> = if room.forwarding.is_none() {
-                mesh.stats().values().map(|s| s.sent_kbps).collect()
+            let mesh_links: Vec<CallStats> = if room.forwarding.is_none() {
+                mesh.stats().into_values().collect()
             } else {
                 Vec::new()
             };
-            // A measure counts only from a room settled in where this device sends a copy to every other: a mesh, or
-            // the forwarder's relay. A leaf sends one stream upstream, so its figure is one stream's worth, not what
-            // its upload can carry, and announced it would keep a forwarded call from ever returning to a mesh. It
-            // keeps the figure it carried over instead. An override, set by tests, always counts.
+            // A measure counts only where this device sends a copy to every other, a mesh or the forwarder's relay,
+            // and only once every link it sums has carried media for `settle_after_swap`. A leaf sends one stream
+            // upstream, so its figure is one stream's worth, not what its upload can carry; a link still ramping, after
+            // a join, a swap or a relink, sends less than it will. Announced, either would lower every peer's limit.
+            // Until then the device keeps the figure it carried over. An override, set by tests, always counts.
             let overridden = self.inner.calls.capacity_override.load(Ordering::SeqCst) > 0;
             let role = room.forwarding.as_ref().map(|f| f.role);
-            let hold = !overridden && (self.settling(room) || !measures_own_upload(role));
-            let measured = if hold { None } else { self.measure_capacity(room, mesh_links).await };
+            let (measured, ripe) = if overridden || measures_own_upload(role) {
+                self.measure_capacity(room, mesh_links).await
+            } else {
+                (None, false)
+            };
+            let hold = !overridden && !ripe;
             if let Some(kbps) = capacity_to_announce(measured, room.own_kbps.load(Ordering::SeqCst), hold) {
                 room.own_kbps.store(kbps, Ordering::SeqCst);
                 self.announce_capacity(room, kbps).await;
@@ -4971,27 +4976,30 @@ impl Engine {
     /// downlinks, and a leaf its link to its forwarder. Links with no rate yet add nothing, and with
     /// none at all there is no measurement. It is what the device carries, not what it could: no
     /// probe measures headroom yet. The audio target, 16 to 64 kbps, is a separate value that sizes
-    /// the voice only.
-    async fn measure_capacity(&self, room: &Arc<Room>, mesh_links: Vec<Option<u32>>) -> Option<u32> {
+    /// the voice only. Also says whether each of those links has carried media long enough for the figure to count
+    /// (`links_ripe`).
+    async fn measure_capacity(&self, room: &Arc<Room>, mesh_links: Vec<CallStats>) -> (Option<u32>, bool) {
         let overridden = self.inner.calls.capacity_override.load(Ordering::SeqCst);
         if overridden > 0 {
-            return Some(overridden);
+            return (Some(overridden), true);
         }
-        let mut links: Vec<Option<u32>> = Vec::new();
+        let mut links: Vec<CallStats> = Vec::new();
         match room.forwarding.as_ref() {
             None => links.extend(mesh_links),
             Some(forwarding) if forwarding.role == Role::Leaf => {
                 if let Some(participant) = forwarding.leaf.lock().await.as_ref() {
-                    links.extend(participant.link_stats().values().map(|s| s.sent_kbps));
+                    links.extend(participant.link_stats().into_values());
                 }
             }
             Some(forwarding) => {
                 if let Some(relay) = forwarding.sfu.lock().await.as_ref() {
-                    links.extend(relay.downlink_stats().values().map(|s| s.sent_kbps));
+                    links.extend(relay.downlink_stats().into_values());
                 }
             }
         }
-        upload_kbps(&links)
+        let rates: Vec<Option<u32>> = links.iter().map(|s| s.sent_kbps).collect();
+        let media_for: Vec<Option<Duration>> = links.iter().map(|s| s.media_for).collect();
+        (upload_kbps(&rates), links_ripe(&media_for, self.inner.timings.settle_after_swap))
     }
 
     /// Signs and sends this device's capacity to the other devices in the call.
@@ -5821,6 +5829,12 @@ fn upload_kbps(links: &[Option<u32>]) -> Option<u32> {
     Some(u32::try_from(measured.iter().sum::<u64>()).unwrap_or(u32::MAX))
 }
 
+/// Whether a measure over links that have carried media for `media_for` counts: only with at least one link, each
+/// past `settle`. A link newer than that is still ramping, so it would pull the sum down.
+fn links_ripe(media_for: &[Option<Duration>], settle: Duration) -> bool {
+    !media_for.is_empty() && media_for.iter().all(|m| m.is_some_and(|m| m >= settle))
+}
+
 /// The mesh limit of boost level 0. A released device uses it too: it forwards at 7 and goes back
 /// to a mesh at 5.
 const LEVEL0_MESH_LIMIT: usize = 6;
@@ -5861,9 +5875,9 @@ fn measures_own_upload(role: Option<Role>) -> bool {
     matches!(role, None | Some(Role::Root))
 }
 
-/// The capacity to announce for this device: what was measured, or while it `hold`s (the room is settling, or does not
-/// measure its upload, see `measures_own_upload`), the value it carried over from the room before, so peers do not
-/// lower their limit on a dip. `None` announces nothing.
+/// The capacity to announce for this device: what was measured, or while it `hold`s (a link it sums is still ramping,
+/// or its role does not measure its upload, see `links_ripe` and `measures_own_upload`), the value it carried over from
+/// the room before, so peers do not lower their limit on a dip. `None` announces nothing.
 fn capacity_to_announce(measured: Option<u32>, carried: u32, hold: bool) -> Option<u32> {
     if hold {
         (carried > 0).then_some(carried)
@@ -6035,7 +6049,21 @@ mod settle_tests {
         assert!(settling_since(Some(now), now, settle), "just joined");
         assert!(!settling_since(Some(now - settle), now, settle), "settled");
         assert!(!settling_since(None, now, settle), "a staged room not carrying the call yet");
-        assert_eq!(capacity_to_announce(Some(31), 0, settling_since(Some(now), now, settle)), None);
+    }
+
+    /// A measure counts only once every link it sums has carried media for the settle time: after a join, a swap or
+    /// a relink, a new link is still ramping, and a joiner with nothing carried over announces nothing until then.
+    #[test]
+    fn a_measure_waits_for_every_link_to_carry_media_for_the_settle_time() {
+        let settle = Duration::from_secs(3);
+        let old = Some(Duration::from_secs(20));
+        assert!(links_ripe(&[old, old, old], settle));
+        assert!(!links_ripe(&[old, Some(Duration::from_secs(1)), old], settle), "one link still ramping");
+        assert!(!links_ripe(&[old, None], settle), "one link has carried no media yet");
+        assert!(!links_ripe(&[], settle), "no link at all");
+        let joiner = !links_ripe(&[Some(Duration::from_secs(2)); 6], settle);
+        assert_eq!(capacity_to_announce(Some(35), 0, joiner), None, "the newest joiner's 35 kbps is not announced");
+        assert_eq!(capacity_to_announce(Some(35), 640, joiner), Some(640), "a device with a figure keeps it");
     }
 
     /// A leaf sends one stream to its forwarder, so what it sends says nothing of its upload. It keeps announcing the
