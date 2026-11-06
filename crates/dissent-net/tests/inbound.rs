@@ -141,3 +141,119 @@ async fn a_crowd_of_slow_senders_cannot_keep_an_honest_request_out() {
     }
     server.shutdown().await.unwrap();
 }
+
+/// 32 devices, 2 connections each: 64 slow senders for 32 slots, so some are always waiting to get in, each dialling
+/// again as soon as it is turned away. Returns the devices and their tasks; set `stop` to end them.
+async fn flood(server: &Node, stop: &Arc<std::sync::atomic::AtomicBool>) -> (Vec<Node>, Vec<tokio::task::JoinHandle<()>>) {
+    let mut abusers = Vec::new();
+    let mut tasks = Vec::new();
+    for _ in 0..32 {
+        let abuser = dialer(server).await;
+        for _ in 0..2 {
+            let (abuser, server, stop) = (abuser.clone(), server.clone(), stop.clone());
+            tasks.push(tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    let (conn, send) = declare(&abuser, &server, 1024 * 1024).await;
+                    if let Some(mut send) = send {
+                        while !stop.load(Ordering::SeqCst) && send.write_all(&[7u8; 64]).await.is_ok() {
+                            if conn.close_reason().is_some() {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }));
+        }
+        abusers.push(abuser);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    (abusers, tasks)
+}
+
+fn flood_limits() -> InboundLimits {
+    InboundLimits {
+        max_concurrent: 32,
+        per_device: 2,
+        evict_after: Duration::from_millis(100),
+        deadline_floor: Duration::from_secs(60),
+        ..InboundLimits::default()
+    }
+}
+
+async fn stop_flood(stop: &std::sync::atomic::AtomicBool, abusers: Vec<Node>, tasks: Vec<tokio::task::JoinHandle<()>>) {
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.abort();
+    }
+    for node in abusers {
+        node.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_honest_request_completes_while_every_slot_is_taken_by_slow_senders() {
+    let served = Arc::new(AtomicUsize::new(0));
+    let server = Node::spawn(&DeviceKey::generate(), cfg(Some(Arc::new(Echo(served.clone()))), flood_limits())).await.unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (abusers, tasks) = flood(&server, &stop).await;
+
+    let honest = dialer(&server).await;
+    let big = vec![42u8; 8 * 1024 * 1024];
+    let reply = honest.request(server.id(), big.clone()).await.expect("the large honest request is answered");
+    assert_eq!(reply.len(), big.len());
+    assert_eq!(served.load(Ordering::SeqCst), 1, "only the honest request reached the handler");
+
+    stop_flood(&stop, abusers, tasks).await;
+    honest.shutdown().await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+/// An honest request that takes long to arrive but arrives steadily, as a large one over a relay does, keeps its
+/// slot while slow senders come and go around it, and is answered on its first try.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_steady_upload_keeps_its_slot_while_slow_senders_come_and_go() {
+    let served = Arc::new(AtomicUsize::new(0));
+    let server = Node::spawn(&DeviceKey::generate(), cfg(Some(Arc::new(Echo(served.clone()))), flood_limits())).await.unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (abusers, tasks) = flood(&server, &stop).await;
+
+    // 2 MiB in 64 KiB pieces, one every 60 ms: about 1 MiB/s for two seconds, twenty times `evict_after`. A full node
+    // may turn the connection away when it opens, as `Node::request` would see and retry; it must never lose its slot
+    // once the upload is under way.
+    let honest = dialer(&server).await;
+    let len = 2 * 1024 * 1024u32;
+    let server_id = EndpointId::from_bytes(&server.id().0).unwrap();
+    let mut lost_midway = 0;
+    let attempt = async {
+        loop {
+            let conn = honest.endpoint().connect(server_id, RPC_ALPN).await.unwrap();
+            let started = std::time::Instant::now();
+            let sent = async {
+                let (mut send, mut recv) = conn.open_bi().await.ok()?;
+                send.write_all(&len.to_be_bytes()).await.ok()?;
+                for _ in 0..(len / (64 * 1024)) {
+                    send.write_all(&[42u8; 64 * 1024]).await.ok()?;
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                }
+                send.finish().ok()?;
+                recv.read_to_end(4 + len as usize).await.ok()
+            };
+            match sent.await {
+                Some(reply) => break reply,
+                None if started.elapsed() > Duration::from_millis(500) => lost_midway += 1,
+                None => {}
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    let reply = tokio::time::timeout(Duration::from_secs(30), attempt).await.expect("the honest upload gets through");
+    assert_eq!(lost_midway, 0, "an upload under way was never given up for a slow sender");
+    assert_eq!(reply.len(), 4 + len as usize, "the whole echo came back");
+    assert_eq!(served.load(Ordering::SeqCst), 1);
+
+    stop_flood(&stop, abusers, tasks).await;
+    honest.shutdown().await.unwrap();
+    server.shutdown().await.unwrap();
+}

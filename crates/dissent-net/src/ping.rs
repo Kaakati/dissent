@@ -47,7 +47,7 @@ impl ProtocolHandler for PingHandler {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let from = DeviceId(*connection.remote_id().as_bytes());
         log_key_exchange(&connection, from, "accept");
-        let Some(permit) = self.0.admit(from) else {
+        let Some(permit) = self.0.admit(from).await else {
             connection.close(BUSY.into(), b"busy");
             return Ok(());
         };
