@@ -148,7 +148,8 @@ if (!window.__TAURI__) {
         { id: 'ch3', name: 'announcements' },
         { id: 'ch4', name: '3d-printing' },
       ],
-      roles: { [GRACE]: 'owner', [ME]: 'member', [LINUS]: 'admin', [KEN]: 'moderator', [RADIA]: 'member', [RANA]: 'member' },
+      // ?asadmin makes Sami an admin here instead of a member, for what an admin who is not the owner may do.
+      roles: { [GRACE]: 'owner', [ME]: new URLSearchParams(location.search).has('asadmin') ? 'admin' : 'member', [LINUS]: 'admin', [KEN]: 'moderator', [RADIA]: 'member', [RANA]: 'member' },
       banned: new Set(),
       msgs: {
         ch1: generalMessages,

@@ -6687,6 +6687,163 @@ noConsoleErrors('activebadge', b.consoleErrors);
 await b.close();
 }
 
+// ---- Member menu: right-click (or Shift+F10, or the Menu key) on a server member offers Profile and the card's actions ----
+async function section_membermenu() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9871 + 100, profile: `${SCRATCH}/membermenu-profile` });
+const { ev } = b;
+await sleep(1200);
+const ROW = (name) => `[...document.querySelectorAll('button[title]')].find((n) => n.title.startsWith(${JSON.stringify(name + '·')}) && !n.closest('[aria-label="Channels and conversations"]'))`;
+const menuLabels = () => ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+const cardLabels = () => ev(`[...document.querySelectorAll('[role="dialog"][aria-label="User profile"] button[data-slot="button"]')].map((n) => n.textContent.trim())`);
+const openServer = async (id) => {
+  await ev(`document.querySelector('button[data-server-id="${id}"]').click()`);
+  await until(() => ev(`!!${ROW('Sami')}`), 5000);
+};
+const rightClick = async (name) => {
+  await ev(`(() => { const n = ${ROW(name)}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await until(() => ev(`!!document.querySelector('[role="menu"]')`), 3000);
+  return menuLabels();
+};
+const cardOf = async (name) => {
+  await ev(`(() => { const n = ${ROW(name)}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await until(() => ev(`!!document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]')`), 3000);
+  await sleep(200);
+  const labels = await cardLabels();
+  await b.press('Escape');
+  await sleep(250);
+  return labels;
+};
+const closeMenu = async () => {
+  await b.press('Escape');
+  await sleep(250);
+};
+// The menu is Profile, then exactly the card's actions in the card's order.
+const same = async (name) => {
+  const card = await cardOf(name);
+  const menu = await rightClick(name);
+  await closeMenu();
+  return { ok: menu[0] === 'Profile' && JSON.stringify(menu.slice(1)) === JSON.stringify(card), menu, card };
+};
+
+// Riverside Makers: Sami is a member there, so a member viewer gets no moderation.
+await openServer('c1');
+const self = await same('Sami');
+check('MM1 on yourself the menu is Profile alone, as the card has no actions', self.ok && self.card.length === 0, JSON.stringify(self));
+const peer = await same('Leila');
+check('MM2 as a member, a member\'s menu is Profile and the card\'s Message and Verify', peer.ok && JSON.stringify(peer.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(peer));
+// Open Source Arabic: Sami owns it, so moderation shows, and must match the card row for row.
+await openServer('c2');
+const owned = await same('Leila');
+check('MM3 as the owner, the menu has the card\'s moderation actions too', owned.ok && ['Ban', 'Grant Moderator', 'Grant Admin'].every((l) => owned.card.includes(l)), JSON.stringify(owned));
+const ownSelf = await same('Sami');
+check('MM4 the owner\'s own row still offers only Profile', ownSelf.ok && ownSelf.card.length === 0, JSON.stringify(ownSelf));
+
+// Keys: Shift+F10 and the Menu key open it on the focused row, and the first row takes the focus.
+const key = async (code, vk, modifiers) => {
+  await ev(`${ROW('Leila')}.focus()`);
+  const base = { key: code, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await b.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+  await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await until(() => ev(`!!document.querySelector('[role="menu"]')`), 3000);
+  await sleep(150);
+  const labels = await menuLabels();
+  const focused = await ev(`document.activeElement?.getAttribute('role')?.startsWith('menuitem') === true`);
+  await closeMenu();
+  return { labels, focused };
+};
+const shiftF10 = await key('F10', 121, 8);
+check('MM5 Shift+F10 on a focused member opens the same menu, focused', JSON.stringify(shiftF10.labels) === JSON.stringify(owned.menu) && shiftF10.focused, JSON.stringify(shiftF10));
+const menuKey = await key('ContextMenu', 93, 0);
+check('MM6 the Menu key on a focused member opens the same menu, focused', JSON.stringify(menuKey.labels) === JSON.stringify(owned.menu) && menuKey.focused, JSON.stringify(menuKey));
+check('MM7 closing the menu gives the focus back to the row', (await ev(`document.activeElement === ${ROW('Leila')}`)) === true);
+
+// Picks: Profile opens the card, Grant Moderator changes the role, Message opens the DM.
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Profile').click()`);
+check('MM8 Profile opens the member\'s card', (await until(() => ev(`document.querySelector('[role="dialog"][aria-label="User profile"]')?.textContent.includes('Leila') === true`), 3000)) === true);
+await b.press('Escape');
+await sleep(250);
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Grant Moderator').click()`);
+const granted = await until(async () => {
+  const labels = await rightClick('Leila');
+  await closeMenu();
+  return labels.includes('Revoke Moderator') ? labels : null;
+}, 4000);
+check('MM9 Grant Moderator from the menu makes the member a moderator', !!granted, JSON.stringify(granted));
+const after = await same('Leila');
+check('MM10 after the change, the menu still matches the card', after.ok && after.card.includes('Revoke Moderator'), JSON.stringify(after));
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Message').click()`);
+check('MM11 Message from the menu opens the DM', (await until(() => ev(`!!document.querySelector('main [placeholder="Message @Leila"]')`), 4000)) === true);
+
+// As an admin who is not the owner (?asadmin): a member can be banned and made a moderator, but not an admin; another
+// admin and the owner get no moderation at all. The menu matches the card each time.
+await b.send('Page.navigate', { url: `${BASE}/?asadmin` });
+await sleep(1800);
+await openServer('c1');
+const adminOnMember = await same('Leila');
+check("MM12 as an admin, a member's menu matches the card: Ban and Grant Moderator, no Grant Admin", adminOnMember.ok && JSON.stringify(adminOnMember.card) === JSON.stringify(['Message', 'Verify safety number', 'Ban', 'Grant Moderator']), JSON.stringify(adminOnMember));
+const adminOnAdmin = await same('Jonas');
+check("MM13 as an admin, another admin's menu has no moderation", adminOnAdmin.ok && JSON.stringify(adminOnAdmin.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(adminOnAdmin));
+const adminOnOwner = await same('Maya');
+check("MM14 as an admin, the owner's menu has no moderation", adminOnOwner.ok && JSON.stringify(adminOnOwner.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(adminOnOwner));
+noConsoleErrors('membermenu', b.consoleErrors);
+await b.close();
+}
+
+// ---- The webview's own menu is off: nothing on empty chrome, the field's own in the composer, Copy on selected text ----
+async function section_nativemenu() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9871 + 102, profile: `${SCRATCH}/nativemenu-profile` });
+const { ev } = b;
+await sleep(1200);
+// Fires a right-click on the element `pick` returns. Resolves to whether the default (the browser menu) was prevented,
+// and the rows of any menu of ours that opened.
+const rightClickOn = async (pick) => {
+  const prevented = await ev(`(() => { const n = ${pick}; const r = n.getBoundingClientRect(); return !n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 4, clientY: r.top + 4 })); })()`);
+  await sleep(300);
+  const menu = await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+  return { prevented, menu };
+};
+const chrome = await rightClickOn(`[...document.querySelectorAll('span')].find((n) => n.textContent === 'Mock backend')`);
+check('NM1 a right-click on empty chrome opens nothing, and no browser menu', chrome.prevented === true && chrome.menu.length === 0, JSON.stringify(chrome));
+
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((n) => n.textContent.includes('Maya')).click()`);
+await until(() => ev(`!!document.querySelector('textarea[aria-label="Message"]') && !!document.querySelector('article.msg')`), 5000);
+const composer = await rightClickOn(`document.querySelector('textarea[aria-label="Message"]')`);
+check('NM2 a right-click in the composer keeps the field\'s own menu', composer.prevented === false && composer.menu.length === 0, JSON.stringify(composer));
+
+// A word of a message, selected as a mouse would.
+const selected = await ev(`(() => {
+  const body = [...document.querySelectorAll('article.msg')].map((a) => a.querySelector('.text, .content, p, [data-message-text]') ?? a).find((n) => (n.textContent ?? '').trim().length > 8);
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node && node.textContent.trim().length < 5) node = walker.nextNode();
+  const range = document.createRange();
+  range.setStart(node, 0);
+  range.setEnd(node, 5);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  window.__picked = node.parentElement;
+  return sel.toString();
+})()`);
+const onText = await rightClickOn('window.__picked');
+check('NM3 a right-click on selected message text shows our Copy', onText.prevented === true && JSON.stringify(onText.menu) === '["Copy"]', JSON.stringify({ selected, ...onText }));
+// The clipboard is recorded rather than written, as the headless browser has no clipboard of its own here.
+await ev(`(() => { window.__copied = []; navigator.clipboard.writeText = async (t) => { window.__copied.push(t); }; })()`);
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Copy').click()`);
+const copied = await until(() => ev(`window.__copied.length ? window.__copied : null`), 3000);
+check('NM4 Copy copies exactly the selection', JSON.stringify(copied) === JSON.stringify([selected]) && (await ev(`document.body.textContent.includes('Copied')`)) === true, JSON.stringify({ copied, selected }));
+await ev(`window.getSelection().removeAllRanges()`);
+const message = await rightClickOn('window.__picked');
+check('NM5 without a selection a message keeps its own menu', message.prevented === true && message.menu.includes('Copy Text'), JSON.stringify(message));
+await b.press('Escape');
+await sleep(250);
+noConsoleErrors('nativemenu', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -6733,6 +6890,8 @@ const SECTIONS = [
   ['tooltips', section_tooltips],
   ['disclaimer', section_disclaimer],
   ['privacy', section_privacy],
+  ['membermenu', section_membermenu],
+  ['nativemenu', section_nativemenu],
   ['inbox', section_inbox],
   ['consistency', section_consistency],
   ['scrub', section_scrub],

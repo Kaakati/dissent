@@ -1,6 +1,7 @@
 // Entry point. In the desktop app the Tauri globals exist already. In a browser the current UI's mock backend is
 // loaded first, so the shell runs against the same fixtures as apps/desktop/ui.
 import { installLinkGuard } from './components/dialogs/external-link';
+import { installContextMenuGuard } from './lib/native-menu';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
@@ -32,6 +33,8 @@ async function start(): Promise<void> {
   await loadMockBackend();
   // Every link in every screen, the screen-share window's too, asks before it opens outside the app.
   installLinkGuard();
+  // No browser menu on a right-click: ours, the field's own, or Copy for selected text (lib/native-menu.ts).
+  installContextMenuGuard();
   // The pop-out of a shared screen is this page alone. It shows one stream and never opens the profile.
   const params = new URLSearchParams(window.location.search);
   const stream = params.get('stream');
