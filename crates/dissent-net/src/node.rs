@@ -31,6 +31,7 @@ use crate::{
     lan,
     media::{MEDIA_ALPN, MEDIA_TOKEN_ALPN},
     error::{NetError, Result},
+    inbound::{Inbound, InboundLimits},
     media::{LinkToken, MediaHandler, MediaLink, MediaProtocol, MediaTokenProtocol, dial_media, dial_media_tokened},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
     rpc::{RPC_ALPN, RpcHandler, RpcProtocol, run_request},
@@ -107,6 +108,8 @@ pub struct NodeConfig {
     /// (`RelayChoice::Default`), where iroh's N0 preset used to add it; custom relays never use it. On by
     /// default.
     pub n0_address_lookup: bool,
+    /// What devices that dial this node may make it hold: how many requests and pings at once, and for how long.
+    pub inbound: InboundLimits,
 }
 
 impl Default for NodeConfig {
@@ -126,6 +129,7 @@ impl Default for NodeConfig {
             lan_discovery: false,
             serves_lookups: false,
             n0_address_lookup: true,
+            inbound: InboundLimits::default(),
         }
     }
 }
@@ -148,6 +152,7 @@ impl fmt::Debug for NodeConfig {
             .field("relay_only", &self.relay_only)
             .field("lan_discovery", &self.lan_discovery)
             .field("serves_lookups", &self.serves_lookups)
+            .field("inbound", &self.inbound)
             .finish()
     }
 }
@@ -304,14 +309,15 @@ impl Node {
         } else {
             None
         };
+        let inbound = Inbound::new(cfg.inbound);
         let gossip = Gossip::builder()
             .max_message_size(gossip_max)
             .spawn(endpoint.clone());
         let mut router = Router::builder(endpoint.clone())
-            .accept(PING_ALPN, PingHandler)
+            .accept(PING_ALPN, PingHandler(inbound.clone()))
             .accept(GOSSIP_ALPN, gossip.clone());
         if let Some(handler) = cfg.rpc {
-            router = router.accept(RPC_ALPN, RpcProtocol(handler));
+            router = router.accept(RPC_ALPN, RpcProtocol { handler, inbound: inbound.clone() });
         }
         if let Some(handler) = cfg.media {
             router = router.accept(MEDIA_ALPN, MediaProtocol(handler.clone()));

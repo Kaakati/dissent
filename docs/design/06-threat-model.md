@@ -885,6 +885,26 @@ A navigation or window request it tries anyway is sent to the UI as a link to co
   whitespace or a control character in it, so no trick a parser would strip gets through.
 - **What remains.** The person can still open a link they chose to; the dialog is the warning, not a filter of sites.
 
+## Inbound connections: what a stranger can make a device hold
+
+Device ids are published, and anyone who knows one can dial it on the request and ping protocols. A request used to
+reserve the whole length it declared, up to 16 MiB, before a byte of it arrived, and nothing on the answering side ever
+timed out: iroh's keep-alives stop an idle connection from closing. A stranger could open many connections, declare
+16 MiB on each and send nothing, and hold that memory and a task per connection for as long as it liked.
+
+Now (`dissent-net/src/inbound.rs`, `NodeConfig::inbound`):
+
+- A request's payload is read as it arrives, so a device holds only the bytes a peer actually sent.
+- Every exchange has a deadline: 20 s for the stream and its length to arrive, and 20 s plus the declared length at
+  256 KiB/s in all. An honest requester gives up after 15 s, so no honest exchange is cut off. A reply waits at most
+  5 s for the requester to close.
+- At most 64 requests and pings are served at once, and 8 for one device. When every slot is taken, the oldest
+  connection that has been sending its request for over 2 s gives its slot to the new one, so connections that send
+  nothing, from any number of fresh ids, cannot keep an honest request out.
+
+What remains: each handshake still costs some CPU, since iroh offers no hook before it, and fresh ids cost an attacker
+nothing. A crowd that keeps every slot busy with requests it does send in full still delays everyone else.
+
 ## Findings
 
 1. **Fixed: unauthorized MLS commits are refused.** MLS lets any group member commit, so a
