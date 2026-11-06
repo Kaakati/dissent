@@ -347,6 +347,9 @@ pub struct AttachmentView {
     /// Set when the file can run code, from its name and claimed type and, once it is here, its content. The card warns
     /// and offers no Open. Nothing here says a file with no flag is safe.
     pub danger: Option<dissent_files::Danger>,
+    /// Why this file is not fetched on arrival though it is small enough: over this device's download limit, or over
+    /// the server's. A download past this device's limit needs the person to go ahead anyway.
+    pub over_limit: Option<String>,
     /// The preview, for an image that has one.
     pub thumb: Option<ThumbView>,
     /// The download's id, while this device has a transfer for the file.
@@ -709,7 +712,9 @@ fn mime_of(path: &Path) -> String {
 
 impl World {
     /// The attachments of a message, with their state on this device.
-    pub(crate) fn attachment_views(&self, text: &str) -> Vec<AttachmentView> {
+    /// The attachments of a message, as its card shows them. `server` is the largest file the message's server allows,
+    /// for a message in one.
+    pub(crate) fn attachment_views(&self, text: &str, server: Option<u64>) -> Vec<AttachmentView> {
         let (_, files) = unpack(text);
         let thumbs = thumbs_of(text);
         files
@@ -744,6 +749,7 @@ impl World {
                 let danger = dissent_files::danger_of_name(&name, &a.file.mime)
                     .or_else(|| local_path.as_deref().and_then(|path| self.content_danger(&id, path)));
                 AttachmentView {
+                    over_limit: crate::limits::over_limit_note(&self.size_limits, server, a.file.size),
                     id: id.clone(),
                     danger,
                     name,
@@ -793,6 +799,7 @@ impl World {
                 // A finished download whose saved file is no longer recorded can be fetched again.
                 _ => at("available", 0.0),
             },
+            // Past the file format's ceiling, which no download can take.
             None if file.size > MAX_FILE_SIZE => at("too_large", 0.0),
             None => at("available", 0.0),
         }
@@ -844,7 +851,18 @@ impl Engine {
     /// Encrypts the files and returns them ready to pack into a message, with the thumbnails of the
     /// images among them. A file whose details are to be removed goes from a scrubbed copy under a generic name; one
     /// whose details cannot be removed fails the send, so nothing goes out with what the user asked to remove.
-    pub(crate) async fn add_files(&self, files: &[OutgoingFile], seed: bool) -> Result<(Vec<Attached>, Vec<Thumb>)> {
+    pub(crate) async fn add_files(
+        &self,
+        community: Option<dissent_identity::CommunityId>,
+        files: &[OutgoingFile],
+        seed: bool,
+    ) -> Result<(Vec<Attached>, Vec<Thumb>)> {
+        for file in files {
+            if let Ok(meta) = std::fs::metadata(&file.path) {
+                let name = file.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.check_upload(community, &name, meta.len())?;
+            }
+        }
         let mut out = Vec::new();
         let mut thumbs = Vec::new();
         let (keep_default, staging) = {
@@ -1004,7 +1022,7 @@ impl Engine {
         seed: bool,
         mentions: Mentions,
     ) -> Result<crate::views::MessageItem> {
-        let (attached, thumbs) = self.add_files(&files, seed).await?;
+        let (attached, thumbs) = self.add_files(Some(community), &files, seed).await?;
         let plain = pack_all(text.trim(), &attached, &[], &thumbs, Some(&mentions))?;
         self.send_channel_plain(community, channel, plain).await
     }
@@ -1027,7 +1045,7 @@ impl Engine {
         files: Vec<OutgoingFile>,
         text: String,
     ) -> Result<crate::views::DmItem> {
-        let (attached, thumbs) = self.add_files(&files, true).await?;
+        let (attached, thumbs) = self.add_files(None, &files, true).await?;
         let plain = pack_full(text.trim(), &attached, &[], &thumbs)?;
         self.send_conversation_plain(conv, plain).await
     }
@@ -1079,6 +1097,17 @@ impl Engine {
         message: String,
         attachment: String,
     ) -> Result<TransferView> {
+        self.download_attachment_with(community, message, attachment, false).await
+    }
+
+    /// `download_attachment`, past this device's download limit when `anyway` is set: the person chose to.
+    pub async fn download_attachment_with(
+        &self,
+        community: Option<dissent_identity::CommunityId>,
+        message: String,
+        attachment: String,
+        anyway: bool,
+    ) -> Result<TransferView> {
         let (file, roots, message_id) = self.locate_attachment(community, &message, &attachment)?;
         let id = attachment_id(&file);
         if self.read().local_state(&id, &file).state == "downloaded" {
@@ -1088,6 +1117,7 @@ impl Engine {
         if file.size > MAX_FILE_SIZE {
             return Err(CoreError::Invalid("file is over the size limit".into()));
         }
+        self.check_download(file.size, anyway)?;
         let providers = self.providers_for(&roots);
         {
             let mut guard = self.write();
@@ -2347,9 +2377,11 @@ impl Engine {
     pub(crate) fn auto_download(&self, community: Option<dissent_identity::CommunityId>, message: String, plain: &str) {
         self.auto_fetch_thumbnails(community, message.clone(), plain);
         self.auto_fetch_embed_images(community, message.clone(), plain);
-        let limit = match self.read().attach.auto_accept_bytes {
-            Some(limit) => limit,
-            None => return,
+        let limit = {
+            let w = self.read();
+            let Some(auto) = w.attach.auto_accept_bytes else { return };
+            let server = community.and_then(|c| w.communities.get(&c)).map(|c| c.state().max_file_size());
+            crate::limits::auto_fetch_limit(&w.size_limits, server, auto)
         };
         let (_, files) = unpack(plain);
         // A file that says it can run code always waits for a click, whatever its size.

@@ -1,6 +1,7 @@
 // The Transfers page (views/pages.js): Active, Completed and Failed tabs in the header, the rows in the main column, and
 // the storage panel in the right column. The actions on each row go through lib/transfers.ts. Ported from transfersPage().
 import { DownloadFolder } from './download-folder';
+import { DEFAULT_LIMIT, limitLabel, useSizeLimits } from '@/lib/limits';
 import { useEffect, type ReactNode } from 'react';
 import { create } from 'zustand';
 import { Folder, Pause, Play, RotateCcw, Trash2, X } from 'lucide-react';
@@ -204,7 +205,12 @@ export function TransfersAside() {
   const settings = useTransferSettings((s) => s.settings);
   const load = useTransferSettings((s) => s.load);
   const transfers = useShell((s) => s.transfers);
-  const max = settings?.max_accept_bytes ?? 10 * 1024 ** 3;
+  // This device's download limit (Settings › Downloads); larger files wait to be chosen.
+  const max = useSizeLimits((s) => s.limits?.max_download ?? DEFAULT_LIMIT);
+  const loadLimits = useSizeLimits((s) => s.load);
+  useEffect(() => {
+    void loadLimits();
+  }, [loadLimits]);
   // The settings are read again whenever the list changes, as the current UI does on every transfer event.
   useEffect(() => {
     void load();
@@ -217,7 +223,7 @@ export function TransfersAside() {
       <StoreMeter />
       <div className="rounded-lg bg-sidebar p-s-4 text-center">
         <div className="text-ui font-semibold text-text-strong">Largest file you’ll accept</div>
-        <div className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{formatBytes(max)}. Bigger files are refused before any data moves.</div>
+        <div data-download-limit className="mt-1 text-[12px] leading-[18px] text-muted-foreground">{limitLabel(max)}. Larger files never download on their own; you can still choose to download one.</div>
       </div>
       {settings && 'auto_accept_bytes' in settings ? <AutoAccept value={settings.auto_accept_bytes ?? null} /> : null}
       <DownloadFolder />

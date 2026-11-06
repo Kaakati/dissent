@@ -37,7 +37,7 @@ battery rules); linked folders seeded in place; dedupe; reputation from receipts
 privacy line of `08-files.md` (relays and storage seeders see ciphertext, a hash and a size).
 
 Non-goals: no BitTorrent interop, magnets or public announce; no enforcement against a modified client (download
-rules are requests each app keeps for its own member); no streaming playback; nothing over `MAX_FILE_SIZE`.
+rules are requests each app keeps for its own member); no streaming playback; nothing over `MAX_FILE_SIZE` (1 TiB), or over the person's or the server's limit (`08-files.md`, "Limits").
 
 ## What exists today
 
@@ -272,7 +272,8 @@ Appended after the roles payloads, pinned in `wire_order.rs`, carried (`carry_se
   (shown as locked until keys arrive).
 - **Receipts do not name the file** (decision 4). `tag` is `blake3::keyed_hash(device_receipt_secret, listing)`
   truncated: the same for one downloader and listing, unlinkable by anyone else. Replay counts a (downloader, tag)
-  once, credits each receipt at most `cipher_len(MAX_FILE_SIZE)` in total, and ignores credit to the downloader's
+  once, credits each receipt at most `MAX_RECEIPT_BYTES` (the ciphertext of a 1 TiB file, rounded up; 11 GiB before
+  v0.1.36, so an older client refuses a larger receipt or listing) in total, and ignores credit to the downloader's
   own root. "Downloaded completely N times" on the file page then comes from holdings (distinct roots ever seen
   complete), not receipts.
 - Levels are computed in the view from per-root aggregates and the current time. A level gate in replay
@@ -350,7 +351,7 @@ does not fire it for files while its own handler is on). A drop anywhere else st
   server order.
 - **No category.** Someone with `MANAGE_FILES` gets one per type dropped (Images, Documents, ...), open to members. Anyone
   else is told someone has to make one.
-- **Left out, with the reason in the toast**: fits no category, over `MAX_FILE_SIZE`, a link, unreadable, and any name that
+- **Left out, with the reason in the toast**: fits no category, over the limit where it goes (`limits::upload_limit`), a link, unreadable, and any name that
   looks like a key or password file (`looks_like_credentials`), since a drop asks nothing first and goes to the whole server.
   Add files can still list such a file on purpose.
 - **Already listed.** By someone else: this device seeds that listing, as the dialog does. By this device: left alone, so

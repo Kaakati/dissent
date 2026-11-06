@@ -147,8 +147,17 @@ export async function stagePasted(files: File[]): Promise<StagedFile[]> {
 }
 
 // A download of one attachment: the server id for a channel, none for a direct conversation.
-export function downloadAttachment(communityId: Id | null, messageId: Id, attachment: Attachment): Promise<boolean> {
-  return run(() => api.downloadAttachment(communityId, messageId, attachment.id), { read: false });
+// `force` goes past this device's download limit: the person chose to (lib/limits.ts). An over-limit refusal is thrown, so
+// the caller can ask; anything else is a toast, as before.
+export async function downloadAttachment(communityId: Id | null, messageId: Id, attachment: Attachment, force = false): Promise<boolean> {
+  try {
+    await api.downloadAttachment(communityId, messageId, attachment.id, force);
+  } catch (err) {
+    if (String(err).includes('over_download_limit')) throw err;
+    toast(err);
+    return false;
+  }
+  return run(() => Promise.resolve(), { read: false });
 }
 
 // Sends a message the recipient or an inbox refused, again. The backend keeps the packet for this.

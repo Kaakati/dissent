@@ -108,6 +108,8 @@ export interface CommunityView extends CommunitySummary {
   my_role: Role | null;
   history?: 'since_join' | 'all'; // what a new member can read of past messages
   can_mention_everyone?: boolean; // the viewer holds the mention-everyone permission (the composer offers @everyone)
+  max_file_size?: number; // bytes: the largest file members may share here (Server Settings › Files)
+  can_set_max_file_size?: boolean; // the viewer may change max_file_size
   channels: ChannelView[];
   members: Member[];
   relays?: string[]; // the relays voice channels can use; Automatic is always there
@@ -662,6 +664,7 @@ export interface Attachment {
   note?: string; // why a download waits
   error?: string | null; // why the last download failed, shown beside Retry
   danger?: FileDanger | null; // the file can run code: the card warns and has no Open
+  over_limit?: string | null; // why it is not fetched on arrival: over my download limit, or the server's
   status?: string; // a sending line
   sources?: FileSourceView[];
   rate_bps?: number;

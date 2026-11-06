@@ -3,9 +3,10 @@ import type { FileDanger } from './types';
 // File rules for the composer and the message cards: size limit, names, extensions and icons. Ported from
 // the old UI's views/attachments.js. Nothing here renders markup; the icon is named, and the component maps it to a glyph.
 
-// The hard cap on one attachment. Every limit message is derived from it.
-export const MAX_FILE_BYTES = 10 * 1024 ** 3;
-export const MAX_FILE_LABEL = '10 GB';
+// The file format's ceiling: no download can take a larger file. The limit for sending is the person's own and the
+// server's (lib/limits.ts).
+export const MAX_FILE_BYTES = 1024 ** 4;
+export const MAX_FILE_LABEL = '1 TB';
 
 const ARCHIVE = new Set(['zip', '7z', 'rar', 'gz', 'tgz', 'tar', 'xz', 'bz2']);
 const CODE = new Set(['js', 'mjs', 'ts', 'rs', 'py', 'json', 'html', 'css', 'toml', 'yaml', 'yml', 'sh', 'c', 'h', 'cpp', 'go', 'java']);

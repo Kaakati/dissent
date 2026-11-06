@@ -9,7 +9,8 @@ import { openInviteDialog } from '@/components/dialogs/invite-dialogs';
 import { contactLink } from '@/lib/actions';
 import { wrapSelection } from '@/lib/markdown';
 import { api } from '@/lib/api';
-import { MAX_FILE_LABEL, guessMime, isOverLimit } from '@/lib/attachments';
+import { guessMime } from '@/lib/attachments';
+import { isOver, limitLabel, useUploadLimit } from '@/lib/limits';
 import { useChat, type StagedFile } from '@/lib/chat';
 import { useShell } from '@/lib/store';
 import { convertEmoticons, convertWhileTyping, isInsertion } from '@/lib/emoticons';
@@ -86,7 +87,8 @@ export function Composer({ view }: { view: ChatView }) {
   // Link previews are off until the sender turns them on. The first text with a link asks once, here in the composer.
   const [previews, setPreviews] = useState<{ on: boolean; prompted: boolean } | null>(null);
   const [askPreviews, setAskPreviews] = useState(false);
-  const overLimit = staged.some(isOverLimit);
+  const limit = useUploadLimit();
+  const overLimit = staged.some((f) => isOver(f, limit));
 
   useEffect(() => {
     Promise.all([api.linkPreviews(), api.linkPreviewPrompted()])
@@ -142,8 +144,8 @@ export function Composer({ view }: { view: ChatView }) {
       return;
     }
     stopTyping(view.target);
-    if (files.some(isOverLimit)) {
-      toast(`Remove files over ${MAX_FILE_LABEL} before sending.`);
+    if (files.some((f) => isOver(f, limit))) {
+      toast(`Remove files over ${limitLabel(limit)} before sending.`);
       return;
     }
     // A file whose details were to be removed but cannot be: ask before it goes as it is.
@@ -344,7 +346,7 @@ export function Composer({ view }: { view: ChatView }) {
         ) : null}
         <div className="composer">
           {rows.length ? <MentionList rows={rows} total={matches.length} query={mention?.query ?? ''} active={mentionIndex} onPick={pickMention} /> : null}
-          <IconBtn lg label="More actions" title={`Attach a file (up to ${MAX_FILE_LABEL})`} icon={Plus} aria-haspopup="menu" onClick={(e) => openPlusMenu(e.currentTarget)} />
+          <IconBtn lg label="More actions" title={`Attach a file (up to ${limitLabel(limit)})`} icon={Plus} aria-haspopup="menu" onClick={(e) => openPlusMenu(e.currentTarget)} />
           <textarea ref={input} rows={1} placeholder={view.placeholder} aria-label="Message" value={text} onChange={onChange} onKeyDown={onKeyDown} onPaste={onPaste} />
           <IconBtn lg label="Insert emoji" title="Emoji" icon={Smile} onClick={(e) => openEmojiPicker(e.currentTarget, insertEmoji, 'Insert emoji')} />
           <IconBtn lg className="send" label="Send message" title="Send" shortcut="Enter" icon={SendHorizontal} disabled={overLimit} onClick={() => void send()} />

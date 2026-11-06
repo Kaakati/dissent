@@ -87,8 +87,10 @@ pub const MAX_SEALED_BYTES: usize = 16 * 1024;
 pub const MAX_SPEC_ENTRIES: usize = 256;
 /// Most seeders one receipt may credit.
 pub const MAX_RECEIPT_CREDITS: usize = 64;
-/// Most bytes one receipt may credit in total: the ciphertext of the largest file, rounded up.
-pub const MAX_RECEIPT_BYTES: u64 = 11 * 1024 * 1024 * 1024;
+/// Most bytes one receipt may credit in total: the ciphertext of the largest file the format holds (1 TiB of plaintext
+/// and one 16-byte tag per 64 KiB chunk), rounded up to 1 TiB and 1 GiB. Releases up to v0.1.35 refuse anything over
+/// 11 GiB, so a receipt or a listing past that is accepted only by later ones; those releases cannot fetch such a file.
+pub const MAX_RECEIPT_BYTES: u64 = (1 << 40) + (1 << 30);
 /// Most ciphertext bytes a listing may declare.
 pub const MAX_LISTING_BYTES: u64 = MAX_RECEIPT_BYTES;
 /// Most reputation levels.

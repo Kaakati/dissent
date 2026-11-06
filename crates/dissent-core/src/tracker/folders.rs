@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dissent_events::CategoryId;
-use dissent_files::MAX_FILE_SIZE;
 use dissent_identity::CommunityId;
 use serde::Serialize;
 
@@ -86,6 +85,8 @@ fn marked_hidden(_meta: &std::fs::Metadata) -> bool {
 /// A folder as it is walked.
 #[derive(Default)]
 struct Walk {
+    /// The largest file that may be added where the folder goes.
+    limit: u64,
     files: Vec<FolderFile>,
     flagged: usize,
     over_limit: usize,
@@ -151,7 +152,7 @@ impl Walk {
                 "system"
             } else if hidden {
                 "hidden"
-            } else if meta.len() > MAX_FILE_SIZE {
+            } else if meta.len() > self.limit {
                 "too_large"
             } else {
                 ""
@@ -184,8 +185,9 @@ impl Engine {
             return Err(CoreError::Invalid(format!("{} is not a folder", folder.display())));
         }
         let root = folder.clone();
+        let limit = self.upload_limit_in(Some(community));
         let walk = tokio::task::spawn_blocking(move || {
-            let mut walk = Walk::default();
+            let mut walk = Walk { limit, ..Walk::default() };
             walk.visit(&root, &root, MAX_DEPTH);
             walk
         })
@@ -252,7 +254,7 @@ mod tests {
     }
 
     fn walked(dir: &Path) -> Walk {
-        let mut walk = Walk::default();
+        let mut walk = Walk { limit: dissent_events::DEFAULT_FILE_SIZE_LIMIT, ..Walk::default() };
         walk.visit(dir, dir, MAX_DEPTH);
         walk
     }

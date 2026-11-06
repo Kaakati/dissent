@@ -31,8 +31,8 @@ it and sends, fetches and mirrors attachments (`dissent-core/src/attachments.rs`
 - Every file has its own random key. Exposing one key exposes one file.
 - Content is AES-256-GCM in 64 KiB chunks. Each chunk's nonce holds an 8-byte random prefix, a
   3-byte chunk index and a last-chunk flag.
-- The nonce is 12 bytes, so the index is 3 bytes rather than 4. That caps a file at 1 TiB, far
-  above the 10 GB limit.
+- The nonce is 12 bytes, so the index is 3 bytes rather than 4. That caps a file at 1 TiB, which is
+  the hard cap (`MAX_FILE_SIZE`).
 - The index stops chunks from being reordered or spliced. The last-chunk flag stops truncation at a
   chunk boundary. Any change anywhere makes decryption fail, and nothing is written to the final path.
 
@@ -49,10 +49,21 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
 
 ## Limits
 
-- **Size limit.** Files are capped at 10 GB (`MAX_FILE_SIZE`, 10 × 1024³ bytes) of plaintext. A
+- **Size limit.** The hard cap is what the format holds: 1 TiB of plaintext (`MAX_FILE_SIZE`, 2^24
+  chunks of 64 KiB). Sizes, offsets and counters are u64 throughout, so nothing else bounds it. A
   node can lower its own limit but never raise it. Adding a larger file fails. Fetching rejects a
   reference whose size or ciphertext size is over the cap before any bytes move. A peer that sends
-  more bytes than the reference declares is cut off mid-download.
+  more bytes than the reference declares is cut off mid-download. Releases up to v0.1.35 capped files
+  at 10 GiB (`RELEASED_MAX_FILE_SIZE`) and still refuse anything larger.
+- **The person's limits.** The app keeps three (`dissent_core::limits`), each 1 MiB to 1 TiB and 10 GiB
+  until changed: this device's largest upload and largest download (Settings › Downloads, kept in the
+  sealed `size_limits.bin`), and a server's largest file (`Payload::ServerFileSizeLimit`, Server
+  Settings › Files, needs `MANAGE_SERVER`, carried so an older client shows it as locked). Sending keeps
+  to the smaller of the device's upload limit and the server's, checked before the file is read, for
+  message files, listings and folders alike. A file over the device's download limit, or over the
+  server's (an older client may still post one), is never fetched on arrival, and its card says why.
+  A download past the device's own limit asks first ("Download anyway"); the server's limit does not
+  stop a download someone chooses.
 - **Bytes input.** `Input::Bytes` holds its payload in memory, so it is for small payloads only. It
   refuses data over 64 MiB (`MAX_BYTES_INPUT`) and points the caller to `Input::Path`.
 - **Memory.** No path reads a whole file into memory. `add` streams the file through the encryptor
@@ -77,7 +88,7 @@ Ciphertext length reveals the plaintext length to within one 64 KiB chunk. We do
   stops a fetch at half, reopens the data folder, and checks that only the rest crosses the wire.
 - **Timeouts.** A provider gets 15 seconds to connect and 30 seconds of silence before it is
   dropped. The 30-second stall timeout is the main guard against hangs. The whole download gets
-  60 seconds plus 10 seconds per MiB, capped at 24 hours. A 10 GB file reaches the cap.
+  60 seconds plus 10 seconds per MiB, capped at 24 hours.
 - **Seeder policy.** `mirror` takes a `MirrorPolicy`. Its defaults are 2 GB per file and 50 GB of
   pinned ciphertext in total, counting the node's own files. A refused file moves no bytes.
 - **No revocation.** A removed member who already holds a `FileRef` keeps the key and can decrypt

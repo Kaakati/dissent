@@ -64,6 +64,7 @@ mod typing;
 mod voice_presence;
 mod volunteers;
 mod many_seeds;
+mod size_limits;
 mod upgrade_compat;
 mod video;
 mod warm;

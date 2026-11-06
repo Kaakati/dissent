@@ -64,6 +64,7 @@ export interface ListingView {
   progress: number;
   can_edit: boolean;
   folder?: { files: number; contents_known: boolean; dangerous: number } | null; // a folder listing
+  over_limit?: string | null; // over my download limit, or the server's: not fetched on arrival
 }
 
 // One file of a folder listing's contents (`FolderEntryView` in dissent-core).
@@ -281,7 +282,7 @@ export const filesApi = {
   listFolder: (communityId: Id, categoryId: Id, root: string, files: string[], tags: string[], description: string, limit: string) =>
     invoke<Id>('list_folder', { communityId, categoryId, root, files, tags, description, limit }),
   folderContents: (communityId: Id, listingId: Id) => invoke<FolderContentsView>('folder_contents', { communityId, listingId }),
-  downloadFolder: (communityId: Id, listingId: Id) => invoke<TransferItem>('download_folder', { communityId, listingId }),
+  downloadFolder: (communityId: Id, listingId: Id, force = false) => invoke<TransferItem>('download_folder', { communityId, listingId, force }),
   folderFiles: (listingId: Id) => invoke<FolderFileProgress[]>('folder_download_files', { communityId: useFiles.getState().communityId, listingId }),
   relistFolder: (communityId: Id, listingId: Id) => invoke<string>('relist_folder', { communityId, listingId }),
   planDrop: (communityId: Id, paths: string[], filter: Id | null) => invoke<DropPlan>('plan_file_drop', { communityId, paths, filter }),
@@ -289,7 +290,7 @@ export const filesApi = {
   updateListing: (communityId: Id, listingId: Id, tags: string[], description: string) =>
     invoke<void>('update_listing', { communityId, listingId, tags, description }),
   removeListing: (communityId: Id, listingId: Id) => invoke<void>('remove_listing', { communityId, listingId }),
-  download: (communityId: Id, listingId: Id) => invoke<TransferItem>('download_listing', { communityId, listingId }),
+  download: (communityId: Id, listingId: Id, force = false) => invoke<TransferItem>('download_listing', { communityId, listingId, force }),
   swarm: (communityId: Id, listingId: Id) => invoke<SwarmView>('listing_swarm', { communityId, listingId }),
   live: (communityId: Id, listingId: Id) => invoke<LiveSwarm>('listing_live', { communityId, listingId }),
   setRules: (communityId: Id, rules: ReputationRules) => invoke<void>('set_reputation_rules', { communityId, rules }),

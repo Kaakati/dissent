@@ -72,6 +72,9 @@ of closing. The icon applies at once, through the existing icon flow.
   sequences, flags and keycaps pass, and two emoji do not.
   Replay **rejects** a profile over any cap as `Malformed`, rather than trimming it, so every peer
   shows the same profile or none. The engine refuses it before sending.
+- **Largest file.** `Payload::ServerFileSizeLimit { bytes }`, `MANAGE_SERVER`, 1 MiB to 1 TiB, the latest
+  by HLC wins; shown in Server Settings › Files. Carried (unlike the three below), so an older client shows it
+  as locked and keeps its own 10 GiB cap. See `08-files.md`, "Limits".
 - **Compatibility.** The three payloads are appended to `Payload`. They are sealed like every other
   control payload: under the community secret, or under the epoch key with member-only control on.
   So the outer event is the `SealedControl` or carrier form that older clients decode. A released

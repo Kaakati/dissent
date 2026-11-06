@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dissent_events::{AddSpec, CategoryId, ChannelId, EventId, LevelRule, Payload, Perms, ReaderSpec, ReputationRules};
-use dissent_files::{FileRef, Input, MAX_FILE_SIZE};
+use dissent_files::{FileRef, Input};
 use dissent_identity::{CommunityId, RootId};
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +86,9 @@ pub struct ListingView {
     pub local_path: Option<String>,
     /// Why this file can run code, by its name, type or, once it is on this device, its content. See `dissent_files::received`.
     pub danger: Option<dissent_files::Danger>,
+    /// Why it is not fetched on arrival, or needs the person to go ahead: over this device's download limit, or the
+    /// server's. See `limits`.
+    pub over_limit: Option<String>,
     pub progress: f64,
     pub can_edit: bool,
     /// Set for a folder listing. See `tracker::folder`.
@@ -297,6 +300,7 @@ impl Engine {
 
     /// The files area of `community`.
     pub fn files_view(&self, community: CommunityId) -> Result<FilesView> {
+        let (limits, server) = (self.size_limits(), self.server_file_size_limit(community));
         let keys = self.with_tracker(community, |l| l.keys.clone());
         let book = self.with_tracker(community, |l| l.book.clone());
         let opened = self.opened_listings(community);
@@ -376,6 +380,7 @@ impl Engine {
                 w.content_danger(&format!("listing:{}", first.id), path)
             });
             listings.push(ListingView {
+                over_limit: crate::limits::over_limit_note(&limits, server, first.body.size),
                 id: first.id.to_string(),
                 category: first.category.to_string(),
                 name: first.body.name.clone(),
@@ -634,7 +639,7 @@ impl Engine {
         let opened = self.opened_listings(community);
         let mut out = Vec::new();
         for path in paths {
-            let view = self.candidate(&path, &types, &opened, |_| true).await;
+            let view = self.candidate(&path, &types, &opened, self.upload_limit_in(Some(community)), |_| true).await;
             if view.state == "ready" || view.state == "already_listed" {
                 self.with_tracker(community, |l| l.offered.insert(path.clone()));
                 self.remember_candidate(community, &path, &view);
@@ -676,7 +681,7 @@ impl Engine {
 
     /// What adding the file at `path` would do. `progress` gets the bytes fingerprinted so far, and stops the pass when it
     /// returns false.
-    pub(super) async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened], progress: impl FnMut(u64) -> bool + Send + 'static) -> CandidateView {
+    pub(super) async fn candidate(&self, path: &Path, types: &[FileType], opened: &[Opened], limit: u64, progress: impl FnMut(u64) -> bool + Send + 'static) -> CandidateView {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let kind = FileType::of_name(&name);
         let mut view = CandidateView {
@@ -701,7 +706,7 @@ impl Engine {
             view.state = "type_not_allowed".into();
             return view;
         }
-        if meta.len() > MAX_FILE_SIZE {
+        if meta.len() > limit {
             view.state = "too_large".into();
             return view;
         }
@@ -763,6 +768,7 @@ impl Engine {
             }
             let tags = clean_tags(&item.tags)?;
             let description = clean_description(&item.description)?;
+            self.check_upload(Some(community), &name, std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))?;
             let (fp, size) = self.fingerprint_of(community, &path).await?;
             // Dedupe within the same keys: an open category's file against open listings, a restricted one's against its
             // own category. A listing whose blob is not what these bytes make under its key was made of other bytes:
@@ -930,6 +936,11 @@ impl Engine {
 
     /// Starts downloading a listing into the download folder. It shows in Transfers like an attachment.
     pub async fn download_listing(&self, community: CommunityId, listing: EventId) -> Result<TransferView> {
+        self.download_listing_with(community, listing, false).await
+    }
+
+    /// `download_listing`, past this device's download limit when `anyway` is set: the person chose to.
+    pub async fn download_listing_with(&self, community: CommunityId, listing: EventId, anyway: bool) -> Result<TransferView> {
         let opened = self.opened_listings(community);
         let o = opened
             .iter()
@@ -949,6 +960,7 @@ impl Engine {
             nonce_prefix: key.nonce_prefix,
         };
         file.check(self.inner.files.size_limit()).map_err(files_err)?;
+        self.check_download(file.size, anyway)?;
         // Whole holders first, freshest first, then partial ones, then the listers' devices.
         let mut roots: Vec<RootId> = opened.iter().filter(|x| x.body.blob == o.body.blob).map(|x| x.lister).collect();
         roots.dedup();

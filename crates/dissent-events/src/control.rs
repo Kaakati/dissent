@@ -63,7 +63,7 @@ pub fn carry_sealed(sealed: &Payload) -> Result<Payload> {
 
 /// Opens a carried control event with the ring, as the body it was sealed for. Only `ChannelCreatePrivate`,
 /// `ChannelAccess`, `ChannelOrder`, `SeederForwardsCalls`, `StorageGrant`, `HistorySupport`, `ChannelLayout`,
-/// `ProfileThemeSet`, `AvatarDecorationSet`, the roles payloads and the tracker payloads are accepted, so the carrier cannot carry another kind.
+/// `ProfileThemeSet`, `AvatarDecorationSet`, `ServerFileSizeLimit`, the roles payloads and the tracker payloads are accepted, so the carrier cannot carry another kind.
 fn open_sealed_carried(body: &EventBody, ciphertext: &[u8], ring: &[SealKey]) -> std::result::Result<Payload, OpenError> {
     let carried = carried(ciphertext).ok_or(OpenError::Forged)?;
     if carried.kind != CARRIED_SEALED {
@@ -88,7 +88,8 @@ fn open_sealed_carried(body: &EventBody, ciphertext: &[u8], ring: &[SealKey]) ->
         | Payload::HistorySupport { .. }
         | Payload::ChannelLayout { .. }
         | Payload::ProfileThemeSet { .. }
-        | Payload::AvatarDecorationSet { .. } => Ok(payload),
+        | Payload::AvatarDecorationSet { .. }
+        | Payload::ServerFileSizeLimit { .. } => Ok(payload),
         ref p if crate::roles::is_roles_payload(p) || crate::tracker::is_files_payload(p) => Ok(payload),
         _ => Err(OpenError::Forged),
     }
@@ -336,6 +337,7 @@ pub fn is_sealable(payload: &Payload) -> bool {
             | Payload::ChannelLayout { .. }
             | Payload::ProfileThemeSet { .. }
             | Payload::AvatarDecorationSet { .. }
+            | Payload::ServerFileSizeLimit { .. }
     ) || crate::roles::is_roles_payload(payload)
         || crate::tracker::is_files_payload(payload)
 }

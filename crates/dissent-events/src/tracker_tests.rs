@@ -4,7 +4,7 @@
 use crate::roles::{Perms, RoleId, RoleSpec};
 use crate::state::replay_with;
 use crate::testutil::{on_channel, User};
-use crate::tracker::{AddSpec, CategoryId, FilesSealed, LevelRule, ReaderSpec, ReputationRules, NO_RANK};
+use crate::tracker::{AddSpec, CategoryId, FilesSealed, LevelRule, ReaderSpec, ReputationRules, MAX_LISTING_BYTES, NO_RANK};
 use crate::{ChannelId, Dag, EventId, Hlc, Payload, Rejection, Role};
 
 const OWNER: usize = 0;
@@ -257,4 +257,19 @@ fn sealed_fields_are_bounded() {
 fn the_default_levels_are_the_designs() {
     let names: Vec<String> = ReputationRules::default().levels.into_iter().map(|l| l.name).collect();
     assert_eq!(names, ["Newcomer", "Sharer", "Seeder", "Keeper", "Archivist"]);
+}
+
+#[test]
+fn a_listing_and_a_receipt_past_ten_gib_are_accepted_up_to_the_format_ceiling() {
+    let mut f = Fixture::new();
+    let bob = f.id(BOB);
+    let cat = f.category(AddSpec { min_rank: 0, ..AddSpec::default() }, None);
+    let gb500 = 500u64 << 30;
+    let big = f.push(BOB, Payload::FileListing { category: cat, blob: Some(([5; 32], gb500)), inner: sealed() });
+    assert_eq!(f.rejection(big), None, "a 500 GB listing");
+    let past = f.push(BOB, Payload::FileListing { category: cat, blob: Some(([6; 32], MAX_LISTING_BYTES + 1)), inner: sealed() });
+    assert_eq!(f.rejection(past), Some(Rejection::Malformed), "past the format's ceiling");
+    let credit = f.push(CAROL, Payload::FileReceipt { tag: [3; 16], credits: vec![(bob, gb500)] });
+    assert_eq!(f.rejection(credit), None, "a receipt for a 500 GB download");
+    assert_eq!(f.state().files.credited_bytes(&bob, f.t), gb500);
 }

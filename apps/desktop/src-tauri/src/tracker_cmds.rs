@@ -182,10 +182,10 @@ pub async fn folder_contents(state: State<'_, AppState>, community_id: String, l
 
 /// Downloads a whole folder into the download folder. It shows in Transfers as one entry.
 #[tauri::command]
-pub async fn download_folder(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<TransferView, String> {
+pub async fn download_folder(state: State<'_, AppState>, community_id: String, listing_id: String, force: Option<bool>) -> Result<TransferView, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: EventId = parse("listing id", &listing_id)?;
-    engine(&state).await?.download_folder(community, id).await.map_err(err)
+    engine(&state).await?.download_folder_with(community, id, force.unwrap_or(false)).await.map_err(err)
 }
 
 /// Each file of a folder download, by the folder listing.
@@ -257,10 +257,10 @@ pub async fn remove_listing(state: State<'_, AppState>, community_id: String, li
 }
 
 #[tauri::command]
-pub async fn download_listing(state: State<'_, AppState>, community_id: String, listing_id: String) -> Result<TransferView, String> {
+pub async fn download_listing(state: State<'_, AppState>, community_id: String, listing_id: String, force: Option<bool>) -> Result<TransferView, String> {
     let community: CommunityId = parse("community id", &community_id)?;
     let id: EventId = parse("listing id", &listing_id)?;
-    engine(&state).await?.download_listing(community, id).await.map_err(err)
+    engine(&state).await?.download_listing_with(community, id, force.unwrap_or(false)).await.map_err(err)
 }
 
 #[tauri::command]

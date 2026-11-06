@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use dissent_events::{CategoryId, Perms};
-use dissent_files::MAX_FILE_SIZE;
 use dissent_identity::CommunityId;
 use serde::Serialize;
 
@@ -124,6 +123,7 @@ impl Engine {
         let files: Vec<&PickedView> = views.iter().filter(|v| !v.is_dir).collect();
 
         let me = self.inner.me;
+        let limit = self.upload_limit_in(Some(community));
         let (none, manage) = {
             let w = self.read();
             let c = w.communities.get(&community).ok_or_else(|| crate::engine::not_found(&community))?;
@@ -135,7 +135,7 @@ impl Engine {
             let mut kinds: Vec<FileType> = Vec::new();
             for file in &files {
                 let kind = FileType::of_name(&file.name);
-                if !kinds.contains(&kind) && !looks_like_credentials(&file.name) && file.size <= MAX_FILE_SIZE {
+                if !kinds.contains(&kind) && !looks_like_credentials(&file.name) && file.size <= limit {
                     kinds.push(kind);
                 }
             }
@@ -165,7 +165,7 @@ impl Engine {
                 let skip = match &meta {
                     None => Some("unreadable"),
                     Some(m) if m.file_type().is_symlink() => Some("link"),
-                    Some(m) if m.len() > MAX_FILE_SIZE => Some("too_large"),
+                    Some(m) if m.len() > limit => Some("too_large"),
                     // A key file listed by accident goes to the whole server, and a drop asks nothing first.
                     Some(_) if looks_like_credentials(&file.name) => Some("credentials"),
                     Some(_) if choice.is_none() => Some("no_category"),

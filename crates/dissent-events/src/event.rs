@@ -373,6 +373,11 @@ pub enum Payload {
     /// their own, as for `ProfileBannerSet`. The latest by HLC wins. Carried: see `control::carry_sealed`, so an older
     /// client shows it as locked and draws no decoration. Appended, see `picture::Decoration`.
     AvatarDecorationSet { decoration: Option<crate::picture::Decoration> },
+    /// The largest file members may share in this server, in plaintext bytes, from `MIN_FILE_SIZE_LIMIT` to
+    /// `MAX_FILE_SIZE_LIMIT`. Needs `MANAGE_SERVER`; the latest by HLC wins. Each sender's app keeps to it, and a
+    /// receiver does not fetch a larger file on arrival. Carried, so an older client shows it as locked and keeps its
+    /// own 10 GiB cap. Appended.
+    ServerFileSizeLimit { bytes: u64 },
 }
 
 /// One entry of a channel layout: a channel outside any category, or a category. Appended only: the variant

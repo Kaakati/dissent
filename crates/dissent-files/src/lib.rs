@@ -36,7 +36,7 @@ pub use thumbnail::{
 };
 pub use store::{
     Files, Input, MirrorPolicy, Timeouts, DEFAULT_GC_INTERVAL, DEFAULT_PARTIAL_TTL, DISK_MARGIN,
-    MAX_BYTES_INPUT, MAX_FILE_SIZE,
+    MAX_BYTES_INPUT, MAX_FILE_SIZE, RELEASED_MAX_FILE_SIZE,
 };
 
 /// What a blob server can be told about, and asked to allow: connections, requests and the bytes sent. A device
@@ -61,3 +61,30 @@ pub mod gate {
 
 /// ALPN the blob protocol runs on: `/iroh-bytes/4`. Mount [`Files::protocol_handler`] under it.
 pub const ALPN: &[u8] = iroh_blobs::ALPN;
+
+/// A size as people read it, in binary units: "512 KB", "10 GB", "1 TB". Whole numbers when exact, else one decimal.
+pub fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 || value.fract() == 0.0 {
+        format!("{} {}", value as u64, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod size_text_tests {
+    #[test]
+    fn sizes_read_in_binary_units() {
+        assert_eq!(super::size_text(10 << 30), "10 GB");
+        assert_eq!(super::size_text(1 << 40), "1 TB");
+        assert_eq!(super::size_text(1536 << 20), "1.5 GB");
+        assert_eq!(super::size_text(512), "512 bytes");
+    }
+}

@@ -127,7 +127,8 @@ impl Engine {
                     .is_some_and(|m| m.mention_all);
                 w.resolve_mentions(c, mention_all, &plain)
             });
-            (w.attachment_views(&plain), me, names, everyone)
+            let server = w.communities.get(&community).map(|c| c.state().max_file_size());
+            (w.attachment_views(&plain, server), me, names, everyone)
         };
         // One read guard for both fields. Two reads inside one expression hold two guards at once, and
         // a queued writer makes the second read wait for the first, which never ends.
@@ -307,6 +308,7 @@ impl Engine {
                     | Payload::ChannelLayout { .. }
                     | Payload::ProfileThemeSet { .. }
                     | Payload::AvatarDecorationSet { .. }
+                    | Payload::ServerFileSizeLimit { .. }
             ) || dissent_events::is_roles_payload(&body.payload)
                 || dissent_events::is_files_payload(&body.payload);
             body.payload = match &member {

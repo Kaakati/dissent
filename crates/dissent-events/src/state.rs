@@ -115,6 +115,8 @@ pub struct CommunityState {
     /// Each member's avatar decoration, from their latest accepted `AvatarDecorationSet`, with its HLC. A `None` is
     /// a removed one. A newer HLC wins, as for `avatars`.
     pub avatar_decorations: BTreeMap<RootId, (Hlc, Option<crate::picture::Decoration>)>,
+    /// The latest accepted `ServerFileSizeLimit`, with its HLC. Read it through [`CommunityState::max_file_size`].
+    pub file_size_limit: Option<(Hlc, u64)>,
     /// The relays each member says they host for this community, from their latest accepted
     /// `RelayHostSet`, with its HLC. Apps verify them before counting a host. See `boosts`.
     pub relay_hosts: BTreeMap<RootId, (Hlc, Vec<String>)>,
@@ -153,6 +155,15 @@ pub struct ChannelOrderSpec {
     pub text: Vec<ChannelId>,
     pub voice: Vec<ChannelId>,
 }
+
+/// The smallest file size limit a server or a device may set: 1 MiB.
+pub const MIN_FILE_SIZE_LIMIT: u64 = 1 << 20;
+/// The largest file size limit, and the largest file the file format can hold: 1 TiB. A file is sealed in 64 KiB chunks
+/// whose nonce has a 3-byte index, so a file has at most 2^24 chunks. It equals `dissent_files::MAX_FILE_SIZE`,
+/// which a core test checks.
+pub const MAX_FILE_SIZE_LIMIT: u64 = 1 << 40;
+/// The file size limit when nothing is set, and the most a client up to v0.1.35 accepts: 10 GiB.
+pub const DEFAULT_FILE_SIZE_LIMIT: u64 = 10 << 30;
 
 /// Most categories one `ChannelLayout` may hold.
 pub const MAX_CATEGORIES: usize = 50;
@@ -488,6 +499,7 @@ impl CommunityState {
             profile_banners: BTreeMap::new(),
             profile_themes: BTreeMap::new(),
             avatar_decorations: BTreeMap::new(),
+            file_size_limit: None,
             relay_hosts: BTreeMap::new(),
             storage_grants: BTreeMap::new(),
             history_support: BTreeMap::new(),
@@ -512,6 +524,11 @@ impl CommunityState {
     pub fn may_manage_channels(&self, user: &RootId) -> bool {
         let root = self.canonical(user);
         self.may(&root, self.rank(&root), Rank::Admin, Perms::MANAGE_CHANNELS)
+    }
+
+    /// The largest file members may share here: the latest accepted `ServerFileSizeLimit`, else the default.
+    pub fn max_file_size(&self) -> u64 {
+        self.file_size_limit.map_or(DEFAULT_FILE_SIZE_LIMIT, |(_, bytes)| bytes)
     }
 
     /// The server's channel layout as it shows now, or `None` when no `ChannelLayout` was accepted (the order
@@ -598,6 +615,12 @@ impl CommunityState {
     }
 
     /// Whether `user` may mention everyone in a community message: the owner and admins by default.
+    /// Whether `user` may change the server's settings: owner, admin, or a custom role with `MANAGE_SERVER`.
+    pub fn may_manage_server(&self, user: &RootId) -> bool {
+        let rank = self.rank(&self.canonical(user));
+        self.may(user, rank, Rank::Admin, Perms::MANAGE_SERVER)
+    }
+
     pub fn may_mention_everyone(&self, user: &RootId) -> bool {
         let rank = self.rank(&self.canonical(user));
         self.may(user, rank, Rank::Admin, Perms::MENTION_EVERYONE)
@@ -1093,6 +1116,15 @@ impl CommunityState {
                     return Err(Rejection::Malformed);
                 }
             }
+            Payload::ServerFileSizeLimit { bytes } => {
+                require_control(chan)?;
+                if !self.may(&actor, rank, Rank::Admin, Perms::MANAGE_SERVER) {
+                    return Err(Rejection::NoPermission);
+                }
+                if !(MIN_FILE_SIZE_LIMIT..=MAX_FILE_SIZE_LIMIT).contains(bytes) {
+                    return Err(Rejection::Malformed);
+                }
+            }
             Payload::RelayHostSet { relays } => {
                 require_control(chan)?;
                 if rank < Rank::Admin && !self.members_host_relays {
@@ -1556,6 +1588,11 @@ impl CommunityState {
             Payload::AvatarDecorationSet { decoration } => {
                 if self.avatar_decorations.get(&actor).is_none_or(|(hlc, _)| ev.body.hlc > *hlc) {
                     self.avatar_decorations.insert(actor, (ev.body.hlc, decoration.clone()));
+                }
+            }
+            Payload::ServerFileSizeLimit { bytes } => {
+                if self.file_size_limit.is_none_or(|(hlc, _)| ev.body.hlc > hlc) {
+                    self.file_size_limit = Some((ev.body.hlc, *bytes));
                 }
             }
             Payload::RelayHostSet { relays } => {

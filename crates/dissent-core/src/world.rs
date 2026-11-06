@@ -64,6 +64,8 @@ pub(crate) struct World {
     pub mention_reads: crate::mention_reads::MentionReads,
     /// Attachment downloads and mirror settings.
     pub attach: crate::attachments::AttachBook,
+    /// This device's file size limits. See `limits`.
+    pub size_limits: crate::limits::SizeLimits,
     /// Attachments whose thumbnail is being fetched now. Not stored: a restart fetches again.
     pub thumb_fetching: std::collections::BTreeSet<String>,
     /// Thumbnails and preview pictures whose fetches all failed, kept to try again later. Not stored.
@@ -151,6 +153,7 @@ impl World {
         let mention_reads = crate::mention_reads::MentionReads::load(&paths)?;
         let inbox = crate::inbox::InboxBook::load(&paths)?;
         let attach = crate::attachments::AttachBook::load(&paths)?;
+        let size_limits = paths.read_bin(&paths.size_limits())?.unwrap_or_default();
         let thumb_fetching = std::collections::BTreeSet::new();
         let thumb_missed = BTreeMap::new();
         let source_counts = BTreeMap::new();
@@ -206,6 +209,7 @@ impl World {
             mention_reads,
             inbox,
             attach,
+            size_limits,
             thumb_fetching,
             thumb_missed,
             source_counts,
@@ -445,6 +449,8 @@ impl World {
             icon: self.icon_of(c),
             icon_poster: self.icon_poster_of(c),
             can_mention_everyone: c.state().may_mention_everyone(&self.me),
+            max_file_size: c.state().max_file_size(),
+            can_set_max_file_size: c.state().may_manage_server(&self.me),
             banner: self.banner_of(c),
             banner_poster: self.banner_poster_of(c),
             banner_preset: crate::invite_preview::preset_of(c.state().banner.and_then(|(_, b)| b)),
@@ -560,7 +566,7 @@ impl World {
                     id: m.id.to_string(),
                     author: m.author.to_string(),
                     author_name: self.display_name(&m.author),
-                    attachments: self.attachment_views(&text),
+                    attachments: self.attachment_views(&text, Some(c.state().max_file_size())),
                     embeds: crate::attachments::embed_views(&self.paths, &text),
                     text: crate::attachments::text_of(&text),
                     ms: m.hlc.wall_ms,

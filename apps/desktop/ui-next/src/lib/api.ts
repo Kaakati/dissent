@@ -225,8 +225,8 @@ export const api = {
   sendDmFiles: (peer: Id, paths: string[], text: string, scrub?: boolean[]) => call<unknown>('send_dm_files', { peer, paths, text, ...(scrub ? { scrub } : {}) }),
   // What each file is, whether "Remove identifying details" starts on for it, and whether its details can be removed.
   inspectFiles: (paths: string[]) => call<FileInspection[]>('inspect_files', { paths }),
-  downloadAttachment: (communityId: Id | null, messageId: Id, attachmentId: Id) =>
-    call<unknown>('download_attachment', { communityId, messageId, attachmentId }),
+  downloadAttachment: (communityId: Id | null, messageId: Id, attachmentId: Id, force = false) =>
+    call<unknown>('download_attachment', { communityId, messageId, attachmentId, force }),
   // Both accept only a file Dissent saved, in whichever download folder it used.
   openAttachment: (path: string) => call<void>('open_attachment', { path }),
   revealAttachment: (path: string) => call<void>('reveal_attachment', { path }),
