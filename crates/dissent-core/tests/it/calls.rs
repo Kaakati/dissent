@@ -162,6 +162,83 @@ async fn leaving_and_muting_update_the_call_view() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_peer_that_is_gone_delays_neither_a_mute_nor_a_leave() {
+    heavy(3, async {
+    let alice = peer("alice").await;
+    let bob = peer("bob").await;
+    let carol = peer("carol").await;
+    let (community, channel) = voice_community(&alice, &[&bob, &carol]).await;
+    for p in [&alice, &bob, &carol] {
+        p.engine.join_call(community, channel).await.expect("join the voice channel");
+    }
+    for p in [&alice, &bob, &carol] {
+        eventually_within(Duration::from_secs(30), "a mesh of three", || {
+            p.engine.call_state().filter(|v| v.participants.len() == 2)
+        })
+        .await;
+    }
+    // Carol's device goes away without leaving: alice still counts her as a peer, and an RPC to her waits out its timeout.
+    let _ = stop(carol).await;
+
+    let started = std::time::Instant::now();
+    alice.engine.set_mute(true).await.expect("mute");
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(500), "a mute waited {took:?} on peers");
+    assert!(alice.engine.call_state().expect("in call").muted, "this device is muted at once");
+    eventually("bob still hears of the mute", || {
+        bob.engine
+            .call_state()
+            .filter(|v| v.participants.iter().any(|p| p.root_id == alice.identity.root_id().to_string() && p.muted))
+    })
+    .await;
+    // Unmute and mute again at once: bob ends with the latest.
+    alice.engine.set_mute(false).await.unwrap();
+    alice.engine.set_mute(true).await.unwrap();
+    alice.engine.set_mute(false).await.unwrap();
+    eventually("bob ends with the latest mute", || {
+        bob.engine
+            .call_state()
+            .filter(|v| v.participants.iter().any(|p| p.root_id == alice.identity.root_id().to_string() && !p.muted))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        bob.engine.call_state().is_some_and(|v| v.participants.iter().any(|p| p.root_id == alice.identity.root_id().to_string() && !p.muted)),
+        "an older value never lands last"
+    );
+    // The resends stop once the peers have the latest, and the gone peer timing out never brings another round: at most
+    // one round per change, four here.
+    eventually_within(scaled(Duration::from_secs(20)), "the mute task ends", || {
+        dissent_core::test_support::mute_telling(&alice.engine).filter(|(telling, _)| !telling)
+    })
+    .await;
+    let (_, rounds) = dissent_core::test_support::mute_telling(&alice.engine).expect("in call");
+    assert!((1..=4).contains(&rounds), "{rounds} mute rounds for four changes");
+    tokio::time::sleep(scaled(Duration::from_secs(12))).await;
+    assert_eq!(
+        dissent_core::test_support::mute_telling(&alice.engine),
+        Some((false, rounds)),
+        "no resends after the latest is out"
+    );
+
+    let started = std::time::Instant::now();
+    alice.engine.leave_call().await.expect("leave");
+    let took = started.elapsed();
+    // One timeout for the gone peer at most, not one per peer told in turn.
+    assert!(took < scaled(Duration::from_secs(7)), "a leave waited {took:?}");
+    assert!(alice.engine.call_state().is_none());
+    eventually("bob sees alice leave", || {
+        bob.engine
+            .call_state()
+            .filter(|v| !v.participants.iter().any(|p| p.root_id == alice.identity.root_id().to_string()))
+    })
+    .await;
+    finish(vec![alice, bob]).await;
+    }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
 async fn banned_member_is_removed_from_the_call_and_cannot_rejoin() {
     bounded(async {
     let alice = peer("alice").await;
