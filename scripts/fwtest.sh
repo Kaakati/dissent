@@ -26,19 +26,32 @@ fi
 mkdir -p target/fw
 # One lock for every worktree of this repository, so runs from parallel worktrees never share the machine.
 lock="$(git rev-parse --path-format=absolute --git-common-dir)/fwtest.lock"
+# Whether the lock's run is over: its owner (a Windows pid, since agents run separate MSYS runtimes that can't see
+# each other's pids) is gone and no dissent-test.exe runs. PowerShell decides, by exit code: 1 is over, and anything
+# else, an error included, counts as still going, so a check that fails never takes a live run's lock.
+stale() {
+  local owner="$1" code=0
+  [[ "$owner" =~ ^[0-9]+$ ]] || return 1
+  powershell.exe -NoProfile -Command "if (Get-Process -Id $owner -EA SilentlyContinue) {exit 2}; if (Get-Process -Name dissent-test -EA SilentlyContinue) {exit 2}; exit 1" >/dev/null 2>&1 || code=$?
+  [[ $code -eq 1 ]]
+}
 got=
-for _ in $(seq 3600); do
+for i in $(seq 3600); do
+  # mkdir is the atomic acquire.
   if mkdir "$lock" 2>/dev/null; then got=1; break; fi
-  # Take over a lock left by a killed run: owner pid gone and no dissent-test.exe running.
-  owner=$(cat "$lock/pid" 2>/dev/null || true)
-  if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null \
-     && ! tasklist //FI "IMAGENAME eq dissent-test.exe" 2>/dev/null | grep -qi dissent-test.exe; then
-    rm -rf "$lock"; continue
+  # A lock left by a killed run is taken over, checked every 15 s rather than every second.
+  if (( i % 15 == 0 )); then
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if stale "$owner"; then
+      echo "fwtest: taking over a lock whose run (pid $owner) is over" >&2
+      rm -rf "$lock"; continue
+    fi
   fi
   sleep 1
 done
 [[ -n "$got" ]] || { echo "another fwtest run held the lock for 60 min" >&2; exit 1; }
-echo $$ > "$lock/pid"
+# The Windows pid, which every agent's PowerShell can see.
+cat /proc/$$/winpid > "$lock/pid"
 trap 'rm -rf "$lock"' EXIT
 
 cp -f "$exe" target/fw/dissent-test.exe
