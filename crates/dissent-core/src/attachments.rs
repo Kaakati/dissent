@@ -1400,10 +1400,15 @@ impl Engine {
             inner: self.inner.clone(),
         };
         let id_owned = id.to_string();
+        // Under the write lock, which shutdown takes to collect these handles after it set `stopping`.
+        let mut w = self.write();
+        if self.inner.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let handle = tokio::spawn(async move {
             engine.run_download(&id_owned).await;
         });
-        self.write().attach.tasks.insert(id.to_string(), handle);
+        w.attach.tasks.insert(id.to_string(), handle);
     }
 
     async fn run_download(&self, id: &str) {
@@ -1601,7 +1606,7 @@ impl Engine {
             };
             let id = attachment_id(&a.file);
             let size = a.file.cipher_size;
-            tokio::spawn(async move {
+            self.spawn_task(async move {
                 let node = engine.node();
                 let result = engine
                     .inner
@@ -1839,7 +1844,7 @@ impl Engine {
                 max_total: policy.max_total,
             };
             let providers = providers.clone();
-            tokio::spawn(async move {
+            self.spawn_task(async move {
                 let node = engine.node();
                 let result = engine
                     .inner
@@ -1899,9 +1904,9 @@ impl Engine {
     }
 
     /// Fetches a picture, trying again after each of `PICTURE_RETRIES`. The claim is held across the pauses.
-    fn spawn_picture_fetch(&self, community: Option<dissent_identity::CommunityId>, message: String, id: String, kind: PictureKind) {
+    pub(crate) fn spawn_picture_fetch(&self, community: Option<dissent_identity::CommunityId>, message: String, id: String, kind: PictureKind) {
         let engine = self.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let mut pauses = PICTURE_RETRIES.iter();
             let outcome = loop {
                 let result = match kind {
@@ -2398,7 +2403,7 @@ impl Engine {
                 inner: self.inner.clone(),
             };
             let message = message.clone();
-            tokio::spawn(async move {
+            self.spawn_task(async move {
                 if let Err(e) = engine.download_attachment(community, message, id).await {
                     debug!(error = %e, "could not start an automatic download");
                 }
