@@ -62,6 +62,12 @@ fn removal(by: &Node, dave: &Node, id: CommunityId) -> Vec<u8> {
     by.engine.with_mls(|mls| mls.remove_members(&id.0, &[dave.identity.device_id()])).expect("the removal")
 }
 
+/// Whether `dave`'s device is in `node`'s group.
+fn in_group(node: &Node, dave: &Node, id: CommunityId) -> bool {
+    let device = dave.identity.device_id();
+    node.engine.with_mls_read(|mls| mls.members(&id.0)).is_ok_and(|m| m.iter().any(|c| c.device == device))
+}
+
 fn forked_at(node: &Node, id: CommunityId) -> Option<u64> {
     crate::test_support::fork_state(&node.engine, id).map(|(epoch, _)| epoch)
 }
@@ -70,8 +76,13 @@ fn forked_at(node: &Node, id: CommunityId) -> Option<u64> {
 /// hearing of the other: the group forks. Returns the forked epoch.
 async fn fork(alice: &Node, bob: &Node, carol: &Node, dave: &Node, id: CommunityId) -> u64 {
     let add = add_commit(bob, dave, id);
+    let added = bob.engine.mls_epoch(id).expect("bob is in the group");
     for node in [alice, carol] {
-        assert!(matches!(node.engine.apply_commit(id, &add), Ok(true)), "takes the add");
+        // Once alice has the add, carol's own catch-up can fetch it from her before the test hands it over, and a
+        // commit for an epoch already left is refused. Either way she has taken it.
+        let outcome = node.engine.apply_commit(id, &add);
+        let has_it = node.engine.mls_epoch(id) == Some(added) && in_group(node, dave, id);
+        assert!(matches!(outcome, Ok(true)) || has_it, "takes the add: {outcome:?}, epoch {:?}", node.engine.mls_epoch(id));
     }
     let (by_alice, by_carol) = (removal(alice, dave, id), removal(carol, dave, id));
     let epoch = alice.engine.mls_epoch(id).expect("in the group");
@@ -99,7 +110,16 @@ async fn two_members_committing_at_one_epoch_is_reported_by_everyone() {
         assert!(bob_names.contains(&alice.identity.device_id()) || bob_names.contains(&carol.identity.device_id()));
         let view = alice.engine.community_view(id).expect("view").mls_fork.expect("the view shows the fork");
         assert_eq!(view.epoch, epoch);
-        assert_eq!(view.roots, vec![carol.root().to_string()]);
+        // alice's view names the people heard on the other branch: carol, and bob as well when the removal he took was
+        // carol's (he then names alice), once alice has heard him there. Nobody else.
+        let bob_with_carol = bob_names.contains(&alice.identity.device_id());
+        let (carol_root, bob_root) = (carol.root().to_string(), bob.root().to_string());
+        assert!(view.roots.contains(&carol_root), "alice's view names carol: {:?}", view.roots);
+        assert!(
+            view.roots.iter().all(|r| *r == carol_root || (bob_with_carol && *r == bob_root)),
+            "alice's view names only the other branch: {:?}, bob names {bob_names:?}",
+            view.roots
+        );
     })
     .await;
 }
