@@ -292,7 +292,7 @@ if (!window.__TAURI__) {
     ],
   };
 
-  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true, hide_ip: false };
+  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true, hide_ip: false, tor: false, tor_socks: '127.0.0.1:9050' };
   // Relays the mock node measures. Public relays are always there; a community's relay is listed once it is named.
   const mockRelayLatency = new Map([
     ['https://use1-1.relay.n0.iroh.link./', 38],
@@ -1842,6 +1842,19 @@ if (!window.__TAURI__) {
       return shellView();
     },
     get_network_settings: () => ({ ...mockNetwork, relays: [...mockNetwork.relays] }),
+    // How this device hides its IP. In Tor mode Tor answers unless a test sets window.__mockTorDown.
+    privacy_status: () => {
+      const mode = !mockNetwork.hide_ip ? 'off' : mockNetwork.tor ? 'tor' : 'relays';
+      if (mode !== 'tor') return { mode, tor_socks: null, tor_ok: null, tor_error: null };
+      const down = Boolean(window.__mockTorDown);
+      return { mode, tor_socks: mockNetwork.tor_socks, tor_ok: !down, tor_error: down ? `Tor is not running at ${mockNetwork.tor_socks}` : null };
+    },
+    // Updates are checked on their own unless the IP is hidden behind relays alone.
+    update_policy: () => {
+      const hidden = mockNetwork.hide_ip && !mockNetwork.tor;
+      return { automatic: !hidden, hidden_ip: hidden, last_checked_ms: null, remind: hidden };
+    },
+    link_previews_blocked: () => mockNetwork.hide_ip && !mockNetwork.tor,
     set_network_settings: ({ settings }) => {
       const relays = settings.relays.map((r) => {
         const url = new URL(r);
@@ -1859,7 +1872,10 @@ if (!window.__TAURI__) {
         disabled,
         use_community_relays: settings.use_community_relays !== false,
         use_n0_lookup: settings.use_n0_lookup !== false,
-        hide_ip: Boolean(settings.hide_ip),
+        // Tor hides the IP from peers too, as the desktop's check does.
+        hide_ip: Boolean(settings.hide_ip) || Boolean(settings.tor),
+        tor: Boolean(settings.tor),
+        tor_socks: (settings.tor_socks || '127.0.0.1:9050').trim(),
       };
       return { ...mockNetwork, relays: [...mockNetwork.relays], pinned: [...pinned], disabled: [...disabled] };
     },
