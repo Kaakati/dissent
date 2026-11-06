@@ -201,6 +201,8 @@ pub fn node_config(settings: &NetworkSettings) -> NodeConfig {
         lan_discovery: settings.lan_discovery && !settings.hide_ip,
         community_relays: settings.use_community_relays,
         n0_address_lookup: settings.use_n0_lookup,
+        // A node with no IP socket has no port to map, and the gateway would be asked for nothing.
+        portmapper: !settings.hide_ip,
         ..Default::default()
     }
 }
@@ -367,7 +369,9 @@ mod tests {
         assert!(config.relay_only, "no IP transport");
         assert!(!config.dht_lookup, "no Mainline DHT socket");
         assert!(!config.lan_discovery, "no LAN beacons");
+        assert!(!config.portmapper, "no gateway port mapping");
         assert!(!matches!(config.relay, RelayChoice::Disabled), "a relay to go through");
+        assert_eq!(config.egress(), dissent_core::Egress::Relayed);
     }
 
     #[test]

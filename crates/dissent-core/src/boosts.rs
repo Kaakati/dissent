@@ -369,7 +369,7 @@ impl Engine {
         if self.inner.loopback_relays && dissent_events::loopback_relay_host(url) {
             return Ok(());
         }
-        public_address(url).await
+        public_address(&self.inner.egress, url).await
     }
 
     /// Every hosted relay a current host publishes in one of this device's communities.
@@ -466,7 +466,7 @@ impl Engine {
         if self.in_call() {
             return Response::RelayCheck(Err(MEMBER_BUSY.into()));
         }
-        if let Err(reason) = public_address(&url).await {
+        if let Err(reason) = public_address(&self.inner.egress, &url).await {
             return Response::Error(reason);
         }
         // The responder pings the asker through the asker's relay. It passes only if the relay admits this
@@ -533,12 +533,13 @@ pub(crate) use dissent_events::relay::is_public_address;
 
 /// Whether `url`'s host name resolves now to any address that is not public. A name that does not
 /// resolve, or an IP literal, gives false: the literal is judged by `public_relay_host` instead.
-pub(crate) async fn resolves_privately(url: &Url) -> bool {
+/// A proxied device resolves no name (see `egress::lookup_host`), so it gives false.
+pub(crate) async fn resolves_privately(egress: &crate::egress::Egress, url: &Url) -> bool {
     let (Some(url::Host::Domain(name)), Some(port)) = (url.host(), url.port_or_known_default()) else {
         return false;
     };
-    match tokio::time::timeout(PROBE_WAIT, tokio::net::lookup_host((name, port))).await {
-        Ok(Ok(addrs)) => addrs.into_iter().any(|a| !is_public_address(a.ip())),
+    match tokio::time::timeout(PROBE_WAIT, crate::egress::lookup_host(egress, name, port)).await {
+        Ok(Some(addrs)) => addrs.into_iter().any(|a| !is_public_address(a.ip())),
         _ => false,
     }
 }
@@ -547,7 +548,10 @@ pub(crate) async fn resolves_privately(url: &Url) -> bool {
 /// address must be https. Every address its host name resolves to must be public, since one private
 /// record is enough to reach a member's network. The resolution is checked here, and the connection
 /// resolves again, so a name that changes between the two can still point elsewhere.
-pub(crate) async fn public_address(url: &str) -> std::result::Result<(), String> {
+///
+/// A proxied device resolves no name: the proxy does, and its exit cannot reach this device's network. A host name
+/// passes there, and an address literal is still checked.
+pub(crate) async fn public_address(egress: &crate::egress::Egress, url: &str) -> std::result::Result<(), String> {
     use std::net::{IpAddr, SocketAddr};
     use url::Host;
     let parsed = Url::parse(url).map_err(|_| "not a valid relay address".to_string())?;
@@ -558,9 +562,11 @@ pub(crate) async fn public_address(url: &str) -> std::result::Result<(), String>
     let addrs: Vec<IpAddr> = match parsed.host() {
         Some(Host::Ipv4(v4)) => vec![IpAddr::V4(v4)],
         Some(Host::Ipv6(v6)) => vec![IpAddr::V6(v6)],
-        Some(Host::Domain(name)) => tokio::net::lookup_host((name, port))
+        Some(Host::Domain(_)) if matches!(egress, crate::egress::Egress::Proxied(_)) => return Ok(()),
+        Some(Host::Domain(name)) => crate::egress::lookup_host(egress, name, port)
             .await
-            .map_err(|_| "the relay's address did not resolve".to_string())?
+            .ok_or_else(|| "the relay's address did not resolve".to_string())?
+            .into_iter()
             .map(|a: SocketAddr| a.ip())
             .collect(),
         None => return Err("the relay address has no host".into()),
@@ -681,11 +687,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_check_only_dials_a_public_https_address() {
-        assert!(public_address("https://8.8.8.8").await.is_ok());
+        let direct = crate::egress::Egress::Direct;
+        assert!(public_address(&direct, "https://8.8.8.8").await.is_ok());
         for refused in ["https://127.0.0.1", "https://10.0.0.5", "https://100.64.0.1", "https://[::1]", "https://169.254.1.1"] {
-            assert!(public_address(refused).await.is_err(), "{refused} should be refused");
+            assert!(public_address(&direct, refused).await.is_err(), "{refused} should be refused");
         }
-        assert!(public_address("http://8.8.8.8").await.is_err(), "plain http is refused");
+        assert!(public_address(&direct, "http://8.8.8.8").await.is_err(), "plain http is refused");
+        let proxied = crate::egress::Egress::Proxied("http://127.0.0.1:9080".parse().unwrap());
+        assert!(public_address(&proxied, "https://relay.example.org").await.is_ok(), "the proxy resolves the name");
+        assert!(public_address(&proxied, "https://10.0.0.5").await.is_err(), "a private literal is still refused");
     }
 
     #[test]

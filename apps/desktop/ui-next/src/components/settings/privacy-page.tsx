@@ -125,11 +125,16 @@ function FriendsBlock() {
 // Off until it is turned on here, or in the question the composer asks once.
 function LinkPreviewsBlock() {
   const [on, setOn] = useState(false);
+  const [blocked, setBlocked] = useState(false);
 
   useEffect(() => {
     api
       .linkPreviews()
       .then((value) => setOn(Boolean(value)))
+      .catch(() => {});
+    api
+      .linkPreviewsBlocked()
+      .then((value) => setBlocked(Boolean(value)))
       .catch(() => {});
   }, []);
 
@@ -159,6 +164,11 @@ function LinkPreviewsBlock() {
       <Hint>
         Dissent fetches each link from your device, so the site sees your IP address. Recipients never contact the site: they get the preview in your message.
       </Hint>
+      {blocked ? (
+        <Hint role="status" data-previews-blocked>
+          Link previews are off while your IP address is hidden, since fetching a link would show your IP address to its site.
+        </Hint>
+      ) : null}
     </Block>
   );
 }

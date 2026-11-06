@@ -41,6 +41,7 @@ import type { FileInspection,
   TransferSettings,
   TypingTarget,
   UpdateInfo,
+  UpdatePolicy,
   UserStatus,
   StatusName,
   UserProfileView,
@@ -142,6 +143,7 @@ export const api = {
   clearCommunityBanner: (communityId: Id) => call<void>('clear_community_banner', { communityId }),
   contactLink: () => call<string>('contact_link'),
   linkPreviews: () => call<boolean>('link_previews'),
+  linkPreviewsBlocked: () => call<boolean>('link_previews_blocked'),
   setLinkPreviews: (on: boolean) => call<void>('set_link_previews', { on }),
   linkPreviewPrompted: () => call<boolean>('link_preview_prompted'),
   markLinkPreviewPrompted: () => call<void>('mark_link_preview_prompted'),
@@ -253,6 +255,7 @@ export const api = {
 
   // ---- updates ----
   checkUpdate: () => call<UpdateInfo | null>('check_update'),
+  updatePolicy: () => call<UpdatePolicy>('update_policy'),
   installUpdate: () => call<void>('install_update'),
   openReleasePage: () => call<void>('open_release_page'),
 

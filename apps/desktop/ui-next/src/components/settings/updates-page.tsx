@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Download } from 'lucide-react';
 import { Block, Hint } from '@/components/settings/settings-ui';
 import { openUpdateDialog } from '@/components/settings/update-dialog';
+import { CHECK_SHOWS_IP, checkUpdates, HIDDEN_IP_UPDATES, useUpdatePolicy } from '@/components/settings/update-reminder';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { useShell } from '@/lib/store';
@@ -21,6 +22,7 @@ export function UpdatesPage() {
   const [status, setStatus] = useState('');
   const [checking, setChecking] = useState(false);
   const [found, setFound] = useState<UpdateInfo | null>(null);
+  const [policy, reloadPolicy] = useUpdatePolicy();
 
   useEffect(() => {
     api
@@ -34,7 +36,11 @@ export function UpdatesPage() {
     setStatus('Checking…');
     setFound(null);
     try {
-      const info = await api.checkUpdate();
+      const info = await checkUpdates(policy);
+      if (info === undefined) {
+        setStatus('');
+        return;
+      }
       if (info) {
         setStatus(`Update available: v${info.version}`);
         setFound(info);
@@ -46,6 +52,7 @@ export function UpdatesPage() {
       setStatus('Couldn’t check for updates right now.');
     } finally {
       setChecking(false);
+      reloadPolicy();
     }
   };
 
@@ -57,9 +64,10 @@ export function UpdatesPage() {
         <div className="flex items-center gap-s-2">
           <Button variant="outline" disabled={checking} onClick={() => void check()}>
             <Download />
-            Check for updates
+            {policy?.hidden_ip ? CHECK_SHOWS_IP : 'Check for updates'}
           </Button>
         </div>
+        {policy?.hidden_ip ? <Hint>{HIDDEN_IP_UPDATES}</Hint> : null}
         <Hint role="status">{status}</Hint>
         {found ? (
           <div className="flex items-center gap-s-2">

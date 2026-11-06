@@ -54,6 +54,7 @@ mod relink;
 mod relay_members;
 mod relay_calls;
 mod hide_ip;
+mod egress;
 mod replies;
 mod status;
 mod sync;

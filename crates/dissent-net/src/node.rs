@@ -10,7 +10,7 @@ use iroh::{
     address_lookup::{
         AddressLookup, AddressLookupBuilder, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver,
     },
-    endpoint::{default_relay_mode, presets},
+    endpoint::{default_relay_mode, presets, PortmapperConfig},
     protocol::Router,
     tls::CaTlsConfig,
 };
@@ -107,6 +107,52 @@ pub struct NodeConfig {
     /// (`RelayChoice::Default`), where iroh's N0 preset used to add it; custom relays never use it. On by
     /// default.
     pub n0_address_lookup: bool,
+    /// Send every HTTP(S) connection the endpoint makes (relays, their latency probes, the captive-portal check,
+    /// number0's directory) through this HTTP CONNECT proxy, by host name, so the relay's name is never resolved here.
+    /// It implies `relay_only`: no IP transport, no DHT, no LAN discovery, since none of those can go through it.
+    /// `None` connects directly.
+    pub proxy_url: Option<Url>,
+    /// Ask the local gateway to map a port (UPnP, PCP, NAT-PMP). Off for a node that hides its IP, which has no IP
+    /// socket to map. On by default.
+    pub portmapper: bool,
+}
+
+impl NodeConfig {
+    /// Where this node's traffic goes, from the settings above. See [`Egress`].
+    pub fn egress(&self) -> Egress {
+        match (&self.proxy_url, self.relay_only) {
+            (Some(url), _) => Egress::Proxied(url.clone()),
+            (None, true) => Egress::Relayed,
+            (None, false) => Egress::Direct,
+        }
+    }
+}
+
+/// Where a node's traffic goes, and so who can see this device's IP address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Egress {
+    /// Direct paths to peers, and direct connections to relays and any web host.
+    Direct,
+    /// "Hide my IP address": every peer through a relay. The relays this node uses see its IP, and so would any
+    /// web host it fetched from, so the engine fetches from none.
+    Relayed,
+    /// Every connection through a proxy (Tor, from P1), so even the relays see only the proxy's exit.
+    Proxied(Url),
+}
+
+impl Egress {
+    /// Whether peers reach this device only through a relay, and no direct path forms.
+    pub fn hides_ip(&self) -> bool {
+        !matches!(self, Egress::Direct)
+    }
+
+    /// The proxy every connection goes through, if any.
+    pub fn proxy(&self) -> Option<&Url> {
+        match self {
+            Egress::Proxied(url) => Some(url),
+            _ => None,
+        }
+    }
 }
 
 impl Default for NodeConfig {
@@ -126,6 +172,8 @@ impl Default for NodeConfig {
             lan_discovery: false,
             serves_lookups: false,
             n0_address_lookup: true,
+            proxy_url: None,
+            portmapper: true,
         }
     }
 }
@@ -148,6 +196,8 @@ impl fmt::Debug for NodeConfig {
             .field("relay_only", &self.relay_only)
             .field("lan_discovery", &self.lan_discovery)
             .field("serves_lookups", &self.serves_lookups)
+            .field("proxy_url", &self.proxy_url)
+            .field("portmapper", &self.portmapper)
             .finish()
     }
 }
@@ -179,6 +229,12 @@ struct Inner {
     relay_ca: Option<CaTlsConfig>,
     /// Relay probes bound and not yet closed or dropped.
     open_probes: std::sync::atomic::AtomicUsize,
+    /// The proxy every connection goes through, relay probes included. See `NodeConfig::proxy_url`.
+    proxy_url: Option<Url>,
+    /// Whether the portmapper runs, for relay probes too. See `NodeConfig::portmapper`.
+    portmapper: bool,
+    /// Whether number0's DNS lookup is among the address lookups.
+    n0_dns_lookup: bool,
 }
 
 impl Node {
@@ -205,11 +261,18 @@ impl Node {
         if cfg.relay_only && matches!(cfg.relay, RelayChoice::Disabled) {
             return Err(NetError::Config("relay_only needs a relay, but relays are disabled".into()));
         }
+        if cfg.proxy_url.is_some() && matches!(cfg.relay, RelayChoice::Disabled) {
+            return Err(NetError::Config("a proxy needs a relay, but relays are disabled".into()));
+        }
+        // A proxy carries TCP only, so a proxied node is relay-only too, and talks to no stranger from a socket of
+        // its own: no DHT, no LAN beacons.
+        let proxied = cfg.proxy_url.is_some();
+        let relay_only = cfg.relay_only || proxied;
         let gossip_max = cfg.gossip_max_message;
         let lookup = MemoryLookup::with_provenance(source::CACHE);
         let lan_lookup = MemoryLookup::with_provenance(source::LAN);
         let dials = Arc::new(DialLog::default());
-        let use_dht = cfg.dht_lookup && !matches!(cfg.relay, RelayChoice::Disabled);
+        let use_dht = cfg.dht_lookup && !proxied && !matches!(cfg.relay, RelayChoice::Disabled);
         // number0's directory is used only with number0's own relays, as iroh's N0 preset did, and only when
         // the setting is on. Custom relays and relay-less configs never reach it.
         let use_n0 = cfg.n0_address_lookup && matches!(cfg.relay, RelayChoice::Default);
@@ -246,7 +309,13 @@ impl Node {
         if let Some(ca) = cfg.relay_ca {
             builder = builder.ca_tls_config(ca);
         }
-        if cfg.relay_only {
+        if let Some(proxy) = cfg.proxy_url.clone() {
+            builder = builder.proxy_url(proxy);
+        }
+        if !cfg.portmapper {
+            builder = builder.portmapper_config(PortmapperConfig::Disabled);
+        }
+        if relay_only {
             builder = builder.clear_ip_transports();
         } else if cfg.loopback_only {
             let addr = SocketAddr::from(([127, 0, 0, 1], cfg.bind_port));
@@ -283,13 +352,17 @@ impl Node {
                 .into_address_lookup(&endpoint)
                 .map_err(|e| NetError::Config(e.to_string()))?;
             services.add(Recorded::new(source::N0_DNS, resolver, dials.clone()));
-            let dns = DnsAddressLookup::n0_dns()
-                .into_address_lookup(&endpoint)
-                .map_err(|e| NetError::Config(e.to_string()))?;
-            services.add(Recorded::new(source::N0_DNS, dns, dials.clone()));
+            // The DNS lookup asks the system resolver, outside any proxy, and so tells it which devices this one
+            // looks for. A node that hides its IP keeps only the HTTPS lookups above.
+            if !relay_only {
+                let dns = DnsAddressLookup::n0_dns()
+                    .into_address_lookup(&endpoint)
+                    .map_err(|e| NetError::Config(e.to_string()))?;
+                services.add(Recorded::new(source::N0_DNS, dns, dials.clone()));
+            }
         }
         let lan_keys = Arc::new(Mutex::new(Vec::new()));
-        let lan_task = if cfg.lan_discovery && !cfg.loopback_only && !cfg.relay_only {
+        let lan_task = if cfg.lan_discovery && !cfg.loopback_only && !relay_only {
             match lan::bind() {
                 Ok(socket) => {
                     let port = endpoint.bound_sockets().first().map_or(0, |a| a.port());
@@ -337,8 +410,22 @@ impl Node {
                 lan_task: Mutex::new(lan_task),
                 relay_ca,
                 open_probes: std::sync::atomic::AtomicUsize::new(0),
+                proxy_url: cfg.proxy_url,
+                portmapper: cfg.portmapper,
+                n0_dns_lookup: use_n0 && !relay_only,
             }),
         })
+    }
+
+    /// How many IP sockets the endpoint has bound. Zero for a node that hides its IP.
+    pub fn bound_socket_count(&self) -> usize {
+        self.inner.endpoint.bound_sockets().len()
+    }
+
+    /// Whether number0's DNS lookup is among this node's address lookups. It asks the system resolver, outside any
+    /// proxy, so a node that hides its IP has none.
+    pub fn uses_dns_lookup(&self) -> bool {
+        self.inner.n0_dns_lookup
     }
 
     /// Read-only access to the iroh endpoint, for dialling custom ALPNs or passing to a crate's
@@ -465,6 +552,14 @@ impl Node {
             .clear_ip_transports();
         if let Some(ca) = self.inner.relay_ca.clone() {
             builder = builder.ca_tls_config(ca);
+        }
+        // The probe is a second endpoint: it goes out the way the node does, or it would show this device's IP to
+        // the relay it measures.
+        if let Some(proxy) = self.inner.proxy_url.clone() {
+            builder = builder.proxy_url(proxy);
+        }
+        if !self.inner.portmapper {
+            builder = builder.portmapper_config(PortmapperConfig::Disabled);
         }
         let probe = builder.bind().await?;
         // Counts the probe until it is closed, or dropped if the caller gives up on this future.
@@ -608,5 +703,23 @@ impl<'a> OpenProbe<'a> {
 impl Drop for OpenProbe<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod egress_tests {
+    use super::*;
+
+    #[test]
+    fn the_egress_follows_the_proxy_then_relay_only() {
+        assert_eq!(NodeConfig::default().egress(), Egress::Direct);
+        let relayed = NodeConfig { relay_only: true, ..NodeConfig::default() };
+        assert_eq!(relayed.egress(), Egress::Relayed);
+        let url: Url = "http://127.0.0.1:9080".parse().unwrap();
+        let proxied = NodeConfig { proxy_url: Some(url.clone()), ..NodeConfig::default() };
+        assert_eq!(proxied.egress(), Egress::Proxied(url.clone()), "a proxy implies relay-only");
+        assert!(!Egress::Direct.hides_ip() && Egress::Relayed.hides_ip() && proxied.egress().hides_ip());
+        assert_eq!(proxied.egress().proxy(), Some(&url));
+        assert!(NodeConfig::default().portmapper, "the portmapper runs unless the IP is hidden");
     }
 }

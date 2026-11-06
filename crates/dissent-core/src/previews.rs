@@ -12,6 +12,7 @@
 //! timeout for each request. The whole message's previews share one budget, and a picture that is not
 //! in time is left out, so the message still goes out on time.
 
+use crate::egress::{self, Egress, Purpose};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
@@ -253,31 +254,30 @@ pub(crate) struct Page {
 
 /// A client that connects only to a public address it has checked for `url`'s host. `None` when the
 /// scheme is not allowed, the host does not resolve, or any address it resolves to is not public.
-async fn checked_client(url: &reqwest::Url) -> Option<reqwest::Client> {
+///
+/// A proxied device resolves nothing and pins nothing: the proxy resolves the host, and an exit cannot reach this
+/// device's network, so the public-address check has nothing to guard. A relayed device fetches nothing (`egress`).
+async fn checked_client(egress: &Egress, url: &reqwest::Url) -> Option<reqwest::Client> {
     if !scheme_allowed(url.scheme()) {
+        return None;
+    }
+    let settings = |b: reqwest::ClientBuilder| b.timeout(PREVIEW_TIMEOUT).redirect(reqwest::redirect::Policy::none());
+    if matches!(egress, Egress::Proxied(_)) {
+        return egress::http_client(egress, Purpose::LinkPreview, settings);
+    }
+    if !egress::allows(egress, Purpose::LinkPreview) {
         return None;
     }
     let host = url.host_str()?.to_string();
     let port = url.port_or_known_default().unwrap_or(443);
     let (addrs, trusted): (Vec<SocketAddr>, bool) = match test_resolve(&host) {
         Some(addr) => (vec![addr], true),
-        None => (
-            tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .ok()?
-                .collect(),
-            false,
-        ),
+        None => (egress::lookup_host(egress, &host, port).await?, false),
     };
     if addrs.is_empty() || (!trusted && addrs.iter().any(|a| !ip_is_public(a.ip()))) {
         return None;
     }
-    reqwest::Client::builder()
-        .timeout(PREVIEW_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve(&host, addrs[0])
-        .build()
-        .ok()
+    egress::http_client(egress, Purpose::LinkPreview, |b| settings(b).resolve(&host, addrs[0]))
 }
 
 /// The picture's address, resolved against the page's. Only the schemes previews may use are kept.
@@ -287,9 +287,9 @@ fn picture_url(page: &reqwest::Url, raw: &str) -> Option<reqwest::Url> {
 
 /// Fetches one link's page and reads its preview. `None` when the link is refused, unreachable, or
 /// has no title.
-pub(crate) async fn fetch_page(url: &str) -> Option<Page> {
+pub(crate) async fn fetch_page(egress: &Egress, url: &str) -> Option<Page> {
     let parsed = reqwest::Url::parse(url).ok()?;
-    let client = checked_client(&parsed).await?;
+    let client = checked_client(egress, &parsed).await?;
     let mut resp = client
         .get(parsed.clone())
         .header(reqwest::header::ACCEPT, "text/html")
@@ -332,8 +332,8 @@ pub(crate) async fn fetch_page(url: &str) -> Option<Page> {
 
 /// Fetches a link's picture and re-encodes it as a preview picture. It is refused unless it is an
 /// `image/*` response of at most `MAX_PICTURE_BYTES`, from a public address, without redirects.
-pub(crate) async fn fetch_picture(url: &reqwest::Url) -> Option<Thumbnail> {
-    let client = checked_client(url).await?;
+pub(crate) async fn fetch_picture(egress: &Egress, url: &reqwest::Url) -> Option<Thumbnail> {
+    let client = checked_client(egress, url).await?;
     let mut resp = client
         .get(url.clone())
         .header(reqwest::header::ACCEPT, "image/*")
@@ -413,6 +413,12 @@ impl Engine {
         self.read().attach.link_previews
     }
 
+    /// Whether link previews are off whatever the setting says, because this device hides its IP behind a relay:
+    /// fetching a link's page would show the IP to that site.
+    pub fn link_previews_blocked(&self) -> bool {
+        !egress::allows(&self.inner.egress, Purpose::LinkPreview)
+    }
+
     /// Whether this device has asked the sender about link previews. The question is asked once.
     pub fn link_preview_prompted(&self) -> bool {
         let w = self.read();
@@ -429,7 +435,7 @@ impl Engine {
     /// Previews for the links in `text`, when the sender has them on, and the pictures that arrived in
     /// time, stored as blobs. Both are empty otherwise. Nothing is fetched when they are off.
     pub(crate) async fn build_embeds(&self, text: &str) -> (Vec<Embed>, Vec<EmbedExtra>) {
-        if !self.link_previews() {
+        if !self.link_previews() || self.link_previews_blocked() {
             return (Vec::new(), Vec::new());
         }
         // Every page is fetched at once. Whatever has not arrived by the budget is left out, so the
@@ -437,7 +443,8 @@ impl Engine {
         let deadline = Instant::now() + PREVIEW_BUDGET;
         let mut pages = JoinSet::new();
         for (i, url) in links_in(text).into_iter().enumerate() {
-            pages.spawn(async move { (i, fetch_page(&url).await) });
+            let egress = self.inner.egress.clone();
+            pages.spawn(async move { (i, fetch_page(&egress, &url).await) });
         }
         let mut found: Vec<(usize, Page)> = join_until(&mut pages, deadline)
             .await
@@ -450,7 +457,8 @@ impl Engine {
         for (i, page) in &found {
             if let Some(url) = page.picture.clone() {
                 let i = *i;
-                picts.spawn(async move { (i, fetch_picture(&url).await) });
+                let egress = self.inner.egress.clone();
+                picts.spawn(async move { (i, fetch_picture(&egress, &url).await) });
             }
         }
         let mut pictures: BTreeMap<usize, Thumbnail> = join_until(&mut picts, deadline)
@@ -626,7 +634,7 @@ mod server_tests {
         let body = r#"<meta property="og:title" content="Loopback page"><meta property="og:description" content="Made in a test">"#;
         let addr = serve_once(html_response(body)).await;
         map_host("preview-ok.test", addr);
-        let embed = fetch_page(&format!("http://preview-ok.test:{}/page", addr.port()))
+        let embed = fetch_page(&Egress::Direct, &format!("http://preview-ok.test:{}/page", addr.port()))
             .await
             .expect("a preview")
             .embed;
@@ -640,7 +648,7 @@ mod server_tests {
         let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
         let addr = serve_once(response).await;
         map_host("preview-redirect.test", addr);
-        let embed = fetch_page(&format!("http://preview-redirect.test:{}/", addr.port())).await;
+        let embed = fetch_page(&Egress::Direct, &format!("http://preview-redirect.test:{}/", addr.port())).await;
         assert!(embed.is_none(), "a redirect is not followed, so there is no preview");
     }
 
@@ -663,7 +671,7 @@ mod server_tests {
         let addr = serve_once_bytes(picture_response(&png, "image/png")).await;
         map_host("picture-ok.test", addr);
         let url = reqwest::Url::parse(&format!("http://picture-ok.test:{}/p.png", addr.port())).unwrap();
-        let picture = fetch_picture(&url).await.expect("a picture");
+        let picture = fetch_picture(&Egress::Direct, &url).await.expect("a picture");
         assert_eq!((picture.width, picture.height), (640, 320));
         assert!(dissent_files::is_preview_image(&picture.jpeg));
     }
@@ -675,7 +683,7 @@ mod server_tests {
         let addr = serve_once_bytes(picture_response(&body, "image/png")).await;
         map_host("picture-big.test", addr);
         let url = reqwest::Url::parse(&format!("http://picture-big.test:{}/p.png", addr.port())).unwrap();
-        assert!(fetch_picture(&url).await.is_none());
+        assert!(fetch_picture(&Egress::Direct, &url).await.is_none());
     }
 
     #[tokio::test]
@@ -683,6 +691,6 @@ mod server_tests {
         let addr = serve_once(html_response("<p>not a picture</p>")).await;
         map_host("picture-html.test", addr);
         let url = reqwest::Url::parse(&format!("http://picture-html.test:{}/p.png", addr.port())).unwrap();
-        assert!(fetch_picture(&url).await.is_none());
+        assert!(fetch_picture(&Egress::Direct, &url).await.is_none());
     }
 }

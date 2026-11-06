@@ -5,6 +5,9 @@
 //! token, and the source IP of each request. It does not see senders, recipients or content,
 //! because a wake carries nothing and no request names the sender.
 
+// A server, not a client device: it has no "Hide my IP address" mode, so it builds its own HTTP clients and resolves names.
+#![allow(clippy::disallowed_methods)]
+
 pub mod apns;
 pub mod limit;
 pub mod logs;

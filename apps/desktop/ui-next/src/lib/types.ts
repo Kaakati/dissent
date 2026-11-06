@@ -383,6 +383,14 @@ export interface StoreStats {
   partial_bytes?: number;
 }
 
+// Whether updates are checked on their own (not while the IP is hidden), and whether to remind the user to check.
+export interface UpdatePolicy {
+  automatic: boolean;
+  hidden_ip: boolean;
+  last_checked_ms?: number | null;
+  remind: boolean;
+}
+
 export interface UpdateInfo {
   version: string;
   current_version: string;

@@ -4,6 +4,9 @@
 //! The listener echoes every media datagram back. The dialer therefore measures round-trip
 //! delivery, not one-way delivery, and its RTT samples cover the whole round trip.
 
+// A diagnostic tool, not a client device: it resolves the host it is pointed at.
+#![allow(clippy::disallowed_methods)]
+
 use anyhow::{Context, Result, bail};
 use dissent_identity::{DeviceId, DeviceKey};
 use dissent_net::{MediaHandler, MediaLink, Node, NodeConfig, PathKind, PeerAddr, RelayChoice};

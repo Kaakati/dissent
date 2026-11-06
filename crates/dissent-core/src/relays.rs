@@ -217,7 +217,7 @@ impl Engine {
             }
             if !adopted.contains(s)
                 && !dissent_events::loopback_relay_host(s)
-                && crate::boosts::resolves_privately(&url).await
+                && crate::boosts::resolves_privately(&self.inner.egress, &url).await
             {
                 tracing::warn!(relay = %url, "a relay resolves to a private network address; not using it");
                 continue;

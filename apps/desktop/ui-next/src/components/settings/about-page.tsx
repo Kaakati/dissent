@@ -2,6 +2,7 @@
 // launch (components/startup/disclaimer.tsx) read-only.
 import { FileText } from 'lucide-react';
 import { Block, Hint } from '@/components/settings/settings-ui';
+import { UpdateReminder } from '@/components/settings/update-reminder';
 import { Button } from '@/components/ui/button';
 import { DISCLAIMER_TITLE, DISCLAIMER_UPDATED, openDisclaimer } from '@/lib/disclaimer';
 import { useShell } from '@/lib/store';
@@ -13,6 +14,7 @@ export function AboutPage() {
       <Block title="Dissent">
         <p className="text-body text-text-strong">{version ? `Version ${version}` : 'Version …'}</p>
         <Hint>Free, open-source and peer-to-peer. Published under the MIT License or the Apache License 2.0, at your choice.</Hint>
+        <UpdateReminder />
       </Block>
       <Block title="Legal">
         <div>

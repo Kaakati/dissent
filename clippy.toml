@@ -1,0 +1,8 @@
+# A client device's fetches and name lookups go through dissent-core's `egress` module, so "Hide my IP address" decides
+# them all. Building a client or resolving a name anywhere else is refused.
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "build HTTP clients with egress::http_client, which follows the egress mode" },
+    { path = "reqwest::Client::builder", reason = "build HTTP clients with egress::http_client, which follows the egress mode" },
+    { path = "reqwest::get", reason = "fetch through egress::http_client, which follows the egress mode" },
+    { path = "tokio::net::lookup_host", reason = "resolve with egress::lookup_host, which resolves nothing for a proxied device" },
+]
