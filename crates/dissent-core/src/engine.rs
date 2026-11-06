@@ -206,6 +206,9 @@ pub struct Engine {
     pub(crate) inner: Arc<Inner>,
 }
 
+/// The longest `Engine::shutdown` waits for its aborted tasks to finish. A task that has not finished by then is left.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
+
 impl Engine {
     /// Opens the data directory, replays every community, and joins the network. Uses the
     /// production intervals in `Timings::default()`.
@@ -431,22 +434,38 @@ impl Engine {
         self.withdraw_on_shutdown().await;
         self.flush_mls(true);
         self.inner.dirty_logs.flush();
+        let mut receivers = Vec::new();
         {
             let mut guard = self.write();
             for c in guard.communities.values_mut() {
                 if let Some(task) = c.task.take() {
                     task.handle.abort();
+                    receivers.push(task.handle);
                 }
                 c.sender = None;
             }
         }
         let tasks = std::mem::take(&mut *self.lock_tasks());
-        for task in tasks {
+        for task in &tasks {
             task.abort();
         }
         self.node().shutdown().await?;
         if let Err(e) = self.inner.files.shutdown().await {
             warn!(error = %e, "could not shut down file storage");
+        }
+        // An aborted task drops what it holds, the endpoint's sockets among them, only when it next runs. Waiting for
+        // them means a returned shutdown has let go of its port, so an engine started right after can bind it.
+        let drained = tokio::time::timeout(SHUTDOWN_DRAIN, async {
+            for task in tasks {
+                let _ = task.await;
+            }
+            for task in receivers {
+                let _ = task.await;
+            }
+        })
+        .await;
+        if drained.is_err() {
+            warn!("engine tasks still running {SHUTDOWN_DRAIN:?} after shutdown");
         }
         Ok(())
     }
