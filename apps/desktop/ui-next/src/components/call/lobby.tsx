@@ -12,6 +12,7 @@ import { useShell } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 import { Tip } from '@/components/ui/tip';
 import { UpdateButton } from '@/components/settings/update-dialog';
+import { TOR_CALL_NOTE, TOR_NO_VIDEO, useTorMode } from '@/components/shell/privacy-indicator';
 import { HeaderSearch } from '@/components/chat/chat-header';
 import { UserAvatar } from '@/components/user-avatar';
 import { liveCallOf } from './call-mode';
@@ -97,6 +98,7 @@ function GroupAvatars({ members }: { members: { root_id: string; display_name: s
 // The lobby body: the question, the preview, the devices, the route note and the join row.
 export function LobbyBody() {
   const live = useShell(liveCallOf);
+  const tor = useTorMode();
   const now = useNow();
   const name = useConversationName();
   const group = useShell((s) => s.group);
@@ -117,6 +119,11 @@ export function LobbyBody() {
           <ShieldCheck className="mt-0.5 size-4 shrink-0 text-success-text" aria-hidden="true" />
           <span>{routeNote(live)}</span>
         </div>
+        {tor ? (
+          <p data-tor-call-note className="m-0 text-ui text-warn">
+            {TOR_CALL_NOTE}
+          </p>
+        ) : null}
         <div className="flex items-center justify-between gap-s-4">
           <Button variant="ghost" onClick={dismiss} className="h-10">
             Not now
@@ -157,6 +164,7 @@ function Preview() {
   const micOn = useLobby((l) => l.micOn);
   const cameraOn = useLobby((l) => l.cameraOn);
   const lit = useMicMeter(micOn);
+  const tor = useTorMode();
   const toggle = () => useLobby.setState({ micOn: !useLobby.getState().micOn });
   const toggleCamera = () => {
     const next = !useLobby.getState().cameraOn;
@@ -176,10 +184,11 @@ function Preview() {
           <span className="text-meta text-muted-foreground">{cameraOn ? 'Starting your camera' : 'Your camera is off'}</span>
         </div>
       )}
-      <Tip label={cameraOn ? 'Turn Off Camera' : 'Turn On Camera'}>
+      <Tip label={tor && !cameraOn ? TOR_NO_VIDEO : cameraOn ? 'Turn Off Camera' : 'Turn On Camera'} wrap={tor && !cameraOn}>
         <Button
           variant="ghost"
           size="icon"
+          disabled={tor && !cameraOn}
           onClick={toggleCamera}
           aria-label={cameraOn ? 'Turn camera off' : 'Turn camera on'}
           aria-pressed={cameraOn}

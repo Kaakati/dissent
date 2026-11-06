@@ -3,10 +3,10 @@
 // default browser. dissent:// links stay in the app. A link whose text names one site but goes to another gets a stronger
 // warning. The backend also refuses anything but http, https and mailto, and passes back any link the webview tried to
 // open by itself (`dissent://external-link`), so that asks first too.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CircleAlert, Copy, ExternalLink } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { listenTo } from '@/lib/api';
+import { api, listenTo } from '@/lib/api';
 import { copyText } from '@/lib/clipboard';
 import { handleDeepLink } from '@/lib/deep-link';
 import { openDialog } from '@/lib/dialog';
@@ -34,6 +34,11 @@ export function linkParts(href: string): { scheme: string; host: string; rest: s
 
 function ExternalLinkBody({ href, claimed, close }: { href: string; claimed: string | null; close: () => void }) {
   const [busy, setBusy] = useState(false);
+  // While this device hides its IP, a link opens in the browser, which goes out directly and shows the IP to the site.
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    api.getNetworkSettings().then((s) => setHidden(Boolean(s.hide_ip)), () => {});
+  }, []);
   const { scheme, host, rest } = linkParts(href);
   const open = async () => {
     setBusy(true);
@@ -60,6 +65,11 @@ function ExternalLinkBody({ href, claimed, close }: { href: string; claimed: str
         <strong className="text-text-strong" data-link-host>{host}</strong>
         <span>{shortRest(rest)}</span>
       </p>
+      {hidden ? (
+        <p data-link-outside-protection className="m-0 text-sm text-muted-foreground">
+          Opens in your browser, outside Dissent’s IP protection: the site sees your IP address unless your browser hides it.
+        </p>
+      ) : null}
       <div className="flex items-center gap-s-2">
         <Button variant="ghost" className="mr-auto" onClick={() => void copyText(href).then((ok) => toast(ok ? 'Link copied' : 'Could not copy the link', ok ? 'info' : 'error'))}>
           <Copy className="size-4" /> Copy link

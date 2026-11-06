@@ -6,6 +6,7 @@ import { ChevronDown, ChevronUp, Headphones, Lock, Mic, MicOff, Monitor, Monitor
 import { HeaderSearch, MoreTools } from '@/components/chat/chat-header';
 import '@/components/chat/chat.css';
 import { UpdateButton } from '@/components/settings/update-dialog';
+import { TOR_CALL_NOTE, TOR_NO_VIDEO, useTorMode } from '@/components/shell/privacy-indicator';
 import { Tip } from '@/components/ui/tip';
 import { UserAvatar } from '@/components/user-avatar';
 import { applyHardwareVideo, hardwareVideoWanted, registerCanvas, resetForCall, useEncodedVideoOn } from '@/lib/webcodecs';
@@ -156,6 +157,8 @@ export function CallStage({
   const toggleScreenShare = useShell((s) => s.toggleScreenShare);
   const leaveCall = useShell((s) => s.leaveCall);
   const me = useShell((s) => s.me);
+  // Through Tor a call is slow, and video can't keep up: the camera and screen stay off.
+  const tor = useTorMode();
   const ownPreviews = useShell((s) => (me ? s.videoFrames[me.root_id] : undefined));
   const name = useCallName();
   // You always have a tile, as in Discord: your camera while it is on, else your avatar.
@@ -213,6 +216,12 @@ export function CallStage({
           )}
         </>
       )}
+      {tor && !compact ? (
+        <p data-tor-call-note className="m-0 flex items-center justify-center gap-s-2 text-meta text-warn">
+          <TriangleAlert className="size-4" aria-hidden="true" />
+          {TOR_CALL_NOTE}
+        </p>
+      ) : null}
       <div className="flex items-center justify-center gap-s-3">
         <ControlButton
           label={call.muted ? 'Unmute microphone' : 'Mute microphone'}
@@ -231,6 +240,8 @@ export function CallStage({
         <ControlButton
           label={call.camera ? 'Turn camera off' : 'Turn camera on'}
           pressed={Boolean(call.camera)}
+          disabled={tor && !call.camera}
+          disabledReason={TOR_NO_VIDEO}
           onClick={() => void toggleCamera()}
         >
           {call.camera ? <Video className="size-7" /> : <VideoOff className="size-7" />}
@@ -252,7 +263,7 @@ export function CallStage({
             </Tip>
           </>
         ) : (
-          <ControlButton label="Share screen" onClick={() => openShareDialog(name, false)}>
+          <ControlButton label="Share screen" disabled={tor} disabledReason={TOR_NO_VIDEO} onClick={() => openShareDialog(name, false)}>
             <Monitor className="size-7" />
           </ControlButton>
         )}
@@ -438,6 +449,7 @@ function ControlButton({
   pressed,
   expanded,
   disabled,
+  disabledReason,
   onClick,
   children,
 }: {
@@ -445,11 +457,12 @@ function ControlButton({
   pressed?: boolean;
   expanded?: boolean; // for a button that shows or hides a panel
   disabled?: boolean;
+  disabledReason?: string; // what the tip says while it is disabled
   onClick?: () => void;
   children: ReactNode;
 }) {
   return (
-    <Tip label={disabled ? 'Coming soon' : label} wrap={disabled}>
+    <Tip label={disabled ? (disabledReason ?? 'Coming soon') : label} wrap={disabled}>
       <button
         type="button"
         aria-label={label}

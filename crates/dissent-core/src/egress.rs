@@ -19,6 +19,16 @@ pub(crate) enum Purpose {
     LinkPreview,
 }
 
+impl Purpose {
+    /// The proxy user name for this purpose. Through Tor it picks the circuit, so one exit cannot tie these fetches
+    /// to the relay traffic (see `dissent_net::socks_bridge`).
+    fn proxy_user(self) -> &'static str {
+        match self {
+            Purpose::LinkPreview => "previews",
+        }
+    }
+}
+
 /// Whether `egress` allows a fetch for `purpose`. A relayed device fetches nothing on its own: the host would see
 /// the IP the relay hides.
 pub(crate) fn allows(egress: &Egress, purpose: Purpose) -> bool {
@@ -39,7 +49,11 @@ pub(crate) fn http_client(
         return None;
     }
     let builder = match egress {
-        Egress::Proxied(url) => reqwest::Client::builder().proxy(reqwest::Proxy::all(url.as_str()).ok()?),
+        Egress::Proxied(url) => {
+            let mut url = url.clone();
+            url.set_username(purpose.proxy_user()).ok()?;
+            reqwest::Client::builder().proxy(reqwest::Proxy::all(url.as_str()).ok()?)
+        }
         // A proxy in the environment would see only what the host sees, but the mode says direct: none is used.
         Egress::Direct | Egress::Relayed => reqwest::Client::builder().no_proxy(),
     };

@@ -520,6 +520,18 @@ export interface NetworkSettings {
   use_n0_lookup?: boolean;
   // Hide my IP address: every connection goes through a relay. Applied when the engine restarts.
   hide_ip?: boolean;
+  // With hide_ip: every connection also goes through the Tor this person runs, at tor_socks.
+  tor?: boolean;
+  // Tor's SOCKS port on this machine: 127.0.0.1:9050 for tor, 127.0.0.1:9150 for Tor Browser.
+  tor_socks?: string;
+}
+
+// How this device hides its IP now, and in Tor mode whether Tor opened a connection just now.
+export interface PrivacyStatus {
+  mode: 'off' | 'relays' | 'tor';
+  tor_socks?: string | null;
+  tor_ok?: boolean | null;
+  tor_error?: string | null;
 }
 
 // One relay in Settings > Network, with what the node measured. `source` is where the relay came from.

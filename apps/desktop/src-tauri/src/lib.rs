@@ -6,6 +6,7 @@ mod disclaimer;
 mod secret_clipboard;
 mod events;
 mod network;
+mod tor;
 mod storage;
 mod tray;
 mod shell_cmds;
@@ -63,7 +64,8 @@ pub(crate) fn fake_capture(engine: &dissent_core::Engine) {
 
 /// The node config: the saved network settings, or loopback-only when `DISSENT_LOOPBACK=1`.
 /// Loopback mode avoids the firewall prompt on Windows and only works for instances on one machine.
-pub(crate) fn node_config(settings: &network::NetworkSettings) -> NodeConfig {
+/// `tor_proxy` is the Tor bridge's address in Tor mode.
+pub(crate) fn node_config(settings: &network::NetworkSettings, tor_proxy: Option<url::Url>) -> NodeConfig {
     if std::env::var_os("DISSENT_LOOPBACK").is_some_and(|v| v == "1") {
         tracing::warn!("loopback mode is on (DISSENT_LOOPBACK=1): binding 127.0.0.1 only, no relays, no DHT");
         return NodeConfig {
@@ -73,7 +75,7 @@ pub(crate) fn node_config(settings: &network::NetworkSettings) -> NodeConfig {
             ..Default::default()
         };
     }
-    network::node_config(settings)
+    network::node_config(settings, tor_proxy)
 }
 
 pub fn run() {
@@ -99,6 +101,7 @@ pub fn run() {
     }
     let app = builder
         .manage(deep_link::Queue::default())
+        .manage(tor::Tor::default())
         .manage(website_handle_cmds::HandleChecks::default())
         .manage(secret_clipboard::SecretClipboard::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -359,6 +362,7 @@ pub fn run() {
             commands::safety_number,
             updates::check_update,
             updates::update_policy,
+            tor::privacy_status,
             updates::install_update,
             updates::open_release_page,
             profile::vault_status,
