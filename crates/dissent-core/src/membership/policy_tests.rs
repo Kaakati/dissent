@@ -274,11 +274,15 @@ mod banned_add {
             // can hold the add alone long enough for its own turn to remove dave too, and two removals at one epoch
             // fork the group (`05-encrypted-servers.md`, "Collision"), which is not what this test is about.
             // A device may already have both from its own catch-up with bob, so a commit it has is fine too.
+            // bob has merged both: his epoch is the one after the removal, and the one before it follows the add. A
+            // device that is already past a commit has it, whichever way it came.
+            let after_removal = bob.engine.mls_epoch(id).expect("bob is in the group");
+            let past = |n: &Node, epoch: u64| n.engine.mls_epoch(id).is_some_and(|e| e >= epoch);
             for node in [&carol, &alice] {
                 let took = node.engine.apply_commit(id, &add);
-                assert!(took.is_ok(), "it takes the add of someone since banned: {took:?}");
+                assert!(took.is_ok() || past(node, after_removal - 1), "it takes the add of someone since banned: {took:?}");
                 let took = node.engine.apply_commit(id, &removal);
-                assert!(took.is_ok(), "and the removal after it: {took:?}, epoch {:?}", node.engine.mls_epoch(id));
+                assert!(took.is_ok() || past(node, after_removal), "and the removal after it: {took:?}, epoch {:?}", node.engine.mls_epoch(id));
             }
             assert!(one_group(&[&alice, &bob, &carol], id, &dave), "one group, with dave out");
             carol.engine.send_message(id, channel, "after the add".into()).await.expect("carol sends");
