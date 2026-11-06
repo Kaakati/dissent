@@ -11,7 +11,8 @@ import { confirm } from '@/lib/dialog';
 import { formatDials } from '@/lib/dials';
 import { toast } from '@/lib/toasts';
 import { useShell } from '@/lib/store';
-import type { NetStatus, NetworkSettings, RelayRow, RelayStatus } from '@/lib/types';
+import { usePrivacyStatus } from '@/components/shell/privacy-indicator';
+import type { NetStatus, NetworkSettings, PrivacyStatus, RelayRow, RelayStatus } from '@/lib/types';
 
 const REFRESH_MS = 15000;
 // Matches MAX_RELAYS in apps/desktop/src-tauri/src/network.rs: the relays this person adds.
@@ -304,14 +305,61 @@ export function NetworkPage() {
   );
 }
 
-// Hide my IP address: every connection goes through a relay, so people you talk to see the relay's address, never yours. It costs
-// latency, and the relay sees your IP and the traffic's metadata (who you connect to, when, how much), never its content. It applies
-// when the connection restarts, so it asks first and saves at once. While on, the status names the relay that carries the traffic.
+// Hide my IP address, three ways. Off: direct connections, the fastest. Behind relays: peers see a relay's address, the relay
+// sees yours. Through Tor: every connection also goes through the Tor you run, so the relays see a Tor exit; with Tor down
+// nothing gets out and the app is offline, never direct. Each applies when the connection restarts, so it asks first and saves
+// at once. While hidden, the status names the relay, and in Tor mode whether Tor is up.
+type IpChoice = 'off' | 'relays' | 'tor';
+
+const CHOICES: { value: IpChoice; label: string; hint: string }[] = [
+  { value: 'off', label: 'Off', hint: 'Direct connections, the fastest. The people you talk to can see your IP address.' },
+  {
+    value: 'relays',
+    label: 'Hide behind relays',
+    hint: 'Everything goes through a relay, so the people you talk to never see your IP address. The relay sees it, and when and with whom you connect, but not what you send.',
+  },
+  {
+    value: 'tor',
+    label: 'Hide through Tor',
+    hint: 'Everything also goes through Tor, which you run yourself (Tor, or Tor Browser while it is open). The relays see a Tor exit, not you. Slow: voice may lag or drop, and video isn’t practical. If Tor stops, Dissent goes offline rather than connect directly.',
+  },
+];
+
+function choiceOf(settings: NetworkSettings): IpChoice {
+  if (!settings.hide_ip) return 'off';
+  return settings.tor ? 'tor' : 'relays';
+}
+
+const CONFIRM: Record<IpChoice, (socks: string) => string> = {
+  off: () => 'Show your IP address again? Direct connections come back, which are faster. Your connection restarts now, which ends a call you are in.',
+  relays: () =>
+    'Hide your IP address behind relays? Everything will go through a relay. Calls and file transfers get slower, and the relay sees your IP address and when and with whom you connect, but not what you send. Your connection restarts now, which ends a call you are in.',
+  tor: (socks) =>
+    `Hide your IP address through Tor? Tor must be running on this computer at ${socks}. Everything goes through it, so it is slow: voice may lag and video isn’t practical. If Tor stops, Dissent goes offline instead of connecting directly. Your connection restarts now, which ends a call you are in.`,
+};
+
+const CONFIRM_LABEL: Record<IpChoice, string> = { off: 'Show my IP address', relays: 'Hide behind relays', tor: 'Hide through Tor' };
+
+function hideIpStatus(choice: IpChoice, status: PrivacyStatus | null, home: string | null, socks: string): string {
+  if (choice === 'relays') {
+    return home ? `Connected through relay ${home}. Peers can’t see your IP address; the relay can.` : 'Connecting through a relay…';
+  }
+  if (status?.tor_ok === false) {
+    return `Can’t reach Tor at ${status.tor_socks ?? socks}: ${status.tor_error ?? 'no answer'}. Nothing is sent until it can.`;
+  }
+  if (status?.tor_ok) {
+    return `Connected through Tor${home ? ` and relay ${home}` : ''}. The relay sees a Tor exit, not your IP address.`;
+  }
+  return 'Connecting to Tor…';
+}
+
 function HideIpBlock({ settings, saving, onSave }: { settings: NetworkSettings; saving: boolean; onSave: (next: NetworkSettings) => Promise<void> }) {
-  const on = Boolean(settings.hide_ip);
+  const choice = choiceOf(settings);
+  const [socks, setSocks] = useState(settings.tor_socks || '127.0.0.1:9050');
   const [home, setHome] = useState<string | null>(null);
+  const status = usePrivacyStatus(choice === 'tor');
   useEffect(() => {
-    if (!on) return;
+    if (choice === 'off') return;
     let live = true;
     const read = () => api.relayStatus().then((r) => live && setHome(r.home ?? null), () => {});
     void read();
@@ -320,37 +368,46 @@ function HideIpBlock({ settings, saving, onSave }: { settings: NetworkSettings; 
       live = false;
       clearInterval(timer);
     };
-  }, [on]);
-  const change = async (next: boolean) => {
-    const ok = await confirm({
-      message: next
-        ? 'Hide your IP address? Everything will go through a relay. Calls and file transfers get slower, and the relay sees your IP address and when and with whom you connect, but not what you send. Your connection restarts now, which ends a call you are in.'
-        : 'Show your IP address again? Direct connections come back, which are faster. Your connection restarts now, which ends a call you are in.',
-      okLabel: next ? 'Hide my IP address' : 'Show my IP address',
-    });
-    if (ok) await onSave({ ...settings, hide_ip: next });
+  }, [choice]);
+  const change = async (next: IpChoice, nextSocks = socks) => {
+    const ok = await confirm({ message: CONFIRM[next](nextSocks), okLabel: CONFIRM_LABEL[next] });
+    if (ok) await onSave({ ...settings, hide_ip: next !== 'off', tor: next === 'tor', tor_socks: nextSocks });
   };
   return (
     <Block title="Privacy">
-      <CheckRow>
-        <input
-          type="checkbox"
-          aria-label="Hide my IP address"
-          checked={on}
-          disabled={saving}
-          onChange={(e) => void change(e.target.checked)}
-          className={CHECK_CLASS}
-        />
-        <span>Hide my IP address</span>
-      </CheckRow>
-      <Hint>
-        Everything goes through a relay, so the people you talk to never see your IP address. The relay sees it, and when and with whom you
-        connect, but not what you send. Calls and transfers are slower, finding people on the local network is off, and short invite and address
-        links that need the DHT do not open; use full links instead.
-      </Hint>
-      {on ? (
+      <fieldset className="m-0 flex flex-col gap-s-2 border-0 p-0" aria-label="Hide my IP address" disabled={saving}>
+        <legend className="mb-s-1 text-body text-text-strong">Hide my IP address</legend>
+        {CHOICES.map((c) => (
+          <label key={c.value} className="flex items-start gap-s-2">
+            <input
+              type="radio"
+              name="hide-ip"
+              value={c.value}
+              checked={choice === c.value}
+              onChange={() => void change(c.value)}
+              className="m-0 mt-0.5 size-5 shrink-0 accent-accent"
+            />
+            <span className="flex flex-col">
+              <span>{c.label}</span>
+              <Hint>{c.hint}</Hint>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      {choice === 'tor' ? (
+        <>
+          <div className="flex items-center gap-s-2">
+            <Input aria-label="Tor SOCKS port" value={socks} onChange={(e) => setSocks(e.target.value)} className="max-w-[220px] font-mono" />
+            <Button variant="outline" disabled={saving || socks.trim() === (settings.tor_socks || '')} onClick={() => void change('tor', socks.trim())}>
+              Use this port
+            </Button>
+          </div>
+          <Hint>Tor listens on 127.0.0.1:9050; Tor Browser on 127.0.0.1:9150, while it is open.</Hint>
+        </>
+      ) : null}
+      {choice !== 'off' ? (
         <Hint role="status" data-hide-ip-status>
-          {home ? `Connected through relay ${home}. Peers can’t see your IP address; the relay can.` : 'Connecting through a relay…'}
+          {hideIpStatus(choice, status, home, socks)}
         </Hint>
       ) : null}
     </Block>

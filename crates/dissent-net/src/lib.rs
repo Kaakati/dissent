@@ -9,6 +9,7 @@ mod media;
 mod ping;
 mod relay_rank;
 mod rpc;
+pub mod socks_bridge;
 mod source;
 mod tls;
 mod topic;
@@ -19,6 +20,7 @@ pub use node::{DEFAULT_GOSSIP_MAX_MESSAGE, Egress, Node, NodeConfig, RelayChoice
 pub use relay_rank::{merge as merge_relays, rank as rank_relays, Entry as RelayEntry, Source as RelaySource, MAX_LIST as MAX_RELAY_LIST};
 pub use media::{LinkToken, MediaHandler, MediaLink, LINK_TOKEN_WAIT};
 pub use rpc::RpcHandler;
+pub use socks_bridge::SocksBridge;
 pub use lan::community_key as lan_key;
 pub use ping::{PathKind, PingReport};
 pub use source::{CACHE, DHT, DialSample, DialStats, LAN, OPEN, PEER, SEEDER};

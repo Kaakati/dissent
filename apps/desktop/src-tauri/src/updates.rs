@@ -2,7 +2,7 @@
 //! Failures are logged and never shown, and never crash the app. Manual checks report their errors to the caller.
 //!
 //! While "Hide my IP address" is on, nothing is checked on its own: a check shows the IP to GitHub, which the relay
-//! hides from everyone else. The user checks by hand, warned, and is reminded once no check has run for
+//! hides from everyone else. Through Tor, checks run as usual, through the Tor bridge, and never directly. The user checks by hand, warned, and is reminded once no check has run for
 //! `REMIND_AFTER`, so a hidden device does not stay on an old version unknowingly.
 
 use std::time::Duration;
@@ -14,6 +14,7 @@ use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
 use crate::commands::AppState;
+use crate::network::IpMode;
 use crate::profile;
 
 /// The release page. A portable build can't update in place, so the user downloads the new portable zip here.
@@ -69,14 +70,32 @@ fn note_check(data_dir: &std::path::Path) {
     }
 }
 
-fn hides_ip(app: &AppHandle) -> bool {
-    app.try_state::<AppState>().is_some_and(|state| crate::network::load(&state.data_dir).hide_ip)
+/// Whether a check would show the IP the relays hide: "Hide my IP address" without Tor. Through Tor, GitHub sees a
+/// Tor exit, so checks run as usual.
+fn check_shows_hidden_ip(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .is_some_and(|state| crate::network::load(&state.data_dir).ip_mode() == IpMode::Relays)
+}
+
+/// The updater, set up the way this device goes out: through the Tor bridge in Tor mode, and refused when Tor mode is
+/// on but the bridge isn't running, so a check never goes out directly.
+async fn updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let tor = app
+        .try_state::<AppState>()
+        .is_some_and(|state| crate::network::load(&state.data_dir).ip_mode() == IpMode::Tor);
+    if !tor {
+        return app.updater().map_err(|e| e.to_string());
+    }
+    let proxy = crate::tor::running_proxy(app)
+        .await
+        .ok_or("Tor isn't connected, so updates aren't checked")?;
+    app.updater_builder().proxy(proxy).build().map_err(|e| e.to_string())
 }
 
 /// Whether updates are checked on their own, and whether to remind the user to check.
 #[tauri::command]
 pub fn update_policy(state: tauri::State<'_, AppState>) -> UpdatePolicy {
-    let hidden = crate::network::load(&state.data_dir).hide_ip;
+    let hidden = crate::network::load(&state.data_dir).ip_mode() == IpMode::Relays;
     policy(hidden, last_check(&state.data_dir), now_ms())
 }
 
@@ -122,7 +141,7 @@ pub fn background_outcome<T, E: std::fmt::Display>(result: Result<Option<T>, E>)
 /// Asks the release feed whether a newer version exists.
 #[tauri::command]
 pub async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let updater = updater(&app).await?;
     let found = updater.check().await.map_err(|e| e.to_string())?;
     if let Some(state) = app.try_state::<AppState>() {
         note_check(&state.data_dir);
@@ -142,9 +161,8 @@ pub async fn install_update(app: AppHandle, state: tauri::State<'_, AppState>) -
     if profile::is_portable_exe() {
         return Err("A portable build can't update in place. Download the new portable build instead.".into());
     }
-    let update = app
-        .updater()
-        .map_err(|e| e.to_string())?
+    let update = updater(&app)
+        .await?
         .check()
         .await
         .map_err(|e| e.to_string())?
@@ -183,11 +201,11 @@ pub fn start_background(app: AppHandle) {
         tokio::time::sleep(FIRST_CHECK).await;
         loop {
             // Read each time, so turning the setting on stops the checks without a restart.
-            if hides_ip(&app) {
+            if check_shows_hidden_ip(&app) {
                 info!("automatic update check skipped: the IP is hidden");
             } else {
-                let result = match app.updater() {
-                    Ok(updater) => updater.check().await.map(|found| found.as_ref().map(describe)),
+                let result = match updater(&app).await {
+                    Ok(updater) => updater.check().await.map(|found| found.as_ref().map(describe)).map_err(|e| e.to_string()),
                     Err(e) => Err(e),
                 };
                 if let Some(state) = app.try_state::<AppState>() {

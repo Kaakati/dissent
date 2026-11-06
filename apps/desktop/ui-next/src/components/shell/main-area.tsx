@@ -6,6 +6,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { OwlMark } from '@/components/owl-mark';
 import { UpdateButton } from '@/components/settings/update-dialog';
 import { UpdateReminderButton } from '@/components/settings/update-reminder';
+import { PrivacyIndicator } from '@/components/shell/privacy-indicator';
 import { useShell, type ShellState } from '@/lib/store';
 
 // The heading and the name of the view the current UI would show in this column.
@@ -49,6 +50,7 @@ export function MainArea({ children, headerExtra, header, overlay }: { children?
           <h1 className="min-w-0 truncate text-head font-semibold text-text-strong">{title}</h1>
           {headerExtra}
           <div className="ml-auto flex shrink-0 items-center">
+            <PrivacyIndicator />
             <UpdateReminderButton />
             <UpdateButton />
           </div>

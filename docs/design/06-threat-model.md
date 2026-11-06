@@ -228,12 +228,35 @@ it ends a call in progress. Tested by `tests/it/hide_ip.rs` (two relay-only engi
 exchange channel and direct messages, and hold no IP address for each other) and
 `tests/it/relay_calls.rs` (calls over the relay).
 
+### Hide through Tor
+
+Settings › Network offers three choices: Off, Hide behind relays, and Hide through Tor. Tor is the one the person runs
+(the tor service on 127.0.0.1:9050, or Tor Browser on 127.0.0.1:9150 while it is open); Dissent bundles none. The app
+starts a bridge on loopback (`dissent_net::socks_bridge`): an HTTP CONNECT proxy that carries each tunnel through Tor's
+SOCKS port, giving Tor the host name, so Tor resolves every name. The node's `proxy_url`, the engine's HTTP client and
+the updater all point at it. It takes CONNECT only, and only a SOCKS port on this machine. Any process here can reach
+a loopback port, so each request must carry a secret made new at every start (`Proxy-Authorization: Basic`, the password
+of the URLs the bridge hands out); without it the bridge answers 407 and asks Tor nothing. The user name of those URLs
+is the purpose, relay, previews or updates, and the bridge passes it to Tor as the SOCKS user name. Tor's
+`IsolateSOCKSAuth`, on by default, then keeps each on circuits of its own, so one exit cannot tie the relay traffic to
+the sites this device previews or to its update checks.
+
+It fails closed. The bridge starts before the engine, and an engine in this mode has no IP socket, no DHT and no LAN
+discovery, so its only way out is the bridge. With Tor down the bridge answers every tunnel with a 502 and tries nothing
+else, so the app is offline. The header shows a shield while the IP is hidden, red with "Can't reach Tor" when a check
+through Tor to a relay fails; the check opens one connection, through Tor. Opening an external link says that the
+browser goes out outside Dissent's protection.
+
+What Tor does not hide: Tor's entry guard sees this device's IP, and its exit sees the relay and site host names;
+relays still see which devices exchange traffic, when and how much. Calls work but are slow over Tor; video isn't
+practical.
+
 ### What each mode shows, and to whom
 
 `NodeConfig::egress` names the mode: `Direct`, `Relayed` ("Hide my IP address"), or `Proxied` (every
-connection through an HTTP proxy, which "Hide my IP through Tor" will use; not in the app yet).
+connection through an HTTP proxy: "Hide through Tor").
 
-| Who | Direct | Relayed (Hide my IP address) | Proxied (through Tor, planned) |
+| Who | Direct (Off) | Relayed (Hide behind relays) | Proxied (Hide through Tor) |
 |---|---|---|---|
 | Peers you talk to (members, contacts) | Your IP, in signed addresses and on direct paths | The relay's address only | The relay's address only |
 | The relays you use, and each relay measured | Your IP, and who you exchange traffic with, when and how much | The same | The proxy's exit, not your IP; the same traffic metadata |
@@ -242,7 +265,7 @@ connection through an HTTP proxy, which "Hide my IP through Tor" will use; not i
 | Your system's DNS resolver | Relay and site host names; with number0's directory, the device ids you look up | Relay host names | Nothing: the proxy resolves every name |
 | number0's directory (while on) | Your IP and device id | Your IP (HTTPS) and device id | The proxy's exit and your device id |
 | Sites of your link previews | Your IP | Nothing: previews are off | The proxy's exit |
-| GitHub, for updates | Your IP, every six hours | Your IP only when you check by hand | The proxy's exit (planned) |
+| GitHub, for updates | Your IP, every six hours | Your IP only when you check by hand | A Tor exit, every six hours |
 | The proxy itself | — | — | Your IP, and the hosts you connect to (Tor's entry guard sees the IP, its exit the hosts) |
 
 `tests/it/egress.rs` runs both hidden modes on loopback, with a local proxy standing in for Tor. Proxied

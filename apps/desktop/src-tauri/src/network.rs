@@ -53,6 +53,47 @@ pub struct NetworkSettings {
     /// would show this device's IP to strangers. The relay sees the IP and the traffic's metadata, and
     /// calls and transfers are slower. Off by default. Applied when the engine restarts.
     pub hide_ip: bool,
+    /// "Hide my IP through Tor": with `hide_ip`, every connection also goes through the Tor this person runs, at
+    /// `tor_socks`, so even the relays see a Tor exit and not this device. Nothing ever goes out another way: with
+    /// Tor down, the app is offline. Off by default. Applied when the engine restarts.
+    pub tor: bool,
+    /// Tor's SOCKS port on this machine: 127.0.0.1:9050 for tor, 127.0.0.1:9150 for Tor Browser.
+    pub tor_socks: String,
+}
+
+/// Tor's SOCKS port when the tor service runs. Tor Browser listens on 9150 instead.
+pub const DEFAULT_TOR_SOCKS: &str = "127.0.0.1:9050";
+
+/// Which way this device hides its IP address, from the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IpMode {
+    /// Direct connections: peers see this device's IP.
+    Off,
+    /// Every peer through a relay; the relays see the IP.
+    Relays,
+    /// Every connection through Tor; the relays see a Tor exit.
+    Tor,
+}
+
+impl NetworkSettings {
+    pub fn ip_mode(&self) -> IpMode {
+        match (self.hide_ip, self.tor) {
+            (false, _) => IpMode::Off,
+            (true, false) => IpMode::Relays,
+            (true, true) => IpMode::Tor,
+        }
+    }
+
+    /// Tor's SOCKS address, when it parses and is on this machine.
+    pub fn tor_socks_addr(&self) -> Result<std::net::SocketAddr, String> {
+        let addr: std::net::SocketAddr =
+            self.tor_socks.trim().parse().map_err(|_| format!("{} is not an address and port, for example {DEFAULT_TOR_SOCKS}", self.tor_socks))?;
+        if !addr.ip().is_loopback() {
+            return Err("Tor's SOCKS port must be on this machine, for example 127.0.0.1:9050".into());
+        }
+        Ok(addr)
+    }
 }
 
 impl Default for NetworkSettings {
@@ -66,6 +107,8 @@ impl Default for NetworkSettings {
             use_community_relays: true,
             use_n0_lookup: true,
             hide_ip: false,
+            tor: false,
+            tor_socks: DEFAULT_TOR_SOCKS.to_string(),
         }
     }
 }
@@ -141,8 +184,14 @@ pub fn check(settings: &NetworkSettings) -> Result<NetworkSettings, String> {
         disabled,
         use_community_relays: settings.use_community_relays,
         use_n0_lookup: settings.use_n0_lookup,
-        hide_ip: settings.hide_ip,
+        // Tor hides the IP from the relays too, so it needs the IP hidden from peers first.
+        hide_ip: settings.hide_ip || settings.tor,
+        tor: settings.tor,
+        tor_socks: if settings.tor_socks.trim().is_empty() { DEFAULT_TOR_SOCKS.to_string() } else { settings.tor_socks.trim().to_string() },
     };
+    if checked.tor {
+        checked.tor_socks_addr()?;
+    }
     if enabled(&checked).is_empty() {
         return Err(EMPTY_OFF_MESSAGE.to_string());
     }
@@ -191,9 +240,11 @@ pub fn relay_choice(settings: &NetworkSettings) -> RelayChoice {
     RelayChoice::Custom(entries.into_iter().map(|e| e.url).collect())
 }
 
-/// Node config for these settings.
-pub fn node_config(settings: &NetworkSettings) -> NodeConfig {
+/// Node config for these settings. `tor_proxy` is the running Tor bridge's address, which Tor mode needs: every
+/// connection goes through it.
+pub fn node_config(settings: &NetworkSettings, tor_proxy: Option<Url>) -> NodeConfig {
     NodeConfig {
+        proxy_url: tor_proxy,
         relay: relay_choice(settings),
         // Hiding the IP leaves the node no IP transport, so nothing reaches a peer but through a relay.
         relay_only: settings.hide_ip,
@@ -293,6 +344,28 @@ mod tests {
 
     use super::*;
 
+    fn node_config_off(settings: &NetworkSettings) -> NodeConfig {
+        node_config(settings, None)
+    }
+
+    #[test]
+    fn tor_mode_hides_the_ip_first_and_needs_a_local_socks_port() {
+        let old = parse_settings(r#"{"hide_ip": true}"#).unwrap();
+        assert_eq!(old.ip_mode(), IpMode::Relays, "a file from before Tor reads as relays");
+        assert_eq!(old.tor_socks, DEFAULT_TOR_SOCKS);
+        let tor = parse_settings(r#"{"tor": true}"#).unwrap();
+        assert!(tor.hide_ip, "Tor implies hiding the IP from peers");
+        assert_eq!(tor.ip_mode(), IpMode::Tor);
+        let browser = parse_settings(r#"{"tor": true, "tor_socks": " 127.0.0.1:9150 "}"#).unwrap();
+        assert_eq!(browser.tor_socks_addr().unwrap().port(), 9150);
+        assert!(parse_settings(r#"{"tor": true, "tor_socks": "10.0.0.2:9050"}"#).is_err(), "a SOCKS port elsewhere is refused");
+        assert!(parse_settings(r#"{"tor": true, "tor_socks": "tor"}"#).is_err());
+        let proxy: Url = "http://relay:secret@127.0.0.1:41000".parse().unwrap();
+        let config = node_config(&tor, Some(proxy.clone()));
+        assert_eq!(config.egress(), dissent_core::Egress::Proxied(proxy), "every connection through the bridge");
+        assert!(config.relay_only && !config.dht_lookup && !config.portmapper);
+    }
+
     fn custom_urls(choice: RelayChoice) -> Vec<Url> {
         match choice {
             RelayChoice::Custom(urls) => urls,
@@ -339,23 +412,23 @@ mod tests {
         // A network.json written before the switch existed has no use_n0_lookup field.
         let old = parse_settings(r#"{"use_public_relays": true, "relays": []}"#).unwrap();
         assert!(old.use_n0_lookup);
-        assert!(node_config(&old).n0_address_lookup);
+        assert!(node_config_off(&old).n0_address_lookup);
     }
 
     #[test]
     fn the_number0_directory_switch_reaches_the_node() {
-        assert!(node_config(&NetworkSettings::default()).n0_address_lookup);
+        assert!(node_config_off(&NetworkSettings::default()).n0_address_lookup);
         let off = NetworkSettings { use_n0_lookup: false, ..NetworkSettings::default() };
-        assert!(!node_config(&off).n0_address_lookup);
+        assert!(!node_config_off(&off).n0_address_lookup);
         let saved = parse_settings(r#"{"use_n0_lookup": false}"#).unwrap();
         assert!(!saved.use_n0_lookup);
-        assert!(!node_config(&saved).n0_address_lookup);
+        assert!(!node_config_off(&saved).n0_address_lookup);
     }
 
     #[test]
     fn hide_ip_is_off_by_default_and_an_old_file_keeps_it_off() {
         assert!(!NetworkSettings::default().hide_ip);
-        let config = node_config(&NetworkSettings::default());
+        let config = node_config_off(&NetworkSettings::default());
         assert!(!config.relay_only && config.dht_lookup);
         let old = parse_settings(r#"{"use_public_relays": true, "relays": [], "lan_discovery": true}"#).unwrap();
         assert!(!old.hide_ip, "a network.json from before the switch reads as off");
@@ -365,7 +438,7 @@ mod tests {
     fn hide_ip_routes_everything_through_relays_and_leaves_the_dht_and_lan() {
         let on = parse_settings(r#"{"hide_ip": true, "lan_discovery": true}"#).unwrap();
         assert!(on.hide_ip);
-        let config = node_config(&on);
+        let config = node_config_off(&on);
         assert!(config.relay_only, "no IP transport");
         assert!(!config.dht_lookup, "no Mainline DHT socket");
         assert!(!config.lan_discovery, "no LAN beacons");
@@ -377,9 +450,9 @@ mod tests {
     #[test]
     fn lan_discovery_is_off_by_default_and_reaches_the_node() {
         assert!(!NetworkSettings::default().lan_discovery);
-        assert!(!node_config(&NetworkSettings::default()).lan_discovery);
+        assert!(!node_config_off(&NetworkSettings::default()).lan_discovery);
         let on = NetworkSettings { lan_discovery: true, ..NetworkSettings::default() };
-        assert!(node_config(&on).lan_discovery);
+        assert!(node_config_off(&on).lan_discovery);
     }
 
     #[test]
@@ -497,9 +570,9 @@ mod tests {
     #[test]
     fn community_relays_are_off_when_the_switch_is_off() {
         assert!(NetworkSettings::default().use_community_relays);
-        assert!(node_config(&NetworkSettings::default()).community_relays);
+        assert!(node_config_off(&NetworkSettings::default()).community_relays);
         let off = NetworkSettings { use_community_relays: false, ..NetworkSettings::default() };
-        assert!(!node_config(&off).community_relays);
+        assert!(!node_config_off(&off).community_relays);
         let community = vec![url("community").to_string()];
         let view = status(&off, &community, &[], &RelayReport::default());
         assert!(view.relays.iter().all(|r| r.source != "community"));

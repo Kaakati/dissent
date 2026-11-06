@@ -14,7 +14,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 postcard.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 tracing.workspace = true
 iroh = { workspace = true, features = ["tls-aws-lc-rs"] }
 noq-proto.workspace = true

@@ -195,3 +195,70 @@ async fn a_device_behind_a_relay_fetches_no_link_preview() {
     })
     .await;
 }
+
+/// A SOCKS5 server on loopback standing in for Tor: it takes a user name and password (RFC 1929), records the user
+/// name and the host each tunnel asks for, and reaches the hosts it is given.
+async fn fake_tor(hosts: BTreeMap<String, SocketAddr>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (log, hosts) = (asked.clone(), Arc::new(hosts));
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = listener.accept().await {
+            let (log, hosts) = (log.clone(), hosts.clone());
+            tokio::spawn(async move {
+                let mut hello = [0u8; 3];
+                if s.read_exact(&mut hello).await.is_err() {
+                    return;
+                }
+                let _ = s.write_all(&[5, 2]).await;
+                let mut len = [0u8; 2];
+                let _ = s.read_exact(&mut len).await;
+                let mut user = vec![0u8; usize::from(len[1])];
+                let _ = s.read_exact(&mut user).await;
+                let mut plen = [0u8; 1];
+                let _ = s.read_exact(&mut plen).await;
+                let mut pass = vec![0u8; usize::from(plen[0])];
+                let _ = s.read_exact(&mut pass).await;
+                let _ = s.write_all(&[1, 0]).await;
+                let mut head = [0u8; 5];
+                if s.read_exact(&mut head).await.is_err() || head[3] != 3 {
+                    return;
+                }
+                let mut name = vec![0u8; usize::from(head[4])];
+                let _ = s.read_exact(&mut name).await;
+                let mut port = [0u8; 2];
+                let _ = s.read_exact(&mut port).await;
+                let (name, port) = (String::from_utf8_lossy(&name).into_owned(), u16::from_be_bytes(port));
+                log.lock().unwrap().push(format!("{} {name}:{port}", String::from_utf8_lossy(&user)));
+                let Some(base) = hosts.get(&name) else { return };
+                let Ok(mut up) = tokio::net::TcpStream::connect(SocketAddr::new(base.ip(), port)).await else { return };
+                let _ = s.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await;
+                let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+            });
+        }
+    });
+    (addr, asked)
+}
+
+/// Hide through Tor, end to end: the engine's relay connection goes through the Tor bridge, which needs its secret,
+/// and reaches the relay through SOCKS by name, on the relay's own circuit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_device_hidden_through_tor_reaches_its_relay_through_the_bridge_on_its_own_circuit() {
+    bounded(async {
+        let relay = spawn_relay().await;
+        let relay_port = relay.url.port().expect("a port");
+        let (tor, asked) = fake_tor(BTreeMap::from([("localhost".to_string(), SocketAddr::from(([127, 0, 0, 1], relay_port)))])).await;
+        let bridge = dissent_core::SocksBridge::spawn(tor).await.expect("the bridge starts");
+        let proxy = Proxy { url: bridge.url("relay"), seen: Arc::new(Mutex::new(Vec::new())) };
+        let alice = start_proxied(&relay, &proxy, "alice-tor").await;
+        wait_online(&[&alice]).await;
+        assert_eq!(dissent_core::test_support::bound_socket_count(&alice.engine), 0, "no IP socket at all");
+        let tunnels = asked.lock().unwrap().clone();
+        assert!(tunnels.contains(&format!("relay localhost:{relay_port}")), "the relay through Tor, by name, on its circuit: {tunnels:?}");
+        assert!(tunnels.iter().all(|t| t.starts_with("relay ")), "the node used only the relay's circuit: {tunnels:?}");
+        finish(vec![alice]).await;
+    })
+    .await;
+}
