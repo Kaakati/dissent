@@ -66,16 +66,9 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A port no other test in this process hands out. Binding and releasing a port races with other
-/// tests, so ports come from a counter seeded per process instead.
-const OFFSET: u16 = 0;
+/// A port no other test hands out, from the OS. See `membership::tests::free_port`.
 fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    // Below Linux's ephemeral range (32768 and up) and Windows' (49152 and up), so the OS never
-    // hands one of these to another socket first.
-    let base = 20_000 + OFFSET + (std::process::id() % 4_000) as u16;
-    base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
+    crate::membership::tests::free_port()
 }
 
 fn now() -> u64 {

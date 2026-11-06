@@ -86,6 +86,8 @@ pub(crate) struct Inner {
     pub events: broadcast::Sender<EngineEvent>,
     pub node: OnceLock<Node>,
     pub tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Set when shutdown starts. From then on `spawn_task` starts nothing, so no task outlives the drain.
+    pub(crate) stopping: AtomicBool,
     /// Mainline DHT client for publishing community records and reading network stats. `None`
     /// when relays are disabled, so tests stay offline.
     pub discovery: Option<Arc<Discovery>>,
@@ -285,6 +287,7 @@ impl Engine {
             events,
             node: OnceLock::new(),
             tasks: Mutex::new(Vec::new()),
+            stopping: AtomicBool::new(false),
             discovery,
             founded: Mutex::new(founded),
             mls: Mutex::new(mls),
@@ -434,6 +437,12 @@ impl Engine {
         self.withdraw_on_shutdown().await;
         self.flush_mls(true);
         self.inner.dirty_logs.flush();
+        // From here nothing new starts (`spawn_task`, downloads, receive loops), so what is collected below is all
+        // there is to drain. Set under the task list's lock, which `spawn_task` checks it under.
+        {
+            let _list = self.lock_tasks();
+            self.inner.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut receivers = Vec::new();
         {
             let mut guard = self.write();
@@ -445,7 +454,8 @@ impl Engine {
                 c.sender = None;
             }
         }
-        let tasks = std::mem::take(&mut *self.lock_tasks());
+        let mut tasks = std::mem::take(&mut *self.lock_tasks());
+        tasks.extend(std::mem::take(&mut self.write().attach.tasks).into_values());
         for task in &tasks {
             task.abort();
         }
@@ -642,9 +652,15 @@ impl Engine {
     }
 
     /// Runs `fut` on the runtime and keeps its handle. Finished handles are dropped first.
+    /// Once shutdown has started, nothing is started: a task begun during the drain would outlive it.
     pub(crate) fn spawn_task(&self, fut: impl Future<Output = ()> + Send + 'static) {
-        let handle = tokio::spawn(fut);
+        // Checked under the task list's lock, which shutdown takes to set the flag, so a task is either in the list
+        // shutdown drains or never started.
         let mut tasks = self.lock_tasks();
+        if self.inner.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let handle = tokio::spawn(fut);
         tasks.retain(|t| !t.is_finished());
         tasks.push(handle);
     }
@@ -652,6 +668,11 @@ impl Engine {
     /// Sets the community's receive task, aborting any task it replaces.
     pub(crate) fn set_receiver_task(&self, id: CommunityId, task: ReceiverTask) {
         let mut guard = self.write();
+        // A receive loop started once shutdown has collected the others would outlive it.
+        if self.inner.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            task.handle.abort();
+            return;
+        }
         match guard.communities.get_mut(&id) {
             Some(c) => {
                 if let Some(old) = c.task.replace(task) {

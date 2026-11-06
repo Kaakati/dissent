@@ -81,7 +81,7 @@ impl Engine {
             job
         };
         let engine = self.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             let opened = Arc::new(engine.opened_listings(community));
             let limit = Arc::new(tokio::sync::Semaphore::new(CHECK_AT_ONCE));
             let mut asks = tokio::task::JoinSet::new();

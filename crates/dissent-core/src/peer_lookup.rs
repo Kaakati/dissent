@@ -77,19 +77,18 @@ impl AddressLookup for PeerLookup {
         let (tx, rx) = mpsc::unbounded_channel();
         let task = engine.clone();
         engine.spawn_task(async move {
-            let mut asks = Vec::with_capacity(peers.len());
+            // A JoinSet, so aborting the lookup at shutdown aborts its asks too.
+            let mut asks = tokio::task::JoinSet::new();
             for peer in peers {
                 let asker = task.clone();
                 let tx = tx.clone();
-                asks.push(tokio::spawn(async move {
+                asks.spawn(async move {
                     let _ = tokio::time::timeout(ASK_TIMEOUT, asker.ask_for_record(peer, device, tx)).await;
-                }));
+                });
             }
             // The stream ends once every ask has finished and dropped its sender.
             drop(tx);
-            for ask in asks {
-                let _ = ask.await;
-            }
+            while asks.join_next().await.is_some() {}
             task.end_lookup(device);
         });
         let items = stream::unfold(rx, |mut rx| async move {

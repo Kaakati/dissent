@@ -489,7 +489,7 @@ impl Engine {
             .filter_map(|c| c.id.parse().ok())
             .collect();
         let engine = self.clone();
-        tokio::spawn(async move {
+        self.spawn_task(async move {
             if missing {
                 engine.fetch_files_keys(community, false).await;
             }

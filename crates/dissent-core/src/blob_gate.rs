@@ -505,8 +505,9 @@ async fn answer_seed(engine: Engine, device: DeviceId, key: (u64, u64), sending:
         crate::tracker::slots::Take::Busy => false,
         crate::tracker::slots::Take::Held(wait) => {
             // Its own task, so a held request does not hold the gate.
-            let engine = engine.clone();
-            tokio::spawn(async move {
+            let held = engine.clone();
+            engine.spawn_task(async move {
+                let engine = held;
                 let granted = matches!(tokio::time::timeout(crate::tracker::slots::HOLD, wait).await, Ok(Ok(())));
                 if !granted {
                     engine.forget_slot(key, device);
@@ -521,7 +522,7 @@ async fn answer_seed(engine: Engine, device: DeviceId, key: (u64, u64), sending:
     };
     if granted {
         m.tx.send(Ok(())).await.ok();
-        tokio::spawn(count_served(engine, device, key, sending, m.rx, true));
+        engine.clone().spawn_task(count_served(engine, device, key, sending, m.rx, true));
     } else {
         m.tx.send(Err(AbortReason::RateLimited)).await.ok();
     }
@@ -610,7 +611,7 @@ async fn run_gate(inner: Weak<Inner>, mut rx: tokio::sync::mpsc::Receiver<Provid
         let result = answer(verdict);
         let count = |updates| {
             if let (Verdict::Allow, Some(device)) = (verdict, device) {
-                tokio::spawn(count_served(engine.clone(), device, (conn, request), sending.clone(), updates, false));
+                engine.spawn_task(count_served(engine.clone(), device, (conn, request), sending.clone(), updates, false));
             }
         };
         match msg {

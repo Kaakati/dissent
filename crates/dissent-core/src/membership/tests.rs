@@ -105,16 +105,18 @@ async fn wait_until_free(port: u16) {
     }
 }
 
-/// A port no other test in this process hands out. Binding and releasing a port races with other
-/// tests, so ports come from a counter seeded per process instead.
-const OFFSET: u16 = 8_000;
+/// A port no other test hands out: one the OS reports free, and not one this process handed out already. Asked of the
+/// OS, so tests in other processes running at the same time do not collide on it, as a range picked per process could.
 pub(crate) fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    // Below Linux's ephemeral range (32768 and up) and Windows' (49152 and up), so the OS never
-    // hands one of these to another socket first.
-    let base = 20_000 + OFFSET + (std::process::id() % 4_000) as u16;
-    base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    static GIVEN: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+    loop {
+        let port = std::net::UdpSocket::bind(("127.0.0.1", 0)).and_then(|s| s.local_addr()).expect("a free port").port();
+        if GIVEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(port) {
+            return port;
+        }
+    }
 }
 
 pub(crate) fn now() -> u64 {
@@ -371,6 +373,55 @@ async fn an_engine_restarts_on_its_port_right_after_shutdown() {
         alice.engine.send_message(id, channel, text.clone()).await.expect("alice sends");
         eventually("bob reads it", || readable(&bob.engine, id, channel, &text)).await;
         let (identity, dir, port) = bob.stop().await;
+        bob = Node::boot(identity, dir, port).await;
+    }
+    }).await;
+}
+
+/// A picture fetch that keeps failing waits between its tries, holding the engine's state, when the engine shuts down. A
+/// task left running would keep using the old profile after an identity switch, so shutdown ends it: the state is gone
+/// within the drain bound, not after the fetch's last pause.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_fetch_still_retrying_at_shutdown_does_not_outlive_its_engine() {
+    crate::testutil::bounded(async {
+    let bob = Node::named("bob").await;
+    // No such message: every try fails, and the fetch waits 1, 2, 4 and 8 s between them.
+    bob.engine.spawn_picture_fetch(None, "no-such-message".into(), "no-such-picture".into(), crate::attachments::PictureKind::Thumbnail);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let weak = std::sync::Arc::downgrade(&bob.engine.inner);
+    bob.stop().await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while weak.strong_count() > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(weak.strong_count(), 0, "nothing of the engine runs on after its shutdown");
+    }).await;
+}
+
+/// Diagnostic: how many holders the engine's state has when `Engine::shutdown` returns, and how long it takes to drop.
+/// Every holder is something of the old engine still running.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "diagnostic: prints the engine state's holders after shutdown"]
+async fn what_holds_the_engine_after_shutdown() {
+    crate::testutil::bounded(async {
+    let alice = Node::named("alice").await;
+    let id: CommunityId = alice.engine.create_community("Holders".into()).await.expect("create").id.parse().unwrap();
+    let invite = alice.engine.create_invite(id).await.expect("invite");
+    let mut bob = Node::named("bob").await;
+    bob.engine.join_community(&invite).await.expect("bob joins");
+    let channel = general(&alice.engine, id);
+    for round in 0..10 {
+        let text = format!("round {round}");
+        alice.engine.send_message(id, channel, text.clone()).await.expect("alice sends");
+        eventually("bob reads it", || readable(&bob.engine, id, channel, &text)).await;
+        let weak = std::sync::Arc::downgrade(&bob.engine.inner);
+        let (identity, dir, port) = bob.stop().await;
+        let at_return = weak.strong_count();
+        let started = Instant::now();
+        while weak.strong_count() > 0 && started.elapsed() < Duration::from_secs(30) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        println!("HOLDERS round {round}: {at_return} at return, gone after {:?} (left {})", started.elapsed(), weak.strong_count());
         bob = Node::boot(identity, dir, port).await;
     }
     }).await;

@@ -874,7 +874,7 @@ pub(crate) async fn maintenance(weak: Weak<Inner>) {
             // Swarm holdings, asked off the tick so a slow device does not hold it up. See `tracker::swarm`.
             let engine = engine.clone();
             let auto = rounds.is_multiple_of((crate::tracker::scan::AUTO_IMPORT_EVERY.as_secs() / 30) as u32);
-            tokio::spawn(async move {
+            engine.clone().spawn_task(async move {
                 engine.refresh_all_holdings().await;
                 if auto {
                     engine.auto_import().await;
