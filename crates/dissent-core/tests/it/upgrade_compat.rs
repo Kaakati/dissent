@@ -323,3 +323,42 @@ async fn v0120_profile_is_sealed_on_first_start_and_reads_back() {
     })
     .await;
 }
+
+const PASSPHRASE_V0137: &str = "dissent fixture v0.1.37";
+const SALT_V0137: [u8; 16] = *b"dissent-fixture4";
+
+fn fixture_v0137() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/profile-v0.1.37")
+}
+
+/// v0.1.37 wrote the first `size_limits.bin` and the first `ServerFileSizeLimit`. Both read back on every start.
+#[tokio::test(flavor = "multi_thread")]
+async fn v0137_profile_keeps_its_size_limits() {
+    bounded(async {
+        let work = scratch("upgrade-compat-v0137");
+        copy_dir(&fixture_v0137().join("engine"), &work.join("engine"));
+        fs::copy(fixture_v0137().join("identity.bin"), work.join("identity.bin")).unwrap();
+        let vault = Arc::new(Vault::from_passphrase(PASSPHRASE_V0137, &SALT_V0137).unwrap());
+        let identity = keystore::load(&work.join("identity.bin"), &vault).expect("the v0.1.37 identity opens");
+        for run in 1..=2 {
+            let engine = start(&identity, &work.join("engine"), &vault).await;
+            assert_eq!(
+                engine.size_limits(),
+                dissent_core::SizeLimits { max_upload: 20 << 30, max_download: 2 << 30 },
+                "run {run}: this device's limits"
+            );
+            let communities = engine.communities();
+            assert_eq!(communities.len(), 1, "run {run}: one server");
+            let id: CommunityId = communities[0].id.parse().unwrap();
+            let view = engine.community_view(id).expect("the server opens");
+            assert_eq!(view.name, "Fixture Server");
+            assert_eq!(view.max_file_size, 3 << 30, "run {run}: the server's limit");
+            assert!(view.can_set_max_file_size, "run {run}: the owner may change it");
+            let general = view.channels.iter().find(|c| c.name == "general").unwrap().id.parse().unwrap();
+            assert!(engine.channel_messages(id, general, 10).iter().any(|m| m.text == "limits are set"), "run {run}: the channel reads");
+            engine.shutdown().await.unwrap_or_else(|e| panic!("clean shutdown after run {run}: {e}"));
+        }
+        let _ = fs::remove_dir_all(&work);
+    })
+    .await;
+}
