@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{info, warn};
 
 /// How the service layer names this program.
 pub const SPEC: Spec = Spec {
@@ -92,8 +92,8 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH", env = "DISSENT_RELAY_PASSPHRASE_FILE")]
     pub passphrase_file: Option<PathBuf>,
 
-    /// Most bytes per second the relay reads from its clients together, with --join. Each client gets
-    /// an equal share, over the connection cap.
+    /// Most bytes per second the relay reads from its clients together. Each client gets an equal share, over the
+    /// connection cap.
     #[arg(
         long,
         value_name = "BYTES",
@@ -102,7 +102,7 @@ pub struct RunArgs {
     )]
     pub bandwidth: u32,
 
-    /// Most connections the relay holds open at once, with --join.
+    /// Most connections the relay holds open at once.
     #[arg(
         long,
         value_name = "COUNT",
@@ -110,6 +110,36 @@ pub struct RunArgs {
         env = "DISSENT_RELAY_MAX_CONNECTIONS"
     )]
     pub max_connections: usize,
+
+    /// UDP address for QUIC address discovery, which tells clients their public address so they can connect
+    /// directly. TLS modes only. Clients look for it on port 7842.
+    #[arg(long, value_name = "ADDR", default_value = "0.0.0.0:7842", env = "DISSENT_RELAY_QAD_BIND")]
+    pub qad_bind: SocketAddr,
+
+    /// Do not serve QUIC address discovery. Clients then cannot learn their public address from this relay.
+    #[arg(long, env = "DISSENT_RELAY_NO_QAD")]
+    pub no_qad: bool,
+
+    /// Serve Prometheus metrics on this address, for example `127.0.0.1:9090`. Off by default. Keep it off the
+    /// public internet: the counts show how busy the relay is.
+    #[arg(long, value_name = "ADDR", env = "DISSENT_RELAY_METRICS_BIND")]
+    pub metrics_bind: Option<SocketAddr>,
+}
+
+impl RunArgs {
+    /// Where QUIC address discovery is served: in TLS modes, unless `--no-qad`. Dev mode has no certificate for it.
+    pub fn qad(&self) -> Option<SocketAddr> {
+        (!self.dev && !self.no_qad).then_some(self.qad_bind)
+    }
+}
+
+/// Says that a relay run without `--join` carries traffic for anyone who has its URL.
+pub(crate) fn open_relay_warning(caps: &crate::hosted::Caps) -> String {
+    format!(
+        "This relay is open: any device that knows its URL can use it, up to {} connections and {} bytes per second \
+         together. To carry traffic only for your own servers' members, run it with --join <invite>.",
+        caps.max_connections, caps.total_bytes_per_second
+    )
 }
 
 #[derive(Debug, Subcommand)]
@@ -232,7 +262,9 @@ async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
     if !run.join.is_empty() {
         return crate::members::serve(&run, &mode, stop).await;
     }
-    let (config, tls) = match mode {
+    let caps = crate::hosted::Caps { total_bytes_per_second: run.bandwidth, max_connections: run.max_connections };
+    caps.validate().map_err(anyhow::Error::msg)?;
+    let (mut config, tls) = match mode {
         Mode::Dev => (dev_config(run.bind), false),
         Mode::Tls(tls) => (
             tls_config(run.bind, run.https_bind, tls)
@@ -241,6 +273,14 @@ async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
             true,
         ),
     };
+    crate::hosted::apply(&caps, crate::hosted::HostedAccess::open(&caps), &mut config);
+    if let Some(bind) = run.qad() {
+        crate::enable_qad(&mut config, bind);
+    }
+    config.metrics_addr = run.metrics_bind;
+    let warning = open_relay_warning(&caps);
+    println!("{warning}");
+    warn!("{warning}");
     let mut server = Server::spawn(config).await.context("start relay")?;
     let url = client_url(&server, run.hostname.as_deref(), run.https_bind, tls);
     println!("Relay listening. Put this URL in a Dissent client: {url}");
@@ -398,6 +438,20 @@ mod tests {
     #[test]
     fn defaults_bind_3340() {
         let run = parse(&["--dev"]);
+        assert_eq!(run.metrics_bind, None, "metrics are off unless asked for");
+        assert_eq!(
+            (run.bandwidth, run.max_connections),
+            (crate::hosted::DEFAULT_TOTAL_BYTES_PER_SECOND, crate::hosted::DEFAULT_MAX_CONNECTIONS),
+            "an open relay gets the same caps as a hosted one"
+        );
+        let warning = open_relay_warning(&crate::hosted::Caps::default());
+        assert!(warning.contains("--join") && warning.contains("16 connections"), "{warning}");
+        assert_eq!(run.qad(), None, "dev mode has no certificate to serve QUIC address discovery with");
+        let tls = parse(&["--cert", "c.pem", "--key", "k.pem"]);
+        assert_eq!(tls.qad(), Some("0.0.0.0:7842".parse().unwrap()), "on by default with TLS, on the port clients probe");
+        assert_eq!(parse(&["--cert", "c.pem", "--key", "k.pem", "--no-qad"]).qad(), None);
+        let with_metrics = parse(&["--dev", "--metrics-bind", "127.0.0.1:9090"]);
+        assert_eq!(with_metrics.metrics_bind, Some("127.0.0.1:9090".parse().unwrap()));
         assert_eq!(run.bind, "0.0.0.0:3340".parse().unwrap());
         assert_eq!(run.mode().unwrap(), Mode::Dev);
     }

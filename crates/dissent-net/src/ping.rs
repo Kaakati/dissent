@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use dissent_identity::DeviceId;
 use iroh::{
@@ -9,6 +9,7 @@ use iroh::{
 
 use crate::{
     error::{NetError, Result, stream},
+    inbound::{BUSY, Inbound, TIMED_OUT},
     tls::{is_pq, key_exchange, log_key_exchange},
 };
 
@@ -38,20 +39,45 @@ pub struct PingReport {
     pub pq: Option<bool>,
 }
 
+/// Answers pings. Each one is admitted through the same slots as requests and gets the shortest deadline.
 #[derive(Debug)]
-pub(crate) struct PingHandler;
+pub(crate) struct PingHandler(pub(crate) Arc<Inbound>);
 
 impl ProtocolHandler for PingHandler {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
-        log_key_exchange(&connection, DeviceId(*connection.remote_id().as_bytes()), "accept");
-        let (mut send, mut recv) = connection.accept_bi().await?;
-        let request = recv.read_to_end(PING.len()).await.map_err(AcceptError::from_err)?;
-        if request == PING {
-            send.write_all(PONG).await.map_err(AcceptError::from_err)?;
+        let from = DeviceId(*connection.remote_id().as_bytes());
+        log_key_exchange(&connection, from, "accept");
+        let Some(permit) = self.0.admit(from) else {
+            connection.close(BUSY.into(), b"busy");
+            return Ok(());
+        };
+        let limits = *self.0.limits();
+        let answer = async {
+            let (mut send, mut recv) = connection.accept_bi().await?;
+            let request = recv.read_to_end(PING.len()).await.map_err(AcceptError::from_err)?;
+            permit.done_reading();
+            if request == PING {
+                send.write_all(PONG).await.map_err(AcceptError::from_err)?;
+            }
+            send.finish().map_err(AcceptError::from_err)
+        };
+        let answered = tokio::select! {
+            answered = tokio::time::timeout(limits.deadline_floor, answer) => answered,
+            () = permit.cancelled() => {
+                connection.close(BUSY.into(), b"busy");
+                return Ok(());
+            }
+        };
+        match answered {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                connection.close(TIMED_OUT.into(), b"timed out");
+                return Ok(());
+            }
         }
-        send.finish().map_err(AcceptError::from_err)?;
-        // Keep the connection alive until the pinger closes it, so the reply is not cut off.
-        connection.closed().await;
+        // Keep the connection until the pinger closes it, so the reply is not cut off, but not for ever.
+        let _ = tokio::time::timeout(limits.close_wait, connection.closed()).await;
         Ok(())
     }
 }

@@ -97,6 +97,8 @@ fn member_keys(engine: &Engine) -> Vec<NodeKey> {
 fn config_builder(run: &RunArgs, mode: &Mode, caps: Caps) -> ConfigBuilder {
     let bind = run.bind;
     let https_bind = run.https_bind;
+    let qad = run.qad();
+    let metrics = run.metrics_bind;
     let mode = mode.clone();
     Box::new(move |access| {
         let mode = mode.clone();
@@ -108,6 +110,10 @@ fn config_builder(run: &RunArgs, mode: &Mode, caps: Caps) -> ConfigBuilder {
                     .map_err(|e| format!("configure TLS: {e:#}"))?,
             };
             hosted::apply(&caps, access, &mut config);
+            if let Some(bind) = qad {
+                crate::enable_qad(&mut config, bind);
+            }
+            config.metrics_addr = metrics;
             Ok(config)
         })
     })

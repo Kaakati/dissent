@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     error::{NetError, Result, stream},
+    inbound::{BUSY, Inbound, Permit, TIMED_OUT},
     tls::log_key_exchange,
 };
 
@@ -18,7 +19,7 @@ pub(crate) const RPC_ALPN: &[u8] = b"dissent/rpc/0";
 /// Maximum frame payload, enforced in both directions.
 pub(crate) const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// Overall budget for one request, dial included.
-pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Answers one request. `from` is the remote device that opened the connection.
 pub trait RpcHandler: Send + Sync + 'static {
@@ -27,8 +28,12 @@ pub trait RpcHandler: Send + Sync + 'static {
     fn handle(&self, from: DeviceId, req: Vec<u8>) -> Boxed<Vec<u8>>;
 }
 
-/// Protocol handler registered on the router for [`RPC_ALPN`].
-pub(crate) struct RpcProtocol(pub(crate) Arc<dyn RpcHandler>);
+/// Protocol handler registered on the router for [`RPC_ALPN`]. Every connection is admitted through `inbound`,
+/// shared with the ping handler, and runs under its deadline.
+pub(crate) struct RpcProtocol {
+    pub(crate) handler: Arc<dyn RpcHandler>,
+    pub(crate) inbound: Arc<Inbound>,
+}
 
 impl fmt::Debug for RpcProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,23 +45,66 @@ impl ProtocolHandler for RpcProtocol {
     async fn accept(&self, connection: Connection) -> std::result::Result<(), AcceptError> {
         let from = DeviceId(*connection.remote_id().as_bytes());
         log_key_exchange(&connection, from, "accept");
-        let (mut send, mut recv) = connection.accept_bi().await?;
-        let req = read_frame(&mut recv, MAX_FRAME).await.map_err(AcceptError::from_err)?;
-        let resp = self.0.handle(from, req).await;
-        if resp.is_empty() {
-            connection.close(0u32.into(), b"");
+        let Some(permit) = self.inbound.admit(from) else {
+            connection.close(BUSY.into(), b"busy");
             return Ok(());
+        };
+        let served = tokio::select! {
+            served = self.serve(&connection, &permit) => served,
+            () = permit.cancelled() => {
+                connection.close(BUSY.into(), b"busy");
+                return Ok(());
+            }
+        };
+        // Hold the connection until the requester closes it, so the reply is not cut off, but not for ever.
+        if served.is_ok() {
+            let _ = tokio::time::timeout(self.inbound.limits().close_wait, connection.closed()).await;
         }
-        if let Err(e) = write_frame(&mut send, &resp, MAX_FRAME).await {
-            // Close the whole connection so the requester fails fast instead of waiting.
-            connection.close(1u32.into(), b"response rejected");
-            return Err(AcceptError::from_err(e));
-        }
-        send.finish().map_err(AcceptError::from_err)?;
-        // Hold the connection until the requester closes it, so the reply is not cut off.
-        connection.closed().await;
-        Ok(())
+        served
     }
+}
+
+impl RpcProtocol {
+    /// Reads the request, answers it and sends the reply, all within the deadline its declared length allows.
+    async fn serve(&self, connection: &Connection, permit: &Permit) -> std::result::Result<(), AcceptError> {
+        let from = DeviceId(*connection.remote_id().as_bytes());
+        let limits = *self.inbound.limits();
+        let admitted = tokio::time::Instant::now();
+        let header = tokio::time::timeout(limits.deadline_floor, async {
+            let (send, mut recv) = connection.accept_bi().await.map_err(AcceptError::from_err)?;
+            let len = read_len(&mut recv, MAX_FRAME).await.map_err(AcceptError::from_err)?;
+            Ok::<_, AcceptError>((send, recv, len))
+        });
+        let (mut send, mut recv, len) = match header.await {
+            Ok(header) => header?,
+            Err(_) => return Err(timed_out(connection)),
+        };
+        let exchange = async {
+            let req = read_payload(&mut recv, len).await.map_err(AcceptError::from_err)?;
+            permit.done_reading();
+            let resp = self.handler.handle(from, req).await;
+            if resp.is_empty() {
+                connection.close(0u32.into(), b"");
+                return Ok(());
+            }
+            if let Err(e) = write_frame(&mut send, &resp, MAX_FRAME).await {
+                // Close the whole connection so the requester fails fast instead of waiting.
+                connection.close(1u32.into(), b"response rejected");
+                return Err(AcceptError::from_err(e));
+            }
+            send.finish().map_err(AcceptError::from_err)
+        };
+        match tokio::time::timeout_at(admitted + limits.deadline(len), exchange).await {
+            Ok(done) => done,
+            Err(_) => Err(timed_out(connection)),
+        }
+    }
+}
+
+/// Closes a connection that ran out of time, so the peer learns at once.
+fn timed_out(connection: &Connection) -> AcceptError {
+    connection.close(TIMED_OUT.into(), b"timed out");
+    AcceptError::from_err(NetError::Timeout)
 }
 
 /// Sends one request over a fresh bi-stream and returns the reply.
@@ -83,14 +131,38 @@ pub(crate) async fn read_frame<R>(r: &mut R, max: usize) -> Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
+    let len = read_len(r, max).await?;
+    read_payload(r, len).await
+}
+
+/// Reads a frame's `u32` big-endian length. Rejects lengths above `max`.
+pub(crate) async fn read_len<R>(r: &mut R, max: usize) -> Result<usize>
+where
+    R: AsyncRead + Unpin,
+{
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await.map_err(stream)?;
     let len = u32::from_be_bytes(len) as usize;
     if len > max {
         return Err(NetError::FrameTooLarge { len, max });
     }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf).await.map_err(stream)?;
+    Ok(len)
+}
+
+/// First allocation for a payload. The buffer grows only as bytes arrive, so a peer that declares a large frame and
+/// sends little makes this node hold little.
+const FIRST_READ: usize = 64 * 1024;
+
+/// Reads exactly `len` payload bytes, growing the buffer as they arrive.
+pub(crate) async fn read_payload<R>(r: &mut R, len: usize) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(len.min(FIRST_READ));
+    r.take(len as u64).read_to_end(&mut buf).await.map_err(stream)?;
+    if buf.len() != len {
+        return Err(NetError::Stream(format!("frame ended after {} of {len} bytes", buf.len())));
+    }
     Ok(buf)
 }
 
@@ -124,6 +196,8 @@ mod tests {
             read_frame(&mut &[0, 0, 0, 9][..], 8).await,
             Err(NetError::FrameTooLarge { len: 9, max: 8 })
         ));
+        // A frame that ends early is an error, not a short payload.
+        assert!(read_frame(&mut &[0, 0, 0, 5, b'a'][..], 8).await.is_err());
         assert!(matches!(
             write_frame(&mut Vec::new(), &[0; 9], 8).await,
             Err(NetError::FrameTooLarge { len: 9, max: 8 })

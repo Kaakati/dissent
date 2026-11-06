@@ -17,8 +17,9 @@ Open these in the server firewall and in your provider's control panel.
 | --- | --- | --- |
 | 443 | TCP | Relay traffic over HTTPS. Also used to issue the Let's Encrypt certificate. |
 | 3340 | TCP | Plain HTTP. Serves the captive-portal probe. Optional, but clients use it to check their network. |
+| 7842 | UDP | QUIC address discovery: tells clients the public address their packets come from, so two of them can connect directly instead of through the relay. TLS modes only. Clients look for it on this port, so keep it. |
 
-The relay does not use UDP, so you do not need to open any UDP ports.
+Without UDP 7842 the relay still carries traffic, but clients cannot learn their public address from it, so clients that use only your relay are less likely to connect directly. Turn it off with `--no-qad`.
 
 ## Run it in the foreground
 
@@ -117,5 +118,13 @@ Clients then use `http://127.0.0.1:3340`.
 | `--cert` / `--key` | none | PEM certificate chain and private key. Use together. |
 | `--data-dir` | none | State directory: ACME cache and logs. Required to install a service. |
 | `--log-dir` | none | Also write rolling log files here. |
+| `--join` | none | Carry traffic only for the members of these servers. Repeat it, or separate invites with commas. Needs `--data-dir`. |
+| `--bandwidth` | `2097152` | Most bytes per second the relay reads from all clients together. Each gets an equal share over `--max-connections`. |
+| `--max-connections` | `16` | Most connections open at once. |
+| `--qad-bind` | `0.0.0.0:7842` | UDP address for QUIC address discovery. TLS modes only. |
+| `--no-qad` | off | Do not serve QUIC address discovery. |
+| `--metrics-bind` | off | Serve Prometheus metrics on this address, for example `127.0.0.1:9090`. Keep it private. |
+
+Without `--join` the relay is open: any device that has its URL may use it. It still keeps to `--bandwidth` and `--max-connections`, and says so when it starts. Raise both if you run an open relay for many people. `/healthz` on the HTTPS address answers when the relay is up.
 
 Service subcommands: `service install [--user|--system] [--run-as <user>] -- <run arguments>`, `service uninstall`, `service start`, `service stop`, and `service status`. Set `RUST_LOG=debug` for more logging.

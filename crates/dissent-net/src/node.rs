@@ -10,7 +10,7 @@ use iroh::{
     address_lookup::{
         AddressLookup, AddressLookupBuilder, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver,
     },
-    endpoint::{default_relay_mode, presets, PortmapperConfig},
+    endpoint::{BindOpts, default_relay_mode, presets, PortmapperConfig},
     protocol::Router,
     tls::CaTlsConfig,
 };
@@ -31,6 +31,7 @@ use crate::{
     lan,
     media::{MEDIA_ALPN, MEDIA_TOKEN_ALPN},
     error::{NetError, Result},
+    inbound::{Inbound, InboundLimits},
     media::{LinkToken, MediaHandler, MediaLink, MediaProtocol, MediaTokenProtocol, dial_media, dial_media_tokened},
     ping::{PING_ALPN, PingHandler, PingReport, run_ping},
     rpc::{RPC_ALPN, RpcHandler, RpcProtocol, run_request},
@@ -63,7 +64,7 @@ pub const DEFAULT_GOSSIP_MAX_MESSAGE: usize = 128 * 1024;
 #[derive(Clone)]
 pub struct NodeConfig {
     pub relay: RelayChoice,
-    /// UDP port to bind on all IPv4 interfaces. `0` picks any free port.
+    /// UDP port to bind on all IPv4 and IPv6 interfaces. `0` picks any free port.
     pub bind_port: u16,
     /// Handler for incoming requests on the RPC ALPN. `None` refuses RPC.
     pub rpc: Option<Arc<dyn RpcHandler>>,
@@ -115,6 +116,8 @@ pub struct NodeConfig {
     /// Ask the local gateway to map a port (UPnP, PCP, NAT-PMP). Off for a node that hides its IP, which has no IP
     /// socket to map. On by default.
     pub portmapper: bool,
+    /// What devices that dial this node may make it hold: how many requests and pings at once, and for how long.
+    pub inbound: InboundLimits,
 }
 
 impl NodeConfig {
@@ -174,6 +177,7 @@ impl Default for NodeConfig {
             n0_address_lookup: true,
             proxy_url: None,
             portmapper: true,
+            inbound: InboundLimits::default(),
         }
     }
 }
@@ -198,6 +202,7 @@ impl fmt::Debug for NodeConfig {
             .field("serves_lookups", &self.serves_lookups)
             .field("proxy_url", &self.proxy_url)
             .field("portmapper", &self.portmapper)
+            .field("inbound", &self.inbound)
             .finish()
     }
 }
@@ -324,8 +329,14 @@ impl Node {
                 .bind_addr(addr)
                 .map_err(|e| NetError::Config(e.to_string()))?;
         } else if cfg.bind_port != 0 {
-            let addr = SocketAddr::from(([0, 0, 0, 0], cfg.bind_port));
-            builder = builder.bind_addr(addr).map_err(|e| NetError::Config(e.to_string()))?;
+            // Binding one family replaces only that family's default socket, so IPv6 gets the port too. A host
+            // without IPv6 keeps going on IPv4, as it does with the default sockets.
+            let v4 = SocketAddr::from(([0, 0, 0, 0], cfg.bind_port));
+            let v6 = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, cfg.bind_port));
+            builder = builder
+                .bind_addr(v4)
+                .and_then(|b| b.bind_addr_with_opts(v6, BindOpts::default().set_is_required(false)))
+                .map_err(|e| NetError::Config(e.to_string()))?;
         }
         let endpoint = builder.bind().await?;
         // Added after bind, so each service can be wrapped to record which one resolves a dial. The
@@ -377,14 +388,15 @@ impl Node {
         } else {
             None
         };
+        let inbound = Inbound::new(cfg.inbound);
         let gossip = Gossip::builder()
             .max_message_size(gossip_max)
             .spawn(endpoint.clone());
         let mut router = Router::builder(endpoint.clone())
-            .accept(PING_ALPN, PingHandler)
+            .accept(PING_ALPN, PingHandler(inbound.clone()))
             .accept(GOSSIP_ALPN, gossip.clone());
         if let Some(handler) = cfg.rpc {
-            router = router.accept(RPC_ALPN, RpcProtocol(handler));
+            router = router.accept(RPC_ALPN, RpcProtocol { handler, inbound: inbound.clone() });
         }
         if let Some(handler) = cfg.media {
             router = router.accept(MEDIA_ALPN, MediaProtocol(handler.clone()));
