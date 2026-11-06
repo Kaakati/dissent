@@ -123,6 +123,7 @@ Clients then use `http://127.0.0.1:3340`.
 | `--max-connections` | `16` | Most connections open at once. |
 | `--qad-bind` | `0.0.0.0:7842` | UDP address for QUIC address discovery. TLS modes only. |
 | `--no-qad` | off | Do not serve QUIC address discovery. |
+| `--metrics-bind` | off | Serve Prometheus metrics on this address, for example `127.0.0.1:9090`. Keep it private. |
 
 Without `--join` the relay is open: any device that has its URL may use it. It still keeps to `--bandwidth` and `--max-connections`, and says so when it starts. Raise both if you run an open relay for many people. `/healthz` on the HTTPS address answers when the relay is up.
 

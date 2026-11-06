@@ -119,6 +119,11 @@ pub struct RunArgs {
     /// Do not serve QUIC address discovery. Clients then cannot learn their public address from this relay.
     #[arg(long, env = "DISSENT_RELAY_NO_QAD")]
     pub no_qad: bool,
+
+    /// Serve Prometheus metrics on this address, for example `127.0.0.1:9090`. Off by default. Keep it off the
+    /// public internet: the counts show how busy the relay is.
+    #[arg(long, value_name = "ADDR", env = "DISSENT_RELAY_METRICS_BIND")]
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 impl RunArgs {
@@ -272,6 +277,7 @@ async fn serve(run: RunArgs, mode: Mode, stop: Arc<Notify>) -> Result<()> {
     if let Some(bind) = run.qad() {
         crate::enable_qad(&mut config, bind);
     }
+    config.metrics_addr = run.metrics_bind;
     let warning = open_relay_warning(&caps);
     println!("{warning}");
     warn!("{warning}");
@@ -432,6 +438,7 @@ mod tests {
     #[test]
     fn defaults_bind_3340() {
         let run = parse(&["--dev"]);
+        assert_eq!(run.metrics_bind, None, "metrics are off unless asked for");
         assert_eq!(
             (run.bandwidth, run.max_connections),
             (crate::hosted::DEFAULT_TOTAL_BYTES_PER_SECOND, crate::hosted::DEFAULT_MAX_CONNECTIONS),
@@ -443,6 +450,8 @@ mod tests {
         let tls = parse(&["--cert", "c.pem", "--key", "k.pem"]);
         assert_eq!(tls.qad(), Some("0.0.0.0:7842".parse().unwrap()), "on by default with TLS, on the port clients probe");
         assert_eq!(parse(&["--cert", "c.pem", "--key", "k.pem", "--no-qad"]).qad(), None);
+        let with_metrics = parse(&["--dev", "--metrics-bind", "127.0.0.1:9090"]);
+        assert_eq!(with_metrics.metrics_bind, Some("127.0.0.1:9090".parse().unwrap()));
         assert_eq!(run.bind, "0.0.0.0:3340".parse().unwrap());
         assert_eq!(run.mode().unwrap(), Mode::Dev);
     }
