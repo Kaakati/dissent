@@ -6667,6 +6667,18 @@ check('MM10 after the change, the menu still matches the card', after.ok && afte
 await rightClick('Leila');
 await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Message').click()`);
 check('MM11 Message from the menu opens the DM', (await until(() => ev(`!!document.querySelector('main [placeholder="Message @Leila"]')`), 4000)) === true);
+
+// As an admin who is not the owner (?asadmin): a member can be banned and made a moderator, but not an admin; another
+// admin and the owner get no moderation at all. The menu matches the card each time.
+await b.send('Page.navigate', { url: `${BASE}/?asadmin` });
+await sleep(1800);
+await openServer('c1');
+const adminOnMember = await same('Leila');
+check("MM12 as an admin, a member's menu matches the card: Ban and Grant Moderator, no Grant Admin", adminOnMember.ok && JSON.stringify(adminOnMember.card) === JSON.stringify(['Message', 'Verify safety number', 'Ban', 'Grant Moderator']), JSON.stringify(adminOnMember));
+const adminOnAdmin = await same('Jonas');
+check("MM13 as an admin, another admin's menu has no moderation", adminOnAdmin.ok && JSON.stringify(adminOnAdmin.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(adminOnAdmin));
+const adminOnOwner = await same('Maya');
+check("MM14 as an admin, the owner's menu has no moderation", adminOnOwner.ok && JSON.stringify(adminOnOwner.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(adminOnOwner));
 noConsoleErrors('membermenu', b.consoleErrors);
 await b.close();
 }
