@@ -29,8 +29,14 @@ use crate::received::mark_or_log;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
-/// Hard maximum plaintext size for one file: 10 GB. A configured limit can only be lower.
-pub const MAX_FILE_SIZE: u64 = 10 * GIB;
+/// Hard maximum plaintext size for one file: the most the file format holds, 1 TiB. A file is sealed in 64 KiB chunks
+/// whose nonce has a 3-byte index, so it has at most 2^24 chunks (`crypt::MAX_PLAINTEXT`). Sizes, offsets and counters
+/// are u64 throughout, so nothing else bounds it. A configured limit can only be lower; the person's own limits are kept
+/// by the app.
+pub const MAX_FILE_SIZE: u64 = crate::crypt::MAX_PLAINTEXT;
+
+/// The most a release up to v0.1.35 accepts: 10 GiB. A larger file does not reach a device on one of those releases.
+pub const RELEASED_MAX_FILE_SIZE: u64 = 10 * GIB;
 
 /// Largest payload [`Input::Bytes`] accepts. Anything bigger goes through [`Input::Path`].
 pub const MAX_BYTES_INPUT: u64 = 64 * MIB;
@@ -75,7 +81,7 @@ impl Default for Timeouts {
             stall: Duration::from_secs(30),
             base: Duration::from_secs(60),
             per_mib: Duration::from_secs(10),
-            max: Duration::from_secs(24 * 60 * 60),
+            max: Duration::from_secs(30 * 24 * 60 * 60),
             refused_retry: Duration::from_secs(1),
         }
     }

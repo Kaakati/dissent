@@ -87,8 +87,34 @@ pub struct SwarmView {
     pub peers: Vec<SwarmPeerView>,
     /// For each 64 KiB piece, how many of the asked holders have it.
     pub pieces: Vec<u8>,
+    /// How many 64 KiB pieces each entry of `pieces` covers: at least 8, and more for a file of over `MAX_CELLS` cells, so a
+    /// large file's map stays small. An entry is the fewest holders of any piece in it.
+    pub pieces_per_cell: u64,
+    /// How many pieces the file has.
+    pub piece_count: u64,
     /// How many holders the piece counts come from.
     pub asked: u32,
+}
+
+/// Most cells a piece map has.
+const MAX_CELLS: u64 = 2048;
+
+/// How many pieces one cell of the map covers, for a file of `pieces` pieces.
+fn cells_for(pieces: u64) -> u64 {
+    pieces.div_ceil(MAX_CELLS).max(8)
+}
+
+/// Adds one holder to every cell that its `runs` of whole pieces cover entirely. A short last cell counts when its
+/// pieces are all held.
+fn count_runs(cells: &mut [u8], runs: &[(u64, u64)], per_cell: u64, pieces: u64) {
+    for &(start, end) in runs {
+        let first = start.div_ceil(per_cell);
+        // The cell ending at `end` counts if it ends there, or is the short last cell.
+        let last = if end >= pieces { cells.len() as u64 } else { end / per_cell };
+        for cell in first..last.min(cells.len() as u64) {
+            cells[cell as usize] = cells[cell as usize].saturating_add(1);
+        }
+    }
 }
 
 fn digest_of(holdings: &[Holding]) -> [u8; 32] {
@@ -383,16 +409,15 @@ impl Engine {
                 }
             }
         }
-        let pieces_total = dissent_files::pieces_of(size) as usize;
-        let mut pieces = vec![0u8; pieces_total];
+        let piece_count = dissent_files::pieces_of(size);
+        let per_cell = cells_for(piece_count);
+        let mut pieces = vec![0u8; piece_count.div_ceil(per_cell) as usize];
         let node = self.node();
         let peers_addr = self.read().addresses.peers();
         for device in online.iter().take(PIECE_ASKS) {
             let Some(addr) = peers_addr.iter().find(|p| p.id == *device).and_then(|p| p.clone().to_iroh().ok()) else { continue };
-            if let Ok(map) = self.inner.files.piece_map(node.endpoint(), addr, blob, size).await {
-                for (count, held) in pieces.iter_mut().zip(map) {
-                    *count = count.saturating_add(u8::from(held));
-                }
+            if let Ok(runs) = self.inner.files.piece_map(node.endpoint(), addr, blob, size).await {
+                count_runs(&mut pieces, &runs, per_cell, piece_count);
             }
         }
         // This device's own copy counts too.
@@ -431,6 +456,8 @@ impl Engine {
             downloading: peers.iter().filter(|p| p.has < 1.0).count() as u32,
             peers,
             pieces,
+            pieces_per_cell: per_cell,
+            piece_count,
             asked: online.len().min(PIECE_ASKS) as u32 + u32::from(mine),
         })
     }
@@ -449,5 +476,32 @@ impl Engine {
             self.refresh_holdings(community, false).await;
         }
         self.save_dirty_tracker_books();
+    }
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    #[test]
+    fn a_large_file_map_stays_within_its_cells() {
+        assert_eq!(cells_for(100), 8, "a small file keeps 8 pieces a cell");
+        let pieces = dissent_files::pieces_of(500 * 1024 * 1024 * 1024);
+        let per = cells_for(pieces);
+        assert!(pieces.div_ceil(per) <= MAX_CELLS, "{pieces} pieces in {} cells", pieces.div_ceil(per));
+    }
+
+    #[test]
+    fn a_cell_counts_only_when_all_its_pieces_are_held() {
+        // 20 pieces, 8 a cell: cells of 8, 8 and a short 4.
+        let mut cells = vec![0u8; 3];
+        count_runs(&mut cells, &[(0, 20)], 8, 20);
+        assert_eq!(cells, vec![1, 1, 1], "a whole holder covers every cell");
+        let mut cells = vec![0u8; 3];
+        count_runs(&mut cells, &[(0, 7), (9, 20)], 8, 20);
+        assert_eq!(cells, vec![0, 0, 1], "a missing piece leaves its cell out");
+        let mut cells = vec![0u8; 3];
+        count_runs(&mut cells, &[(8, 16)], 8, 20);
+        assert_eq!(cells, vec![0, 1, 0]);
     }
 }

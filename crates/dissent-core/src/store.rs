@@ -232,6 +232,10 @@ impl Paths {
     pub fn attachments(&self) -> PathBuf {
         self.root.join("attachments.bin")
     }
+    /// This device's file size limits. See `limits`.
+    pub fn size_limits(&self) -> PathBuf {
+        self.root.join("size_limits.bin")
+    }
     /// Blobs this device keeps because a member hinted them, with the hint's community. See `blob_gate`.
     pub fn blob_hints(&self) -> PathBuf {
         self.root.join("blob_hints.bin")

@@ -435,6 +435,9 @@ if (!window.__TAURI__) {
     history: c.history ?? null,
     // The mention-everyone permission: owners and admins hold it by default.
     can_mention_everyone: ['owner', 'admin'].includes(myRole(c)),
+    // The largest file members may share, as the server sets it (10 GB until then), and who may change it.
+    max_file_size: c.maxFile ?? 10 * 1024 ** 3,
+    can_set_max_file_size: ['owner', 'admin'].includes(myRole(c)),
     // The layout as the engine resolves it: each live channel once, the ones left out at the end, outside categories.
     layout: layoutView(c),
     can_manage_channels: ['owner', 'admin'].includes(myRole(c)),
@@ -737,6 +740,7 @@ if (!window.__TAURI__) {
   // My seeding: the settings and a record per seeded listing.
   const seeding = { settings: null, records: {} };
   const liveReads = {};
+  const sizeLimits = { max_upload: 10 * 1024 ** 3, max_download: 10 * 1024 ** 3 };
   // Joins a voice channel's call, as join_call answers it.
   function joinChannelCall({ communityId, channelId }) {
     const c = servers[communityId];
@@ -1225,9 +1229,12 @@ if (!window.__TAURI__) {
     },
     listing_swarm: ({ communityId, listingId }) => {
       const l = servers[communityId].files.listings.find((x) => x.id === listingId);
-      const pieces = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
+      // Cells of 8 pieces, as the engine groups them: the fewest holders of any piece in each.
+      const per = Array.from({ length: l.pieces }, (_, i) => [0, 1, 2, 4, 8][(i * 37 + 11) % 5]);
+      const pieces = [];
+      for (let i = 0; i < per.length; i += 8) pieces.push(Math.min(...per.slice(i, i + 8)));
       return {
-        seeders: l.seeders, downloading: l.leechers, asked: 8, pieces,
+        seeders: l.seeders, downloading: l.leechers, asked: 8, pieces, pieces_per_cell: 8, piece_count: l.pieces,
         peers: [{ root_id: LINUS, you: false, name: people[LINUS], role: 'member', storage: false, online: true, has: 1, level: 2 }],
       };
     },
@@ -2298,6 +2305,19 @@ if (!window.__TAURI__) {
     retry_transfer: ({ transferId }) => { const t = findTransfer(transferId); if (t) t.state = 'active'; return null; },
     remove_transfer: ({ transferId }) => { const i = transfers.findIndex((x) => x.id === transferId); if (i >= 0) transfers.splice(i, 1); return null; },
     transfer_settings: () => transferSettings(),
+    // This device's file size limits, 1 MB to 1 TB, 10 GB each until changed. See dissent_core::limits.
+    size_limits: () => ({ ...sizeLimits }),
+    set_size_limits: ({ limits }) => {
+      const ok = (b) => Number.isInteger(b) && b >= 1024 ** 2 && b <= 1024 ** 4;
+      need(ok(limits.max_upload) && ok(limits.max_download), 'a size limit is 1 MB to 1 TB');
+      Object.assign(sizeLimits, limits);
+      return { ...sizeLimits };
+    },
+    set_server_file_size_limit: ({ communityId, bytes }) => {
+      need(bytes >= 1024 ** 2 && bytes <= 1024 ** 4, 'a size limit is 1 MB to 1 TB');
+      servers[communityId].maxFile = bytes;
+      return null;
+    },
     set_transfer_settings: ({ settings }) => settings,
     pick_download_dir: () => {
       if (window.__mockDownloadDirRefused) throw window.__mockDownloadDirRefused;

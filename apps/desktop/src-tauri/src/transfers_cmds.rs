@@ -147,12 +147,35 @@ pub async fn download_attachment(
     community_id: Option<String>,
     message_id: String,
     attachment_id: String,
+    force: Option<bool>,
 ) -> Result<TransferView, String> {
     let community: Option<CommunityId> = match community_id {
         Some(id) => Some(parse("community id", &id)?),
         None => None,
     };
-    engine(&state).await?.download_attachment(community, message_id, attachment_id).await.map_err(err)
+    engine(&state)
+        .await?
+        .download_attachment_with(community, message_id, attachment_id, force.unwrap_or(false))
+        .await
+        .map_err(err)
+}
+
+/// This device's file size limits. See `dissent_core::limits`.
+#[tauri::command]
+pub async fn size_limits(state: State<'_, AppState>) -> Result<dissent_core::SizeLimits, String> {
+    Ok(engine(&state).await?.size_limits())
+}
+
+#[tauri::command]
+pub async fn set_size_limits(state: State<'_, AppState>, limits: dissent_core::SizeLimits) -> Result<dissent_core::SizeLimits, String> {
+    engine(&state).await?.set_size_limits(limits).map_err(err)
+}
+
+/// The largest file members may share in a server. Needs the manage-server permission.
+#[tauri::command]
+pub async fn set_server_file_size_limit(state: State<'_, AppState>, community_id: String, bytes: u64) -> Result<(), String> {
+    let community: CommunityId = parse("community id", &community_id)?;
+    engine(&state).await?.set_server_file_size_limit(community, bytes).await.map_err(err)
 }
 
 #[tauri::command]

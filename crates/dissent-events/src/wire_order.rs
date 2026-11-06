@@ -74,6 +74,7 @@ const V0111_PAYLOAD: &[&str] = &[
     "ReputationReset",
     "ProfileThemeSet",
     "AvatarDecorationSet",
+    "ServerFileSizeLimit",
 ];
 
 const LAYOUT_ENTRY: &[&str] = &["Channel", "Category"];

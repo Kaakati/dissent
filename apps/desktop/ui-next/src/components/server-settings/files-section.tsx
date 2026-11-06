@@ -3,6 +3,9 @@
 import { useState } from 'react';
 import { Link2, Plus, Trash2 } from 'lucide-react';
 import { BLOCK_TITLE, Block, CHECK_CLASS, CheckRow, Hint } from '@/components/settings/settings-ui';
+import { SizeLimitInput } from '@/components/settings/size-limit-input';
+import { limitLabel, limitsApi, OLDER_VERSIONS_NOTE, RELEASED_LIMIT } from '@/lib/limits';
+import { useShell } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { formatBytes } from '@/components/transfers/format';
@@ -45,8 +48,30 @@ export function FilesSection({ community }: { community: CommunityView }) {
   const [selected, setSelected] = useState<string | null>(null);
   if (!view) return <Hint>Loading files…</Hint>;
   const cat = selected && selected !== 'new' ? (view.categories.find((c) => c.id === selected) ?? null) : null;
+  const maxFile = community.max_file_size ?? RELEASED_LIMIT;
+  const saveMaxFile = async (bytes: number) => {
+    try {
+      await limitsApi.setServer(community.id, bytes);
+      await useShell.getState().loadCommunity(community.id);
+    } catch (err) {
+      toast(err);
+    }
+  };
   return (
     <div className="flex max-w-[900px] flex-col gap-7">
+      <Block title="File size">
+        {community.can_set_max_file_size ? (
+          <SizeLimitInput
+            name="server"
+            label="Largest file members may share"
+            value={maxFile}
+            hint={maxFile > RELEASED_LIMIT ? OLDER_VERSIONS_NOTE : 'Each member’s app keeps to it. Larger files are not downloaded on arrival.'}
+            onSave={saveMaxFile}
+          />
+        ) : (
+          <Hint data-size-limit="server">Members may share files up to {limitLabel(maxFile)}.</Hint>
+        )}
+      </Block>
       <Block title="Categories">
         <Hint>Each category can be linked to a folder on your computer. Files you drop in it are listed and seeded from where they are.</Hint>
         <div role="table" aria-label="Categories" data-categories className="flex flex-col">

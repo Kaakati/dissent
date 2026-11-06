@@ -122,7 +122,7 @@ impl Engine {
             !flag.load(Ordering::Relaxed)
         };
         // A category's allowed types are not applied here: the file's category can change while it is checked.
-        let view = self.candidate(path, &[], opened, progress).await;
+        let view = self.candidate(path, &[], opened, self.upload_limit_in(Some(community)), progress).await;
         if cancel.load(Ordering::Relaxed) {
             return;
         }

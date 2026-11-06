@@ -87,6 +87,10 @@ pub struct CommunityView {
     pub voice_channels: Vec<VoiceChannelView>,
     /// Whether this device's user may mention everyone here: the owner and admins.
     pub can_mention_everyone: bool,
+    /// The largest file members may share here, in bytes. See `limits`.
+    pub max_file_size: u64,
+    /// Whether this device's user may change `max_file_size`.
+    pub can_set_max_file_size: bool,
     /// The server's channel layout, top first, as this user sees it: only channels they can read, and no
     /// category whose channels are all hidden from them. `None` when the server has no layout yet; the UI then
     /// shows its text and voice channels in two groups, in `channels` order. See `channel_categories`.

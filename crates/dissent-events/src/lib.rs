@@ -29,6 +29,8 @@ mod channel_order_tests;
 #[cfg(test)]
 mod history_support_tests;
 #[cfg(test)]
+mod file_size_tests;
+#[cfg(test)]
 mod private_tests;
 #[cfg(test)]
 mod relay_host_tests;
@@ -65,7 +67,10 @@ pub use tracker::{
     ReputationRules, NO_RANK,
 };
 pub use roles::{is_roles_payload, BotEntry, Perms, RoleBook, RoleId, RoleSpec, MAX_CUSTOM_ROLES, MAX_ROLE_NAME_CHARS};
-pub use state::{replay, replay_keyed, replay_with, ChannelOrderSpec, CommunityState, Member, MessageView, Rejection};
+pub use state::{
+    replay, replay_keyed, replay_with, ChannelOrderSpec, CommunityState, Member, MessageView, Rejection, DEFAULT_FILE_SIZE_LIMIT,
+    MAX_FILE_SIZE_LIMIT, MIN_FILE_SIZE_LIMIT,
+};
 pub use wire::SignedEvent;
 
 #[derive(Debug, thiserror::Error)]

@@ -666,6 +666,12 @@ check('RL8 turning it off asks nothing', (await ev(`!document.querySelector('[ro
 await ev(`${ssButton('Files')}.click()`);
 await sleep(300);
 check('FL1 Server Settings lists Files, with no categories yet', (await ev(`document.querySelector('${SS} [data-categories]')?.textContent.includes('No categories yet.')`)) === true);
+check('FS1 the owner sees the server\'s file size limit at 10 GB', (await ev(`(() => { const b = document.querySelector('${SS} [data-size-limit="server"]'); return b ? b.querySelector('input').value + ' ' + b.querySelector('select').value : null; })()`)) === '10 GB');
+await ev(`(() => { const i = document.querySelector('${SS} [data-size-limit="server"] input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, '2'); i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+await sleep(200);
+await ev(`document.querySelector('${SS} [data-size-limit="server"] button').click()`);
+await sleep(600);
+check('FS2 saving it sets the server\'s limit', (await ev(`document.querySelector('${SS} [data-size-limit="server"] input').value`)) === '2');
 await ev(`[...document.querySelectorAll('${SS} button')].find((b) => b.textContent.trim().endsWith('New category')).click()`);
 await sleep(200);
 await fill(`${SS} input[aria-label="Category name"]`, 'Releases');
@@ -5727,6 +5733,22 @@ await openSettings();
 check('DL1 Settings shows the default folder with no reset', (await path()) === 'C:/Users/ada/Downloads' && (await ev(`![...document.querySelectorAll('[data-download-folder] button')].some((n) => n.textContent.trim() === 'Reset to default')`)) === true, await path());
 const hint = await ev(`document.querySelector('[data-download-folder]').textContent`);
 check('DL2 it says what happens to running downloads', hint.includes('already running finish in the folder they started in'), hint);
+// The file size limits beside the folder: 10 GB each, 1 MB to 1 TB, in MB, GB or TB.
+const limitBox = (name) => `[data-size-limit="${name}"]`;
+const typeLimit = async (name, value, unit) => {
+  await ev(`(() => { const i = document.querySelector('${limitBox(name)} input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, ${JSON.stringify(value)}); i.dispatchEvent(new Event('input', { bubbles: true })); const s = document.querySelector('${limitBox(name)} select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(unit)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await sleep(200);
+};
+const limitShown = (name) => ev(`(() => { const b = document.querySelector('${limitBox(name)}'); return b ? b.querySelector('input').value + ' ' + b.querySelector('select').value : null; })()`);
+check('SL1 Downloads shows both size limits at 10 GB', (await limitShown('upload')) === '10 GB' && (await limitShown('download')) === '10 GB', `${await limitShown('upload')} / ${await limitShown('download')}`);
+await typeLimit('download', '0.5', 'MB');
+check('SL2 a limit under 1 MB is refused before saving', (await ev(`document.querySelector('${limitBox('download')} [data-limit-error]')?.textContent`)) === 'The smallest limit is 1 MB.' && (await ev(`document.querySelector('${limitBox('download')} button').disabled`)) === true);
+await typeLimit('download', '2', 'TB');
+check('SL3 a limit over 1 TB is refused before saving', (await ev(`document.querySelector('${limitBox('download')} [data-limit-error]')?.textContent`)) === 'The largest limit is 1 TB.');
+await typeLimit('upload', '500', 'GB');
+await ev(`document.querySelector('${limitBox('upload')} button').click()`);
+await sleep(400);
+check('SL4 a limit over 10 GB saves, and says older versions cannot take such files', (await ev(`window.__TAURI__.core.invoke('size_limits')`))?.max_upload === 500 * 1024 ** 3 && (await ev(`document.querySelector('${limitBox('upload')}').textContent.includes('0.1.35 or earlier')`)) === true);
 await click('Change');
 await until(async () => (await path()).endsWith('/Dissent'), 2000);
 check('DL3 Change in Settings saves the folder', (await path()) === 'C:/Users/ada/Downloads/Dissent', await path());

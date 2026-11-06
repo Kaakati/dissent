@@ -222,7 +222,7 @@ impl Engine {
             id: id_text(&m.id),
             from: m.from.to_string(),
             text: if deleted { String::new() } else { crate::attachments::text_of(text) },
-            attachments: if deleted { Vec::new() } else { w.attachment_views(text) },
+            attachments: if deleted { Vec::new() } else { w.attachment_views(text, None) },
             embeds: if deleted { Vec::new() } else { crate::attachments::embed_views(&w.paths, text) },
             ms: m.hlc.wall_ms,
             pending: delivery == "sending",

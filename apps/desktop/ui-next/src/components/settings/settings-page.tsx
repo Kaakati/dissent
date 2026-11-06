@@ -13,6 +13,7 @@ import { PrivacyPage } from '@/components/settings/privacy-page';
 import { RecoveryPage } from '@/components/settings/recovery-page';
 import { SoundsPage } from '@/components/settings/sounds-page';
 import { DownloadFolder } from '@/components/transfers/download-folder';
+import { SizeLimits } from '@/components/settings/size-limits';
 import { UpdatesPage } from '@/components/settings/updates-page';
 import { VoicePage } from '@/components/settings/voice-page';
 import { Button } from '@/components/ui/button';
@@ -48,7 +49,13 @@ function Body({ section }: { section: SettingsSection }) {
     case 'appearance': return <AppearancePage />;
     case 'sounds': return <SoundsPage />;
     case 'voice': return <VoicePage />;
-    case 'downloads': return <DownloadFolder />;
+    case 'downloads':
+      return (
+        <div className="flex flex-col gap-s-6">
+          <DownloadFolder />
+          <SizeLimits />
+        </div>
+      );
     case 'network': return <NetworkPage />;
     case 'updates': return <UpdatesPage />;
     case 'about': return <AboutPage />;

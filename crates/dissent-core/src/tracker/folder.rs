@@ -487,6 +487,7 @@ impl Engine {
             if !types.is_empty() && !types.contains(&kind) {
                 return Err(CoreError::Invalid(format!("{rel}: {} files are not allowed in this category", kind.name())));
             }
+            self.check_upload(Some(community), rel, std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))?;
             let (fingerprint, size) = self.fingerprint_of(community, &path).await?;
             let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
             let key = dissent_files::tracker::content_key(&files_key, &fingerprint);
@@ -677,6 +678,7 @@ impl Engine {
 
     /// The listing views of `community`'s folders, for the Files page. `swarms_of` gives each blob's holders.
     pub(crate) fn folder_views(&self, community: CommunityId) -> Vec<ListingView> {
+        let (limits, server) = (self.size_limits(), self.server_file_size_limit(community));
         let folders = self.opened_folders(community);
         if folders.is_empty() {
             return Vec::new();
@@ -747,6 +749,8 @@ impl Engine {
                 let dangerous = entries.iter().filter(|e| dissent_files::danger_of_name(leaf(&e.path), "").is_some()).count() as u32;
                 let cipher: u64 = entries.iter().map(|e| e.cipher_size).sum();
                 ListingView {
+                    // A folder is over a limit when one of its files is: limits are per file.
+                    over_limit: crate::limits::over_limit_note(&limits, server, entries.iter().map(|e| e.size).max().unwrap_or(0)),
                     id: f.id.to_string(),
                     category: f.category.to_string(),
                     name: f.body.name.clone(),
@@ -792,6 +796,11 @@ impl Engine {
 
     /// Starts downloading a whole folder into the download folder, under its name. It shows in Transfers as one entry.
     pub async fn download_folder(&self, community: CommunityId, listing: EventId) -> Result<crate::attachments::TransferView> {
+        self.download_folder_with(community, listing, false).await
+    }
+
+    /// `download_folder`, past this device's download limit when `anyway` is set: the person chose to.
+    pub async fn download_folder_with(&self, community: CommunityId, listing: EventId, anyway: bool) -> Result<crate::attachments::TransferView> {
         let f = self
             .opened_folders(community)
             .into_iter()
@@ -799,6 +808,7 @@ impl Engine {
             .ok_or_else(|| CoreError::NotFound(format!("folder {listing}")))?;
         let manifest = self.folder_manifest(community, &f).await?;
         check_manifest(&manifest)?;
+        self.check_download(manifest.entries.iter().map(|e| e.size).max().unwrap_or(0), anyway)?;
         let total: u64 = manifest.entries.iter().map(|e| e.size).sum();
         let cipher: u64 = manifest.entries.iter().map(|e| e.cipher_size).sum();
         // The whole folder up front: its plaintext where it lands, and its ciphertext and one file's copy in the store.

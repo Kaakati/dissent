@@ -7,7 +7,9 @@ import { Download, ExternalLink, File, FileArchive, FileAudio, FileCode, FileTex
 import type { LucideProps } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ProgressBar } from '@/components/transfers/progress';
-import { DANGER_TEXT, MAX_FILE_LABEL, extOf, formatSize, iconFor, isImage, isOverLimit, isVideo, transferText, type FileIconName } from '@/lib/attachments';
+import { DANGER_TEXT, MAX_FILE_LABEL, extOf, formatSize, iconFor, isImage, isVideo, transferText, type FileIconName } from '@/lib/attachments';
+import { downloadWithin, isOver, limitLabel, OLDER_VERSIONS_NOTE, RELEASED_LIMIT, useUploadLimit } from '@/lib/limits';
+import { toast } from '@/lib/toasts';
 import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
 import { pictureSrc } from '@/lib/pictures';
@@ -54,7 +56,9 @@ export { pictureSrc };
 // Transfer state, as the card's meta line says it. A failure's reason goes on its own line, under the meta.
 function StateNode({ a, unshown }: { a: Attachment; unshown: boolean }) {
   switch (a.state) {
-    case 'available': return <span className="att-state">{isImage(a) ? 'Download to view' : 'Not downloaded'}</span>;
+    case 'available':
+      if (a.over_limit) return <span className="att-state" data-over-limit>{a.over_limit}</span>;
+      return <span className="att-state">{isImage(a) ? 'Download to view' : 'Not downloaded'}</span>;
     case 'downloading': return <span className="att-state tnum">{transferText(a)}</span>;
     case 'paused': return <span className="att-state tnum">{`Paused · ${transferText(a)}`}</span>;
     case 'failed': return <span className="att-state danger">Download failed</span>;
@@ -87,7 +91,7 @@ function DownloadButton({ label, onClick }: { label: string; onClick: () => void
 
 // The buttons on a card: download, pause and cancel while it moves, retry, open and show in folder when it is saved.
 function CardActions({ a, communityId, messageId }: { a: Attachment; communityId: Id | null; messageId: Id }) {
-  const download = () => void downloadAttachment(communityId, messageId, a);
+  const download = () => void downloadWithin((force) => downloadAttachment(communityId, messageId, a, force)).catch(toast);
   switch (a.state) {
     case 'available': return <DownloadButton label={`Download ${a.name}`} onClick={download} />;
     case 'downloading':
@@ -250,13 +254,15 @@ export function AttachmentView({ a, communityId, messageId }: { a: Attachment; c
 
 // A file waiting above the composer: its icon, name, size, and a remove button. Over the limit it turns red.
 export function StagedChip({ file, onRemove }: { file: StagedFile; onRemove: () => void }) {
-  const over = isOverLimit(file);
+  const limit = useUploadLimit();
+  const over = isOver(file, limit);
   const name = String(file.name);
+  const older = !over && isOver(file, RELEASED_LIMIT);
   return (
-    <div className={cn('chip-file', over && 'danger')} role="listitem" title={over ? `${name} is over ${MAX_FILE_LABEL} and cannot be sent` : name}>
+    <div className={cn('chip-file', over && 'danger')} role="listitem" data-older-note={older || undefined} title={over ? `${name} is over ${limitLabel(limit)} and cannot be sent` : older ? `${name}: ${OLDER_VERSIONS_NOTE}` : name}>
       <FileGlyph name={name} mime={file.mime} />
       <span className="chip-name">{name}</span>
-      <span className="chip-size tnum">{over ? `over ${MAX_FILE_LABEL}` : formatSize(file.size)}</span>
+      <span className="chip-size tnum">{over ? `over ${limitLabel(limit)}` : formatSize(file.size)}</span>
       <IconBtn label={`Remove ${name}`} icon={X} onClick={onRemove} />
     </div>
   );

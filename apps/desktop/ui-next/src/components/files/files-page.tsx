@@ -9,6 +9,7 @@ import { Tip } from '@/components/ui/tip';
 import { formatBytes } from '@/components/transfers/format';
 import { confirm } from '@/lib/dialog';
 import { filesApi, formatLevel, reloadFiles, tileStyle, useFilesOf, type CategoryView, type FilesView, type ListingView } from '@/lib/files';
+import { downloadWithin, OLDER_VERSIONS_NOTE, RELEASED_LIMIT } from '@/lib/limits';
 import { useShell } from '@/lib/store';
 import { toast } from '@/lib/toasts';
 import type { CommunityView } from '@/lib/types';
@@ -539,8 +540,7 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
   const download = async () => {
     setBusy(true);
     try {
-      if (l.folder) await filesApi.downloadFolder(community.id, l.id);
-      else await filesApi.download(community.id, l.id);
+      await downloadWithin((force) => (l.folder ? filesApi.downloadFolder(community.id, l.id, force) : filesApi.download(community.id, l.id, force)));
       await useShell.getState().loadTransfers();
       await reloadFiles(community.id);
     } catch (err) {
@@ -599,6 +599,8 @@ function FilePage({ community, view, listing: l }: { community: CommunityView; v
             </Button>
           )}
           <span className="text-meta text-muted-foreground">From {l.seeders} {l.seeders === 1 ? 'seeder' : 'seeders'}</span>
+          {l.over_limit ? <span data-over-limit className="text-meta text-warn">{l.over_limit}</span> : null}
+          {l.size > RELEASED_LIMIT ? <span data-older-note className="max-w-[260px] text-right text-meta text-muted-foreground">{OLDER_VERSIONS_NOTE}</span> : null}
           {l.can_edit ? (
             <Button variant="ghost" onClick={() => openEditListing(community.id, l)}>
               <Pencil className="size-4" /> Edit tags and description

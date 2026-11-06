@@ -620,13 +620,13 @@ fn timeout_budget_scales_and_caps() {
     assert_eq!(t.overall(1), Duration::from_secs(70));
     assert_eq!(t.overall(5 * MIB as u64), Duration::from_secs(60 + 50));
     assert_eq!(t.overall(5 * MIB as u64 + 1), Duration::from_secs(60 + 60));
-    // The overall cap is 24 hours, and a 10 GB file reaches it.
-    assert_eq!(t.max, Duration::from_secs(24 * 60 * 60));
-    assert_eq!(
-        t.overall(MAX_FILE_SIZE * 1000),
-        Duration::from_secs(24 * 60 * 60)
-    );
-    assert_eq!(t.overall(MAX_FILE_SIZE), Duration::from_secs(24 * 60 * 60));
+    // The overall cap is 30 days: a 500 GB file at 1 MB/s takes about six days. Stall timeouts catch a dead link
+    // long before that.
+    assert_eq!(t.max, Duration::from_secs(30 * 24 * 60 * 60));
+    let gb500 = 500 * 1024 * MIB as u64;
+    assert_eq!(t.overall(gb500), t.max, "500 GB gets the whole 30 days");
+    assert!(t.max > Duration::from_secs(gb500 / 1_000_000), "which outlasts 500 GB at 1 MB/s");
+    assert_eq!(t.overall(MAX_FILE_SIZE), Duration::from_secs(30 * 24 * 60 * 60));
 }
 
 #[tokio::test]
@@ -1297,7 +1297,7 @@ async fn bytes_input_is_capped_and_points_at_path() {
 
 #[test]
 fn size_limit_is_clamped_to_the_hard_cap() {
-    assert_eq!(MAX_FILE_SIZE, 10 * 1024 * 1024 * 1024);
+    assert_eq!(MAX_FILE_SIZE, 1 << 40, "the format's ceiling: 2^24 chunks of 64 KiB");
     let dir = TestDir::new();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1318,22 +1318,25 @@ fn size_limit_is_clamped_to_the_hard_cap() {
 #[test]
 fn over_cap_error_message() {
     let err = FilesError::TooLarge { size: 1, limit: 1 };
-    assert_eq!(err.to_string(), "Files can be up to 10 GB.");
+    assert_eq!(err.to_string(), "This file is larger than the limit of 1 bytes.");
+    let err = FilesError::TooLarge { size: 1, limit: 10 << 30 };
+    assert_eq!(err.to_string(), "This file is larger than the limit of 10 GB.");
 }
 
 #[tokio::test]
 async fn add_refuses_over_cap_and_fetch_refuses_over_cap_reference() {
     let alice = Peer::new().await;
     let bob = Peer::new().await;
-    // Over the cap on add. A sparse file of the right length is refused from its metadata alone,
-    // so the test never reads 10 GB.
+    // Over a configured limit on add, refused from the file's metadata alone. (A file past the format's 1 TiB ceiling
+    // cannot be made here: Windows reserves the space for a file's length.)
+    let limited_dir = TestDir::new();
+    let limited = Files::open(limited_dir.path().join("data")).await.unwrap().with_size_limit(MIB as u64);
     let sparse = alice.dir.path().join("huge.bin");
     fs::File::create(&sparse)
         .unwrap()
-        .set_len(MAX_FILE_SIZE + 1)
+        .set_len(MIB as u64 + 1)
         .unwrap();
-    let err = alice
-        .files
+    let err = limited
         .add(Input::Path {
             path: sparse,
             mime: "application/octet-stream".into(),
@@ -1359,7 +1362,7 @@ async fn add_refuses_over_cap_and_fetch_refuses_over_cap_reference() {
         .await
         .unwrap_err();
     assert!(matches!(err, FilesError::TooLarge { .. }), "{err:?}");
-    assert_eq!(err.to_string(), "Files can be up to 10 GB.");
+    assert_eq!(err.to_string(), "This file is larger than the limit of 1 TB.");
 
     // A reference whose ciphertext size is inflated past the cap is also refused.
     let mut inflated = fref.clone();
@@ -1628,10 +1631,9 @@ async fn a_swarm_download_takes_slices_from_every_provider_and_skips_one_without
 
     // Pieces: alice holds them all, carol none.
     let full = dan.files.piece_map(&dan.endpoint, alice.addr(), a.hash, a.cipher_size).await.unwrap();
-    assert_eq!(full.len() as u64, dissent_files::pieces_of(a.cipher_size));
-    assert!(full.iter().all(|p| *p));
+    assert_eq!(full, vec![(0, dissent_files::pieces_of(a.cipher_size))], "every piece, as one run");
     let none = dan.files.piece_map(&dan.endpoint, carol.addr(), a.hash, a.cipher_size).await;
-    assert!(none.map(|m| m.iter().all(|p| !*p)).unwrap_or(true));
+    assert!(none.map(|m| m.is_empty()).unwrap_or(true));
 }
 
 #[tokio::test]
@@ -1664,7 +1666,7 @@ async fn a_linked_file_is_served_from_disk_without_a_copy() {
     assert_eq!(fs::read(&done.path).unwrap(), plain);
     assert!(done.failed.is_empty(), "{:?}", done.failed);
     let map = dan.files.piece_map(&dan.endpoint, alice.addr(), linked.hash, linked.cipher_size).await.unwrap();
-    assert!(map.iter().all(|p| *p), "a linked file is all there");
+    assert_eq!(map, vec![(0, dissent_files::pieces_of(linked.cipher_size))], "a linked file is all there");
 
     // A wrong fingerprint is refused, and unlinking stops serving.
     assert!(matches!(

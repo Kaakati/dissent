@@ -181,7 +181,11 @@ impl Files {
         let before = modified(path);
         let (owned, k) = (path.to_path_buf(), key.clone());
         let dir = self.blobs_dir.join("outboards");
-        let (hash, outboard) = tokio::task::spawn_blocking(move || -> Result<(Hash, Vec<u8>)> {
+        // Written as it is made, to a file of its own name until the hash is known: it is 0.4 % of the file, which for a
+        // large file is too much to hold in memory.
+        let pending = dir.join(format!("{:016x}.obao.part", rand::random::<u64>()));
+        let part = pending.clone();
+        let made = tokio::task::spawn_blocking(move || -> Result<Hash> {
             std::fs::create_dir_all(&dir)?;
             let mut reader = CipherReader {
                 file: BufReader::new(File::open(&owned)?),
@@ -193,20 +197,30 @@ impl Files {
                 at: 0,
                 hasher: blake3::Hasher::new(),
             };
-            let mut outboard = Vec::new();
+            let mut outboard = std::io::BufWriter::new(File::create(&part)?);
             let root = outboard_post_order(&mut reader, BaoTree::new(cipher_size, BLOCK_SIZE), &mut outboard)?;
+            std::io::Write::flush(&mut outboard)?;
             if *reader.hasher.finalize().as_bytes() != fingerprint {
                 return Err(FilesError::Changed);
             }
-            Ok((Hash::from(root), outboard))
+            Ok(Hash::from(root))
         })
         .await
-        .map_err(|e| FilesError::Store(format!("blocking task failed: {e}")))??;
-        if modified(path) != before {
-            return Err(FilesError::Changed);
-        }
+        .map_err(|e| FilesError::Store(format!("blocking task failed: {e}")))
+        .and_then(|r| r)
+        .and_then(|hash| if modified(path) != before { Err(FilesError::Changed) } else { Ok(hash) });
+        let hash = match made {
+            Ok(hash) => hash,
+            Err(e) => {
+                let _ = std::fs::remove_file(&pending);
+                return Err(e);
+            }
+        };
         let file_path = self.outboard_path(&hash);
-        tokio::fs::write(&file_path, outboard).await?;
+        if let Err(e) = tokio::fs::rename(&pending, &file_path).await {
+            let _ = std::fs::remove_file(&pending);
+            return Err(e.into());
+        }
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let linked = Linked { path: path.to_path_buf(), key: key.clone(), size, cipher_size, modified: before };
         self.linked.0.write().unwrap_or_else(PoisonError::into_inner).insert(hash, linked);

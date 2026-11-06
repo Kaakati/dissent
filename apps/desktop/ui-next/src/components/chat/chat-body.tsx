@@ -3,7 +3,7 @@
 import type { DragEvent } from 'react';
 import './chat.css';
 import { Paperclip } from 'lucide-react';
-import { MAX_FILE_LABEL } from '@/lib/attachments';
+import { limitLabel, useUploadLimit } from '@/lib/limits';
 import { useChat } from '@/lib/chat';
 import { MessageList } from './message-list';
 import { needsAgeGate } from './chat-notices';
@@ -42,13 +42,14 @@ export function ChatBody() {
 export function ChatOverlay() {
   const dropping = useChat((s) => s.dropping);
   const view = useChatView();
+  const limit = useUploadLimit();
   if (!dropping || !view) return null;
   return (
     <div className="drop-overlay" aria-hidden="true">
       <div className="drop-box">
         <Paperclip aria-hidden="true" />
         <p className="drop-title">{`Drop to send to ${view.dm ? view.title : `#${view.title}`}`}</p>
-        <p className="muted">{`Up to ${MAX_FILE_LABEL}, end-to-end encrypted`}</p>
+        <p className="muted">{`Up to ${limitLabel(limit)}, end-to-end encrypted`}</p>
       </div>
     </div>
   );
