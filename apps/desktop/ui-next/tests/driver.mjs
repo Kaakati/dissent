@@ -6671,6 +6671,58 @@ noConsoleErrors('membermenu', b.consoleErrors);
 await b.close();
 }
 
+// ---- The webview's own menu is off: nothing on empty chrome, the field's own in the composer, Copy on selected text ----
+async function section_nativemenu() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9871 + 102, profile: `${SCRATCH}/nativemenu-profile` });
+const { ev } = b;
+await sleep(1200);
+// Fires a right-click on the element `pick` returns. Resolves to whether the default (the browser menu) was prevented,
+// and the rows of any menu of ours that opened.
+const rightClickOn = async (pick) => {
+  const prevented = await ev(`(() => { const n = ${pick}; const r = n.getBoundingClientRect(); return !n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 4, clientY: r.top + 4 })); })()`);
+  await sleep(300);
+  const menu = await ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+  return { prevented, menu };
+};
+const chrome = await rightClickOn(`[...document.querySelectorAll('span')].find((n) => n.textContent === 'Mock backend')`);
+check('NM1 a right-click on empty chrome opens nothing, and no browser menu', chrome.prevented === true && chrome.menu.length === 0, JSON.stringify(chrome));
+
+await ev(`[...document.querySelectorAll('aside[aria-label="Channels and conversations"] button')].find((n) => n.textContent.includes('Maya')).click()`);
+await until(() => ev(`!!document.querySelector('textarea[aria-label="Message"]') && !!document.querySelector('article.msg')`), 5000);
+const composer = await rightClickOn(`document.querySelector('textarea[aria-label="Message"]')`);
+check('NM2 a right-click in the composer keeps the field\'s own menu', composer.prevented === false && composer.menu.length === 0, JSON.stringify(composer));
+
+// A word of a message, selected as a mouse would.
+const selected = await ev(`(() => {
+  const body = [...document.querySelectorAll('article.msg')].map((a) => a.querySelector('.text, .content, p, [data-message-text]') ?? a).find((n) => (n.textContent ?? '').trim().length > 8);
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node && node.textContent.trim().length < 5) node = walker.nextNode();
+  const range = document.createRange();
+  range.setStart(node, 0);
+  range.setEnd(node, 5);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  window.__picked = node.parentElement;
+  return sel.toString();
+})()`);
+const onText = await rightClickOn('window.__picked');
+check('NM3 a right-click on selected message text shows our Copy', onText.prevented === true && JSON.stringify(onText.menu) === '["Copy"]', JSON.stringify({ selected, ...onText }));
+// The clipboard is recorded rather than written, as the headless browser has no clipboard of its own here.
+await ev(`(() => { window.__copied = []; navigator.clipboard.writeText = async (t) => { window.__copied.push(t); }; })()`);
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Copy').click()`);
+const copied = await until(() => ev(`window.__copied.length ? window.__copied : null`), 3000);
+check('NM4 Copy copies exactly the selection', JSON.stringify(copied) === JSON.stringify([selected]) && (await ev(`document.body.textContent.includes('Copied')`)) === true, JSON.stringify({ copied, selected }));
+await ev(`window.getSelection().removeAllRanges()`);
+const message = await rightClickOn('window.__picked');
+check('NM5 without a selection a message keeps its own menu', message.prevented === true && message.menu.includes('Copy Text'), JSON.stringify(message));
+await b.press('Escape');
+await sleep(250);
+noConsoleErrors('nativemenu', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -6717,6 +6769,7 @@ const SECTIONS = [
   ['disclaimer', section_disclaimer],
   ['privacy', section_privacy],
   ['membermenu', section_membermenu],
+  ['nativemenu', section_nativemenu],
   ['inbox', section_inbox],
   ['consistency', section_consistency],
   ['scrub', section_scrub],

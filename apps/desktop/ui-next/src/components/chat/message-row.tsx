@@ -26,6 +26,7 @@ import { MarkdownBody } from './markdown';
 import { canDelete, openMessageMenu, removeMessage } from './message-menu';
 import { Reactions, pickReaction } from './reactions';
 import { openProfileCard } from '@/components/profile/profile-card';
+import { selectionAt } from '@/lib/native-menu';
 import { IconBtn, highlight, jumpTo, spoilerGuard } from './parts';
 import type { ChatView, ViewItem } from './use-chat-view';
 
@@ -329,6 +330,8 @@ export function MessageRow({
         editing || readOnly
           ? undefined
           : (e) => {
+            // On selected text the Copy menu opens instead (lib/native-menu.ts), so a part of a message can be copied.
+            if (selectionAt(e.target)) return;
             e.preventDefault();
             openMessageMenu(e.clientX, e.clientY, item, view, e.currentTarget);
           }
