@@ -6578,6 +6578,99 @@ noConsoleErrors('activebadge', b.consoleErrors);
 await b.close();
 }
 
+// ---- Member menu: right-click (or Shift+F10, or the Menu key) on a server member offers Profile and the card's actions ----
+async function section_membermenu() {
+const b = await launch({ url: `${BASE}/`, width: 1600, height: 1000, port: 9871 + 100, profile: `${SCRATCH}/membermenu-profile` });
+const { ev } = b;
+await sleep(1200);
+const ROW = (name) => `[...document.querySelectorAll('button[title]')].find((n) => n.title.startsWith(${JSON.stringify(name + '·')}) && !n.closest('[aria-label="Channels and conversations"]'))`;
+const menuLabels = () => ev(`[...document.querySelectorAll('[role="menu"] [role^="menuitem"]')].map((n) => n.textContent.trim())`);
+const cardLabels = () => ev(`[...document.querySelectorAll('[role="dialog"][aria-label="User profile"] button[data-slot="button"]')].map((n) => n.textContent.trim())`);
+const openServer = async (id) => {
+  await ev(`document.querySelector('button[data-server-id="${id}"]').click()`);
+  await until(() => ev(`!!${ROW('Sami')}`), 5000);
+};
+const rightClick = async (name) => {
+  await ev(`(() => { const n = ${ROW(name)}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await until(() => ev(`!!document.querySelector('[role="menu"]')`), 3000);
+  return menuLabels();
+};
+const cardOf = async (name) => {
+  await ev(`(() => { const n = ${ROW(name)}; const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + 20, clientY: r.top + 10 })); })()`);
+  await until(() => ev(`!!document.querySelector('[role="dialog"][aria-label="User profile"] [data-profile-banner]')`), 3000);
+  await sleep(200);
+  const labels = await cardLabels();
+  await b.press('Escape');
+  await sleep(250);
+  return labels;
+};
+const closeMenu = async () => {
+  await b.press('Escape');
+  await sleep(250);
+};
+// The menu is Profile, then exactly the card's actions in the card's order.
+const same = async (name) => {
+  const card = await cardOf(name);
+  const menu = await rightClick(name);
+  await closeMenu();
+  return { ok: menu[0] === 'Profile' && JSON.stringify(menu.slice(1)) === JSON.stringify(card), menu, card };
+};
+
+// Riverside Makers: Sami is a member there, so a member viewer gets no moderation.
+await openServer('c1');
+const self = await same('Sami');
+check('MM1 on yourself the menu is Profile alone, as the card has no actions', self.ok && self.card.length === 0, JSON.stringify(self));
+const peer = await same('Leila');
+check('MM2 as a member, a member\'s menu is Profile and the card\'s Message and Verify', peer.ok && JSON.stringify(peer.card) === JSON.stringify(['Message', 'Verify safety number']), JSON.stringify(peer));
+// Open Source Arabic: Sami owns it, so moderation shows, and must match the card row for row.
+await openServer('c2');
+const owned = await same('Leila');
+check('MM3 as the owner, the menu has the card\'s moderation actions too', owned.ok && ['Ban', 'Grant Moderator', 'Grant Admin'].every((l) => owned.card.includes(l)), JSON.stringify(owned));
+const ownSelf = await same('Sami');
+check('MM4 the owner\'s own row still offers only Profile', ownSelf.ok && ownSelf.card.length === 0, JSON.stringify(ownSelf));
+
+// Keys: Shift+F10 and the Menu key open it on the focused row, and the first row takes the focus.
+const key = async (code, vk, modifiers) => {
+  await ev(`${ROW('Leila')}.focus()`);
+  const base = { key: code, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await b.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base });
+  await b.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  await until(() => ev(`!!document.querySelector('[role="menu"]')`), 3000);
+  await sleep(150);
+  const labels = await menuLabels();
+  const focused = await ev(`document.activeElement?.getAttribute('role')?.startsWith('menuitem') === true`);
+  await closeMenu();
+  return { labels, focused };
+};
+const shiftF10 = await key('F10', 121, 8);
+check('MM5 Shift+F10 on a focused member opens the same menu, focused', JSON.stringify(shiftF10.labels) === JSON.stringify(owned.menu) && shiftF10.focused, JSON.stringify(shiftF10));
+const menuKey = await key('ContextMenu', 93, 0);
+check('MM6 the Menu key on a focused member opens the same menu, focused', JSON.stringify(menuKey.labels) === JSON.stringify(owned.menu) && menuKey.focused, JSON.stringify(menuKey));
+check('MM7 closing the menu gives the focus back to the row', (await ev(`document.activeElement === ${ROW('Leila')}`)) === true);
+
+// Picks: Profile opens the card, Grant Moderator changes the role, Message opens the DM.
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Profile').click()`);
+check('MM8 Profile opens the member\'s card', (await until(() => ev(`document.querySelector('[role="dialog"][aria-label="User profile"]')?.textContent.includes('Leila') === true`), 3000)) === true);
+await b.press('Escape');
+await sleep(250);
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Grant Moderator').click()`);
+const granted = await until(async () => {
+  const labels = await rightClick('Leila');
+  await closeMenu();
+  return labels.includes('Revoke Moderator') ? labels : null;
+}, 4000);
+check('MM9 Grant Moderator from the menu makes the member a moderator', !!granted, JSON.stringify(granted));
+const after = await same('Leila');
+check('MM10 after the change, the menu still matches the card', after.ok && after.card.includes('Revoke Moderator'), JSON.stringify(after));
+await rightClick('Leila');
+await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"]')].find((n) => n.textContent.trim() === 'Message').click()`);
+check('MM11 Message from the menu opens the DM', (await until(() => ev(`!!document.querySelector('main [placeholder="Message @Leila"]')`), 4000)) === true);
+noConsoleErrors('membermenu', b.consoleErrors);
+await b.close();
+}
+
 const SECTIONS = [
   ['core', section_core],
   ['friends', section_friends],
@@ -6623,6 +6716,7 @@ const SECTIONS = [
   ['tooltips', section_tooltips],
   ['disclaimer', section_disclaimer],
   ['privacy', section_privacy],
+  ['membermenu', section_membermenu],
   ['inbox', section_inbox],
   ['consistency', section_consistency],
   ['scrub', section_scrub],

@@ -1,21 +1,20 @@
 // The profile card: a compact card next to a clicked name (a member, a message, a DM), kept inside the window. One card at
 // a time; Escape and a click outside close it, and the focus goes back where it was. Ported from the old UI's views/profile.js.
 // ProfileCardBody is the card's content, shared with the Contacts & privacy preview (preview hides the actions).
-import { type ReactNode, useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { Ban, MessageSquare, Radio, ShieldCheck, ShieldMinus, ShieldPlus, Undo2 } from 'lucide-react';
-import { openSafetyDialog } from '@/components/dialogs/safety-dialog';
+import { Radio } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { HandleStatus } from '@/components/website-handle';
 import { addressOf, shortOf } from '@/lib/address';
-import { moderate } from '@/lib/actions';
 import { themeProps } from '@/lib/profile-theme';
 import { useShell } from '@/lib/store';
-import type { CommunityView, Presence, Role, UserProfileView } from '@/lib/types';
+import type { Presence, Role, UserProfileView } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { bannerBackground } from './banner';
+import { memberActions } from './member-actions';
 import { MutualFriendsToggle } from './mutual-friends';
 import { useUserProfile } from './use-user-profile';
 
@@ -55,85 +54,18 @@ function presenceOfView(view: UserProfileView, fallback?: Presence): Presence | 
   return fallback;
 }
 
-// Moderation is offered inside an open server, to owner, admin and moderator, never on yourself or the owner. These rules
-// mirror dissent-events; the engine enforces them too.
-function moderationButtons(community: CommunityView | null, inServer: boolean, meId: string | undefined, userId: string): ReactNode[] {
-  if (!inServer || !community || !['owner', 'admin', 'moderator'].includes(community.my_role ?? '') || userId === meId) return [];
-  const member = community.members.find((m) => m.root_id === userId);
-  if (!member || member.role === 'owner') return [];
-  const mine = community.my_role;
-  const target = member.role;
-  const canBan = mine === 'owner' || (mine === 'admin' && target !== 'admin') || (mine === 'moderator' && target === 'member');
-  const canModRole = (mine === 'owner' || mine === 'admin') && (target === 'member' || target === 'moderator');
-  const canAdminRole = mine === 'owner';
-
-  const act = (label: string, action: string, icon: ReactNode, danger = false) => (
-    <Button
-      key={action}
-      size="sm"
-      variant={danger ? 'destructive' : 'secondary'}
-      className="flex-1"
-      onClick={async () => {
-        closeProfileCard();
-        await moderate(community.id, action, userId);
-      }}
-    >
-      {icon}
-      {label}
-    </Button>
-  );
-  const out: ReactNode[] = [];
-  if (canBan) out.push(member.banned ? act('Unban', 'unban', <Undo2 />) : act('Ban', 'ban', <Ban />, true));
-  if (canModRole) {
-    out.push(target === 'moderator'
-      ? act('Revoke Moderator', 'revoke_moderator', <ShieldMinus />)
-      : act('Grant Moderator', 'grant_moderator', <ShieldPlus />));
-  }
-  if (canAdminRole) out.push(target === 'admin' ? act('Revoke Admin', 'revoke_admin', <ShieldMinus />) : act('Grant Admin', 'grant_admin', <ShieldPlus />));
-  return out;
-}
-
 // The card's body: banner, avatar, name and tag, the handle in this server, the role, mutual servers, and the actions.
 // `preview` shows the card as others see it, without the actions (Settings > Contacts & privacy).
 export function ProfileCardBody({ view, userId, preview = false }: { view: UserProfileView; userId: string; preview?: boolean }) {
-  const me = useShell((s) => s.me);
-  const inServer = useShell((s) => s.route.kind === 'server');
+  // memberActions reads me, the route and the server from the store; these subscriptions re-render the card on a change.
+  useShell((s) => s.me);
+  useShell((s) => s.route.kind);
   const community = useShell((s) => s.community);
   const member = community?.members.find((m) => m.root_id === userId) ?? null;
-  const isMe = userId === me?.root_id;
   const mutual = view.mutual_communities.length;
   const presence = presenceOfView(view, member?.status);
-  const actions: ReactNode[] = preview || isMe
-    ? []
-    : [
-      <Button
-        key="message"
-        size="sm"
-        className="flex-1"
-        onClick={() => {
-          closeProfileCard();
-          void useShell.getState().openDm(userId, view.display_name);
-        }}
-      >
-        <MessageSquare />
-        Message
-      </Button>,
-      <Button
-        key="verify"
-        size="sm"
-        variant="secondary"
-        className="flex-1"
-        onClick={() => {
-          closeProfileCard();
-          void openSafetyDialog(userId, { name: view.display_name, keyChangedMs: view.key_changed_ms });
-        }}
-      >
-        <ShieldCheck />
-        Verify safety number
-      </Button>,
-      ...(preview ? [] : moderationButtons(community, inServer, me?.root_id, userId)),
-    ];
-
+  // The same actions a member's right-click menu offers (member-actions.ts). Each closes the card first.
+  const actions = preview ? [] : memberActions(userId, view);
   return (
     <>
       <div data-profile-banner className="h-[105px]" style={{ background: bannerBackground(userId, view) }} />
@@ -176,7 +108,25 @@ export function ProfileCardBody({ view, userId, preview = false }: { view: UserP
           {view.mutual_friends?.length ? <span aria-hidden="true">•</span> : null}
           <span>{mutual ? `${mutual} mutual server${mutual === 1 ? '' : 's'}` : 'No mutual servers'}</span>
         </div>
-        {actions.length ? <div className="mt-s-3 flex flex-wrap gap-s-2">{actions}</div> : null}
+        {actions.length ? (
+          <div className="mt-s-3 flex flex-wrap gap-s-2">
+            {actions.map((a) => (
+              <Button
+                key={a.key}
+                size="sm"
+                variant={a.primary ? 'default' : a.danger ? 'destructive' : 'secondary'}
+                className="flex-1"
+                onClick={() => {
+                  closeProfileCard();
+                  a.run();
+                }}
+              >
+                <a.icon />
+                {a.label}
+              </Button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </>
   );

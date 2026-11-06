@@ -1,8 +1,8 @@
 // The right column. It shows the Friends page's Active Now, the server member list, the member list of an open group, the
 // DM profile panel, or nothing; the current UI's call details and lobby come with their batches. Ported from
 // the old UI's views/right.js and the old UI's views/members.js. The shell's grid follows `mode` (see App.tsx and shell.css).
-import type { ReactNode } from 'react';
-import { Radio } from 'lucide-react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
+import { Radio, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { MemberHandle } from '@/components/website-handle';
@@ -20,7 +20,10 @@ import { FriendsAside } from '@/components/friends/friends-page';
 import { CallDetails } from '@/components/call/call-body';
 import { LobbyRoster } from '@/components/call/lobby';
 import { useCallBoard } from '@/components/call/call-mode';
+import { memberActions } from '@/components/profile/member-actions';
 import { openProfileCard } from '@/components/profile/profile-card';
+import { api } from '@/lib/api';
+import { openContextMenu, type MenuEntry } from '@/lib/menu';
 import { useShell } from '@/lib/store';
 import type { CommunityView, GroupSummary, Member, Presence, Role } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -76,7 +79,20 @@ function ServerMembers({ community }: { community: CommunityView }) {
   );
 }
 
-// A click opens the member's profile card next to the row.
+// The member's right-click menu, also opened by Shift+F10 and the Menu key on a focused row: Profile, then the same
+// actions as the profile card. The profile is read first, as the card reads it, so both offer the same rows.
+async function openMemberMenu(e: ReactMouseEvent<HTMLElement>, member: Member) {
+  e.preventDefault();
+  const r = e.currentTarget.getBoundingClientRect();
+  const [x, y] = [e.clientX || r.left + 20, e.clientY || r.bottom];
+  const person = await api.userProfile(member.root_id).catch(() => member);
+  openContextMenu(x, y, [
+    { label: 'Profile', icon: UserRound, onPick: () => openProfileCard(x, y, member.root_id) },
+    ...memberActions(member.root_id, person).map((a): MenuEntry => ({ label: a.label, icon: a.icon, danger: a.danger, onPick: a.run })),
+  ]);
+}
+
+// A click opens the member's profile card next to the row; a right-click opens its menu.
 function MemberRow({ member }: { member: Member }) {
   // A member with no presence yet is shown offline, with the ring, as the reference shows every avatar's state.
   const presence: Presence = member.status ?? (member.online ? 'online' : 'offline');
@@ -84,6 +100,7 @@ function MemberRow({ member }: { member: Member }) {
     <button
       type="button"
       onClick={(e) => openProfileCard(e.clientX, e.clientY, member.root_id)}
+      onContextMenu={(e) => void openMemberMenu(e, member)}
       className="flex h-11 w-full min-w-0 shrink-0 items-center gap-s-3 rounded-lg px-s-2 text-left text-ui font-medium text-text hover:bg-hover"
       title={`${member.display_name}·${addressOf('user', member.root_id)}`}
     >
