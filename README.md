@@ -77,15 +77,18 @@ Everything listed here is in the app today. There is no paid tier.
 
 - Create servers, join them from invite links, and reorder them on the side rail.
 - Text and voice channels, grouped into categories, with slow mode and per-channel settings. Unread markers and a "New messages" line.
+- Voice channels join with one click and open straight into the call, with no text pane.
 - Private channels visible only to chosen members and roles, sealed under the channel's own key.
 - Server profile: name, icon, banner (image or looping GIF), traits and description. Invite links render as cards with the banner, icon, member and online counts.
 - History for new members follows the server's setting: only messages after they joined, or the full history.
+- A right-click menu on any member (also Shift+F10 or the Menu key) opens their profile and the same actions as their profile card, under the same permission rules.
 - Earned boost levels: a server's level rises with the number of members who host a working relay for it, verified by each member's own app. Levels raise call quality ceilings; nothing is ever locked or sold. See [`docs/design/12-boosts.md`](docs/design/12-boosts.md).
 
 ### Messages
 
 - Markdown formatting, code blocks with syntax highlighting, spoilers, mentions (including `@everyone` for owners and admins), replies, reactions, edits, pins, forwarding and message links.
 - Link previews fetched by the sender, so readers never contact the website.
+- External links open in your default browser only after a confirmation that shows the full address, with its host in bold and a stronger warning when a link's text names another site. Only `http`, `https` and `mailto` links are opened.
 - Saved messages, reminders, full scroll-back history and per-server notification levels.
 
 ### Direct and group messages
@@ -98,13 +101,19 @@ Everything listed here is in the app today. There is no paid tier.
 ### Voice, video and screen share
 
 - Voice calls one to one, in groups and in voice channels: noise suppression, echo cancellation, automatic gain, push-to-talk and a mic test.
+- Who can call you: everyone, friends only or no one (Settings › Contacts & privacy). A refused call doesn't ring; the conversation shows a quiet missed call.
+- Mute, deafen, camera, screen share and leave respond on the first click, without waiting for every peer to hear of the change.
 - Camera video and screen sharing, including the shared screen's audio. Video uses AV1 when every participant can decode it and H.264 otherwise.
 - Small calls connect everyone directly. Larger calls elect a member to forward everyone's encrypted streams, with a backup if it drops, and an owner can let the server's seeder forward calls.
+- Video quality climbs back after a dip in a viewer's or sharer's connection, and after a CPU spike ends.
+- Calls heal themselves: a link that dies mid-call is dialled again, a device left without working links rejoins the room its peers are in, and a voice-channel join that went unanswered is retried.
 - Media is end-to-end encrypted with SFrame under keys from the server's MLS group. Forwarders cannot decrypt what they pass along.
 
 ### File sharing and the tracker
 
-- Encrypted attachments of up to 10 GB, downloaded from several members at once and resumed after a restart.
+- Encrypted attachments, downloaded from several members at once and resumed after a restart.
+- File size limits: your own upload and download limits (Settings › Downloads) and a per-server limit (Server Settings › Files), each from 1 MB to 1 TB, 10 GB by default. A file over a limit isn't sent or fetched, and the app asks before a download past your own limit. Members on versions before v0.1.37 don't receive files over 10 GB.
+- Large transfers are built to last: a download may take up to 30 days, with stall timeouts catching a dead link.
 - An optional "Remove details" switch strips location, time and device metadata from photos and videos before sending.
 - File data is served only to the people who can read the message it belongs to.
 - **Files area (tracker):** each server can keep a catalog of files that members list in categories, with tags, filters and search. Downloads come from every member who holds a file, members seed files back under their own limits, and a category can be linked to a folder on the lister's computer. Reputation comes from signed receipts for what members deliver. See [`docs/design/14-file-tracker.md`](docs/design/14-file-tracker.md).
@@ -121,7 +130,11 @@ Everything listed here is in the app today. There is no paid tier.
 - Server messages, reactions and private channels sealed with MLS; control events (membership, roles, handles) sealed under the server's secret, and optionally under the MLS group with member-only mode.
 - Post-quantum hybrid key exchange (X25519 + ML-KEM-768) for connections and for server encryption.
 - Your identity, messages and other profile data are sealed on disk under a key held in the OS credential store.
-- Hide my IP address: route everything through a relay so the people you talk to never see your IP.
+- Hide my IP address (Settings › Network), in two strengths:
+  - **Hide behind relays:** the app binds no IP socket and every connection goes through a relay, so the people you talk to only ever see the relay's address. Everything that would show your IP to strangers is off too: the Mainline DHT, local network discovery, number0's DNS lookup, router port mapping (UPnP, PCP, NAT-PMP), link previews and automatic update checks. Every web request and host name lookup the app makes goes through one policy that follows this setting.
+  - **Hide through Tor:** everything also goes through a Tor you run yourself (the Tor service, or Tor Browser while it's open), so relays see a Tor exit rather than you. It fails closed: if Tor stops, Dissent goes offline instead of connecting directly. It is slow; voice may lag and video isn't practical. Dissent doesn't bundle Tor yet.
+- Inbound connection limits, and a connection gate that refuses banned and revoked devices on every protocol (see [Security model](#security-model)).
+- The webview's own right-click menu (Back, Reload, Print, Inspect) is disabled outside text fields, and the window never navigates away or opens windows by itself.
 - Invisible mode, notification previews that hide message text by default, and opt-in public DNS lookups for website-verified handles.
 - Signed in-app updates.
 
@@ -135,6 +148,7 @@ The full analysis is in [`docs/design/06-threat-model.md`](docs/design/06-threat
 | Integrity | Every event, address record and device certificate is Ed25519-signed with a domain-separated context and verified on receipt. Permissions are re-derived by every member from the signed history. |
 | Server messages | MLS (RFC 9420) with the hybrid post-quantum ciphersuite from `draft-ietf-mls-pq-ciphersuites`. There is no plaintext fallback. Commits are checked against the history, so a malicious member cannot add an outsider. |
 | Calls | SFrame (RFC 9605) with keys exported from MLS, plus per-sender signed digests so a call member cannot impersonate another for more than about half a second. |
+| Inbound connections | A request is read only as it arrives, and every exchange has a deadline. At most 64 requests are served at once (8 per device), and the slowest sender gives up its slot first. After the handshake, one gate on every protocol closes devices a server revoked or whose user is banned; strangers share at most 256 connections and any device holds at most 32, so members never wait on strangers. |
 | Data at rest | Identity, MLS state, messages and the rest of the profile sealed with XChaCha20-Poly1305 under a data key held in the OS credential store (passphrase fallback on headless machines). |
 
 Out of scope: someone with access to your unlocked computer, malware running as you, and a compromised root key.
@@ -144,11 +158,12 @@ Out of scope: someone with access to your unlocked computer, malware running as 
 These are taken from the threat model and design notes. They are the honest current state, not a complete list.
 
 - **No security audit has been done.**
-- **Group splits are not yet detected or recovered.** If two members change a server's encryption group at the same moment, the group can split into two branches; messages sealed on one branch show as locked on the other. Detection and recovery are designed ([`05-encrypted-servers.md`](docs/design/05-encrypted-servers.md#forks-proposal-not-built)) but not built.
+- **Group splits are detected but not yet recovered.** If two members change a server's encryption group at the same moment, the group can split into two branches; messages sealed on one branch show as locked on the other. Devices now detect a split and log it. Recovery is designed ([`05-encrypted-servers.md`](docs/design/05-encrypted-servers.md#forks-proposal-not-built)) but not built.
 - **Members see metadata.** Everyone in a server sees its member list, roles, handles, who is online and who is typing in channels they can read, and the author, time and channel of messages. A forwarder in a large call sees who is speaking. Anyone holding an invite link can see the same without appearing in the member list.
 - **Structure is visible to whoever holds the history.** Event ids, authors, timing and payload sizes stay in clear; seeders and other storage members can read control events made before member-only mode is turned on.
 - **Leavers keep some access for a while.** A member who leaves or is banned can't read new messages once their devices are removed from the group, but keeps the server secret until it is rotated; rotation on leave needs every remaining device on a recent version. See [Leaving and the secret](docs/design/05-encrypted-servers.md#leaving-and-the-secret).
-- **People you connect to directly see your IP address**, and long invite and contact links carry your public address. Hide my IP address avoids this at the cost of speed; the relay then sees your IP.
+- **People you connect to directly see your IP address**, and long invite and contact links carry your public address. Hide my IP address avoids this at the cost of speed. Behind relays, every relay you use sees your IP and which devices you exchange traffic with, when and how much. Through Tor, Tor's entry guard sees your IP, and relays still see that traffic metadata. While hidden, short invite and address links don't open (full links do), since they need the DHT.
+- **Connection limits have edges.** Each handshake still costs some CPU, fresh device ids cost an attacker nothing, and a crowd of strangers that fills their shared pool delays real joiners and invite previews until it thins. A connection already open when its device is banned isn't closed by the gate.
 - **The MLS ciphersuite is an IETF draft** and its wire format may change before it becomes an RFC.
 - **History needs someone online.** You can only catch up when another member, or a seeder, is reachable.
 - **Real-world testing is limited.** Most testing has been on one machine and between a few copies over the internet; measurements across many networks and mobile carriers are still to come.
@@ -191,11 +206,20 @@ Dissent works with no servers at all. These optional programs make it better, an
 | Tool | What it does | Guide |
 |---|---|---|
 | `dissent-seeder` | An always-on member that keeps a server's encrypted history and files available while everyone else is offline. It holds no keys and cannot read anything. | [`apps/seeder/README.md`](apps/seeder/README.md) |
-| `dissent-relay` | Passes encrypted traffic between devices that can't connect directly. With `--join <invite>` it hosts a relay for one of your servers and counts toward its boost level. | [`apps/relay/README.md`](apps/relay/README.md) |
+| `dissent-relay` | Passes encrypted traffic between devices that can't connect directly, and tells clients their public address so they can connect directly instead. With `--join <invite>` it hosts a relay for one of your servers and counts toward its boost level. | [`apps/relay/README.md`](apps/relay/README.md) |
 | `dissent-probe` | Measures whether two devices on different networks connect directly or through a relay, and how fast. | [`apps/probe/README.md`](apps/probe/README.md) |
 | `dissent-push-relay` | Prototype content-blind relay for waking phones with an empty push notification. | [`apps/push-relay/README.md`](apps/push-relay/README.md) |
 
 To run the seeder or relay as a service with systemd, launchd or a Windows service, see [`packaging/README.md`](packaging/README.md).
+
+### Notes for relay operators
+
+- **Ports:** TCP 443 (relay traffic over HTTPS, and the Let's Encrypt certificate), TCP 3340 (optional captive-portal probe) and **UDP 7842** for QUIC address discovery, which tells clients the public address their packets come from so they can connect directly. Without UDP 7842 the relay still carries traffic, but its clients are less likely to connect directly. Turn it off with `--no-qad`, or move it with `--qad-bind`.
+- **Default caps:** every relay, open or members-only, allows at most 16 connections (`--max-connections`) and 2 MiB/s in total (`--bandwidth`), shared equally. Raise both if you run an open relay for many people.
+- **Members only:** `--join <invite>` (repeatable, or comma-separated; needs `--data-dir`) carries traffic only for the members of those servers. Without it, the relay is open to any device that has its URL.
+- **Metrics:** `--metrics-bind 127.0.0.1:9090` serves Prometheus metrics. Keep that address private.
+
+The full flag list is in [`apps/relay/README.md`](apps/relay/README.md).
 
 ## Build from source
 
@@ -288,7 +312,7 @@ Design documents:
 
 Dissent is early-stage and changes quickly: every change merged to `main` that passes the test suite ships as a new patch release. It is usable day to day between people who run it, but expect rough edges, on-disk and wire formats that are still evolving (older versions are kept able to read newer data where possible), and features that older clients don't show until they update.
 
-Planned next, roughly in order: retiring old clients so every server gets secret rotation on leave, closing the remaining privacy gaps in the threat model, measuring direct connections across real home and mobile networks, mobile push and a mobile app, and an independent security review.
+Planned next, roughly in order: Tor built into the app, so Hide through Tor no longer needs a separate Tor install (in progress); recovering split encryption groups; retiring old clients so every server gets secret rotation on leave; closing the remaining privacy gaps in the threat model; measuring direct connections across real home and mobile networks; mobile push and a mobile app; and an independent security review.
 
 ## Contributing
 
