@@ -13,6 +13,13 @@ pub fn force_tier_move(engine: &crate::Engine, forwarded: bool, reach: usize) ->
     engine.force_tier_move_now(forwarded, reach)
 }
 
+/// While `Some`, `engine` takes call offers only from that device, as a joiner whose other peers have not offered yet.
+/// `None` takes them from anyone again.
+#[cfg(feature = "test-hooks")]
+pub fn offers_only_from(engine: &crate::Engine, device: Option<dissent_identity::DeviceId>) {
+    engine.offers_only_from_now(device);
+}
+
 /// Makes `engine` refuse every tier announcement, as a device that sees another roster does.
 #[cfg(feature = "test-hooks")]
 pub fn refuse_tier_moves(engine: &crate::Engine, on: bool) {

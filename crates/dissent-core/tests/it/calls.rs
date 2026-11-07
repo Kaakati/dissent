@@ -1749,6 +1749,39 @@ async fn a_boosted_mesh_holds_on_measured_upload() {
     }).await;
 }
 
+/// A joiner whose first link is up while the others' offers have not come counts no measure of its upload until it
+/// has a ripe link to every other device. Before, it announced that one link's worth, about 33 kbps, and every peer's
+/// limit fell below a boosted mesh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 12)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_joiner_with_one_link_up_announces_no_measure_of_one_link() {
+    heavy(7, async {
+    let (everyone, community, channel) = boosted_call(7, 2, 0).await;
+    let (joiner, first) = (&everyone[6], &everyone[0]);
+    for p in &everyone {
+        p.engine.set_capacity_override(None);
+    }
+    // The joiner takes only the first device's offer for now.
+    dissent_core::test_support::offers_only_from(&joiner.engine, Some(first.identity.device_id()));
+    for p in &everyone {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    let held = std::time::Instant::now();
+    while held.elapsed() < Duration::from_secs(12) {
+        let announced = dissent_core::test_support::own_call_capacity(&joiner.engine);
+        assert!(announced.is_none_or(|k| k >= 6 * 32), "the joiner announced {announced:?} kbps with one link up");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    dissent_core::test_support::offers_only_from(&joiner.engine, None);
+    all_see(&everyone, Topology::Mesh, "a boosted mesh of seven once every link is up").await;
+    eventually_within(Duration::from_secs(60), "the joiner's upload is measured over every link", || {
+        dissent_core::test_support::own_call_capacity(&joiner.engine).filter(|k| *k >= 6 * 32)
+    })
+    .await;
+    finish(everyone).await;
+    }).await;
+}
+
 /// A forwarded call of seven with video layers, every device at level 0. The devices at `released`
 /// act as released builds: no `Features` and no layer messages, one video stream. They announce
 /// less upload, so a device that knows layers is elected to forward. Returns the peers and the
