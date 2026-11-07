@@ -25,6 +25,10 @@ ext=""
 [[ "$target" == *windows* ]] && ext=".exe"
 # Outside this repo by default, away from its target folder.
 work="${ARTI_WORK:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dissent-arti}"
+# On a Windows runner RUNNER_TEMP is D:\a\_temp. tar reads "D:" as a remote host, so use the /d/a/_temp spelling.
+if command -v cygpath >/dev/null; then
+  work=$(cygpath -u "$work")
+fi
 out="$PWD/apps/desktop/src-tauri/binaries"
 src="$work/arti-$ARTI_VERSION"
 mkdir -p "$work" "$out"
@@ -34,7 +38,8 @@ if [[ ! -f "$crate" ]]; then
   curl -sSfL --retry 3 -o "$crate.part" "https://static.crates.io/crates/arti/arti-$ARTI_VERSION.crate"
   mv "$crate.part" "$crate"
 fi
-got=$( (sha256sum "$crate" 2>/dev/null || shasum -a 256 "$crate") | cut -d' ' -f1)
+# From stdin, so no file name is printed: GNU sha256sum escapes a line whose name has a backslash with a leading "\".
+got=$( (sha256sum < "$crate" 2>/dev/null || shasum -a 256 < "$crate") | cut -d' ' -f1)
 if [[ "$got" != "$ARTI_SHA256" ]]; then
   echo "arti-$ARTI_VERSION.crate has sha256 $got, expected $ARTI_SHA256" >&2
   exit 1
