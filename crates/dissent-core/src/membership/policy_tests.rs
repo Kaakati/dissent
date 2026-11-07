@@ -284,7 +284,8 @@ mod banned_add {
                 let took = node.engine.apply_commit(id, &removal);
                 assert!(took.is_ok() || past(node, after_removal), "and the removal after it: {took:?}, epoch {:?}", node.engine.mls_epoch(id));
             }
-            assert!(one_group(&[&alice, &bob, &carol], id, &dave), "one group, with dave out");
+            // A device past a commit by its own catch-up may still be taking the next one: the group is waited for.
+            eventually("one group, with dave out", || one_group(&[&alice, &bob, &carol], id, &dave)).await;
             carol.engine.send_message(id, channel, "after the add".into()).await.expect("carol sends");
             eventually("alice reads it", || readable(&alice.engine, id, channel, "after the add")).await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;

@@ -102,19 +102,28 @@ async fn two_members_committing_at_one_epoch_is_reported_by_everyone() {
         for node in [&alice, bob, carol] {
             eventually("the fork is reported", || forked_at(node, id) == Some(epoch)).await;
         }
-        let other_side = |n: &Node| crate::test_support::fork_state(&n.engine, id).expect("forked").1;
-        assert!(other_side(&alice).contains(&carol.identity.device_id()), "alice names carol");
-        assert!(other_side(carol).contains(&alice.identity.device_id()), "carol names alice");
+        // A device reports the fork once it hears of the other commit, and names who is on the other branch as their
+        // checks reach it, which can be a moment later: each name is waited for.
+        let other_side = |n: &Node| crate::test_support::fork_state(&n.engine, id).map(|(_, names)| names).unwrap_or_default();
+        let (alice_dev, carol_dev) = (alice.identity.device_id(), carol.identity.device_id());
+        eventually("alice names carol", || other_side(&alice).contains(&carol_dev)).await;
+        eventually("carol names alice", || other_side(carol).contains(&alice_dev)).await;
         // bob took one of the two removals. He names the device of the other.
+        eventually("bob names the other branch", || {
+            let names = other_side(bob);
+            names.contains(&alice_dev) || names.contains(&carol_dev)
+        })
+        .await;
         let bob_names = other_side(bob);
-        assert!(bob_names.contains(&alice.identity.device_id()) || bob_names.contains(&carol.identity.device_id()));
-        let view = alice.engine.community_view(id).expect("view").mls_fork.expect("the view shows the fork");
+        let carol_root = carol.root().to_string();
+        let shown = || alice.engine.community_view(id).ok().and_then(|v| v.mls_fork);
+        eventually("alice's view names carol", || shown().is_some_and(|f| f.roots.contains(&carol_root))).await;
+        let view = shown().expect("the view shows the fork");
         assert_eq!(view.epoch, epoch);
         // alice's view names the people heard on the other branch: carol, and bob as well when the removal he took was
         // carol's (he then names alice), once alice has heard him there. Nobody else.
-        let bob_with_carol = bob_names.contains(&alice.identity.device_id());
-        let (carol_root, bob_root) = (carol.root().to_string(), bob.root().to_string());
-        assert!(view.roots.contains(&carol_root), "alice's view names carol: {:?}", view.roots);
+        let bob_with_carol = bob_names.contains(&alice_dev);
+        let bob_root = bob.root().to_string();
         assert!(
             view.roots.iter().all(|r| *r == carol_root || (bob_with_carol && *r == bob_root)),
             "alice's view names only the other branch: {:?}, bob names {bob_names:?}",
