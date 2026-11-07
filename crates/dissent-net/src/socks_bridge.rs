@@ -12,12 +12,18 @@
 //! Their user name is the purpose (relay, previews, updates). The bridge passes it on to Tor as the SOCKS user name,
 //! and Tor (`IsolateSOCKSAuth`, on by default) gives each a circuit of its own, so one exit cannot tie this device's
 //! relay traffic to the sites it previews or to its update checks.
+//!
+//! The SOCKS proxy is either fixed (the Tor this person runs, `SocksBridge::spawn`) or followed as it moves
+//! (`SocksBridge::follow`): the Tor built into the app gets a new port each time it starts, and while it is down there
+//! is no port at all. The bridge keeps its own address and secret throughout, so nothing that holds its URL has to
+//! change, and a tunnel asked for while Tor is down gets a 502 like any other that Tor can't open.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use url::Url;
 
@@ -35,7 +41,7 @@ const SOCKS_PASSWORD: &str = "dissent";
 pub struct SocksBridge {
     addr: SocketAddr,
     secret: String,
-    socks: SocketAddr,
+    socks: watch::Receiver<Option<SocketAddr>>,
     task: JoinHandle<()>,
 }
 
@@ -47,15 +53,25 @@ impl SocksBridge {
             // device's IP, so only one on this machine is used.
             return Err(NetError::Config("the Tor SOCKS proxy must be on this machine (127.0.0.1)".into()));
         }
+        // A fixed proxy never moves, so the sender may go: the receiver keeps its last value.
+        let (_, socks) = watch::channel(Some(socks));
+        SocksBridge::follow(socks).await
+    }
+
+    /// Like `spawn`, for a SOCKS proxy that moves: each tunnel goes through the address `socks` holds when it is asked
+    /// for, and is refused while it holds `None`. An address off this machine is refused like `None`.
+    pub async fn follow(socks: watch::Receiver<Option<SocketAddr>>) -> Result<SocksBridge> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .map_err(|e| NetError::Config(format!("the Tor bridge could not listen: {e}")))?;
         let addr = listener.local_addr().map_err(|e| NetError::Config(e.to_string()))?;
         let secret = data_encoding::HEXLOWER.encode(&rand::random::<[u8; 16]>());
         let expected = secret.clone();
+        let upstream = socks.clone();
         let task = tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let expected = expected.clone();
+                let socks = *upstream.borrow();
                 tokio::spawn(async move {
                     if let Err(e) = serve(client, socks, &expected).await {
                         tracing::debug!(error = %e, "Tor bridge tunnel ended");
@@ -75,9 +91,9 @@ impl SocksBridge {
         url
     }
 
-    /// The SOCKS proxy it carries tunnels through.
-    pub fn socks(&self) -> SocketAddr {
-        self.socks
+    /// The SOCKS proxy it carries tunnels through now. `None` while a followed proxy is down.
+    pub fn socks(&self) -> Option<SocketAddr> {
+        *self.socks.borrow()
     }
 }
 
@@ -97,7 +113,7 @@ pub async fn reachable(socks: SocketAddr, host: &str, port: u16, wait: Duration)
     }
 }
 
-async fn serve(mut client: TcpStream, socks: SocketAddr, secret: &str) -> std::result::Result<(), String> {
+async fn serve(mut client: TcpStream, socks: Option<SocketAddr>, secret: &str) -> std::result::Result<(), String> {
     let head = read_head(&mut client).await?;
     let Some(purpose) = authorized(&head, secret) else {
         let _ = client
@@ -108,6 +124,10 @@ async fn serve(mut client: TcpStream, socks: SocketAddr, secret: &str) -> std::r
     let Some((host, port)) = connect_target(&head) else {
         let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n").await;
         return Err("not a CONNECT request".into());
+    };
+    let Some(socks) = socks.filter(|s| s.ip().is_loopback()) else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await;
+        return Err("Tor is not running".into());
     };
     let mut upstream = match tokio::time::timeout(OPEN_WAIT, socks5_connect(socks, &host, port, &purpose)).await {
         Ok(Ok(stream)) => stream,
@@ -370,6 +390,34 @@ mod tests {
         let _ = client.read_to_end(&mut answer).await;
         assert!(answer.starts_with(b"HTTP/1.1 502"), "{}", String::from_utf8_lossy(&answer));
         assert!(reachable(free, "relay.example.org", 443, Duration::from_secs(5)).await.is_err());
+    }
+
+    /// The first 12 bytes of the bridge's answer to a relay tunnel: its status line up to the code.
+    async fn ask(bridge: &SocksBridge) -> String {
+        let mut client = TcpStream::connect(bridge_addr(bridge)).await.unwrap();
+        client.write_all(&connect_request(bridge, "relay", "relay.example.org:443")).await.unwrap();
+        let mut answer = [0u8; 12];
+        client.read_exact(&mut answer).await.unwrap();
+        String::from_utf8_lossy(&answer).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_followed_proxy_is_used_where_it_is_now_and_refused_while_it_is_down() {
+        let echo = echo_server().await;
+        let (socks, asked) = fake_socks(echo).await;
+        let (moves, follow) = watch::channel(None);
+        let bridge = SocksBridge::follow(follow).await.unwrap();
+        let url = bridge.url("relay");
+        assert_eq!(ask(&bridge).await, "HTTP/1.1 502", "Tor not started yet");
+        moves.send_replace(Some(socks));
+        assert_eq!(bridge.socks(), Some(socks));
+        assert_eq!(ask(&bridge).await, "HTTP/1.1 200", "Tor up on its new port");
+        moves.send_replace(None);
+        assert_eq!(ask(&bridge).await, "HTTP/1.1 502", "Tor stopped again");
+        moves.send_replace(Some("192.0.2.1:9050".parse().unwrap()));
+        assert_eq!(ask(&bridge).await, "HTTP/1.1 502", "an address off this machine is never used");
+        assert_eq!(asked.lock().unwrap().len(), 1, "Tor was reached only while it was up");
+        assert_eq!(bridge.url("relay"), url, "the bridge kept its address and secret throughout");
     }
 
     #[tokio::test]

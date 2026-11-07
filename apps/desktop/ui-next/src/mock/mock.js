@@ -292,7 +292,7 @@ if (!window.__TAURI__) {
     ],
   };
 
-  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true, hide_ip: false, tor: false, tor_socks: '127.0.0.1:9050' };
+  let mockNetwork = { use_public_relays: true, relays: [], lan_discovery: false, pinned: [], disabled: [], use_community_relays: true, use_n0_lookup: true, hide_ip: false, tor: false, tor_builtin: true, tor_socks: '127.0.0.1:9050' };
   // Relays the mock node measures. Public relays are always there; a community's relay is listed once it is named.
   const mockRelayLatency = new Map([
     ['https://use1-1.relay.n0.iroh.link./', 38],
@@ -1842,12 +1842,19 @@ if (!window.__TAURI__) {
       return shellView();
     },
     get_network_settings: () => ({ ...mockNetwork, relays: [...mockNetwork.relays] }),
-    // How this device hides its IP. In Tor mode Tor answers unless a test sets window.__mockTorDown.
+    // How this device hides its IP. In Tor mode Tor answers unless a test sets window.__mockTorDown, or, for the
+    // built-in Tor, window.__mockTorObsolete (the Tor network no longer accepts its version).
     privacy_status: () => {
       const mode = !mockNetwork.hide_ip ? 'off' : mockNetwork.tor ? 'tor' : 'relays';
-      if (mode !== 'tor') return { mode, tor_socks: null, tor_ok: null, tor_error: null };
+      if (mode !== 'tor') return { mode, tor_builtin: null, tor_socks: null, tor_ok: null, tor_error: null, tor_obsolete: false };
+      if (mockNetwork.tor_builtin) {
+        const obsolete = Boolean(window.__mockTorObsolete);
+        const down = obsolete || Boolean(window.__mockTorDown);
+        const error = obsolete ? 'Tor stopped: update Dissent. The Tor network no longer accepts this version.' : 'The built-in Tor is starting.';
+        return { mode, tor_builtin: true, tor_socks: null, tor_ok: !down, tor_error: down ? error : null, tor_obsolete: obsolete };
+      }
       const down = Boolean(window.__mockTorDown);
-      return { mode, tor_socks: mockNetwork.tor_socks, tor_ok: !down, tor_error: down ? `Tor is not running at ${mockNetwork.tor_socks}` : null };
+      return { mode, tor_builtin: false, tor_socks: mockNetwork.tor_socks, tor_ok: !down, tor_error: down ? `Tor is not running at ${mockNetwork.tor_socks}` : null, tor_obsolete: false };
     },
     // Updates are checked on their own unless the IP is hidden behind relays alone.
     update_policy: () => {
@@ -1875,6 +1882,7 @@ if (!window.__TAURI__) {
         // Tor hides the IP from peers too, as the desktop's check does.
         hide_ip: Boolean(settings.hide_ip) || Boolean(settings.tor),
         tor: Boolean(settings.tor),
+        tor_builtin: settings.tor_builtin ?? !settings.tor,
         tor_socks: (settings.tor_socks || '127.0.0.1:9050').trim(),
       };
       return { ...mockNetwork, relays: [...mockNetwork.relays], pinned: [...pinned], disabled: [...disabled] };

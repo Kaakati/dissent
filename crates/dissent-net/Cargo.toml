@@ -14,7 +14,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 postcard.workspace = true
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net", "io-util", "process"] }
 tracing.workspace = true
 iroh = { workspace = true, features = ["tls-aws-lc-rs"] }
 noq-proto.workspace = true
@@ -27,6 +27,11 @@ url = { workspace = true, features = ["serde"] }
 data-encoding.workspace = true
 blake3.workspace = true
 rand.workspace = true
+# Reads the port file the built-in Tor (arti) writes, a format of arti's.
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 dissent-net = { path = ".", features = ["test-hooks"] }
@@ -34,3 +39,8 @@ dissent-files.workspace = true
 tracing-subscriber.workspace = true
 iroh-relay = { workspace = true, features = ["test-utils"] }
 rcgen.workspace = true
+
+# Its main is also the fake arti the supervisor runs.
+[[test]]
+name = "tor_sidecar"
+harness = false

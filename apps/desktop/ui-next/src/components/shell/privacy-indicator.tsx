@@ -40,6 +40,7 @@ export function usePrivacyStatus(poll = true): PrivacyStatus | null {
 
 function describe(status: PrivacyStatus): { label: string; alert: boolean } {
   if (status.mode === 'relays') return { label: 'Your IP address is hidden behind relays.', alert: false };
+  if (status.tor_obsolete) return { label: 'Tor stopped: update Dissent. Until then Dissent is offline. Nothing is sent directly.', alert: true };
   if (status.tor_ok === false) return { label: 'Can’t reach Tor, so Dissent is offline. Nothing is sent directly.', alert: true };
   if (status.tor_ok) return { label: 'Your IP address is hidden through Tor.', alert: false };
   return { label: 'Connecting to Tor…', alert: false };

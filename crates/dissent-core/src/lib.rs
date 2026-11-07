@@ -97,7 +97,7 @@ mod world;
 pub use dissent_discovery::DhtStats;
 pub use dissent_events::{ChannelId, EventId};
 pub use dissent_identity::{CommunityId, DeviceId, Identity, RootId};
-pub use dissent_net::{merge_relays, socks_bridge, Egress, NodeConfig, SocksBridge, RelayChoice, RelayEntry, RelayReport, RelaySource, MAX_RELAY_LIST};
+pub use dissent_net::{merge_relays, socks_bridge, tor_sidecar, Egress, NodeConfig, SocksBridge, SidecarState, TorSidecar, RelayChoice, RelayEntry, RelayReport, RelaySource, MAX_RELAY_LIST};
 pub use call_privacy::CallPolicy;
 pub use contacts::{ContactEntry, ContactRequestView, ContactsView, DmPolicy, MAX_NOTE_CHARS};
 pub use calls::{

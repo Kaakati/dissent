@@ -593,7 +593,7 @@ pub async fn open_profile(app: &AppHandle, data_dir: PathBuf, vault: Vault, iden
     let settings = network::load(&data_dir);
     let voice = voice::Voice::new(data_dir.clone());
     // In Tor mode the bridge must run before the engine starts: it is the engine's only way out.
-    let tor_proxy = crate::tor::proxy_for(app, &settings).await?;
+    let tor_proxy = crate::tor::proxy_for(app, &settings, &profile).await?;
     let (engine, rx) = Engine::start_with_options(
         identity.clone(),
         profile,

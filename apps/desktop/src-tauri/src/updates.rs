@@ -170,8 +170,9 @@ pub async fn install_update(app: AppHandle, state: tauri::State<'_, AppState>) -
 
     let progress = app.clone();
     let mut downloaded: u64 = 0;
-    update
-        .download_and_install(
+    // Downloaded through Tor in Tor mode, so the built-in Tor runs until then.
+    let bytes = update
+        .download(
             |chunk, total| {
                 downloaded += chunk as u64;
                 let _ = progress.emit(EVENT_PROGRESS, Progress { downloaded, total });
@@ -180,6 +181,9 @@ pub async fn install_update(app: AppHandle, state: tauri::State<'_, AppState>) -
         )
         .await
         .map_err(|e| e.to_string())?;
+    // The installer replaces the built-in Tor's program, which Windows does not let it do while it runs.
+    crate::tor::stop(&app).await;
+    update.install(bytes).map_err(|e| e.to_string())?;
 
     let engine = state.engine.write().await.take();
     if let Some(engine) = engine {

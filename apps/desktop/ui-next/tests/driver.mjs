@@ -6547,17 +6547,44 @@ check('H3 confirming hides it behind relays and saves it', (await chosen()) === 
 const statusLine = await ev(`document.querySelector('[data-hide-ip-status]')?.textContent ?? ''`);
 check('H4 the status names the relay and who can see the IP', statusLine.startsWith('Connected through relay https://') && statusLine.includes('the relay can'), statusLine);
 
-// Through Tor: the prompt says Tor must run and that nothing goes out directly without it; the header shows a shield.
+// Through Tor: the prompt says which Tor and that nothing goes out directly without it; the header shows a shield.
 await pick('tor');
 await sleep(400);
 const torAsk = await prompt();
-check('H6 hiding through Tor asks first, and says it goes offline without Tor', torAsk.includes('Tor must be running') && torAsk.includes('offline instead of connecting directly'), torAsk.slice(0, 200));
+check('H6 hiding through Tor asks first, and says it goes offline without Tor', torAsk.includes('built-in Tor') && torAsk.includes('offline instead of connecting directly'), torAsk.slice(0, 200));
 await answer('Hide through Tor');
 await sleep(1200);
 check('H6 confirming hides it through Tor and saves it', (await chosen()) === 'tor', await chosen());
-check('H6 the Tor SOCKS port is shown, 127.0.0.1:9050 by default', (await ev(`document.querySelector('[data-settings-page] input[aria-label="Tor SOCKS port"]')?.value ?? ''`)) === '127.0.0.1:9050');
+const whichTor = () => ev(`document.querySelector('[data-settings-page] input[name="which-tor"]:checked')?.value ?? null`);
+const socksInput = () => ev(`document.querySelector('[data-settings-page] input[aria-label="Tor SOCKS port"]')?.value ?? null`);
+check('H6 the Tor built into Dissent is the default, and asks for no SOCKS port', (await whichTor()) === 'builtin' && (await socksInput()) === null, `${await whichTor()} ${await socksInput()}`);
 await until(() => ev(`(document.querySelector('[data-hide-ip-status]')?.textContent ?? '').startsWith('Connected through Tor')`), 4000);
 check('H7 the status says Tor is connected and the relay sees a Tor exit', (await ev(`document.querySelector('[data-hide-ip-status]')?.textContent ?? ''`)).includes('sees a Tor exit'));
+
+// Its own Tor instead: asks first, then the SOCKS port shows, 127.0.0.1:9050 by default.
+await ev(`document.querySelector('[data-settings-page] input[name="which-tor"][value="own"]').click()`);
+await sleep(400);
+const ownAsk = await prompt();
+check('H9 using its own Tor asks first, and says it must run at its port', ownAsk.includes('Tor must be running on this computer at 127.0.0.1:9050'), ownAsk.slice(0, 200));
+await answer('Hide through Tor');
+await sleep(1200);
+check('H9 confirming saves its own Tor, and the SOCKS port is shown', (await whichTor()) === 'own' && (await socksInput()) === '127.0.0.1:9050', `${await whichTor()} ${await socksInput()}`);
+await ev(`document.querySelector('[data-settings-page] input[name="which-tor"][value="builtin"]').click()`);
+await sleep(400);
+await answer('Hide through Tor');
+await sleep(1200);
+check('H9 and back to the built-in one', (await whichTor()) === 'builtin', await whichTor());
+
+// The built-in Tor stopped because the Tor network no longer accepts its version: the status says to update.
+await ev(`window.__mockTorObsolete = true`);
+const navTo = (name) => ev(`[...document.querySelectorAll('[data-settings-page] nav button')].find(n => n.textContent === ${JSON.stringify(name)}).click()`);
+const otherPage = await ev(`[...document.querySelectorAll('[data-settings-page] nav button')].map(n => n.textContent).find(t => t !== 'Network')`);
+await navTo(otherPage);
+await sleep(400);
+await navTo('Network');
+await until(() => ev(`(document.querySelector('[data-hide-ip-status]')?.textContent ?? '').startsWith('Tor stopped: update Dissent')`), 4000);
+check('H10 an obsolete built-in Tor says to update Dissent', (await ev(`document.querySelector('[data-hide-ip-status]')?.textContent ?? ''`)).startsWith('Tor stopped: update Dissent'));
+await ev(`window.__mockTorObsolete = false`);
 await pick('off');
 await sleep(400);
 await answer('Show my IP address');

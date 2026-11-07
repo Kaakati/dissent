@@ -321,7 +321,7 @@ const CHOICES: { value: IpChoice; label: string; hint: string }[] = [
   {
     value: 'tor',
     label: 'Hide through Tor',
-    hint: 'Everything also goes through Tor, which you run yourself (Tor, or Tor Browser while it is open). The relays see a Tor exit, not you. Slow: voice may lag or drop, and video isn’t practical. If Tor stops, Dissent goes offline rather than connect directly.',
+    hint: 'Everything also goes through Tor: the one built into Dissent, or your own. The relays see a Tor exit, not you. Slow: voice may lag or drop, and video isn’t practical. If Tor stops, Dissent goes offline rather than connect directly.',
   },
 ];
 
@@ -330,12 +330,30 @@ function choiceOf(settings: NetworkSettings): IpChoice {
   return settings.tor ? 'tor' : 'relays';
 }
 
-const CONFIRM: Record<IpChoice, (socks: string) => string> = {
+// Which Tor carries everything in Tor mode.
+type TorChoice = 'builtin' | 'own';
+
+const TOR_CHOICES: { value: TorChoice; label: string; hint: string }[] = [
+  { value: 'builtin', label: 'Built into Dissent', hint: 'Nothing to install. It starts with Dissent and takes a few seconds to connect the first time.' },
+  { value: 'own', label: 'My own Tor', hint: 'Tor, or Tor Browser while it is open, running on this computer.' },
+];
+
+// Whether these settings use the built-in Tor. A file from before it with Tor on uses its own; the app fills it in.
+function torChoiceOf(settings: NetworkSettings): TorChoice {
+  return (settings.tor_builtin ?? !settings.tor) ? 'builtin' : 'own';
+}
+
+const TOR_INTRO: Record<TorChoice, (socks: string) => string> = {
+  builtin: () => 'Dissent starts its built-in Tor, which takes a few seconds to connect the first time.',
+  own: (socks) => `Tor must be running on this computer at ${socks}.`,
+};
+
+const CONFIRM: Record<IpChoice, (socks: string, tor: TorChoice) => string> = {
   off: () => 'Show your IP address again? Direct connections come back, which are faster. Your connection restarts now, which ends a call you are in.',
   relays: () =>
     'Hide your IP address behind relays? Everything will go through a relay. Calls and file transfers get slower, and the relay sees your IP address and when and with whom you connect, but not what you send. Your connection restarts now, which ends a call you are in.',
-  tor: (socks) =>
-    `Hide your IP address through Tor? Tor must be running on this computer at ${socks}. Everything goes through it, so it is slow: voice may lag and video isn’t practical. If Tor stops, Dissent goes offline instead of connecting directly. Your connection restarts now, which ends a call you are in.`,
+  tor: (socks, tor) =>
+    `Hide your IP address through Tor? ${TOR_INTRO[tor](socks)} Everything goes through it, so it is slow: voice may lag and video isn’t practical. If Tor stops, Dissent goes offline instead of connecting directly. Your connection restarts now, which ends a call you are in.`,
 };
 
 const CONFIRM_LABEL: Record<IpChoice, string> = { off: 'Show my IP address', relays: 'Hide behind relays', tor: 'Hide through Tor' };
@@ -343,6 +361,12 @@ const CONFIRM_LABEL: Record<IpChoice, string> = { off: 'Show my IP address', rel
 function hideIpStatus(choice: IpChoice, status: PrivacyStatus | null, home: string | null, socks: string): string {
   if (choice === 'relays') {
     return home ? `Connected through relay ${home}. Peers can’t see your IP address; the relay can.` : 'Connecting through a relay…';
+  }
+  if (status?.tor_obsolete) {
+    return 'Tor stopped: update Dissent. The Tor network no longer accepts this version of its built-in Tor. Nothing is sent until you update.';
+  }
+  if (status?.tor_ok === false && status.tor_builtin) {
+    return `${status.tor_error ?? 'The built-in Tor can’t connect yet.'} Nothing is sent until it can.`;
   }
   if (status?.tor_ok === false) {
     return `Can’t reach Tor at ${status.tor_socks ?? socks}: ${status.tor_error ?? 'no answer'}. Nothing is sent until it can.`;
@@ -369,9 +393,10 @@ function HideIpBlock({ settings, saving, onSave }: { settings: NetworkSettings; 
       clearInterval(timer);
     };
   }, [choice]);
-  const change = async (next: IpChoice, nextSocks = socks) => {
-    const ok = await confirm({ message: CONFIRM[next](nextSocks), okLabel: CONFIRM_LABEL[next] });
-    if (ok) await onSave({ ...settings, hide_ip: next !== 'off', tor: next === 'tor', tor_socks: nextSocks });
+  const tor = torChoiceOf(settings);
+  const change = async (next: IpChoice, nextSocks = socks, nextTor = tor) => {
+    const ok = await confirm({ message: CONFIRM[next](nextSocks, nextTor), okLabel: CONFIRM_LABEL[next] });
+    if (ok) await onSave({ ...settings, hide_ip: next !== 'off', tor: next === 'tor', tor_builtin: nextTor === 'builtin', tor_socks: nextSocks });
   };
   return (
     <Block title="Privacy">
@@ -395,15 +420,36 @@ function HideIpBlock({ settings, saving, onSave }: { settings: NetworkSettings; 
         ))}
       </fieldset>
       {choice === 'tor' ? (
-        <>
-          <div className="flex items-center gap-s-2">
-            <Input aria-label="Tor SOCKS port" value={socks} onChange={(e) => setSocks(e.target.value)} className="max-w-[220px] font-mono" />
-            <Button variant="outline" disabled={saving || socks.trim() === (settings.tor_socks || '')} onClick={() => void change('tor', socks.trim())}>
-              Use this port
-            </Button>
-          </div>
-          <Hint>Tor listens on 127.0.0.1:9050; Tor Browser on 127.0.0.1:9150, while it is open.</Hint>
-        </>
+        <fieldset className="m-0 flex flex-col gap-s-2 border-0 p-0 pl-s-6" aria-label="Which Tor" disabled={saving}>
+          <legend className="mb-s-1 text-body text-text-strong">Which Tor</legend>
+          {TOR_CHOICES.map((c) => (
+            <label key={c.value} className="flex items-start gap-s-2">
+              <input
+                type="radio"
+                name="which-tor"
+                value={c.value}
+                checked={tor === c.value}
+                onChange={() => void change('tor', socks.trim(), c.value)}
+                className="m-0 mt-0.5 size-5 shrink-0 accent-accent"
+              />
+              <span className="flex flex-col">
+                <span>{c.label}</span>
+                <Hint>{c.hint}</Hint>
+              </span>
+            </label>
+          ))}
+          {tor === 'own' ? (
+            <>
+              <div className="flex items-center gap-s-2">
+                <Input aria-label="Tor SOCKS port" value={socks} onChange={(e) => setSocks(e.target.value)} className="max-w-[220px] font-mono" />
+                <Button variant="outline" disabled={saving || socks.trim() === (settings.tor_socks || '')} onClick={() => void change('tor', socks.trim())}>
+                  Use this port
+                </Button>
+              </div>
+              <Hint>Tor listens on 127.0.0.1:9050; Tor Browser on 127.0.0.1:9150, while it is open.</Hint>
+            </>
+          ) : null}
+        </fieldset>
       ) : null}
       {choice !== 'off' ? (
         <Hint role="status" data-hide-ip-status>

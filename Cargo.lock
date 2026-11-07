@@ -2609,11 +2609,13 @@ dependencies = [
  "rand 0.10.3",
  "rcgen",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

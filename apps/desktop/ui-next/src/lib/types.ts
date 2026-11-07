@@ -520,8 +520,10 @@ export interface NetworkSettings {
   use_n0_lookup?: boolean;
   // Hide my IP address: every connection goes through a relay. Applied when the engine restarts.
   hide_ip?: boolean;
-  // With hide_ip: every connection also goes through the Tor this person runs, at tor_socks.
+  // With hide_ip: every connection also goes through Tor.
   tor?: boolean;
+  // Which Tor: the one built into the app (true), or the one this person runs at tor_socks. The app fills it in.
+  tor_builtin?: boolean | null;
   // Tor's SOCKS port on this machine: 127.0.0.1:9050 for tor, 127.0.0.1:9150 for Tor Browser.
   tor_socks?: string;
 }
@@ -529,9 +531,14 @@ export interface NetworkSettings {
 // How this device hides its IP now, and in Tor mode whether Tor opened a connection just now.
 export interface PrivacyStatus {
   mode: 'off' | 'relays' | 'tor';
+  // In Tor mode: whether it is the Tor built into the app.
+  tor_builtin?: boolean | null;
+  // With this person's own Tor: its SOCKS address.
   tor_socks?: string | null;
   tor_ok?: boolean | null;
   tor_error?: string | null;
+  // The built-in Tor stopped for good: the Tor network no longer accepts this version. An update brings it back.
+  tor_obsolete?: boolean;
 }
 
 // One relay in Settings > Network, with what the node measured. `source` is where the relay came from.

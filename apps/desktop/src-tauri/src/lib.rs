@@ -455,13 +455,16 @@ pub fn run() {
         }
         if let RunEvent::Exit = event {
             // A portable profile that never unlocked has no engine to stop.
-            let Some(state) = handle.try_state::<AppState>() else { return };
-            let engine = tauri::async_runtime::block_on(state.engine.write()).take();
-            if let Some(engine) = engine {
-                if let Err(e) = tauri::async_runtime::block_on(engine.shutdown()) {
-                    tracing::warn!(error = %e, "engine shutdown failed");
+            if let Some(state) = handle.try_state::<AppState>() {
+                let engine = tauri::async_runtime::block_on(state.engine.write()).take();
+                if let Some(engine) = engine {
+                    if let Err(e) = tauri::async_runtime::block_on(engine.shutdown()) {
+                        tracing::warn!(error = %e, "engine shutdown failed");
+                    }
                 }
             }
+            // The built-in Tor is a program of its own, which would outlive the app.
+            tauri::async_runtime::block_on(tor::stop(handle));
         }
     });
 }

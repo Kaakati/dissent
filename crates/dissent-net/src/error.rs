@@ -29,6 +29,8 @@ pub enum NetError {
     Datagram(String),
     #[error("the peer refused this device")]
     Refused,
+    #[error("built-in Tor: {0}")]
+    Tor(String),
 }
 
 pub type Result<T> = std::result::Result<T, NetError>;

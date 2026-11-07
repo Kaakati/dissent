@@ -341,6 +341,12 @@ jobs:
         run: npm ci && npm run build
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
+      # The Tor built into the app: arti from its published source at the version and hash pinned in the script, which
+      # also checks that arti still prints the obsolete-version line the app watches for. The bundle ships it next to
+      # the app (externalBin below).
+      - name: Build the built-in Tor
+        shell: bash
+        run: bash scripts/build-arti.sh ${{ matrix.rust_targets }}
       # Bundling is off for local development; enable it only for releases. Signed
       # updater artifacts (and latest.json for in-app updates) are produced only
       # when the TAURI_SIGNING_PRIVATE_KEY secret is set.
@@ -351,11 +357,11 @@ jobs:
           HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
           if [ "$HAS_KEY" = "true" ]; then
-            echo 'config={"bundle":{"active":true,"targets":"all","createUpdaterArtifacts":true}}' >> "$GITHUB_OUTPUT"
+            echo 'config={"bundle":{"active":true,"targets":"all","createUpdaterArtifacts":true,"externalBin":["binaries/arti"]}}' >> "$GITHUB_OUTPUT"
             echo "updater=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; building without in-app update artifacts"
-            echo 'config={"bundle":{"active":true,"targets":"all"}}' >> "$GITHUB_OUTPUT"
+            echo 'config={"bundle":{"active":true,"targets":"all","externalBin":["binaries/arti"]}}' >> "$GITHUB_OUTPUT"
             echo "updater=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and upload installers
@@ -383,6 +389,8 @@ jobs:
           stage="portable"
           rm -rf "$stage" && mkdir "$stage"
           cp target/release/dissent-desktop.exe "$stage/Dissent.exe"
+          # The built-in Tor, which the build put next to the app.
+          cp target/release/arti.exe "$stage/arti.exe"
           : > "$stage/portable"
           cat > "$stage/README.txt" <<EOF
           Dissent ${ver} (portable)

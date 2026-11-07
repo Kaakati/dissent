@@ -7,7 +7,7 @@ Open-source, decentralized Discord alternative. Rust + Tauri 2. Spec: `docs/Dece
 ```
 crates/dissent-identity   Ed25519 root/device/community keys, DeviceCert, seed phrase, keystore
 crates/dissent-events     signed hash-linked event DAG, HLC, permission state replay
-crates/dissent-net        iroh endpoint wrapper: dial by DeviceId, ping ALPN, gossip per channel
+crates/dissent-net        iroh endpoint wrapper: dial by DeviceId, ping ALPN, gossip per channel; Tor bridge and built-in Tor (arti sidecar)
 crates/dissent-discovery  pkarr community records on Mainline DHT, invite links
 crates/dissent-core       Engine: multi-community state, gossip, sync, DMs, persistence (no tauri)
 crates/dissent-mls        OpenMLS group encryption; core seals message text per community (see docs/design/05-encrypted-servers.md)
@@ -71,6 +71,7 @@ Time is `u64` milliseconds since Unix epoch everywhere.
 ## Releases
 
 - Every push to `main` (except docs-only) that passes clippy and tests is released automatically as the next patch version; a running build always finishes and a newer push waits behind it. Never push to main while a release run is in progress. For a specific version push a tag `vX.Y.Z`. `.github/workflows/release.yml` tests, builds installers (Windows, macOS arm64/x64, Linux) and tool archives, and publishes a release whose notes come from `cliff.toml` (git-cliff, grouped by the commit subject's first verb: Add, Fix, Harden, Remove, ...). Keep commit subjects imperative and descriptive.
+- The built-in Tor (arti, a sidecar; `docs/design/19-built-in-tor.md`) is bumped every month, since the Tor network stops accepting old versions: set `ARTI_VERSION` and `ARTI_SHA256` in `scripts/build-arti.sh`, read arti's changelog (config, CLI, `port_info.json`), check its obsolete-version line, update `ARTI_VERSION` in `crates/dissent-net/src/tor_sidecar.rs`, and run its real-network test once.
 - In-app updates use `tauri-plugin-updater` and the release's signed `latest.json`. The signing key lives outside the repo (`~/.tauri/dissent-updater.key`); CI reads it from the `TAURI_SIGNING_PRIVATE_KEY` secret. Never commit or print the private key.
 - CI releases run clippy `-D warnings` on Linux, so platform-gated code must be clean on every OS: put imports used only under `#[cfg(windows)]` (or unix/macos) behind the same cfg. Check other platforms before a stable checkpoint with `cargo clippy --target x86_64-unknown-linux-gnu -p <crate> --all-targets -- -D warnings` (pure-Rust crates) or, for crates with C deps, in Docker: `docker run --rm -e CARGO_TARGET_DIR=/w/target/linux -e CARGO_BUILD_JOBS=12 -v "$PWD":/w -w /w rust:1 bash -c "apt-get update -qq && apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libclang-dev libpipewire-0.3-dev libspa-0.2-dev libxcb1-dev libxcb-randr0-dev libwayland-dev libegl-dev libgbm-dev >/dev/null && rustup component add clippy && cargo clippy -p <crate> --all-targets -- -D warnings"` (the same package list as `release.yml`). Docker on this machine also runs other projects' containers: never `docker desktop stop`.
 - `Cargo.lock` pins `rust-ini` to 0.21.1: `tauri-plugin-deep-link` 2.6.2 fails to compile on Linux against 0.21.3 (new `ParseOption` fields). Keep the pin through `cargo update` until the plugin is fixed upstream.

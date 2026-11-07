@@ -19,3 +19,6 @@ apps/desktop/src-tauri/gen
 
 # Avatar decoration art without confirmed redistribution rights: never commit.
 assets/avatar_animations/
+
+# The built-in Tor, built by scripts/build-arti.sh for the bundle.
+/apps/desktop/src-tauri/binaries/

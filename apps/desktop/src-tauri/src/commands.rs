@@ -141,7 +141,7 @@ pub async fn restart_engine(app: &AppHandle, state: &AppState, identity: Identit
     std::fs::create_dir_all(&profile).map_err(err)?;
     let settings = crate::network::load(&state.data_dir);
     // In Tor mode the bridge must run before the engine starts: it is the engine's only way out.
-    let tor_proxy = crate::tor::proxy_for(app, &settings).await?;
+    let tor_proxy = crate::tor::proxy_for(app, &settings, &profile).await?;
     let (engine, rx) = Engine::start_with_options(
         identity.clone(),
         profile,

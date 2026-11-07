@@ -230,9 +230,9 @@ exchange channel and direct messages, and hold no IP address for each other) and
 
 ### Hide through Tor
 
-Settings › Network offers three choices: Off, Hide behind relays, and Hide through Tor. Tor is the one the person runs
-(the tor service on 127.0.0.1:9050, or Tor Browser on 127.0.0.1:9150 while it is open); Dissent bundles none. The app
-starts a bridge on loopback (`dissent_net::socks_bridge`): an HTTP CONNECT proxy that carries each tunnel through Tor's
+Settings › Network offers three choices: Off, Hide behind relays, and Hide through Tor. The Tor is the one built into
+Dissent by default (arti, run as a program of its own; see "The built-in Tor" below), or the one the person runs (the
+tor service on 127.0.0.1:9050, or Tor Browser on 127.0.0.1:9150 while it is open). The app starts a bridge on loopback (`dissent_net::socks_bridge`): an HTTP CONNECT proxy that carries each tunnel through Tor's
 SOCKS port, giving Tor the host name, so Tor resolves every name. The node's `proxy_url`, the engine's HTTP client and
 the updater all point at it. It takes CONNECT only, and only a SOCKS port on this machine. Any process here can reach
 a loopback port, so each request must carry a secret made new at every start (`Proxy-Authorization: Basic`, the password
@@ -250,6 +250,30 @@ browser goes out outside Dissent's protection.
 What Tor does not hide: Tor's entry guard sees this device's IP, and its exit sees the relay and site host names;
 relays still see which devices exchange traffic, when and how much. Calls work but are slow over Tor; video isn't
 practical.
+
+#### The built-in Tor
+
+The bundle ships arti next to the app, built in CI from its published source at a version and hash pinned in
+`scripts/build-arti.sh`. `dissent_net::TorSidecar` runs `arti proxy` before the engine starts, on a config it writes into
+the profile's `tor` folder, and kills it when the app quits, switches profile or installs an update. On Windows a job
+object also kills it when the app dies any other way; on Linux and macOS an arti left by a crashed app runs until it is
+stopped, and the next start uses a new port and the same state.
+
+- **A program of its own, not a library.** arti exits its process when the Tor network stops accepting its version, with
+  no setting to turn that off. In its own process that stops Tor and not the app. The supervisor sees arti's
+  "unsupported software version" line on its stderr, does not start it again, and the indicator says "Tor stopped:
+  update Dissent". Nothing goes out until then. Any other exit is restarted after a pause that doubles up to a minute.
+- **Its SOCKS port has no secret.** arti listens on `127.0.0.1:auto`, a port the system picks, new at each start, which
+  arti writes to `port_info.json` and the bridge follows. Any process on this machine that finds the port can use this
+  Tor, as with a Tor the person runs: it gets circuits, not this device's traffic, which still needs the bridge's
+  secret. arti's listen addresses are IP only, so a Unix socket in the 0700 profile folder is not available. The config
+  turns off its DNS port and HTTP CONNECT (which the build leaves out as well), so the port speaks SOCKS only.
+- **While it is down nothing gets out.** The bridge holds no SOCKS address while arti starts, restarts or has stopped,
+  and answers every tunnel with a 502.
+- **Its state is not sealed.** The `tor` folder holds arti's state (its guards, circuit timings and locks) and its
+  directory cache (the public consensus and relay descriptors, about 11 MB). arti writes them itself, so they can't go
+  through the store's sealing. They show that this profile uses Tor and which entry guards it picked. On Unix the folder
+  is the user's only, which arti also requires. See finding 7.
 
 ### What each mode shows, and to whom
 
@@ -1107,6 +1131,8 @@ still apply to what it carries. Dials this device makes are never judged.
      is encrypted. The original is on the disk anyway.
    - **The desktop app's own settings.** `network.json` (relay choices) and `website-handle.json` (the user's
      handle, which is public) stay plaintext.
+   - **The built-in Tor's folder.** A profile's `tor` folder holds arti's config, state and directory cache in
+     arti's own formats, which it reads and writes itself. They show that the profile uses Tor and its entry guards.
    - **The window's storage.** The window keeps read markers, mutes and layout choices in localStorage, keyed
      by server, channel and conversation ids. It is in the WebView2 or WebKit profile, outside the data folder,
      so a portable profile leaves it on the host PC. The portable unlock screen says so. That profile also holds

@@ -53,10 +53,15 @@ pub struct NetworkSettings {
     /// would show this device's IP to strangers. The relay sees the IP and the traffic's metadata, and
     /// calls and transfers are slower. Off by default. Applied when the engine restarts.
     pub hide_ip: bool,
-    /// "Hide my IP through Tor": with `hide_ip`, every connection also goes through the Tor this person runs, at
-    /// `tor_socks`, so even the relays see a Tor exit and not this device. Nothing ever goes out another way: with
-    /// Tor down, the app is offline. Off by default. Applied when the engine restarts.
+    /// "Hide my IP through Tor": with `hide_ip`, every connection also goes through Tor, so even the relays see a
+    /// Tor exit and not this device. Nothing ever goes out another way: with Tor down, the app is offline. Off by
+    /// default. Applied when the engine restarts.
     pub tor: bool,
+    /// Which Tor: the one built into the app (`true`, arti, see `tor.rs`) or the one this person runs at
+    /// `tor_socks`. A file from before the built-in one has no value, and keeps the Tor it used: its own when Tor
+    /// was on. `check` always fills it in.
+    #[serde(default)]
+    pub tor_builtin: Option<bool>,
     /// Tor's SOCKS port on this machine: 127.0.0.1:9050 for tor, 127.0.0.1:9150 for Tor Browser.
     pub tor_socks: String,
 }
@@ -85,6 +90,11 @@ impl NetworkSettings {
         }
     }
 
+    /// Whether Tor mode uses the Tor built into the app rather than this person's own.
+    pub fn tor_builtin(&self) -> bool {
+        self.tor_builtin.unwrap_or(!self.tor)
+    }
+
     /// Tor's SOCKS address, when it parses and is on this machine.
     pub fn tor_socks_addr(&self) -> Result<std::net::SocketAddr, String> {
         let addr: std::net::SocketAddr =
@@ -108,6 +118,7 @@ impl Default for NetworkSettings {
             use_n0_lookup: true,
             hide_ip: false,
             tor: false,
+            tor_builtin: Some(true),
             tor_socks: DEFAULT_TOR_SOCKS.to_string(),
         }
     }
@@ -187,9 +198,10 @@ pub fn check(settings: &NetworkSettings) -> Result<NetworkSettings, String> {
         // Tor hides the IP from the relays too, so it needs the IP hidden from peers first.
         hide_ip: settings.hide_ip || settings.tor,
         tor: settings.tor,
+        tor_builtin: Some(settings.tor_builtin()),
         tor_socks: if settings.tor_socks.trim().is_empty() { DEFAULT_TOR_SOCKS.to_string() } else { settings.tor_socks.trim().to_string() },
     };
-    if checked.tor {
+    if checked.tor && !checked.tor_builtin() {
         checked.tor_socks_addr()?;
     }
     if enabled(&checked).is_empty() {
@@ -356,6 +368,7 @@ mod tests {
         let tor = parse_settings(r#"{"tor": true}"#).unwrap();
         assert!(tor.hide_ip, "Tor implies hiding the IP from peers");
         assert_eq!(tor.ip_mode(), IpMode::Tor);
+        assert_eq!(tor.tor_builtin, Some(false), "a file from before the built-in Tor keeps its own Tor");
         let browser = parse_settings(r#"{"tor": true, "tor_socks": " 127.0.0.1:9150 "}"#).unwrap();
         assert_eq!(browser.tor_socks_addr().unwrap().port(), 9150);
         assert!(parse_settings(r#"{"tor": true, "tor_socks": "10.0.0.2:9050"}"#).is_err(), "a SOCKS port elsewhere is refused");
@@ -364,6 +377,19 @@ mod tests {
         let config = node_config(&tor, Some(proxy.clone()));
         assert_eq!(config.egress(), dissent_core::Egress::Proxied(proxy), "every connection through the bridge");
         assert!(config.relay_only && !config.dht_lookup && !config.portmapper);
+    }
+
+    #[test]
+    fn the_built_in_tor_is_the_default_and_needs_no_socks_port() {
+        assert_eq!(parse_settings("{}").unwrap().tor_builtin, Some(true), "a new file");
+        assert_eq!(parse_settings(r#"{"hide_ip": true}"#).unwrap().tor_builtin, Some(true), "Tor was off: the built-in one when it is turned on");
+        let builtin = parse_settings(r#"{"tor": true, "tor_builtin": true, "tor_socks": "not checked"}"#).unwrap();
+        assert!(builtin.tor_builtin() && builtin.ip_mode() == IpMode::Tor, "its own SOCKS port is not this person's to set");
+        let own = parse_settings(r#"{"tor": true, "tor_builtin": false, "tor_socks": "127.0.0.1:9150"}"#).unwrap();
+        assert!(!own.tor_builtin());
+        assert!(parse_settings(r#"{"tor": true, "tor_builtin": false, "tor_socks": "10.0.0.2:9050"}"#).is_err());
+        let saved = serde_json::to_string(&builtin).unwrap();
+        assert_eq!(parse_settings(&saved).unwrap(), builtin, "it survives a save");
     }
 
     fn custom_urls(choice: RelayChoice) -> Vec<Url> {

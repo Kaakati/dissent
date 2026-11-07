@@ -15,6 +15,7 @@ pub mod socks_bridge;
 mod source;
 mod tls;
 mod topic;
+pub mod tor_sidecar;
 
 pub use addr::PeerAddr;
 pub use error::{NetError, Result};
@@ -25,6 +26,7 @@ pub use gate::{ConnectionGate, Gate, GateLimits};
 pub use inbound::InboundLimits;
 pub use rpc::{RpcHandler, REQUEST_TIMEOUT};
 pub use socks_bridge::SocksBridge;
+pub use tor_sidecar::{SidecarState, TorSidecar};
 pub use lan::community_key as lan_key;
 pub use ping::{PathKind, PingReport};
 pub use source::{CACHE, DHT, DialSample, DialStats, LAN, OPEN, PEER, SEEDER};
