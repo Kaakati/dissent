@@ -2603,6 +2603,7 @@ dependencies = [
  "iroh-gossip",
  "iroh-mainline-address-lookup",
  "iroh-relay",
+ "libc",
  "n0-future",
  "noq-proto",
  "postcard",

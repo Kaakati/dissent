@@ -27,8 +27,11 @@ as it is, and follows arti's SOCKS port instead of a fixed one.
   development build) is `Failed`, and Tor mode stays offline and says why.
 - **Lifetime.** The desktop app starts it in `tor::proxy_for` before the engine, keeps it while the profile and the
   choice stay the same, and stops it when Tor mode is turned off, on a profile switch, on quit (`RunEvent::Exit`) and
-  before an update installs (Windows can't replace a running program). On Windows a job object kills it if the app
-  dies. On Linux and macOS a crashed app leaves it running; the next start uses a new port.
+  before an update installs (Windows can't replace a running program). When the app dies, Windows kills it through a
+  job object and Linux through `PR_SET_PDEATHSIG(SIGKILL)`, set in `pre_exec`. On Linux and macOS each start writes
+  `arti.pid`, and the next start first kills a process with that pid, but only when its executable (`/proc/<pid>/exe`,
+  `proc_pidpath` on macOS) is this same arti program. On macOS, with no death signal, that is what ends an arti a crash
+  left behind, at the next start.
 - **Program.** `arti` beside the app's executable, where the bundle's `externalBin` puts it, or `DISSENT_ARTI` for
   development.
 
@@ -57,7 +60,9 @@ dissent-net keeps the script's `ARTI_VERSION` and `ARTI_MARKER` equal to the con
 
 - `crates/dissent-net/tests/tor_sidecar.rs`, a test without a harness whose own executable is the fake arti: tunnels
   through the reported port, a killed arti restarted with a 502 meanwhile, an obsolete one that stays stopped, a missing
-  program, and stop. With `-- --ignored` and `DISSENT_ARTI` set it also runs the real arti against the Tor network.
+  program, and stop; on Unix an arti left running is killed at the next start, and on Linux arti dies with an app that
+  is killed. The unit test `a_left_over_pid_is_ours_only_when_it_runs_our_program` checks that a pid running any other
+  program is never taken for arti. With `-- --ignored` and `DISSENT_ARTI` set it also runs the real arti against the Tor network.
 - `socks_bridge.rs`: a followed proxy used where it is now and refused while it is down or off this machine.
 - `tor_sidecar.rs` unit tests: the config, the port file, and the version pin.
 - Desktop: the settings default and migration, the indicator's messages. UI driver: section `hideip`, H6 to H10.

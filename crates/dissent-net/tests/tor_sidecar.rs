@@ -25,8 +25,13 @@ fn main() {
         fake_arti(&args);
         return;
     }
+    if args.get(1).map(String::as_str) == Some("fake-app") {
+        fake_app(Path::new(&args[2]));
+        return;
+    }
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let tests: [Case; 5] = [
+    #[allow(unused_mut)]
+    let mut tests: Vec<Case> = vec![
         ("tunnels_go_through_the_port_it_reports", || Box::pin(tunnels_go_through_the_port_it_reports())),
         ("a_killed_tor_is_started_again_and_nothing_gets_out_meanwhile", || {
             Box::pin(a_killed_tor_is_started_again_and_nothing_gets_out_meanwhile())
@@ -35,7 +40,13 @@ fn main() {
         ("a_missing_program_fails_at_once", || Box::pin(a_missing_program_fails_at_once())),
         ("stop_kills_it", || Box::pin(stop_kills_it())),
     ];
-    for (name, test) in tests {
+    #[cfg(unix)]
+    tests.push(("an_arti_a_crashed_app_left_running_is_killed_at_the_next_start", || {
+        Box::pin(an_arti_a_crashed_app_left_running_is_killed_at_the_next_start())
+    }));
+    #[cfg(target_os = "linux")]
+    tests.push(("arti_dies_with_an_app_that_is_killed", || Box::pin(arti_dies_with_an_app_that_is_killed())));
+    for &(name, test) in &tests {
         print!("test {name} ... ");
         runtime.block_on(test());
         println!("ok");
@@ -166,6 +177,88 @@ async fn stop_kills_it() {
     sidecar.stop().await;
     assert_eq!(*states.borrow(), SidecarState::Stopped);
     assert!(TcpStream::connect_timeout(&socks, Duration::from_secs(2)).is_err(), "its port closed with it");
+}
+
+/// A crashed app leaves its arti running: here a fake arti this test starts itself, on the folder's config, with its
+/// pid in `arti.pid` as the supervisor writes it. The next start kills it before it starts its own.
+#[cfg(unix)]
+async fn an_arti_a_crashed_app_left_running_is_killed_at_the_next_start() {
+    let first = start("left-over", "serve");
+    running(&first).await;
+    let dir = first.dir().to_path_buf();
+    first.stop().await;
+    let mut orphan = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["proxy", "-c"])
+        .arg(dir.join("arti.toml"))
+        .spawn()
+        .unwrap();
+    std::fs::write(dir.join("arti.pid"), orphan.id().to_string()).unwrap();
+    // Its port file says it runs.
+    tokio::time::timeout(WAIT, async {
+        while std::fs::read_to_string(dir.join("fake.pid")).ok().as_deref() != Some(orphan.id().to_string().as_str()) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the left-over arti started");
+    assert!(orphan.try_wait().unwrap().is_none());
+    let next = TorSidecar::start(std::env::current_exe().unwrap(), dir.clone()).unwrap();
+    running(&next).await;
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = orphan.try_wait().unwrap() {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the left-over arti was killed");
+    assert!(!status.success(), "killed, not exited: {status:?}");
+    next.stop().await;
+}
+
+/// `fake-app <dir>`: an app that starts its built-in Tor in `dir` and runs until it is killed.
+fn fake_app(dir: &Path) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let sidecar = TorSidecar::start(std::env::current_exe().unwrap(), dir.to_path_buf()).unwrap();
+        running(&sidecar).await;
+        std::future::pending::<()>().await;
+    });
+}
+
+/// The app is killed outright, so nothing in it stops arti: the death signal set in arti does.
+#[cfg(target_os = "linux")]
+async fn arti_dies_with_an_app_that_is_killed() {
+    let dir = folder("app-killed");
+    std::fs::write(dir.join("fake-mode"), "serve").unwrap();
+    let mut app = std::process::Command::new(std::env::current_exe().unwrap()).arg("fake-app").arg(&dir).spawn().unwrap();
+    let pid_file = dir.join("fake.pid");
+    let arti = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().filter(|p| !p.is_empty()) {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the app started its arti");
+    // Running, and not a zombie waiting for whoever took it over to reap it.
+    let alive = |pid: &str| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z')))
+    };
+    assert!(alive(&arti));
+    app.kill().unwrap();
+    app.wait().unwrap();
+    let gone = tokio::time::timeout(Duration::from_secs(5), async {
+        while alive(&arti) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(gone.is_ok(), "arti {arti} outlived its app");
 }
 
 fn kill(pid: &str) {

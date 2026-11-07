@@ -255,9 +255,11 @@ practical.
 
 The bundle ships arti next to the app, built in CI from its published source at a version and hash pinned in
 `scripts/build-arti.sh`. `dissent_net::TorSidecar` runs `arti proxy` before the engine starts, on a config it writes into
-the profile's `tor` folder, and kills it when the app quits, switches profile or installs an update. On Windows a job
-object also kills it when the app dies any other way; on Linux and macOS an arti left by a crashed app runs until it is
-stopped, and the next start uses a new port and the same state.
+the profile's `tor` folder, and kills it when the app quits, switches profile or installs an update. When the app dies
+any other way, arti dies with it: on Windows through a job object, on Linux through a death signal (`PR_SET_PDEATHSIG`)
+set in arti before it runs. On Linux and macOS each start also writes arti's pid to `tor/arti.pid`, and the next start
+kills a process with that pid if, and only if, it runs the app's own arti program (checked by its executable path, so
+a reused pid is never killed). On macOS that is what closes an arti a crash left running.
 
 - **A program of its own, not a library.** arti exits its process when the Tor network stops accepting its version, with
   no setting to turn that off. In its own process that stops Tor and not the app. The supervisor sees arti's

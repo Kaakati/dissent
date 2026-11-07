@@ -10,7 +10,10 @@
 //!
 //! When arti exits it is started again after a pause that doubles up to a minute, except when it said its version is
 //! obsolete ([`OBSOLETE_MARKER`] on its stderr): then it stays stopped, and only an app update brings Tor back. The
-//! app kills it when it quits or switches profile; on Windows a job object also kills it when the app dies.
+//! app kills it when it quits or switches profile. When the app dies instead, arti goes with it: on Windows through a
+//! job object, on Linux through a death signal set in the child. On Linux and macOS each start also writes arti's pid
+//! to `arti.pid`, and the next start kills an arti left running under that pid, but only when that process runs this
+//! same program, never on the pid alone.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -40,6 +43,8 @@ const CONFIG_FILE: &str = "arti.toml";
 const PORT_INFO_FILE: &str = "port_info.json";
 const STATE_DIR: &str = "state";
 const CACHE_DIR: &str = "cache";
+#[cfg(unix)]
+const PID_FILE: &str = "arti.pid";
 
 /// How long arti may take to open its SOCKS port. It opens it before it bootstraps, within a second or two.
 const PORT_WAIT: Duration = Duration::from_secs(30);
@@ -88,7 +93,15 @@ impl TorSidecar {
         let (state_tx, state) = watch::channel(SidecarState::Starting);
         let (socks_tx, socks) = watch::channel(None);
         let (stop, stop_rx) = oneshot::channel();
-        let run = Run { program, config, port_info: dir.join(PORT_INFO_FILE), state: state_tx, socks: socks_tx };
+        let run = Run {
+            program,
+            config,
+            port_info: dir.join(PORT_INFO_FILE),
+            #[cfg(unix)]
+            pid_file: dir.join(PID_FILE),
+            state: state_tx,
+            socks: socks_tx,
+        };
         let task = tokio::spawn(run.supervise(stop_rx));
         Ok(TorSidecar { dir, state, socks, stop: Some(stop), task })
     }
@@ -215,6 +228,8 @@ struct Run {
     program: PathBuf,
     config: PathBuf,
     port_info: PathBuf,
+    #[cfg(unix)]
+    pid_file: PathBuf,
     state: watch::Sender<SidecarState>,
     socks: watch::Sender<Option<SocketAddr>>,
 }
@@ -269,6 +284,9 @@ impl Run {
     async fn run_once(&self, stop: &mut oneshot::Receiver<()>, #[cfg(windows)] job: Option<&job::Job>) -> Ended {
         // A file left by an earlier run names a port nothing listens on any more.
         let _ = std::fs::remove_file(&self.port_info);
+        // An arti a crashed app left running would keep its SOCKS port open, with nothing to stop it.
+        #[cfg(unix)]
+        left_over::kill(&self.pid_file, &self.program).await;
         let mut command = Command::new(&self.program);
         command
             .arg("proxy")
@@ -284,10 +302,35 @@ impl Run {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(CREATE_NO_WINDOW);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let app = std::process::id() as libc::pid_t;
+            // SAFETY: between fork and exec this calls only prctl, getppid and _exit, all async-signal-safe, and
+            // touches no memory but its own copy of `app`.
+            unsafe {
+                command.pre_exec(move || {
+                    // SIGKILL when the thread that started it ends: a tokio worker, which lives as long as the app.
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // The app died before the line above, so the signal will never come.
+                    if libc::getppid() != app {
+                        libc::_exit(1);
+                    }
+                    Ok(())
+                });
+            }
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(e) => return Ended::NotStarted(format!("could not start {}: {e}", self.program.display())),
         };
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            if let Err(e) = std::fs::write(&self.pid_file, pid.to_string()) {
+                tracing::debug!(error = %e, "could not note the built-in Tor's pid");
+            }
+        }
         #[cfg(windows)]
         if let Some(job) = job {
             job.assign(&child);
@@ -352,6 +395,64 @@ async fn read_stderr(stderr: tokio::process::ChildStderr, obsolete: Arc<AtomicBo
         } else {
             tracing::debug!(target: "arti", "{line}");
         }
+    }
+}
+
+/// An arti that a crashed app left running, found by the pid the last start wrote.
+#[cfg(unix)]
+mod left_over {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    /// The pid in `pid_file`, when the process with that pid runs `program`. A pid alone may have been reused by any
+    /// other process since.
+    pub(super) fn ours(pid_file: &Path, program: &Path) -> Option<libc::pid_t> {
+        let pid: libc::pid_t = std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()?;
+        if pid <= 0 || pid as u32 == std::process::id() {
+            return None;
+        }
+        let running = exe_of(pid)?.canonicalize().ok()?;
+        (running == program.canonicalize().ok()?).then_some(pid)
+    }
+
+    /// Kills the arti `ours` finds, and waits up to two seconds for it to go.
+    pub(super) async fn kill(pid_file: &Path, program: &Path) {
+        let Some(pid) = ours(pid_file, program) else { return };
+        tracing::warn!(pid, "stopping a built-in Tor left running by an earlier start");
+        // SAFETY: plain syscalls on a pid just checked to run our arti.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        for _ in 0..20 {
+            // SAFETY: signal 0 only checks that the process exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// The program a process runs. `None` when it is gone, or a zombie, or not ours to look at.
+    #[cfg(target_os = "linux")]
+    fn exe_of(pid: libc::pid_t) -> Option<PathBuf> {
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn exe_of(pid: libc::pid_t) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: the buffer is as long as the size passed, and the call writes at most that much.
+        let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+        if len <= 0 {
+            return None;
+        }
+        path.truncate(len as usize);
+        Some(PathBuf::from(std::ffi::OsString::from_vec(path)))
+    }
+
+    /// Elsewhere there is no way here to tell what a pid runs, so nothing is killed.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn exe_of(_pid: libc::pid_t) -> Option<PathBuf> {
+        None
     }
 }
 
@@ -438,6 +539,33 @@ mod tests {
         assert_eq!(socks_in_port_info(r#"{"ports":[{"protocol":"socks","address":null}]}"#), None);
         assert_eq!(socks_in_port_info(r#"{"ports":[]}"#), None);
         assert_eq!(socks_in_port_info("{\"ports\":[{\"proto"), None, "a file half written");
+    }
+
+    /// A child of this test stands in for an arti left running: it runs the program named, or another one.
+    #[cfg(unix)]
+    #[test]
+    fn a_left_over_pid_is_ours_only_when_it_runs_our_program() {
+        let dir = std::env::temp_dir().join(format!("dissent-left-over-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join(PID_FILE);
+        let sleep = PathBuf::from(if Path::new("/bin/sleep").exists() { "/bin/sleep" } else { "/usr/bin/sleep" });
+        let mut child = std::process::Command::new(&sleep).arg("30").spawn().unwrap();
+        std::fs::write(&pid_file, child.id().to_string()).unwrap();
+        assert_eq!(left_over::ours(&pid_file, &sleep), Some(child.id() as libc::pid_t), "it runs the program");
+        let elsewhere = dir.join("arti");
+        std::fs::write(&elsewhere, b"").unwrap();
+        assert_eq!(left_over::ours(&pid_file, &elsewhere), None, "a pid that runs another program is never ours");
+        assert_eq!(left_over::ours(&pid_file, &dir.join("missing")), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(left_over::ours(&pid_file, &sleep), None, "a pid that is gone");
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        assert_eq!(left_over::ours(&pid_file, &std::env::current_exe().unwrap()), None, "never the app itself");
+        for junk in ["", "0", "-1", "abc"] {
+            std::fs::write(&pid_file, junk).unwrap();
+            assert_eq!(left_over::ours(&pid_file, &sleep), None, "{junk:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The version and marker here are the ones the build script builds and checks.

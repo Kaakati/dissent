@@ -81,6 +81,8 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-autostart = "=2.7.0"
 # Match tauri-plugin-dialog, which uses rfd's gtk3 backend; rfd refuses gtk3 and xdg-portal together.
 rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
+# prctl for the built-in Tor's death signal (Linux), and the pid checks before it starts (Linux, macOS).
+libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Power", "Win32_System_LibraryLoader", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # WinRT toast history, to clear the app's delivered notifications. The version tauri-winrt-notification already uses.
 windows-core = "0.62"
