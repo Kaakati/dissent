@@ -14,6 +14,7 @@
 //!
 //! A relink stays in its room, so it does not start `Timings::settle_after_swap`.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,8 +22,9 @@ use dissent_identity::DeviceId;
 use dissent_media::{LinkTransport, Mesh};
 use tracing::debug;
 
-use super::{lock, Role, Room, FEATURE_RELINK, STALE_LINK};
-use crate::engine::Engine;
+use super::{channel_call_devices, lock, JoinAnswer, Role, Room, Scope, FEATURE_RELINK, STALE_LINK};
+use crate::engine::{now_ms, Engine};
+use crate::timings::millis;
 
 /// One dead pair this device offers for.
 #[derive(Debug, Clone)]
@@ -32,6 +34,24 @@ pub(crate) struct DeadPair {
     in_flight: bool,
     /// An offer was refused as not in this call: the room is not the peer's, which `rejoin` repairs.
     given_up: bool,
+}
+
+/// A device of this channel call that this device asks to join: one whose `Join` went unanswered, or that says it is
+/// in the call while this device does not have it live. Asked again with `backoff` until it answers.
+#[derive(Debug, Clone)]
+pub(crate) struct JoinAsk {
+    attempts: u32,
+    next_at: Instant,
+    in_flight: bool,
+    /// It answered that it is not in this call: asked no more, so a peer's word cannot make this device ask a stranger
+    /// again and again.
+    given_up: bool,
+}
+
+impl JoinAsk {
+    fn new(next_at: Instant) -> Self {
+        Self { attempts: 0, next_at, in_flight: false, given_up: false }
+    }
 }
 
 /// The wait after `attempts` offers: `first`, doubling each time, up to `cap`.
@@ -143,6 +163,105 @@ impl Engine {
                 let timings = &engine.inner.timings;
                 if let Some(pair) = lock(&room.relink).get_mut(&sid) {
                     offered(pair, Instant::now(), timings.relink_after, timings.relink_backoff_cap, elsewhere);
+                }
+            });
+        }
+    }
+
+    /// Records a channel-call `Join` that got no answer, so it is asked again (`join_reconcile`), and notes it.
+    pub(super) fn note_join_unanswered(&self, room: &Arc<Room>, device: DeviceId) {
+        #[cfg(feature = "test-hooks")]
+        if self.inner.calls.no_join_retry.load(std::sync::atomic::Ordering::Relaxed) {
+            self.note_tier(format!("join to {} unanswered", &device.to_string()[..8]));
+            return;
+        }
+        let first = Instant::now() + self.inner.timings.relink_after;
+        lock(&room.join_asks).entry(device).or_insert_with(|| JoinAsk::new(first));
+        self.note_tier(format!("join to {} unanswered", &device.to_string()[..8]));
+    }
+
+    /// Asks again the devices of this channel call that should be linked with this one and are not: a `Join` that got
+    /// no answer, and a device whose own presence says it is in this room while this device does not have it live, as
+    /// when its `Join` reached this device but the answer was lost. Without this, one lost request kept the pair apart
+    /// for the whole call, each in it without the other. Only members of this channel, by this device's own state, are
+    /// asked, each at most once per backoff step, and one that answers it is not in the call is asked no more.
+    pub(super) fn join_reconcile(&self, room: &Arc<Room>) {
+        let Scope::Channel { community, .. } = room.scope else {
+            return;
+        };
+        if room.migrating.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let me = self.inner.identity.device_id();
+        let live: BTreeSet<DeviceId> = lock(&room.live).values().copied().collect();
+        let ttl = millis(self.inner.timings.call_presence_ttl);
+        let now_wall = now_ms();
+        let claimants: Vec<DeviceId> = lock(&self.inner.calls.heard)
+            .iter()
+            .filter(|(d, h)| h.room == room.id && now_wall.saturating_sub(h.seen_ms) < ttl && **d != me && !live.contains(d))
+            .map(|(d, _)| *d)
+            .collect();
+        let members: BTreeSet<DeviceId> = {
+            let w = self.read();
+            w.communities
+                .get(&community)
+                .map(|c| channel_call_devices(&w, c, false).into_iter().collect())
+                .unwrap_or_default()
+        };
+        let now = Instant::now();
+        let first = now + self.inner.timings.relink_after;
+        let due: Vec<DeviceId> = {
+            let mut asks = lock(&room.join_asks);
+            asks.retain(|d, _| members.contains(d) && !live.contains(d));
+            for device in claimants.into_iter().filter(|d| members.contains(d)) {
+                asks.entry(device).or_insert_with(|| JoinAsk::new(first));
+            }
+            asks.iter_mut()
+                .filter(|(_, ask)| !ask.in_flight && !ask.given_up && now >= ask.next_at)
+                .map(|(device, ask)| {
+                    ask.in_flight = true;
+                    *device
+                })
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let Ok(from) = self.my_addr() else {
+            return;
+        };
+        let muted = room.is_muted();
+        for device in due {
+            let msg = self.join_msg(room, None, muted, false, from.clone());
+            let (engine, room) = (self.clone(), room.clone());
+            self.spawn_task(async move {
+                let answer = engine.join_one(room.clone(), device, msg).await;
+                let timings = &engine.inner.timings;
+                {
+                    let mut asks = lock(&room.join_asks);
+                    match answer {
+                        JoinAnswer::Here => {
+                            asks.remove(&device);
+                        }
+                        JoinAnswer::NotIn => {
+                            if let Some(ask) = asks.get_mut(&device) {
+                                ask.in_flight = false;
+                                ask.given_up = true;
+                            }
+                        }
+                        JoinAnswer::Unanswered => {
+                            if let Some(ask) = asks.get_mut(&device) {
+                                ask.in_flight = false;
+                                ask.attempts += 1;
+                                ask.next_at = Instant::now() + backoff(timings.relink_after, timings.relink_backoff_cap, ask.attempts);
+                            }
+                        }
+                    }
+                }
+                match answer {
+                    JoinAnswer::Here => engine.note_tier(format!("asked {} to join again: linked", &device.to_string()[..8])),
+                    JoinAnswer::Unanswered => engine.note_tier(format!("join to {} unanswered again", &device.to_string()[..8])),
+                    JoinAnswer::NotIn => {}
                 }
             });
         }

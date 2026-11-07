@@ -13,6 +13,19 @@ pub fn force_tier_move(engine: &crate::Engine, forwarded: bool, reach: usize) ->
     engine.force_tier_move_now(forwarded, reach)
 }
 
+/// Makes `engine` lose the next `Join`s from `from`, one per entry: `true` takes the join in and loses only its answer,
+/// `false` loses the request itself. Either way the asker's request times out.
+#[cfg(feature = "test-hooks")]
+pub fn lose_joins_from(engine: &crate::Engine, from: dissent_identity::DeviceId, losses: &[bool]) {
+    engine.lose_joins_from_now(from, losses);
+}
+
+/// While `on`, `engine` does not ask again a `Join` that went unanswered.
+#[cfg(feature = "test-hooks")]
+pub fn no_join_retry(engine: &crate::Engine, on: bool) {
+    engine.no_join_retry_now(on);
+}
+
 /// While `Some`, `engine` takes call offers only from that device, as a joiner whose other peers have not offered yet.
 /// `None` takes them from anyone again.
 #[cfg(feature = "test-hooks")]

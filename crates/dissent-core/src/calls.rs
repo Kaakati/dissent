@@ -590,6 +590,17 @@ fn elect_forwarder(sids: &[u64], participants: usize, capacities: &BTreeMap<u64,
     elect(&candidates, participants, Mode::AudioTop3).map(|e| e.primary)
 }
 
+/// How a device answered a `Join`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JoinAnswer {
+    /// It is in the call, or rings for it.
+    Here,
+    /// It answered that it is not in the call, or refused.
+    NotIn,
+    /// No answer came: the request failed or timed out.
+    Unanswered,
+}
+
 /// One remote participant of a call.
 struct Peer {
     device: DeviceId,
@@ -705,6 +716,9 @@ pub(crate) struct Room {
     lonely: Mutex<(Option<Instant>, Option<Instant>)>,
     /// The dead links this device offers for, by sender id. See `relink`.
     relink: Mutex<BTreeMap<u64, relink::DeadPair>>,
+    /// Devices in this channel call that this device has asked to join without an answer, or that said they are in it
+    /// while this device does not have them live, with when to ask again. See `relink::join_reconcile`.
+    join_asks: Mutex<BTreeMap<DeviceId, relink::JoinAsk>>,
     /// Test hook: relink offers made, by sender id.
     #[cfg(feature = "test-hooks")]
     relink_tries: Mutex<BTreeMap<u64, u32>>,
@@ -882,6 +896,14 @@ pub(crate) struct CallHub {
     /// have not offered yet.
     #[cfg(feature = "test-hooks")]
     offers_only_from: Mutex<Option<DeviceId>>,
+    /// Test hook: how the next `Join`s from each device are lost. `true` takes the join in and loses only the answer,
+    /// `false` loses the request itself. See `test_support::lose_joins_from`.
+    #[cfg(feature = "test-hooks")]
+    lose_joins: Mutex<BTreeMap<DeviceId, VecDeque<bool>>>,
+    /// Test hook: set, this device does not ask again a `Join` that went unanswered, so only the presence side brings
+    /// the pair together.
+    #[cfg(feature = "test-hooks")]
+    no_join_retry: AtomicBool,
     /// Test hook: how long each of the next mesh connects holds the answer it got before applying it, in order.
     #[cfg(feature = "test-hooks")]
     answer_holds: Mutex<VecDeque<Duration>>,
@@ -937,6 +959,10 @@ impl CallHub {
             refuse_tier_moves: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             offers_only_from: Mutex::new(None),
+            #[cfg(feature = "test-hooks")]
+            lose_joins: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "test-hooks")]
+            no_join_retry: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             answer_holds: Mutex::new(VecDeque::new()),
             where_answered: Mutex::new(BTreeMap::new()),
@@ -1302,6 +1328,7 @@ impl Room {
             seen_live: Mutex::new(BTreeMap::new()),
             lonely: Mutex::new((None, None)),
             relink: Mutex::new(BTreeMap::new()),
+            join_asks: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "test-hooks")]
             relink_tries: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "test-hooks")]
@@ -2445,31 +2472,42 @@ impl Engine {
         // timeout, so joining a channel with members away took that long times their number.
         let mut asks = tokio::task::JoinSet::new();
         for device in devices.iter().copied() {
-            let msg = CallMsg::Join(Box::new(JoinMsg {
-                ring,
-                room: room.id,
-                scope: room.scope,
-                cert: self.my_cert(),
-                key,
-                muted,
-                leaf: match room.scope {
-                    Scope::Channel { .. } | Scope::Group { .. } => Some(room.my_sid),
-                    Scope::Dm => None,
-                },
-                from: from.clone(),
-            }));
+            let msg = self.join_msg(room, key, muted, ring, from.clone());
             let (engine, room) = (self.clone(), room.clone());
-            asks.spawn(async move { engine.join_one(room, device, msg).await });
+            asks.spawn(async move { (device, engine.join_one(room, device, msg).await) });
         }
         let mut answered = 0;
         while let Some(result) = asks.join_next().await {
-            answered += usize::from(result.unwrap_or(false));
+            let Ok((device, answer)) = result else { continue };
+            answered += usize::from(answer == JoinAnswer::Here);
+            // A channel member that did not answer may be in the call all the same, its answer lost: it is asked
+            // again (`relink::join_reconcile`), so one lost request does not keep the pair apart for the whole call.
+            if answer == JoinAnswer::Unanswered && matches!(room.scope, Scope::Channel { .. }) {
+                self.note_join_unanswered(room, device);
+            }
         }
         answered
     }
 
-    /// Asks one device to join, and links to it if it answers from the call. True when it answered.
-    async fn join_one(&self, room: Arc<Room>, device: DeviceId, msg: CallMsg) -> bool {
+    /// The `Join` this device sends for `room`.
+    pub(super) fn join_msg(&self, room: &Room, key: Option<[u8; 32]>, muted: bool, ring: bool, from: PeerAddr) -> CallMsg {
+        CallMsg::Join(Box::new(JoinMsg {
+            ring,
+            room: room.id,
+            scope: room.scope,
+            cert: self.my_cert(),
+            key,
+            muted,
+            leaf: match room.scope {
+                Scope::Channel { .. } | Scope::Group { .. } => Some(room.my_sid),
+                Scope::Dm => None,
+            },
+            from,
+        }))
+    }
+
+    /// Asks one device to join, and links to it if it answers from the call.
+    pub(super) async fn join_one(&self, room: Arc<Room>, device: DeviceId, msg: CallMsg) -> JoinAnswer {
         match self.call_rpc(device, msg).await {
             Ok(CallReply::Here { cert, .. }) if cert.device == device => {
                 if let Some(sid) = room.sid_of(&device) {
@@ -2485,16 +2523,16 @@ impl Engine {
                         self.note_tier(format!("link to {} not made: {e}", &device.to_string()[..8]));
                     }
                 }
-                true
+                JoinAnswer::Here
             }
-            Ok(CallReply::Ringing) => true,
+            Ok(CallReply::Ringing) => JoinAnswer::Here,
             Ok(reply) => {
                 debug!(device = %device, ?reply, "device is not in the call");
-                false
+                JoinAnswer::NotIn
             }
             Err(e) => {
                 debug!(device = %device, error = %e, "call join not delivered");
-                false
+                JoinAnswer::Unanswered
             }
         }
     }
@@ -2647,10 +2685,24 @@ impl Engine {
                     ring,
                     from: addr,
                 } = *join;
+                #[cfg(feature = "test-hooks")]
+                let lost = lock(&self.inner.calls.lose_joins).get_mut(&from).and_then(VecDeque::pop_front);
+                #[cfg(feature = "test-hooks")]
+                if lost == Some(false) {
+                    // The request is lost: nothing is taken in, and the asker's request times out.
+                    tokio::time::sleep(RPC_TIMEOUT + Duration::from_secs(1)).await;
+                    return CallReply::Refused("test: join lost".into());
+                }
                 if let (Scope::Channel { .. } | Scope::Group { .. }, Some(sid)) = (scope, leaf) {
                     self.admit_leaf(room, from, sid, &cert).await;
                 }
-                self.on_join(from, room, scope, cert, key, muted, addr, ring)
+                let reply = self.on_join(from, room, scope, cert, key, muted, addr, ring);
+                #[cfg(feature = "test-hooks")]
+                if lost == Some(true) {
+                    // The join is taken in, and its answer is lost.
+                    tokio::time::sleep(RPC_TIMEOUT + Duration::from_secs(1)).await;
+                }
+                reply
             }
             CallMsg::Offer { room, gen, signal } => self.on_offer(from, room, gen, signal, None).await,
             CallMsg::OfferV2 { room, gen, signal, link } => self.on_offer(from, room, gen, signal, Some(link)).await,
@@ -3924,6 +3976,7 @@ impl Engine {
         let current = lock(&self.inner.calls.current).as_ref().is_some_and(|c| Arc::ptr_eq(c, room));
         if current {
             self.relink_check(room, mesh).await;
+            self.join_reconcile(room);
             let mesh_up = mesh.live_count(STALE_LINK);
             self.lonely_check(room, mesh_up).await;
             // A device that has been short of working links for `rejoin_after` leads no tier move: its peers are not
@@ -5131,6 +5184,18 @@ impl Engine {
         self.note_tier(format!("forced {:?}->{to:?}, announced to {reach}", room.tier));
         self.spawn_migration(room, to, None);
         true
+    }
+
+    /// Test hook: lose the next `Join`s from `device`, one per entry: `true` loses only the answer, `false` the request.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn lose_joins_from_now(&self, device: DeviceId, losses: &[bool]) {
+        lock(&self.inner.calls.lose_joins).entry(device).or_default().extend(losses.iter().copied());
+    }
+
+    /// Test hook: do not ask again a `Join` that went unanswered.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn no_join_retry_now(&self, on: bool) {
+        self.inner.calls.no_join_retry.store(on, Ordering::Relaxed);
     }
 
     /// Test hook: take call offers only from `device`, or from anyone with `None`. See `test_support::offers_only_from`.
