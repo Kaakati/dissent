@@ -1782,6 +1782,50 @@ async fn a_joiner_with_one_link_up_announces_no_measure_of_one_link() {
     }).await;
 }
 
+/// A joiner's `Join` to one device is lost on the way. Before, that pair stayed apart for the whole call, each in it
+/// without the other. The joiner asks again, and the four end up in one mesh, every device with the other three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_join_lost_on_its_way_to_one_device_is_asked_again() {
+    heavy(4, async {
+    let (everyone, community, channel) = boosted_call(4, 0, 5_000).await;
+    let (first, joiner) = (&everyone[0], &everyone[3]);
+    for p in &everyone[..3] {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    dissent_core::test_support::lose_joins_from(&first.engine, joiner.identity.device_id(), &[false]);
+    joiner.engine.join_call(community, channel).await.expect("join");
+    every_device(&everyone, Duration::from_secs(60), "one mesh of four", |p| {
+        p.engine.call_state().is_some_and(|v| v.topology == Topology::Mesh && v.participants.len() == 3)
+    })
+    .await;
+    assert!(dissent_core::test_support::call_debug(&joiner.engine).contains("unanswered"), "the lost join is noted");
+    finish(everyone).await;
+    }).await;
+}
+
+/// A joiner's `Join` to one device is lost, and the joiner does not ask again. That device's presence still tells the
+/// joiner it is in the call, so the joiner asks it to join, and the four end up in one mesh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "networked: run with scripts/fwtest.sh"]
+async fn a_device_whose_presence_says_it_is_in_the_call_is_asked_to_join() {
+    heavy(4, async {
+    let (everyone, community, channel) = boosted_call(4, 0, 5_000).await;
+    let (first, joiner) = (&everyone[0], &everyone[3]);
+    for p in &everyone[..3] {
+        p.engine.join_call(community, channel).await.expect("join");
+    }
+    dissent_core::test_support::no_join_retry(&joiner.engine, true);
+    dissent_core::test_support::lose_joins_from(&first.engine, joiner.identity.device_id(), &[false]);
+    joiner.engine.join_call(community, channel).await.expect("join");
+    every_device(&everyone, Duration::from_secs(60), "one mesh of four", |p| {
+        p.engine.call_state().is_some_and(|v| v.topology == Topology::Mesh && v.participants.len() == 3)
+    })
+    .await;
+    finish(everyone).await;
+    }).await;
+}
+
 /// A forwarded call of seven with video layers, every device at level 0. The devices at `released`
 /// act as released builds: no `Features` and no layer messages, one video stream. They announce
 /// less upload, so a device that knows layers is elected to forward. Returns the peers and the
