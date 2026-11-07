@@ -5448,6 +5448,17 @@ mod reelect_tests {
         // Already the best: nothing to do.
         assert_eq!(better_forwarder(2, &caps, &[1, 2, 3]), None);
     }
+
+    /// A device that has announced no capacity yet, a joiner still linking, is never a candidate: no default stands in
+    /// for its figure, however high. Only measured devices take a call over.
+    #[test]
+    fn a_device_with_no_fresh_capacity_is_never_a_candidate() {
+        let caps: BTreeMap<u64, u32> = [(1, 600), (2, 640)].into();
+        assert_eq!(better_forwarder(1, &caps, &[1, 2, 9]), None, "the joiner, 9, has no figure");
+        let caps: BTreeMap<u64, u32> = [(1, 600)].into();
+        assert_eq!(better_forwarder(1, &caps, &[1, 9]), None, "nor when it is the only other device");
+        assert_eq!(better_forwarder(9, &caps, &[1, 9]), None, "and a forwarder with no figure is not replaced on a guess");
+    }
 }
 
 /// The room id of a group's call.
