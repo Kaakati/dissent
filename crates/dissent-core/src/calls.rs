@@ -878,6 +878,10 @@ pub(crate) struct CallHub {
     /// Test hook: this device refuses every tier announcement, as one that sees another roster does.
     #[cfg(feature = "test-hooks")]
     refuse_tier_moves: AtomicBool,
+    /// Test hook: while set, this device takes call offers only from this one device, as a joiner whose other peers
+    /// have not offered yet.
+    #[cfg(feature = "test-hooks")]
+    offers_only_from: Mutex<Option<DeviceId>>,
     /// Test hook: how long each of the next mesh connects holds the answer it got before applying it, in order.
     #[cfg(feature = "test-hooks")]
     answer_holds: Mutex<VecDeque<Duration>>,
@@ -931,6 +935,8 @@ impl CallHub {
             swap_without_links: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             refuse_tier_moves: AtomicBool::new(false),
+            #[cfg(feature = "test-hooks")]
+            offers_only_from: Mutex::new(None),
             #[cfg(feature = "test-hooks")]
             answer_holds: Mutex::new(VecDeque::new()),
             where_answered: Mutex::new(BTreeMap::new()),
@@ -3359,6 +3365,10 @@ impl Engine {
     /// `token` names the link the offerer dialled for it. Without one, the offerer is a client that sends none, and
     /// the link waiting from it is taken.
     async fn on_offer(&self, from: DeviceId, id: RoomId, gen: RoomId, signal: Vec<u8>, token: Option<LinkToken>) -> CallReply {
+        #[cfg(feature = "test-hooks")]
+        if lock(&self.inner.calls.offers_only_from).is_some_and(|only| only != from) {
+            return CallReply::Refused("test: offers held".into());
+        }
         let Some(room) = self.await_room(&id, &gen).await else {
             return CallReply::Refused("not in this call".into());
         };
@@ -5035,7 +5045,9 @@ impl Engine {
         }
         let rates: Vec<Option<u32>> = links.iter().map(|s| s.sent_kbps).collect();
         let media_for: Vec<Option<Duration>> = links.iter().map(|s| s.media_for).collect();
-        (upload_kbps(&rates), links_ripe(&media_for, self.inner.timings.settle_after_swap))
+        // A copy to every other live device: each peer in a mesh, each leaf for the forwarder.
+        let copies = lock(&room.live).len().saturating_sub(1);
+        (upload_kbps(&rates), links_ripe(&media_for, copies, self.inner.timings.settle_after_swap))
     }
 
     /// Signs and sends this device's capacity to the other devices in the call.
@@ -5119,6 +5131,12 @@ impl Engine {
         self.note_tier(format!("forced {:?}->{to:?}, announced to {reach}", room.tier));
         self.spawn_migration(room, to, None);
         true
+    }
+
+    /// Test hook: take call offers only from `device`, or from anyone with `None`. See `test_support::offers_only_from`.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn offers_only_from_now(&self, device: Option<DeviceId>) {
+        *lock(&self.inner.calls.offers_only_from) = device;
     }
 
     /// Test hook: refuse every tier announcement. See `test_support::refuse_tier_moves`.
@@ -5871,10 +5889,12 @@ fn upload_kbps(links: &[Option<u32>]) -> Option<u32> {
     Some(u32::try_from(measured.iter().sum::<u64>()).unwrap_or(u32::MAX))
 }
 
-/// Whether a measure over links that have carried media for `media_for` counts: only with at least one link, each
-/// past `settle`. A link newer than that is still ramping, so it would pull the sum down.
-fn links_ripe(media_for: &[Option<Duration>], settle: Duration) -> bool {
-    !media_for.is_empty() && media_for.iter().all(|m| m.is_some_and(|m| m >= settle))
+/// Whether a measure over links that have carried media for `media_for` counts: only when it covers all `copies` the
+/// device sends, one link per other live device, each past `settle`. A link newer than that is still ramping, and a
+/// link not made yet (a joiner waits for each lower id to offer) is missing from the sum: either would pull it down,
+/// to one link's worth for a joiner with its first link up.
+fn links_ripe(media_for: &[Option<Duration>], copies: usize, settle: Duration) -> bool {
+    copies > 0 && media_for.len() >= copies && media_for.iter().all(|m| m.is_some_and(|m| m >= settle))
 }
 
 /// The mesh limit of boost level 0. A released device uses it too: it forwards at 7 and goes back
@@ -6099,13 +6119,27 @@ mod settle_tests {
     fn a_measure_waits_for_every_link_to_carry_media_for_the_settle_time() {
         let settle = Duration::from_secs(3);
         let old = Some(Duration::from_secs(20));
-        assert!(links_ripe(&[old, old, old], settle));
-        assert!(!links_ripe(&[old, Some(Duration::from_secs(1)), old], settle), "one link still ramping");
-        assert!(!links_ripe(&[old, None], settle), "one link has carried no media yet");
-        assert!(!links_ripe(&[], settle), "no link at all");
-        let joiner = !links_ripe(&[Some(Duration::from_secs(2)); 6], settle);
+        assert!(links_ripe(&[old, old, old], 3, settle));
+        assert!(!links_ripe(&[old, Some(Duration::from_secs(1)), old], 3, settle), "one link still ramping");
+        assert!(!links_ripe(&[old, None], 2, settle), "one link has carried no media yet");
+        assert!(!links_ripe(&[], 0, settle), "no link at all");
+        let joiner = !links_ripe(&[Some(Duration::from_secs(2)); 6], 6, settle);
         assert_eq!(capacity_to_announce(Some(35), 0, joiner), None, "the newest joiner's 35 kbps is not announced");
         assert_eq!(capacity_to_announce(Some(35), 640, joiner), Some(640), "a device with a figure keeps it");
+    }
+
+    /// A measure covers every copy the device sends, or it does not count: a joiner whose first link is up and carrying
+    /// media, while it waits for the others' offers, would announce one link's worth.
+    #[test]
+    fn a_measure_counts_only_with_a_ripe_link_to_every_other_device() {
+        let settle = Duration::from_secs(3);
+        let old = Some(Duration::from_secs(20));
+        assert!(!links_ripe(&[old], 6, settle), "one ripe link of six");
+        assert!(!links_ripe(&[old; 5], 6, settle), "five of six");
+        assert!(links_ripe(&[old; 6], 6, settle), "all six");
+        assert!(!links_ripe(&[old, old, old, old, old, Some(Duration::from_secs(1))], 6, settle), "six, one still young");
+        assert!(links_ripe(&[old; 7], 6, settle), "a forwarder's own leaf is one more downlink");
+        assert_eq!(capacity_to_announce(Some(35), 0, !links_ripe(&[old], 6, settle)), None, "the joiner's 35 kbps is not announced");
     }
 
     /// A leaf sends one stream to its forwarder, so what it sends says nothing of its upload. It keeps announcing the
