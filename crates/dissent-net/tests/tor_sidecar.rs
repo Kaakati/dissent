@@ -46,6 +46,8 @@ fn main() {
     }));
     #[cfg(target_os = "linux")]
     tests.push(("arti_dies_with_an_app_that_is_killed", || Box::pin(arti_dies_with_an_app_that_is_killed())));
+    #[cfg(target_os = "linux")]
+    tests.push(("arti_outlives_the_thread_that_started_it", || Box::pin(arti_outlives_the_thread_that_started_it())));
     for &(name, test) in &tests {
         print!("test {name} ... ");
         runtime.block_on(test());
@@ -259,6 +261,25 @@ async fn arti_dies_with_an_app_that_is_killed() {
     })
     .await;
     assert!(gone.is_ok(), "arti {arti} outlived its app");
+}
+
+/// Linux's death signal comes when the thread that started arti ends. Started from a thread that ends at once, as a
+/// blocking-pool thread does when idle, arti must keep running.
+#[cfg(target_os = "linux")]
+async fn arti_outlives_the_thread_that_started_it() {
+    let runtime = tokio::runtime::Handle::current();
+    let sidecar = std::thread::spawn(move || {
+        let _inside = runtime.enter();
+        start("thread", "serve")
+    })
+    .join()
+    .unwrap();
+    running(&sidecar).await;
+    let pid = std::fs::read_to_string(sidecar.dir().join("fake.pid")).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(sidecar.state(), SidecarState::Running(sidecar.socks().borrow().unwrap()), "still running");
+    assert!(Path::new(&format!("/proc/{pid}")).exists(), "arti {pid} was killed with the thread");
+    sidecar.stop().await;
 }
 
 fn kill(pid: &str) {

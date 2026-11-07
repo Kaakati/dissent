@@ -94,6 +94,7 @@ impl TorSidecar {
         let (socks_tx, socks) = watch::channel(None);
         let (stop, stop_rx) = oneshot::channel();
         let run = Run {
+            spawner: Spawner::new()?,
             program,
             config,
             port_info: dir.join(PORT_INFO_FILE),
@@ -225,6 +226,7 @@ enum Ended {
 }
 
 struct Run {
+    spawner: Spawner,
     program: PathBuf,
     config: PathBuf,
     port_info: PathBuf,
@@ -309,7 +311,7 @@ impl Run {
             // touches no memory but its own copy of `app`.
             unsafe {
                 command.pre_exec(move || {
-                    // SIGKILL when the thread that started it ends: a tokio worker, which lives as long as the app.
+                    // SIGKILL when the thread that started it ends: the spawner's, which outlives every run.
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -321,7 +323,7 @@ impl Run {
                 });
             }
         }
-        let mut child = match command.spawn() {
+        let mut child = match self.spawner.spawn(command).await {
             Ok(child) => child,
             Err(e) => return Ended::NotStarted(format!("could not start {}: {e}", self.program.display())),
         };
@@ -362,6 +364,36 @@ impl Run {
             status = child.wait() => exited(status, stderr, &obsolete).await,
             _ = &mut *stop => kill(child).await,
         }
+    }
+}
+
+/// The one thread arti is started from, for as long as its supervisor runs. On Linux arti's death signal comes when the
+/// thread that started it ends, not the process, and a tokio thread may be one of the blocking pool's, which end
+/// after a few idle seconds. This one ends only when the supervisor does, when arti is stopped anyway.
+struct Spawner(std::sync::mpsc::Sender<(Command, oneshot::Sender<std::io::Result<Child>>)>);
+
+impl Spawner {
+    /// Starts the thread. Called inside the runtime, whose reactor the children it starts then use.
+    fn new() -> Result<Spawner> {
+        let runtime = tokio::runtime::Handle::current();
+        let (asks, asked) = std::sync::mpsc::channel::<(Command, oneshot::Sender<std::io::Result<Child>>)>();
+        std::thread::Builder::new()
+            .name("dissent-tor".into())
+            .spawn(move || {
+                let _inside = runtime.enter();
+                for (mut command, answer) in asked {
+                    let _ = answer.send(command.spawn());
+                }
+            })
+            .map_err(|e| NetError::Tor(format!("could not start its thread: {e}")))?;
+        Ok(Spawner(asks))
+    }
+
+    async fn spawn(&self, command: Command) -> std::io::Result<Child> {
+        let (answer, answered) = oneshot::channel();
+        let gone = || std::io::Error::other("the built-in Tor's thread is gone");
+        self.0.send((command, answer)).map_err(|_| gone())?;
+        answered.await.map_err(|_| gone())?
     }
 }
 

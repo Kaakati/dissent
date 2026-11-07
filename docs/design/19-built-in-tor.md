@@ -28,7 +28,9 @@ as it is, and follows arti's SOCKS port instead of a fixed one.
 - **Lifetime.** The desktop app starts it in `tor::proxy_for` before the engine, keeps it while the profile and the
   choice stay the same, and stops it when Tor mode is turned off, on a profile switch, on quit (`RunEvent::Exit`) and
   before an update installs (Windows can't replace a running program). When the app dies, Windows kills it through a
-  job object and Linux through `PR_SET_PDEATHSIG(SIGKILL)`, set in `pre_exec`. On Linux and macOS each start writes
+  job object and Linux through `PR_SET_PDEATHSIG(SIGKILL)`, set in `pre_exec`. That signal comes when the thread that
+  started arti ends, so arti is always started from one thread the supervisor owns, never a tokio thread (a
+  blocking-pool one ends after a few idle seconds). On Linux and macOS each start writes
   `arti.pid`, and the next start first kills a process with that pid, but only when its executable (`/proc/<pid>/exe`,
   `proc_pidpath` on macOS) is this same arti program. On macOS, with no death signal, that is what ends an arti a crash
   left behind, at the next start.
