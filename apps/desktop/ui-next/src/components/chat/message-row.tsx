@@ -18,7 +18,7 @@ import { useShell } from '@/lib/store';
 import { useWebsiteHandle } from '@/lib/website-handles';
 import type { ChatTarget, ReplyRef } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { AttachmentView } from './attachments';
+import { AttachmentList } from './attachments';
 import { EmbedCards } from './embeds';
 import { InviteCards, bodyText, inviteLinks } from './invite-card';
 import { MessageLinks, messageLinks } from './message-link';
@@ -296,9 +296,7 @@ export function MessageRow({
   ) : null;
   const files = view.files && item.attachments?.length && !item.deleted ? (
     <div className={cn('attachments', mediaHidden && 'spoiler-hidden')} {...spoilerGuard(mediaHidden, revealMedia)}>
-      {item.attachments.map((a) => (
-        <AttachmentView key={a.id} a={a} communityId={communityId} messageId={item.id} />
-      ))}
+      <AttachmentList attachments={item.attachments} communityId={communityId} messageId={item.id} />
     </div>
   ) : null;
   // A file-only message has no empty text line.

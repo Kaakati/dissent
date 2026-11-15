@@ -244,6 +244,23 @@ ol.md-list ol.md-list { list-style-type: lower-alpha; }
 .scrub-toggle input { margin: 0; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
 .scrub-toggle.on { color: var(--text); }
 .attachments { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-2); margin-top: 6px; max-width: 100%; }
+/* Two or more pictures in a message: boxes of up to four square tiles, two by two. Three put the first across the top. */
+.att-box { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; width: min(404px, 100%); border-radius: var(--r-2); overflow: hidden; }
+.att-box[data-count="1"] { width: min(200px, 100%); grid-template-columns: 1fr; }
+.att-box[data-count="3"] > .att-tile:first-child { grid-column: 1 / -1; aspect-ratio: 2 / 1; }
+.att-tile { position: relative; display: grid; place-items: center; aspect-ratio: 1; padding: 0; border: 0; background: var(--rail); overflow: hidden; cursor: pointer; }
+.att-tile:disabled { cursor: default; }
+.att-tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.att-tile.pending img { filter: blur(6px); transform: scale(1.08); }
+.att-tile-icon { color: var(--muted-foreground); }
+.att-tile-icon > svg { width: 32px; height: 32px; }
+.att-tile-badge { position: absolute; display: grid; min-width: 40px; height: 40px; padding: 0 10px; place-items: center; border-radius: 999px; background: rgb(0 0 0 / 0.6); color: #fff; font: 600 var(--fs-ui) / 1 var(--font); }
+.att-tile-get { background: var(--success); }
+.att-tile-get svg { width: 20px; height: 20px; }
+.att-tile.failed .att-tile-badge { background: var(--destructive); }
+.att-tile:hover:not(:disabled) img { filter: brightness(1.08); }
+.att-tile.pending:hover:not(:disabled) img { filter: blur(6px) brightness(1.08); }
+.att-tile:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .att-image { position: relative; width: fit-content; max-width: 100%; }
 .att-image-btn { display: inline-block; padding: 0; border: 0; border-radius: var(--r-2); background: var(--rail); overflow: hidden; vertical-align: top; cursor: pointer; }
 .att-image img { display: block; width: auto; height: auto; max-width: 400px; max-height: 300px; }

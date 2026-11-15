@@ -2,6 +2,7 @@
 // conversation it is in (a channel, a direct conversation or a group), then reloads that conversation. A failure is a
 // toast and the action resolves to false, so a caller never throws. Ported from the message parts of the old UI's actions.js.
 import { api } from './api';
+import { confirm } from './dialog';
 import { has } from './features';
 import { markOpenRead, reloadOpen } from './chat';
 import { noteReaction } from './quick-reactions';
@@ -158,6 +159,47 @@ export async function downloadAttachment(communityId: Id | null, messageId: Id, 
     return false;
   }
   return run(() => Promise.resolve(), { read: false });
+}
+
+// The files in a message that "Download all" fetches: not here yet, and not too large or waiting for a source.
+export const FETCHABLE: ReadonlySet<Attachment['state']> = new Set(['available', 'paused', 'failed', 'disk_full']);
+
+// Downloads every fetchable file of a message. Files over a download limit are asked about once, together.
+export async function downloadAll(communityId: Id | null, messageId: Id, attachments: readonly Attachment[]): Promise<void> {
+  const over: Attachment[] = [];
+  let note = '';
+  for (const a of attachments.filter((x) => FETCHABLE.has(x.state))) {
+    try {
+      await api.downloadAttachment(communityId, messageId, a.id, false);
+    } catch (err) {
+      const text = String(err);
+      if (!text.includes('over_download_limit')) {
+        toast(err);
+        continue;
+      }
+      over.push(a);
+      note = text.replace(/^.*over_download_limit:\s*/, '');
+    }
+  }
+  if (over.length) {
+    const ok = await confirm({
+      title: 'Download anyway?',
+      message: over.length === 1
+        ? `${note}. You can change it in Settings › Downloads.`
+        : `${over.length} files are over your download limit. You can change it in Settings › Downloads.`,
+      okLabel: over.length === 1 ? 'Download anyway' : `Download ${over.length} anyway`,
+    });
+    if (ok) {
+      for (const a of over) {
+        try {
+          await api.downloadAttachment(communityId, messageId, a.id, true);
+        } catch (err) {
+          toast(err);
+        }
+      }
+    }
+  }
+  await run(() => Promise.resolve(), { read: false });
 }
 
 // Sends a message the recipient or an inbox refused, again. The backend keeps the packet for this.

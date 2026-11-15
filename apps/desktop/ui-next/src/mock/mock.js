@@ -202,6 +202,8 @@ if (!window.__TAURI__) {
         { ...msg(0, 30, GRACE, 'The view from the ridge.'), attachments: [att('ridge-view.jpg', 2.4 * MB, 'image/jpeg')] },
         { ...msg(0, 25, GRACE, 'And the summit, if it comes through.'), attachments: [att('summit.jpg', 3.2 * MB, 'image/jpeg', 'available', { failOnce: true })] },
         { ...msg(0, 20, GRACE, 'A raw from the old camera.'), attachments: [att('old-camera.jpg', 5.1 * MB, 'image/jpeg', 'downloaded', { local_path: 'C:/Users/ada/Downloads/old-camera.jpg' })] },
+        { ...msg(0, 15, GRACE, 'Route notes for the descent.'), attachments: [att('descent-map.pdf', 1.5 * MB, 'application/pdf'), att('descent-gpx.gpx', 0.5 * MB, 'application/gpx+xml'), att('trailhead.pdf', 2 * MB, 'application/pdf', 'downloaded', { local_path: 'C:/Users/ada/Downloads/trailhead.pdf' })] },
+        { ...msg(0, 10, GRACE, 'Five from the ridge walk.'), attachments: ['ridge-1', 'ridge-2', 'ridge-3', 'ridge-4', 'ridge-5'].map((n, i) => att(`${n}.jpg`, (1 + i) * MB, 'image/jpeg')) },
       ],
     },
     },

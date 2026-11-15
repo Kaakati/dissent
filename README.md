@@ -112,6 +112,7 @@ Everything listed here is in the app today. There is no paid tier.
 ### File sharing and the tracker
 
 - Encrypted attachments, downloaded from several members at once and resumed after a restart.
+- A message with several pictures shows them in boxes of four, and any message with several files ends with **Download all**, which fetches every file not on your device yet (asking once about any over your download limit).
 - File size limits: your own upload and download limits (Settings › Downloads) and a per-server limit (Server Settings › Files), each from 1 MB to 1 TB, 10 GB by default. A file over a limit isn't sent or fetched, and the app asks before a download past your own limit. Members on versions before v0.1.37 don't receive files over 10 GB.
 - Large transfers are built to last: a download may take up to 30 days, with stall timeouts catching a dead link.
 - An optional "Remove details" switch strips location, time and device metadata from photos and videos before sending.

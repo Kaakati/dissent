@@ -4583,6 +4583,25 @@ check('AT8 Retry downloads the picture and shows it', !!retried && retried.card 
 const raw = await until(async () => { const s = await shows('A raw from the old camera.'); return s?.card === 'downloaded' && s; }, 3000);
 check('AT9 a picture that cannot load shows its card, never a broken image', !!raw && raw.broken === 0 && raw.buttons.includes('Open old-camera.jpg') && raw.buttons.includes('Show old-camera.jpg in folder') && raw.text.includes('Cannot show this picture here'), JSON.stringify(raw ?? await shows('A raw from the old camera.')));
 
+// AT9b A message with several files ends with "Download all", which fetches every file not here yet and then goes.
+const allBtn = () => ev(`${article('Route notes for the descent.')}?.querySelector('[data-download-all]')?.getAttribute('aria-label') ?? null`);
+const allLabel = await until(allBtn, 3000);
+check('AT9b a message with several files ends with Download all, counting only the files not here yet', allLabel === 'Download all · 2 files · 2.0 MB' && (await ev(`${article('Route notes for the descent.')}.querySelector('.attachments').lastElementChild.hasAttribute('data-download-all')`)) === true, String(allLabel));
+await ev(`${article('Route notes for the descent.')}.querySelector('[data-download-all]').click()`);
+const allDone = await until(async () => (await ev(`(() => { const a = ${article('Route notes for the descent.')}; const b = a.querySelectorAll('button[aria-label^="Show "][aria-label$=" in folder"]').length; return b === 3 && !a.querySelector('[data-download-all]'); })()`)) === true, 8000);
+check('AT9c Download all downloads every file, then the button goes', allDone === true, JSON.stringify(await shows('Route notes for the descent.')));
+
+// AT9d Several pictures go in boxes of four tiles, Download all under them; it brings every picture, and Open replaces Download.
+const boxes = () => ev(`JSON.stringify((() => { const a = ${article('Five from the ridge walk.')}; if (!a) return null; return { boxes: [...a.querySelectorAll('.att-box')].map((b) => b.querySelectorAll('.att-tile').length), cards: a.querySelectorAll('.att-card').length, last: a.querySelector('.attachments').lastElementChild.getAttribute('aria-label'), labels: [...a.querySelectorAll('.att-tile')].map((t) => t.getAttribute('aria-label')) }; })())`).then(JSON.parse);
+const boxed = await until(async () => { const s = await boxes(); return s?.boxes.length && s; }, 3000);
+check('AT9d five pictures show as a box of four and a box of one, with no file cards', !!boxed && JSON.stringify(boxed.boxes) === '[4,1]' && boxed.cards === 0 && boxed.labels[0] === 'Download ridge-1.jpg', JSON.stringify(boxed));
+check('AT9e Download all comes after the boxes', boxed?.last === 'Download all · 5 files · 15.0 MB', JSON.stringify(boxed));
+const tileBox = await ev(`(() => { const r = ${article('Five from the ridge walk.')}.querySelector('.att-tile').getBoundingClientRect(); return JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height) }); })()`).then(JSON.parse);
+check('AT9f a tile is square', tileBox.w > 100 && Math.abs(tileBox.w - tileBox.h) <= 1, JSON.stringify(tileBox));
+await ev(`${article('Five from the ridge walk.')}.querySelector('[data-download-all]').click()`);
+const opened = await until(async () => { const s = await boxes(); return s?.labels.every((l) => l.startsWith('Open ')) && !s.last.startsWith('Download all') && s; }, 10000);
+check('AT9g Download all brings every picture into its tile', !!opened, JSON.stringify(await boxes()));
+
 // AT10 The sender's own dropped picture shows at once: no Download row, no progress, no "Download failed".
 await ev(`(() => {
   const dt = new DataTransfer();

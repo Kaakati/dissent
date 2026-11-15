@@ -10,7 +10,7 @@ import { ProgressBar } from '@/components/transfers/progress';
 import { DANGER_TEXT, MAX_FILE_LABEL, extOf, formatSize, iconFor, isImage, isVideo, transferText, type FileIconName } from '@/lib/attachments';
 import { downloadWithin, isOver, limitLabel, OLDER_VERSIONS_NOTE, RELEASED_LIMIT, useUploadLimit } from '@/lib/limits';
 import { toast } from '@/lib/toasts';
-import { downloadAttachment, openAttachment, revealAttachment } from '@/lib/chat-actions';
+import { downloadAll, downloadAttachment, FETCHABLE, openAttachment, revealAttachment } from '@/lib/chat-actions';
 import { openFileDetail } from '@/lib/right';
 import { pictureSrc } from '@/lib/pictures';
 import { cancelTransfer, pauseTransfer } from '@/lib/transfers';
@@ -250,6 +250,106 @@ export function AttachmentView({ a, communityId, messageId }: { a: Attachment; c
     return <ThumbPreview video a={a} thumb={a.thumb} src={videoSrc} onBroken={() => markBroken(videoSrc)} communityId={communityId} messageId={messageId} />;
   }
   return <FileCard a={a} communityId={communityId} messageId={messageId} unshown={src !== null} />;
+}
+
+// One picture in a box: square, the picture once it is here, its blurred thumbnail or its icon before that. A click
+// opens it when it is here, downloads it when it can be fetched, and shows the transfer while it moves.
+function ImageTile({ a, communityId, messageId }: { a: Attachment; communityId: Id | null; messageId: Id }) {
+  const [broken, setBroken] = useState(false);
+  const name = String(a.name ?? 'file');
+  const here = a.state === 'downloaded';
+  const src = here ? imageSrc(a.local_path) : a.thumb?.state === 'downloaded' ? pictureSrc(a.thumb.path) : null;
+  const moving = a.state === 'downloading' || a.state === 'sending';
+  const failed = a.state === 'failed' || a.state === 'disk_full';
+  const fetchable = FETCHABLE.has(a.state);
+  const pct = `${Math.round(Math.max(0, Math.min(1, Number(a.progress) || 0)) * 100)}%`;
+  const label = here
+    ? `Open ${name}`
+    : failed ? `Retry download of ${name}`
+      : fetchable ? `Download ${name}`
+        : moving ? `Downloading ${name} · ${pct}` : name;
+  const badge = here
+    ? null
+    : moving ? pct
+      : failed ? 'Retry'
+        : a.state === 'too_large' ? 'Too large'
+          : a.state === 'waiting' ? 'Waiting' : null;
+  const click = () => {
+    if (here) void openAttachment(a);
+    else if (fetchable) void downloadWithin((force) => downloadAttachment(communityId, messageId, a, force)).catch(toast);
+    else if (moving) openFileDetail(a.id);
+  };
+  return (
+    <button
+      type="button"
+      className={cn('att-tile', !here && 'pending', failed && 'failed')}
+      data-att={a.id}
+      data-state={a.state}
+      aria-label={label}
+      title={`${name} · ${formatSize(a.size)} · End-to-end encrypted${a.over_limit ? ` · ${a.over_limit}` : ''}`}
+      disabled={!here && !fetchable && !moving}
+      onClick={click}
+    >
+      {src && !broken ? (
+        <img src={src} alt={here ? name : ''} loading="lazy" decoding="async" draggable={false} onError={() => setBroken(true)} />
+      ) : (
+        <span className="att-tile-icon"><FileGlyph name={name} mime={a.mime} /></span>
+      )}
+      {fetchable && !failed ? (
+        <span className="att-tile-badge att-tile-get" aria-hidden="true"><Download /></span>
+      ) : badge ? (
+        <span className="att-tile-badge tnum" aria-hidden="true">{badge}</span>
+      ) : null}
+    </button>
+  );
+}
+
+// Pictures of one message, in boxes of up to four (two by two; three put the first across the top).
+function ImageBoxes({ images, communityId, messageId }: { images: readonly Attachment[]; communityId: Id | null; messageId: Id }) {
+  const boxes: Attachment[][] = [];
+  for (let i = 0; i < images.length; i += 4) boxes.push(images.slice(i, i + 4));
+  return (
+    <>
+      {boxes.map((box) => (
+        <div key={box[0].id} className="att-box" data-count={box.length} role="group" aria-label={box.length === 1 ? '1 picture' : `${box.length} pictures`}>
+          {box.map((a) => <ImageTile key={a.id} a={a} communityId={communityId} messageId={messageId} />)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// A message's files: two or more pictures go in boxes of four, every other file as itself, then "Download all".
+export function AttachmentList({ attachments, communityId, messageId }: { attachments: readonly Attachment[]; communityId: Id | null; messageId: Id }) {
+  const pictures = attachments.filter((a) => isImage(a) && !a.danger);
+  const boxed = pictures.length >= 2 ? new Set(pictures.map((a) => a.id)) : null;
+  return (
+    <>
+      {boxed ? <ImageBoxes images={pictures} communityId={communityId} messageId={messageId} /> : null}
+      {attachments.filter((a) => !boxed?.has(a.id)).map((a) => <AttachmentView key={a.id} a={a} communityId={communityId} messageId={messageId} />)}
+      <DownloadAll attachments={attachments} communityId={communityId} messageId={messageId} />
+    </>
+  );
+}
+
+// "Download all", at the end of a message that shares several files: fetches every one not here yet, in one click.
+export function DownloadAll({ attachments, communityId, messageId }: { attachments: readonly Attachment[]; communityId: Id | null; messageId: Id }) {
+  const [busy, setBusy] = useState(false);
+  if (attachments.length < 2) return null;
+  const left = attachments.filter((a) => FETCHABLE.has(a.state));
+  if (!left.length) return null;
+  const size = left.reduce((n, a) => n + (Number(a.size) || 0), 0);
+  const label = `Download all · ${left.length} ${left.length === 1 ? 'file' : 'files'} · ${formatSize(size)}`;
+  const click = () => {
+    setBusy(true);
+    void downloadAll(communityId, messageId, attachments).finally(() => setBusy(false));
+  };
+  return (
+    <Button variant="outline" size="sm" className="att-download-all" data-download-all disabled={busy} aria-label={label} onClick={click}>
+      <Download aria-hidden="true" />
+      {label}
+    </Button>
+  );
 }
 
 // A file waiting above the composer: its icon, name, size, and a remove button. Over the limit it turns red.
